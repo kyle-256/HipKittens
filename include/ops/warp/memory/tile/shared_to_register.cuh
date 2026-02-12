@@ -207,7 +207,7 @@ __device__ inline static void load(RT &dst, const ST &src) {
     const int laneid = kittens::laneid();
 
     const int row_offset = ((laneid % 16) / 4) + ((laneid / dst.base_tile_cols) * dst.base_tile_stride);
-    const int col_offset = ((laneid % 4) * 4) + (16 * ((laneid % dst.base_tile_cols) / 16));
+    const int col_offset = ((laneid % 4) * 4);
 
     const uint32_t src_ptr = reinterpret_cast<uintptr_t>(&src.data[0]);
     
