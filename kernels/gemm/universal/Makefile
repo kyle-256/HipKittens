@@ -37,12 +37,24 @@ ICXXFLAGS += -I${THUNDERKITTENS_ROOT}/include -I${THUNDERKITTENS_ROOT}/prototype
 PYEXT := $(shell python3-config --extension-suffix)
 
 # Default target
-all: bf16_gemm
+all: bf16_gemm fp8_gemm grouped_gemm fp8_blockwise_gemm
 
 bf16_gemm: bf16_gemm.cpp
 	$(HIPCXX) $< $(HIPFLAGS) $(ICXXFLAGS) $(ICPPFLAGS) $(ILDFLAGS) \
 	    -o $@$(PYEXT)
 
+fp8_gemm: fp8_gemm.cpp
+	$(HIPCXX) $< $(HIPFLAGS) $(ICXXFLAGS) $(ICPPFLAGS) $(ILDFLAGS) \
+	    -o $@$(PYEXT)
+
+grouped_gemm: grouped_gemm.cpp
+	$(HIPCXX) $< $(HIPFLAGS) $(ICXXFLAGS) $(ICPPFLAGS) $(ILDFLAGS) \
+	    -o $@$(PYEXT)
+
+fp8_blockwise_gemm: fp8_blockwise_gemm.cpp
+	$(HIPCXX) $< $(HIPFLAGS) $(ICXXFLAGS) $(ICPPFLAGS) $(ILDFLAGS) \
+	    -o $@$(PYEXT)
+
 clean:
-	rm -f bf16_gemm$(PYEXT)
+	rm -f bf16_gemm$(PYEXT) fp8_gemm$(PYEXT) grouped_gemm$(PYEXT) fp8_blockwise_gemm$(PYEXT)
 
