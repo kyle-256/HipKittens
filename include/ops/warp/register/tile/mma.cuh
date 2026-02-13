@@ -136,10 +136,10 @@ __device__ static inline void mfma1616128(      float2 (&D)[2],
  * @param[in] b The second input rt_base<bf16_2, col_layout> matrix in column-major mode.
  * @param[in] c The input rt_base<float2, row_layout> accumulator matrix.
  */
-template<ducks::rt_shape::all D_shape, ducks::rt_shape::all A_shape, ducks::rt_shape::all B_shape, ducks::rt_shape::all C_shape>
+template<ducks::rt_shape::all D_shape, ducks::rt_shape::all A_shape, ducks::rt_shape::all B_shape, ducks::rt_shape::all C_shape, typename MM_Operand_T=bf16>
 __device__ static inline void mma_AB_base(rt_base<float, ducks::rt_layout::col, D_shape> &d,
-                                        const rt_base<bf16, ducks::rt_layout::row, A_shape> &a,
-                                        const rt_base<bf16, ducks::rt_layout::col, B_shape> &b, // in col-major mode
+                                        const rt_base<MM_Operand_T, ducks::rt_layout::row, A_shape> &a,
+                                        const rt_base<MM_Operand_T, ducks::rt_layout::col, B_shape> &b, // in col-major mode
                                         const rt_base<float, ducks::rt_layout::col, C_shape> &c) {
 
     static_assert(std::is_same_v<D_shape, C_shape>, "D and C must have the same shape");
@@ -163,6 +163,18 @@ __device__ static inline void mma_AB_base(rt_base<float, ducks::rt_layout::col, 
                   B_rows == 16 && B_cols == 32 &&
                   std::is_same_v<C_shape, typename ducks::rt_shape::rt_32x32>) {
         mfma323216(d.data, a.data, b.data, c.data);
+    // FP8 16x16x128: A[16,128] * B[128,16] → D[16,16]
+    } else if constexpr (std::is_same_v<D_shape, typename ducks::rt_shape::rt_16x16> &&
+                  A_rows == 16 && A_cols == 128 &&
+                  B_rows == 128 && B_cols == 16 &&
+                  std::is_same_v<C_shape, typename ducks::rt_shape::rt_16x16>) {
+        mfma1616128(d.data, a.data, b.data, c.data);
+    // FP8 32x32x64: A[32,64] * B[64,32] → D[32,32]
+    } else if constexpr (std::is_same_v<D_shape, typename ducks::rt_shape::rt_32x32> &&
+                  A_rows == 32 && A_cols == 64 &&
+                  B_rows == 64 && B_cols == 32 &&
+                  std::is_same_v<C_shape, typename ducks::rt_shape::rt_32x32>) {
+        mfma323264(d.data, a.data, b.data, c.data);
     } else {
         static_assert(false, "Unsupported shape combination");
     }
@@ -232,10 +244,10 @@ __device__ static inline void mma_ABt_base(rt_base<float, ducks::rt_layout::col,
  * @param[in] b The second input rt_base<bf16_2, col_layout> matrix in column-major mode.
  * @param[in] c The input rt_base<float2, row_layout> accumulator matrix.
  */
-template<ducks::rt_shape::all D_shape, ducks::rt_shape::all A_shape, ducks::rt_shape::all B_shape, ducks::rt_shape::all C_shape>
+template<ducks::rt_shape::all D_shape, ducks::rt_shape::all A_shape, ducks::rt_shape::all B_shape, ducks::rt_shape::all C_shape, typename MM_Operand_T=bf16>
 __device__ static inline void mma_AtB_base(rt_base<float, ducks::rt_layout::col, D_shape> &d,
-                                           const rt_base<bf16, ducks::rt_layout::col, A_shape> &a,
-                                           const rt_base<bf16, ducks::rt_layout::col, B_shape> &b, // in col-major mode
+                                           const rt_base<MM_Operand_T, ducks::rt_layout::col, A_shape> &a,
+                                           const rt_base<MM_Operand_T, ducks::rt_layout::col, B_shape> &b, // in col-major mode
                                            const rt_base<float, ducks::rt_layout::col, C_shape> &c) {
 
     static_assert(std::is_same_v<D_shape, C_shape>, "D and C must have the same shape");
@@ -264,6 +276,18 @@ __device__ static inline void mma_AtB_base(rt_base<float, ducks::rt_layout::col,
                   B_rows == 32 && B_cols == 32 &&
                   std::is_same_v<C_shape, typename ducks::rt_shape::rt_32x32>) {
         mfma323232(d.data, a.data, b.data, c.data);
+    // FP8 16x16x128: A^T[128,16] * B[128,16] → D[16,16]
+    } else if constexpr (std::is_same_v<D_shape, typename ducks::rt_shape::rt_16x16> &&
+                  A_rows == 128 && A_cols == 16 &&
+                  B_rows == 128 && B_cols == 16 &&
+                  std::is_same_v<C_shape, typename ducks::rt_shape::rt_16x16>) {
+        mfma1616128(d.data, a.data, b.data, c.data);
+    // FP8 32x32x64: A^T[64,32] * B[64,32] → D[32,32]
+    } else if constexpr (std::is_same_v<D_shape, typename ducks::rt_shape::rt_32x32> &&
+                  A_rows == 64 && A_cols == 32 &&
+                  B_rows == 64 && B_cols == 32 &&
+                  std::is_same_v<C_shape, typename ducks::rt_shape::rt_32x32>) {
+        mfma323264(d.data, a.data, b.data, c.data);
     } else {
         static_assert(false, "Unsupported shape combination");
     }
@@ -339,7 +363,9 @@ __device__ static inline void mma_AB(D &d,
         (std::is_same_v<typename D::T, float> && std::is_same_v<typename A::T, bf16> &&
             std::is_same_v<typename B::T, bf16> && std::is_same_v<typename C::T, float>) ||
         (std::is_same_v<typename D::T, half> && std::is_same_v<typename A::T, half> &&
-            std::is_same_v<typename B::T, half> && std::is_same_v<typename C::T, half>)
+            std::is_same_v<typename B::T, half> && std::is_same_v<typename C::T, half>) ||
+        (std::is_same_v<typename D::T, float> && std::is_same_v<typename A::T, fp8e4m3> &&
+            std::is_same_v<typename B::T, fp8e4m3> && std::is_same_v<typename C::T, float>)
     );
 
     #pragma unroll
@@ -447,7 +473,9 @@ __device__ static inline void mma_AtB(D &d,
         (std::is_same_v<typename D::T, float> && std::is_same_v<typename A::T, bf16> &&
             std::is_same_v<typename B::T, bf16> && std::is_same_v<typename C::T, float>) ||
         (std::is_same_v<typename D::T, half> && std::is_same_v<typename A::T, half> &&
-            std::is_same_v<typename B::T, half> && std::is_same_v<typename C::T, half>)
+            std::is_same_v<typename B::T, half> && std::is_same_v<typename C::T, half>) ||
+        (std::is_same_v<typename D::T, float> && std::is_same_v<typename A::T, fp8e4m3> &&
+            std::is_same_v<typename B::T, fp8e4m3> && std::is_same_v<typename C::T, float>)
     );
 
     #pragma unroll

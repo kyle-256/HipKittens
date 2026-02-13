@@ -206,10 +206,99 @@ __device__ inline static void load(RT &dst, const ST &src) {
 
     const int laneid = kittens::laneid();
 
+    const uint32_t src_ptr = reinterpret_cast<uintptr_t>(&src.data[0]);
+
+    // ===== FP8 col_l load using ds_read_b64_tr_b8 =====
+    //
+    // ds_read_b64_tr_b8: each thread reads 8 fp8 values from 8 consecutive 16-byte
+    // rows in LDS at the same byte-column. Output: 2 × fp8e4m3_4 (8 bytes).
+    //
+    // Supports two base tile shapes:
+    //   rt_128x16 (8-wave, 16x16x128 MFMA): base_cols=16, 4 row_groups, st_128x16 subtile 1:1
+    //   rt_64x32  (4-wave, 32x32x64 MFMA):  base_cols=32, 2 row_groups, needs 2 st_128x16 subtiles per base tile col
+    //
+    // Both have stride=16, num_strides=2, 4 reads per base tile per thread.
+    if constexpr (std::is_same_v<U2, fp8e4m3_4> && RT::base_tile_stride == 16) {
+
+        constexpr int base_cols = RT::base_tile_cols;   // 16 or 32
+        constexpr int base_rows = RT::base_tile_rows;   // 128 or 64
+        constexpr int subtile_cols = ST::underlying_subtile_cols;  // must be 16
+        constexpr int subtile_rows = ST::underlying_subtile_rows;  // must be >= base_rows
+
+        static_assert(subtile_cols == 16, "FP8 col_l requires 16-column shared subtiles (st_128x16)");
+        static_assert(base_rows <= subtile_rows, "Shared subtile must have enough rows for the register base tile");
+
+        // How many shared subtiles span one register base tile column (1 for 128x16, 2 for 64x32)
+        constexpr int col_groups_per_base = base_cols / subtile_cols;
+        // How many register base tiles fit vertically in one shared subtile (1 for 128x16, 2 for 64x32)
+        constexpr int reg_tiles_per_subtile_vert = subtile_rows / base_rows;
+
+        // Lane mapping for ds_read_b64_tr_b8:
+        // The instruction reads 8 consecutive bytes per lane from the lane's address.
+        // 16 lanes' data (16 × 8 = 128 bytes) forms an 8-row × 16-col matrix.
+        // After transpose: lane j gets column j from all 8 rows.
+        // So each lane's address must be: block_base + lane_in_16group * 8
+        const int lane_in_16group = laneid % 16;       // 0..15 (hardware 16-lane group)
+        const int fp8_row_group = laneid / base_cols;   // 0..3 (8-wave) or 0..1 (4-wave)
+
+        // For base_cols > 16: lanes 16-31 belong to the next shared subtile
+        const int col_partition = (laneid % base_cols) / subtile_cols;  // 0 for 8-wave; 0..1 for 4-wave
+        const uint32_t col_partition_byte_offset = col_partition * ST::underlying_subtile_bytes;
+
+        // addr_base: lane's byte offset within the 128-byte block
+        // Each lane reads 8 consecutive bytes, so stride = 8 bytes per lane
+        const uint32_t addr_base = src_ptr + lane_in_16group * 8 + col_partition_byte_offset;
+
+        #pragma unroll
+        for (int k = 0; k < RT::base_tile_num_strides; k++) {
+            // Row assignment: each row_group owns 16 consecutive rows per stride group
+            const int base_row = fp8_row_group * 16 + k * RT::base_tile_elements_per_stride_group;
+            const int idx = k * RT::base_tile_stride / packing;  // data index: 0 or 4
+
+            // Two ds_read calls: rows [base_row..base_row+7] and [base_row+8..base_row+15]
+            // Each 8×16 block = 128 bytes, block starts at byte offset base_row * subtile_cols
+            const uint32_t addr1 = addr_base + base_row * subtile_cols;
+            const uint32_t addr2 = addr1 + 8 * subtile_cols;  // next 8 rows
+
+            // Iterate over register base tiles within the shared tile
+            #pragma unroll
+            for (int rv = 0; rv < reg_tiles_per_subtile_vert; rv++) {
+                #pragma unroll
+                for (int ii = 0; ii < ST::subtiles_per_col; ii++) {
+                    #pragma unroll
+                    for (int jj = 0; jj < ST::subtiles_per_row / col_groups_per_base; jj++) {
+                        const int register_row = ii * reg_tiles_per_subtile_vert + rv;
+                        const int register_col = jj;
+
+                        // Compile-time offset: base shared subtile + vertical offset within subtile
+                        // jj*col_groups_per_base: starting shared subtile index for this reg tile col
+                        // rv*base_rows*subtile_cols: byte offset for the rv-th vertical register tile
+                        const int base_subtile_id = ii * ST::underlying_subtiles_per_row + jj * col_groups_per_base;
+                        const int offset = base_subtile_id * ST::underlying_subtile_bytes
+                                         + rv * base_rows * subtile_cols;
+
+                        asm volatile(
+                            "ds_read_b64_tr_b8 %0, %1 offset:%2\n"
+                            : "=v"(*reinterpret_cast<float2*>(&dst.tiles[register_row][register_col].data[idx]))
+                            : "v"(addr1), "i"(offset)
+                            : "memory"
+                        );
+                        asm volatile(
+                            "ds_read_b64_tr_b8 %0, %1 offset:%2\n"
+                            : "=v"(*reinterpret_cast<float2*>(&dst.tiles[register_row][register_col].data[idx + 2]))
+                            : "v"(addr2), "i"(offset)
+                            : "memory"
+                        );
+                    }
+                }
+            }
+        }
+        return;
+    } else {
+
+    // ===== BF16/FP16 col_l load using ds_read_b64_tr_b16 =====
     const int row_offset = ((laneid % 16) / 4) + ((laneid / dst.base_tile_cols) * dst.base_tile_stride);
     const int col_offset = ((laneid % 4) * 4);
-
-    const uint32_t src_ptr = reinterpret_cast<uintptr_t>(&src.data[0]);
     
     // shared subtile is greater than or equal to register subtile
     if constexpr (ST::underlying_subtile_rows >= RT::base_tile_rows && ST::underlying_subtile_cols >= RT::base_tile_cols) {
@@ -412,6 +501,7 @@ __device__ inline static void load(RT &dst, const ST &src) {
     } else {
         static_assert(false, "Unsupported subtile sizes");
     }
+    } // end else (BF16/FP16 col_l)
 }
 
 /**
