@@ -242,18 +242,20 @@ __device__ inline static void load(RT &dst, const ST &src) {
                             const int register_col = jj * register_subtiles_per_shared_subtile_row + j;
 
                             if constexpr (std::is_same_v<U2, bf16_2> || std::is_same_v<U2, half_2>) {
-                                // Special handling for stride == 8, shared tile shape == 16x32
-                                if constexpr (RT::base_tile_stride == 8 && std::is_same_v<typename ST::shape, st_16x32_s>) {
+                                // Single-addr optimization: row and row+4 within the same stride group
+                                // always produce the same swizzle XOR bits, so we can use one addr VGPR
+                                // with two immediate offsets instead of two addr VGPRs.
+                                if constexpr (RT::base_tile_stride == 8 &&
+                                    (std::is_same_v<typename ST::shape, st_16x32_s> ||
+                                     std::is_same_v<typename ST::shape, st_32x16_s>)) {
                                     asm volatile(
                                         "ds_read_b64_tr_b16 %0, %2 offset:%3\n"
                                         "ds_read_b64_tr_b16 %1, %2 offset:%4\n"
-                                        // "s_waitcnt lgkmcnt(0)\n"
                                         : "=v"(*reinterpret_cast<float2*>(&dst.tiles[register_row][register_col].data[idx])), 
                                         "=v"(*reinterpret_cast<float2*>(&dst.tiles[register_row][register_col].data[idx + 2]))
                                         : "v"(addr), "i"(offset), "i"(offset + 4 * ST::underlying_subtile_row_bytes)
                                         : "memory"
                                     );
-                                // Use two ds_read_b64_tr_b16 for stride == 8, dtype == bf16
                                 } else if constexpr (RT::base_tile_stride == 8) {
                                     asm volatile(
                                         "ds_read_b64_tr_b16 %0, %2 offset:%4\n"

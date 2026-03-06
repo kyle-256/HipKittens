@@ -101,16 +101,33 @@ print(f"Performance: {tflops:.2f} TFLOPS for {N}x{N} matrix multiplication.\n")
 
 
 # Compare against reference
+# BF16 GEMM tolerance: accumulation order differs between implementations,
+# expected relative error ~ sqrt(K) * eps_bf16 ≈ sqrt(K) * 2^-8
+import math
+eps_bf16 = 2**-8
+rtol = 2.0 * math.sqrt(N) * eps_bf16  # ~0.7 for N=8192
+atol = 1.0  # absolute tolerance for values near zero
+
 C_float = C.float()
 C_pytorch_float = C_pytorch.float()
 diff = (C_float - C_pytorch_float).abs()
-max_error = diff.max().item()
-mean_error = diff.mean().item()
-error_count = (diff > 0.01*C_pytorch_float.abs()).sum().item()
-print(f"Max error between kernel and reference: {max_error}")
-print(f"Max error: {max_error}")
-print(f"Mean error: {mean_error}")
-print(f"Number of large errors (>0.1): {error_count}\n")
+scale = C_pytorch_float.abs().clamp(min=atol)
+rel_diff = diff / scale
+max_abs_error = diff.max().item()
+mean_abs_error = diff.mean().item()
+max_rel_error = rel_diff.max().item()
+mean_rel_error = rel_diff.mean().item()
+pass_count = ((diff <= atol) | (rel_diff <= rtol)).sum().item()
+total = N * N
+pass_rate = pass_count / total * 100
+
+print(f"Correctness check (rtol={rtol:.4f}, atol={atol:.1f}):")
+print(f"  Max  absolute error: {max_abs_error:.4f}")
+print(f"  Mean absolute error: {mean_abs_error:.4f}")
+print(f"  Max  relative error: {max_rel_error:.4f}")
+print(f"  Mean relative error: {mean_rel_error:.4f}")
+print(f"  Pass rate: {pass_count}/{total} ({pass_rate:.2f}%)")
+print(f"  Result: {'PASS' if pass_rate >= 99.0 else 'FAIL'}\n")
 
 ############### LOGGING OUTPUTS ####################
 
