@@ -19,6 +19,7 @@ namespace st_shape {
 struct st_16x16 {
     static constexpr int rows = 16;
     static constexpr int cols = 16;
+    static constexpr int subtile_padding = 0;
 
     template<typename _T>
     static constexpr int bytes_per_thread() {
@@ -48,6 +49,7 @@ struct st_16x16 {
 struct st_16x16_swizzled {
     static constexpr int rows = 16;
     static constexpr int cols = 16;
+    static constexpr int subtile_padding = 0;
 
     template<typename _T>
     static constexpr int bytes_per_thread() {
@@ -83,6 +85,7 @@ struct st_16x16_swizzled {
 struct st_32x32 {
     static constexpr int rows = 32;
     static constexpr int cols = 32;
+    static constexpr int subtile_padding = 0;
 
     template<typename _T>
     static constexpr int bytes_per_thread() {
@@ -116,6 +119,7 @@ struct st_32x32 {
 struct st_16x32 {
     static constexpr int rows = 16;
     static constexpr int cols = 32;
+    static constexpr int subtile_padding = 0;
 
     template<typename _T>
     static constexpr int bytes_per_thread() {
@@ -148,6 +152,7 @@ struct st_16x32 {
 struct st_32x16 {
     static constexpr int rows = 32;
     static constexpr int cols = 16;
+    static constexpr int subtile_padding = 0;
 
     template<typename _T>
     static constexpr int bytes_per_thread() {
@@ -180,6 +185,7 @@ struct st_32x16 {
 struct st_8x32 {
     static constexpr int rows = 8;
     static constexpr int cols = 32;
+    static constexpr int subtile_padding = 0;
 
     template<typename _T>
     static constexpr int bytes_per_thread() {
@@ -208,6 +214,7 @@ struct st_8x32 {
 struct st_16x128 {
     static constexpr int rows = 16;
     static constexpr int cols = 128;
+    static constexpr int subtile_padding = 0;
 
     template<typename _T>
     static constexpr int bytes_per_thread() {
@@ -238,6 +245,7 @@ struct st_16x128 {
 struct st_16x128_v2 {
     static constexpr int rows = 16;
     static constexpr int cols = 128;
+    static constexpr int subtile_padding = 128;
 
     template<typename _T>
     static constexpr int bytes_per_thread() {
@@ -268,6 +276,7 @@ struct st_16x128_v2 {
 struct st_16x128_v2a {
     static constexpr int rows = 16;
     static constexpr int cols = 128;
+    static constexpr int subtile_padding = 128;
 
     template<typename _T>
     static constexpr int bytes_per_thread() {
@@ -296,6 +305,7 @@ struct st_16x128_v2a {
 struct st_16x128_v3 {
     static constexpr int rows = 16;
     static constexpr int cols = 128;
+    static constexpr int subtile_padding = 0;
 
     template<typename _T>
     static constexpr int bytes_per_thread() {
@@ -326,6 +336,7 @@ struct st_16x128_v3 {
 struct st_128x16 {
     static constexpr int rows = 128;
     static constexpr int cols = 16;
+    static constexpr int subtile_padding = 0;
 
     template<typename _T>
     static constexpr int bytes_per_thread() {

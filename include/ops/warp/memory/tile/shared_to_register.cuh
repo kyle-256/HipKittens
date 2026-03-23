@@ -68,7 +68,7 @@ __device__ inline static void load(RT &dst, const ST &src) {
                         #pragma unroll
                         for (int jj = 0; jj < ST::subtiles_per_row; jj++) {
                             const int shared_subtile_id = ii * ST::underlying_subtiles_per_row + jj;
-                            const int offset = shared_subtile_id * ST::underlying_subtile_bytes;
+                            const int offset = shared_subtile_id * ST::underlying_subtile_stride_bytes;
 
                             const int register_row = ii * register_subtiles_per_shared_subtile_col + i;
                             const int register_col = jj * register_subtiles_per_shared_subtile_row + j;
@@ -126,7 +126,7 @@ __device__ inline static void load(RT &dst, const ST &src) {
             const int shared_base_col = (col_offset + k * RT::base_tile_elements_per_stride_group) / ST::underlying_subtile_cols;
             
             const int shared_base_subtile_id = shared_base_row * ST::underlying_subtiles_per_row + shared_base_col;
-            const int shared_base_offset = shared_base_subtile_id * ST::underlying_subtile_bytes;
+            const int shared_base_offset = shared_base_subtile_id * ST::underlying_subtile_stride_bytes;
 
             const uint32_t swizzled_offset = src.swizzle({row, col});
             const uint32_t next_swizzled_offset = src.swizzle({row, col + 4});
@@ -142,7 +142,7 @@ __device__ inline static void load(RT &dst, const ST &src) {
                 for (int j = 0; j < RT::width; j++) {
                     const int shared_col = j * shared_subtiles_per_register_subtile_row;
                     const int shared_subtile_id = shared_row * ST::underlying_subtiles_per_row + shared_col;
-                    const int offset = shared_subtile_id * ST::underlying_subtile_bytes;
+                    const int offset = shared_subtile_id * ST::underlying_subtile_stride_bytes;
 
                     if constexpr (std::is_same_v<U2, bf16_2> || std::is_same_v<U2, half_2>) {
                         // Special handling for 32x16 and stride == 8
@@ -246,7 +246,7 @@ __device__ inline static void load(RT &dst, const ST &src) {
                         #pragma unroll
                         for (int jj = 0; jj < ST::subtiles_per_row; jj++) {
                             const int shared_subtile_id = ii * ST::underlying_subtiles_per_row + jj;
-                            const int offset = shared_subtile_id * ST::underlying_subtile_bytes;
+                            const int offset = shared_subtile_id * ST::underlying_subtile_stride_bytes;
 
                             const int register_row = ii * register_subtiles_per_shared_subtile_col + i;
                             const int register_col = jj * register_subtiles_per_shared_subtile_row + j;
@@ -338,7 +338,7 @@ __device__ inline static void load(RT &dst, const ST &src) {
                     const int shared_base_row = k;
 
                     const int shared_base_subtile_id = shared_base_row * ST::underlying_subtiles_per_row + shared_base_col;
-                    const int shared_base_offset = shared_base_subtile_id * ST::underlying_subtile_bytes;
+                    const int shared_base_offset = shared_base_subtile_id * ST::underlying_subtile_stride_bytes;
 
                     int idx = k * RT::base_tile_stride / packing;
 
@@ -349,7 +349,7 @@ __device__ inline static void load(RT &dst, const ST &src) {
                         for (int j = 0; j < RT::width; j++) {
                             const int shared_col = j * shared_subtiles_per_register_subtile_row;
                             const int shared_subtile_id = shared_row * ST::underlying_subtiles_per_row + shared_col;
-                            const int offset = shared_subtile_id * ST::underlying_subtile_bytes + shared_base_offset;
+                            const int offset = shared_subtile_id * ST::underlying_subtile_stride_bytes + shared_base_offset;
 
                             if constexpr (std::is_same_v<U2, bf16_2> || std::is_same_v<U2, half_2>) {
                                 // Use two ds_read_b64_tr_b16 for stride == 8, dtype == bf16
@@ -402,7 +402,7 @@ __device__ inline static void load(RT &dst, const ST &src) {
                 const int shared_base_row = (row_offset + k * RT::base_tile_elements_per_stride_group) / ST::underlying_subtile_rows;
 
                 const int shared_base_subtile_id = shared_base_row * ST::underlying_subtiles_per_row + shared_base_col;
-                const int shared_base_offset = shared_base_subtile_id * ST::underlying_subtile_bytes;
+                const int shared_base_offset = shared_base_subtile_id * ST::underlying_subtile_stride_bytes;
 
                 const uint32_t swizzled_offset = src.swizzle({row, col});
                 const uint32_t next_swizzled_offset = src.swizzle({row + tr_row_step2, col});
@@ -418,7 +418,7 @@ __device__ inline static void load(RT &dst, const ST &src) {
                     for (int j = 0; j < RT::width; j++) {
                         const int shared_col = j * shared_subtiles_per_register_subtile_row;
                         const int shared_subtile_id = shared_row * ST::underlying_subtiles_per_row + shared_col;
-                        const int offset = shared_subtile_id * ST::underlying_subtile_bytes;
+                        const int offset = shared_subtile_id * ST::underlying_subtile_stride_bytes;
 
                         if constexpr (std::is_same_v<U2, bf16_2>) {
                             // Use two ds_read_b64_tr_b16 for stride == 8, dtype == bf16
@@ -521,7 +521,7 @@ __device__ inline static void store(ST &dst, const RT &src) {
                         #pragma unroll
                         for (int jj = 0; jj < ST::subtiles_per_row; jj++) {
                             const int shared_subtile_id = ii * ST::underlying_subtiles_per_row + jj;
-                            const int offset = shared_subtile_id * ST::underlying_subtile_bytes;
+                            const int offset = shared_subtile_id * ST::underlying_subtile_stride_bytes;
 
                             const int register_row = ii * register_subtiles_per_shared_subtile_col + i;
                             const int register_col = jj * register_subtiles_per_shared_subtile_row + j;
@@ -573,7 +573,7 @@ __device__ inline static void store(ST &dst, const RT &src) {
             const int shared_base_row = (row_offset) / ST::underlying_subtile_rows;
             const int shared_base_col = (col_offset + k * RT::base_tile_elements_per_stride_group) / ST::underlying_subtile_cols;
             const int shared_base_subtile_id = shared_base_row * shared_subtiles_per_register_subtile_row + shared_base_col;
-            const int shared_base_offset = shared_base_subtile_id * ST::underlying_subtile_bytes;
+            const int shared_base_offset = shared_base_subtile_id * ST::underlying_subtile_stride_bytes;
 
             const uint32_t swizzled_offset = dst.swizzle({row, col});
             const uint32_t addr = dst_ptr + swizzled_offset + shared_base_offset;
@@ -587,7 +587,7 @@ __device__ inline static void store(ST &dst, const RT &src) {
                 for (int j = 0; j < RT::width; j++) {
                     const int shared_col = j * shared_subtiles_per_register_subtile_row;
                     const int shared_subtile_id = shared_row * ST::underlying_subtiles_per_row + shared_col;
-                    const int offset = shared_subtile_id * ST::underlying_subtile_bytes;
+                    const int offset = shared_subtile_id * ST::underlying_subtile_stride_bytes;
 
                     if constexpr (std::is_same_v<U2, bf16_2> || std::is_same_v<U2, half_2>) {
                         // Use ds_write_b128 for stride == 8, dtype == bf16
@@ -672,7 +672,7 @@ __device__ inline static void store(ST &dst, const RT &src) {
                             #pragma unroll
                             for (int jj = 0; jj < ST::subtiles_per_row; jj++) {
                                 const int shared_subtile_id = ii * ST::underlying_subtiles_per_row + jj;
-                                const int offset = (shared_subtile_id * ST::underlying_subtile_bytes) / sizeof(U);
+                                const int offset = (shared_subtile_id * ST::underlying_subtile_stride_bytes) / sizeof(U);
 
                                 const int register_row = ii * register_subtiles_per_shared_subtile_col + i;
                                 const int register_col = jj * register_subtiles_per_shared_subtile_row + j;
@@ -708,7 +708,7 @@ __device__ inline static void store(ST &dst, const RT &src) {
                 const int shared_base_row = (row_offset + k * RT::base_tile_elements_per_stride_group) / ST::underlying_subtile_rows;
 
                 const int shared_base_subtile_id = shared_base_row * shared_subtiles_per_register_subtile_row + shared_base_col;
-                const int shared_base_offset = shared_base_subtile_id * ST::underlying_subtile_bytes;
+                const int shared_base_offset = shared_base_subtile_id * ST::underlying_subtile_stride_bytes;
 
                 const uint32_t swizzled_offset = dst.swizzle({row, col});
                 const uint32_t next_swizzled_offset = dst.swizzle({next_row, col});
@@ -724,7 +724,7 @@ __device__ inline static void store(ST &dst, const RT &src) {
                     for (int j = 0; j < RT::width; j++) {
                         const int shared_col = j * shared_subtiles_per_register_subtile_row;
                         const int shared_subtile_id = shared_row * ST::underlying_subtiles_per_row + shared_col;
-                        const int offset = (shared_subtile_id * ST::underlying_subtile_bytes) / sizeof(U);
+                        const int offset = (shared_subtile_id * ST::underlying_subtile_stride_bytes) / sizeof(U);
 
                         U* dst_elem_ptr = addr + offset;
                         U* next_dst_elem_ptr = next_addr + offset;

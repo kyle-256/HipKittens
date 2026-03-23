@@ -6,6 +6,76 @@ using namespace kittens;
 #define K_DIM 8192
 #define N_DIM 8192
 
+#define TK_STRINGIFY_IMPL(x) #x
+#define TK_STRINGIFY(x) TK_STRINGIFY_IMPL(x)
+#define TK_WAIT_LGKM(x) asm volatile("s_waitcnt lgkmcnt(" TK_STRINGIFY(x) ")")
+#define TK_WAIT_VMCNT(x) asm volatile("s_waitcnt vmcnt(" TK_STRINGIFY(x) ")")
+#define TK_PRAGMA_UNROLL(x) _Pragma(TK_STRINGIFY(unroll x))
+
+#ifndef RCR_PREFETCH_LGKM
+#define RCR_PREFETCH_LGKM 8
+#endif
+#ifndef RRR_PREFETCH_LGKM
+#define RRR_PREFETCH_LGKM 8
+#endif
+#ifndef CRR_PREFETCH_LGKM
+#define CRR_PREFETCH_LGKM 3
+#endif
+
+#ifndef RCR_MAIN_UNROLL
+#define RCR_MAIN_UNROLL 2
+#endif
+#ifndef RRR_MAIN_UNROLL
+#define RRR_MAIN_UNROLL 4
+#endif
+#ifndef CRR_MAIN_UNROLL
+#define CRR_MAIN_UNROLL 1
+#endif
+
+#ifndef CRR_ENABLE_SCHED_BARRIER
+#define CRR_ENABLE_SCHED_BARRIER 0
+#endif
+
+#ifndef CRR_INIT0_VMCNT
+#define CRR_INIT0_VMCNT 4
+#endif
+#ifndef CRR_INIT1_VMCNT
+#define CRR_INIT1_VMCNT 6
+#endif
+#ifndef CRR_STEADY_VMCNT
+#define CRR_STEADY_VMCNT 6
+#endif
+#ifndef CRR_EPILOGUE_VMCNT
+#define CRR_EPILOGUE_VMCNT 4
+#endif
+#ifndef CRR_BATCHED_PAIR_MMA
+#define CRR_BATCHED_PAIR_MMA 1
+#endif
+#ifndef CRR_BATCHED_EPILOGUE_MMA
+#define CRR_BATCHED_EPILOGUE_MMA 0
+#endif
+#ifndef CRR_ENABLE_STEADY_MID_BARRIER
+#define CRR_ENABLE_STEADY_MID_BARRIER 1
+#endif
+#ifndef CRR_ROW_SHARED_TRANSPOSE
+#define CRR_ROW_SHARED_TRANSPOSE 1
+#endif
+#ifndef RRR_ROW_SHARED_TRANSPOSE
+#define RRR_ROW_SHARED_TRANSPOSE 1
+#endif
+
+#if CRR_ENABLE_SCHED_BARRIER
+#define CRR_SCHED_BARRIER() __builtin_amdgcn_sched_barrier(0)
+#else
+#define CRR_SCHED_BARRIER() do {} while (0)
+#endif
+
+#if CRR_ENABLE_STEADY_MID_BARRIER
+#define CRR_STEADY_MID_BARRIER() __builtin_amdgcn_s_barrier()
+#else
+#define CRR_STEADY_MID_BARRIER() do {} while (0)
+#endif
+
 constexpr int BLK = 256, BK = 128;
 constexpr int HB  = BLK / 2;
 constexpr int WARPS_M = 2, WARPS_N = 4;
@@ -35,8 +105,8 @@ using B_col_reg = rt_fp8e4m3<BK, RBN, col_l, rt_128x16_s>;  // 128×32
 using ST_v2  = st_fp8e4m3<HB, BK, st_16x128_v2_s>;
 using ST_v2a = st_fp8e4m3<HB, BK, st_16x128_v2a_s>;
 
-template<typename RT>
-__device__ __forceinline__ void load_col_from_v2_st(
+template<typename RT, int K_HALF>
+__device__ __forceinline__ void load_col_from_v2_st_half(
     RT& dst, const ST_v2& tile, int col_start)
 {
     const int laneid = kittens::laneid();
@@ -44,37 +114,41 @@ __device__ __forceinline__ void load_col_from_v2_st(
     const int col_off = (laneid % 2) * 8;
     const uint32_t tile_base = reinterpret_cast<uintptr_t>(&tile.data[0]);
 
+    constexpr int idx = K_HALF * 4;
+    const int k_row = row_off + K_HALF * 64;
+
+    const uint32_t stidx = k_row >> 4;
+    const uint32_t base_k = tile_base + (stidx << 11) + (stidx << 7) + ((k_row & 15) << 7);
+    const uint32_t sw_k   = (k_row & 7) << 4;
+    const uint32_t base_n = base_k + 1024;
+
     #pragma unroll
-    for (int k = 0; k < 2; k++) {
-        const int idx = k * 4;
-        const int k_row = row_off + k * 64;
-        const int k_next = k_row + 8;
+    for (int j = 0; j < RT::width; j++) {
+        const uint32_t nc = col_start + j * 16 + col_off;
+        const uint32_t addr = base_k + (nc ^ sw_k);
+        const uint32_t next_addr = base_n + (nc ^ sw_k);
 
-        const uint32_t base_k = tile_base + ((k_row >> 4) << 11) + ((k_row & 15) << 7);
-        const uint32_t sw_k   = ((k_row & 7)) << 4;
-        const uint32_t base_n = tile_base + ((k_next >> 4) << 11) + ((k_next & 15) << 7);
-        const uint32_t sw_n   = ((k_next & 7)) << 4;
-
-        #pragma unroll
-        for (int j = 0; j < RT::width; j++) {
-            const uint32_t nc = col_start + j * 16 + col_off;
-            const uint32_t addr = base_k + (nc ^ sw_k);
-            const uint32_t next_addr = base_n + (nc ^ sw_n);
-
-            asm volatile(
-                "ds_read_b64_tr_b8 %0, %2 offset:%4\n"
-                "ds_read_b64_tr_b8 %1, %3 offset:%4\n"
-                : "=v"(*reinterpret_cast<float2*>(&dst.tiles[0][j].data[idx])),
-                  "=v"(*reinterpret_cast<float2*>(&dst.tiles[0][j].data[idx + 2]))
-                : "v"(addr), "v"(next_addr), "i"(0)
-                : "memory"
-            );
-        }
+        asm volatile(
+            "ds_read_b64_tr_b8 %0, %2 offset:%4\n"
+            "ds_read_b64_tr_b8 %1, %3 offset:%4\n"
+            : "=v"(*reinterpret_cast<float2*>(&dst.tiles[0][j].data[idx])),
+              "=v"(*reinterpret_cast<float2*>(&dst.tiles[0][j].data[idx + 2]))
+            : "v"(addr), "v"(next_addr), "i"(0)
+            : "memory"
+        );
     }
 }
 
 template<typename RT>
-__device__ __forceinline__ void load_col_from_v2a_st(
+__device__ __forceinline__ void load_col_from_v2_st(
+    RT& dst, const ST_v2& tile, int col_start)
+{
+    load_col_from_v2_st_half<RT, 0>(dst, tile, col_start);
+    load_col_from_v2_st_half<RT, 1>(dst, tile, col_start);
+}
+
+template<typename RT, int K_HALF>
+__device__ __forceinline__ void load_col_from_v2a_st_half(
     RT& dst, const ST_v2a& tile, int col_start)
 {
     const int laneid = kittens::laneid();
@@ -82,33 +156,37 @@ __device__ __forceinline__ void load_col_from_v2a_st(
     const int col_off = (laneid % 2) * 8;
     const uint32_t tile_base = reinterpret_cast<uintptr_t>(&tile.data[0]);
 
+    constexpr int idx = K_HALF * 4;
+    const int k_row = row_off + K_HALF * 64;
+
+    const uint32_t stidx = k_row >> 4;
+    const uint32_t base_k = tile_base + (stidx << 11) + (stidx << 7) + ((k_row & 15) << 7);
+    const uint32_t sw_k   = (k_row & 7) << 4;
+    const uint32_t base_n = base_k + 1024;
+
     #pragma unroll
-    for (int k = 0; k < 2; k++) {
-        const int idx = k * 4;
-        const int k_row = row_off + k * 64;
-        const int k_next = k_row + 8;
+    for (int j = 0; j < RT::width; j++) {
+        const uint32_t nc = col_start + j * 16 + col_off;
+        const uint32_t addr = base_k + (nc ^ sw_k);
+        const uint32_t next_addr = base_n + (nc ^ sw_k);
 
-        const uint32_t base_k = tile_base + ((k_row >> 4) << 11) + ((k_row & 15) << 7);
-        const uint32_t sw_k   = ((k_row & 7)) << 4;
-        const uint32_t base_n = tile_base + ((k_next >> 4) << 11) + ((k_next & 15) << 7);
-        const uint32_t sw_n   = ((k_next & 7)) << 4;
-
-        #pragma unroll
-        for (int j = 0; j < RT::width; j++) {
-            const uint32_t nc = col_start + j * 16 + col_off;
-            const uint32_t addr = base_k + (nc ^ sw_k);
-            const uint32_t next_addr = base_n + (nc ^ sw_n);
-
-            asm volatile(
-                "ds_read_b64_tr_b8 %0, %2 offset:%4\n"
-                "ds_read_b64_tr_b8 %1, %3 offset:%4\n"
-                : "=v"(*reinterpret_cast<float2*>(&dst.tiles[0][j].data[idx])),
-                  "=v"(*reinterpret_cast<float2*>(&dst.tiles[0][j].data[idx + 2]))
-                : "v"(addr), "v"(next_addr), "i"(0)
-                : "memory"
-            );
-        }
+        asm volatile(
+            "ds_read_b64_tr_b8 %0, %2 offset:%4\n"
+            "ds_read_b64_tr_b8 %1, %3 offset:%4\n"
+            : "=v"(*reinterpret_cast<float2*>(&dst.tiles[0][j].data[idx])),
+              "=v"(*reinterpret_cast<float2*>(&dst.tiles[0][j].data[idx + 2]))
+            : "v"(addr), "v"(next_addr), "i"(0)
+            : "memory"
+        );
     }
+}
+
+template<typename RT>
+__device__ __forceinline__ void load_col_from_v2a_st(
+    RT& dst, const ST_v2a& tile, int col_start)
+{
+    load_col_from_v2a_st_half<RT, 0>(dst, tile, col_start);
+    load_col_from_v2a_st_half<RT, 1>(dst, tile, col_start);
 }
 
 struct layout_globals {
@@ -162,22 +240,22 @@ void gemm_kernel(const layout_globals g) {
         G::load(As[tic][1], g.a, a_co(br*2+1, 0), soA);
 
         if (wm == 1) __builtin_amdgcn_s_barrier();
-        asm volatile("s_waitcnt vmcnt(4)");
+        TK_WAIT_VMCNT(CRR_INIT0_VMCNT);
         __builtin_amdgcn_s_barrier();
 
         G::load(Bs[toc][0], g.b, b_co(bc*2,   1), soB);
         G::load(As[toc][0], g.a, a_co(br*2,   1), soA);
         G::load(Bs[toc][1], g.b, b_co(bc*2+1, 1), soB);
 
-        asm volatile("s_waitcnt vmcnt(6)");
+        TK_WAIT_VMCNT(CRR_INIT1_VMCNT);
         __builtin_amdgcn_s_barrier();
 
-        #pragma unroll 2
+        TK_PRAGMA_UNROLL(RCR_MAIN_UNROLL)
         for (int k = 0; k < KI - 2; k++, tic ^= 1, toc ^= 1) {
             load_b(b0, Bs[tic][0], wn);
             load_a(a, As[tic][0], wm);
             G::load(As[toc][1], g.a, a_co(br*2+1, k+1), soA);
-            asm volatile("s_waitcnt lgkmcnt(8)"); __builtin_amdgcn_s_barrier();
+            TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); mma_ABt(cA, a, b0, cA); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier(); __builtin_amdgcn_sched_barrier(0);
@@ -256,9 +334,13 @@ void gemm_kernel(const layout_globals g) {
 
     } else if constexpr (L == Layout::RRR) {
         __shared__ ST_row As[2][2];
+#if RRR_ROW_SHARED_TRANSPOSE
+        __shared__ ST_row Bs[2][2];
+#else
         __shared__ ST_v2  Bs[2][2];
+#endif
         A_row_reg a;
-        B_col_reg b0, b1;
+        B_col_reg b;
 
         constexpr int bptA = ST_row::underlying_subtile_bytes_per_thread;
         constexpr int bpmA = bptA * _NUM_THREADS;
@@ -266,22 +348,47 @@ void gemm_kernel(const layout_globals g) {
         uint32_t soA[mptA];
         G::prefill_swizzled_offsets(As[0][0], g.a, soA);
 
-        constexpr int bptB = ST_v2::underlying_subtile_bytes_per_thread;
+        constexpr int bptB =
+#if RRR_ROW_SHARED_TRANSPOSE
+            ST_row::underlying_subtile_bytes_per_thread;
+#else
+            ST_v2::underlying_subtile_bytes_per_thread;
+#endif
         constexpr int bpmB = bptB * _NUM_THREADS;
-        constexpr int mptB = ST_v2::rows * ST_v2::cols * sizeof(fp8e4m3) / bpmB;
+        constexpr int mptB =
+#if RRR_ROW_SHARED_TRANSPOSE
+            ST_row::rows * ST_row::cols * sizeof(fp8e4m3) / bpmB;
+#else
+            ST_v2::rows * ST_v2::cols * sizeof(fp8e4m3) / bpmB;
+#endif
         uint32_t soB[mptB];
         G::prefill_swizzled_offsets(Bs[0][0], g.b, soB);
 
         auto a_co = [&](int s, int k) -> coord<ST_row> { return {0, 0, s, k}; };
+#if RRR_ROW_SHARED_TRANSPOSE
+        // Materialize B^T in row-friendly shared tiles, then transpose in registers
+        // to avoid the transposed LDS read on the hot RRR operand.
+        auto b_co = [&](int s, int k) -> coord<ST_row> { return {0, 0, s, k}; };
+#else
         auto b_co = [&](int s, int k) -> coord<ST_v2>  { return {0, 0, k, s}; };
+#endif
 
         auto load_a = [&](A_row_reg& dst, ST_row& tile, int wi) {
             auto sub = subtile_inplace<RBM, BK>(tile, {wi, 0});
             load(dst, sub);
         };
+#if RRR_ROW_SHARED_TRANSPOSE
+        auto load_b = [&](B_col_reg& dst, ST_row& tile, int wi) {
+            B_row_reg tmp;
+            auto sub = subtile_inplace<RBN, BK>(tile, {wi, 0});
+            load(tmp, sub);
+            transpose(dst, tmp);
+        };
+#else
         auto load_b = [&](B_col_reg& dst, ST_v2& tile, int wi) {
             load_col_from_v2_st(dst, tile, wi * RBN);
         };
+#endif
 
         int tic = 0, toc = 1;
         G::load(Bs[tic][0], g.b, b_co(bc*2,   0), soB);
@@ -300,89 +407,133 @@ void gemm_kernel(const layout_globals g) {
         asm volatile("s_waitcnt vmcnt(6)");
         __builtin_amdgcn_s_barrier();
 
-        #pragma unroll 2
+        TK_PRAGMA_UNROLL(RRR_MAIN_UNROLL)
         for (int k = 0; k < KI - 2; k++, tic ^= 1, toc ^= 1) {
-            load_b(b0, Bs[tic][0], wn);
+            load_b(b, Bs[tic][0], wn);
             load_a(a, As[tic][0], wm);
             G::load(As[toc][1], g.a, a_co(br*2+1, k+1), soA);
-            asm volatile("s_waitcnt lgkmcnt(8)"); __builtin_amdgcn_s_barrier();
+            TK_WAIT_LGKM(RRR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); mma_AB(cA, a, b0, cA); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); mma_AB(cA, a, b, cA); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier(); __builtin_amdgcn_sched_barrier(0);
 
-            load_b(b1, Bs[tic][1], wn);
+            load_a(a, As[tic][1], wm);
             G::load(Bs[tic][0], g.b, b_co(bc*2, k+2), soB);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); mma_AB(cB, a, b1, cB); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); mma_AB(cC, a, b, cC); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
-            load_a(a, As[tic][1], wm);
+            load_b(b, Bs[tic][1], wn);
             G::load(As[tic][0], g.a, a_co(br*2, k+2), soA);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); mma_AB(cC, a, b0, cC); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); mma_AB(cD, a, b, cD); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier(); __builtin_amdgcn_sched_barrier(0);
 
+            load_a(a, As[tic][0], wm);
             G::load(Bs[tic][1], g.b, b_co(bc*2+1, k+2), soB);
             asm volatile("s_waitcnt vmcnt(6)"); __builtin_amdgcn_s_barrier();
-            __builtin_amdgcn_s_setprio(1); mma_AB(cD, a, b1, cD); __builtin_amdgcn_s_setprio(0);
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); mma_AB(cB, a, b, cB); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
         }
 
         {
-            load_b(b0, Bs[tic][0], wn);
+            load_b(b, Bs[tic][0], wn);
             load_a(a, As[tic][0], wm);
             G::load(As[toc][1], g.a, a_co(br*2+1, KI-1), soA);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); mma_AB(cA, a, b0, cA); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); mma_AB(cA, a, b, cA); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier(); __builtin_amdgcn_sched_barrier(0);
 
-            load_b(b1, Bs[tic][1], wn);
+            load_a(a, As[tic][1], wm);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); mma_AB(cB, a, b1, cB); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); mma_AB(cC, a, b, cC); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
-            load_a(a, As[tic][1], wm);
+            load_b(b, Bs[tic][1], wn);
+            __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); mma_AB(cD, a, b, cD); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_a(a, As[tic][0], wm);
             asm volatile("s_waitcnt vmcnt(4)"); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); mma_AB(cC, a, b0, cC); __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-
-            load_b(b0, Bs[toc][0], wn);
-            __builtin_amdgcn_s_barrier();
-            asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); mma_AB(cD, a, b1, cD); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); mma_AB(cB, a, b, cB); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier(); __builtin_amdgcn_sched_barrier(0);
             tic ^= 1; toc ^= 1;
         }
 
         {
+            load_b(b, Bs[tic][0], wn);
             load_a(a, As[tic][0], wm);
             asm volatile("s_waitcnt vmcnt(0)"); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); mma_AB(cA, a, b0, cA); __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-
-            load_b(b1, Bs[tic][1], wn);
-            __builtin_amdgcn_s_barrier(); __builtin_amdgcn_sched_barrier(0);
-            asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); mma_AB(cB, a, b1, cB); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); mma_AB(cA, a, b, cA); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
+            __builtin_amdgcn_s_barrier(); __builtin_amdgcn_sched_barrier(0);
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); mma_AB(cC, a, b, cC); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_b(b, Bs[tic][1], wn);
+            __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); mma_AB(cD, a, b, cD); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_a(a, As[tic][0], wm);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1);
-            mma_AB(cC, a, b0, cC);
-            mma_AB(cD, a, b1, cD);
+            mma_AB(cB, a, b, cB);
             __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
         }
 
     } else if constexpr (L == Layout::CRR) {
+#if CRR_ROW_SHARED_TRANSPOSE
+        __shared__ ST_row As[2][2];
+        __shared__ ST_row Bs[2][2];
+        A_col_reg a;
+        B_col_reg b0, b1;
+
+        constexpr int bptA = ST_row::underlying_subtile_bytes_per_thread;
+        constexpr int bpmA = bptA * _NUM_THREADS;
+        constexpr int mptA = ST_row::rows * ST_row::cols * sizeof(fp8e4m3) / bpmA;
+        uint32_t soA[mptA];
+        G::prefill_swizzled_offsets(As[0][0], g.a, soA);
+
+        constexpr int bptB = ST_row::underlying_subtile_bytes_per_thread;
+        constexpr int bpmB = bptB * _NUM_THREADS;
+        constexpr int mptB = ST_row::rows * ST_row::cols * sizeof(fp8e4m3) / bpmB;
+        uint32_t soB[mptB];
+        G::prefill_swizzled_offsets(Bs[0][0], g.b, soB);
+
+        // Materialize the transposed A/B tiles in row-friendly shared memory, then
+        // transpose in registers so CRR can stay on ds_read_b128 instead of tr_b8.
+        auto a_co = [&](int s, int k) -> coord<ST_row> { return {0, 0, s, k}; };
+        auto b_co = [&](int s, int k) -> coord<ST_row> { return {0, 0, s, k}; };
+
+        auto load_a = [&](A_col_reg& dst, ST_row& tile, int wi) {
+            A_row_reg tmp;
+            auto sub = subtile_inplace<RBM, BK>(tile, {wi, 0});
+            load(tmp, sub);
+            transpose(dst, tmp);
+        };
+        auto load_b = [&](B_col_reg& dst, ST_row& tile, int wi) {
+            B_row_reg tmp;
+            auto sub = subtile_inplace<RBN, BK>(tile, {wi, 0});
+            load(tmp, sub);
+            transpose(dst, tmp);
+        };
+#else
         __shared__ ST_v2a As[2][2];
         __shared__ ST_v2  Bs[2][2];
         A_col_reg a;
@@ -409,6 +560,7 @@ void gemm_kernel(const layout_globals g) {
         auto load_b = [&](B_col_reg& dst, ST_v2& tile, int wi) {
             load_col_from_v2_st(dst, tile, wi * RBN);
         };
+#endif
 
         int tic = 0, toc = 1;
         G::load(Bs[tic][0], g.b, b_co(bc*2,   0), soB);
@@ -427,14 +579,40 @@ void gemm_kernel(const layout_globals g) {
         asm volatile("s_waitcnt vmcnt(6)");
         __builtin_amdgcn_s_barrier();
 
-        #pragma unroll 1
+        TK_PRAGMA_UNROLL(CRR_MAIN_UNROLL)
         for (int k = 0; k < KI - 2; k++, tic ^= 1, toc ^= 1) {
+#if CRR_BATCHED_PAIR_MMA
+            load_b(b0, Bs[tic][0], wn);
+            load_b(b1, Bs[tic][1], wn);
+            load_a(a, As[tic][0], wm);
+            G::load(As[toc][1], g.a, a_co(br*2+1, k+1), soA);
+            G::load(Bs[tic][0], g.b, b_co(bc*2, k+2), soB);
+            TK_WAIT_LGKM(CRR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1);
+            mma_AtB(cA, a, b0, cA);
+            mma_AtB(cB, a, b1, cB);
+            __builtin_amdgcn_s_setprio(0);
+            CRR_STEADY_MID_BARRIER(); CRR_SCHED_BARRIER();
+
+            load_a(a, As[tic][1], wm);
+            G::load(As[tic][0], g.a, a_co(br*2, k+2), soA);
+            G::load(Bs[tic][1], g.b, b_co(bc*2+1, k+2), soB);
+            TK_WAIT_VMCNT(CRR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1);
+            mma_AtB(cC, a, b0, cC);
+            mma_AtB(cD, a, b1, cD);
+            __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+#else
             load_b(b0, Bs[tic][0], wn);
             load_a(a, As[tic][0], wm);
             G::load(As[toc][1], g.a, a_co(br*2+1, k+1), soA);
+            TK_WAIT_LGKM(CRR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); mma_AtB(cA, a, b0, cA); __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier(); __builtin_amdgcn_sched_barrier(0);
+            __builtin_amdgcn_s_barrier(); CRR_SCHED_BARRIER();
 
             load_b(b1, Bs[tic][1], wn);
             G::load(Bs[tic][0], g.b, b_co(bc*2, k+2), soB);
@@ -448,22 +626,48 @@ void gemm_kernel(const layout_globals g) {
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); mma_AtB(cC, a, b0, cC); __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier(); __builtin_amdgcn_sched_barrier(0);
+            __builtin_amdgcn_s_barrier(); CRR_SCHED_BARRIER();
 
             G::load(Bs[tic][1], g.b, b_co(bc*2+1, k+2), soB);
-            asm volatile("s_waitcnt vmcnt(6)"); __builtin_amdgcn_s_barrier();
+            TK_WAIT_VMCNT(CRR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
             __builtin_amdgcn_s_setprio(1); mma_AtB(cD, a, b1, cD); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
+#endif
         }
 
         {
+#if CRR_BATCHED_EPILOGUE_MMA
+            load_b(b0, Bs[tic][0], wn);
+            load_b(b1, Bs[tic][1], wn);
+            load_a(a, As[tic][0], wm);
+            G::load(As[toc][1], g.a, a_co(br*2+1, KI-1), soA);
+            __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1);
+            mma_AtB(cA, a, b0, cA);
+            mma_AtB(cB, a, b1, cB);
+            __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier(); CRR_SCHED_BARRIER();
+
+            load_a(a, As[tic][1], wm);
+            TK_WAIT_VMCNT(CRR_EPILOGUE_VMCNT); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1);
+            mma_AtB(cC, a, b0, cC);
+            mma_AtB(cD, a, b1, cD);
+            __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_b(b0, Bs[toc][0], wn);
+            tic ^= 1; toc ^= 1;
+#else
             load_b(b0, Bs[tic][0], wn);
             load_a(a, As[tic][0], wm);
             G::load(As[toc][1], g.a, a_co(br*2+1, KI-1), soA);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); mma_AtB(cA, a, b0, cA); __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier(); __builtin_amdgcn_sched_barrier(0);
+            __builtin_amdgcn_s_barrier(); CRR_SCHED_BARRIER();
 
             load_b(b1, Bs[tic][1], wn);
             __builtin_amdgcn_s_barrier();
@@ -472,7 +676,7 @@ void gemm_kernel(const layout_globals g) {
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
-            asm volatile("s_waitcnt vmcnt(4)"); __builtin_amdgcn_s_barrier();
+            TK_WAIT_VMCNT(CRR_EPILOGUE_VMCNT); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); mma_AtB(cC, a, b0, cC); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
@@ -481,11 +685,32 @@ void gemm_kernel(const layout_globals g) {
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); mma_AtB(cD, a, b1, cD); __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier(); __builtin_amdgcn_sched_barrier(0);
+            __builtin_amdgcn_s_barrier(); CRR_SCHED_BARRIER();
             tic ^= 1; toc ^= 1;
+#endif
         }
 
         {
+#if CRR_BATCHED_EPILOGUE_MMA
+            load_a(a, As[tic][0], wm);
+            load_b(b1, Bs[tic][1], wn);
+            asm volatile("s_waitcnt vmcnt(0)"); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1);
+            mma_AtB(cA, a, b0, cA);
+            mma_AtB(cB, a, b1, cB);
+            __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier(); CRR_SCHED_BARRIER();
+
+            load_a(a, As[tic][1], wm);
+            __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1);
+            mma_AtB(cC, a, b0, cC);
+            mma_AtB(cD, a, b1, cD);
+            __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+#else
             load_a(a, As[tic][0], wm);
             asm volatile("s_waitcnt vmcnt(0)"); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
@@ -493,7 +718,7 @@ void gemm_kernel(const layout_globals g) {
             __builtin_amdgcn_s_barrier();
 
             load_b(b1, Bs[tic][1], wn);
-            __builtin_amdgcn_s_barrier(); __builtin_amdgcn_sched_barrier(0);
+            __builtin_amdgcn_s_barrier(); CRR_SCHED_BARRIER();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); mma_AtB(cB, a, b1, cB); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
@@ -506,8 +731,8 @@ void gemm_kernel(const layout_globals g) {
             mma_AtB(cD, a, b1, cD);
             __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
-        }
-    }
+        #endif
+        }    }
 
     // Store Output
     if (wm == 0) __builtin_amdgcn_s_barrier();
