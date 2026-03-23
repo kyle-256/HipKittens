@@ -64,6 +64,8 @@ struct KITTENS_DEFAULT_ALIGN st {
     static constexpr int underlying_subtile_row_bytes = shape::cols * sizeof(T);
     static constexpr int underlying_subtile_elements  = underlying_subtile_rows * underlying_subtile_cols;
     static constexpr int underlying_subtile_bytes     = underlying_subtile_elements * sizeof(T);
+    static constexpr int subtile_padding              = shape::subtile_padding;
+    static constexpr int underlying_subtile_stride_bytes = underlying_subtile_bytes + subtile_padding;
     static constexpr int underlying_subtile_bytes_per_thread = shape::template bytes_per_thread<T>();
 
     static constexpr int underlying_subtiles_per_row  = underlying_cols / underlying_subtile_cols;
@@ -78,7 +80,7 @@ struct KITTENS_DEFAULT_ALIGN st {
 
     static_assert(base_types::packing<dtype>::num() == 1); // must be a 1-packed type (e.g. float, bf16, etc)
 
-    dtype data[rows*cols]; ///< Raw data storage for the tile.
+    dtype data[underlying_subtiles_per_col * underlying_subtiles_per_row * (underlying_subtile_elements + subtile_padding / sizeof(T))]; ///< Raw data storage for the tile.
 
     __device__ __forceinline__ static const uint32_t swizzle(int2 coord) {
         return shape::template swizzle<T>(coord);
@@ -124,6 +126,8 @@ struct st_subtile {
     static constexpr int underlying_subtile_rows      = ST::underlying_subtile_rows;
     static constexpr int underlying_subtile_elements  = ST::underlying_subtile_elements;
     static constexpr int underlying_subtile_bytes     = ST::underlying_subtile_bytes;
+    static constexpr int subtile_padding              = ST::subtile_padding;
+    static constexpr int underlying_subtile_stride_bytes = ST::underlying_subtile_stride_bytes;
     static constexpr int underlying_subtile_bytes_per_thread = ST::underlying_subtile_bytes_per_thread;
     
     static constexpr int underlying_subtiles_per_row  = ST::underlying_subtiles_per_row;
@@ -145,7 +149,7 @@ struct st_subtile {
         const int subtile_row_offset = row_offset / underlying_subtile_rows;
         const int subtile_col_offset = col_offset / underlying_subtile_cols;
         const int subtile_id = subtile_row_offset * underlying_subtiles_per_row + subtile_col_offset;
-        const int subtile_offset = subtile_id * underlying_subtile_elements;
+        const int subtile_offset = subtile_id * (underlying_subtile_elements + subtile_padding / sizeof(T));
         data = &src.data[subtile_offset];
     }
 
