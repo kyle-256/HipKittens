@@ -35,6 +35,7 @@ using rt_32x16 = rt_shape<32, 16, 8>;
 using rt_32x16_4 = rt_shape<32, 16, 4>;
 using rt_16x32_4 = rt_shape<16, 32, 4>;
 using rt_16x128 = rt_shape<16, 128, 16>;
+using rt_128x16 = rt_shape<128, 16, 16>;
 
 template<typename T>
 concept all = std::is_same_v<T, rt_16x16> || 
@@ -44,7 +45,8 @@ concept all = std::is_same_v<T, rt_16x16> ||
               std::is_same_v<T, rt_32x16> || 
               std::is_same_v<T, rt_32x16_4> || 
               std::is_same_v<T, rt_16x32_4> ||
-              std::is_same_v<T, rt_16x128>;
+              std::is_same_v<T, rt_16x128> ||
+              std::is_same_v<T, rt_128x16>;
 
 /**
  * @brief A struct to generate a transposed layout.
@@ -57,6 +59,8 @@ concept all = std::is_same_v<T, rt_16x16> ||
  template<>      struct transpose<rt_32x16> { using type = rt_16x32; };
  template<>      struct transpose<rt_32x16_4> { using type = rt_16x32_4; };
  template<>      struct transpose<rt_16x32_4> { using type = rt_32x16_4; };
+ template<>      struct transpose<rt_16x128> { using type = rt_128x16; };
+ template<>      struct transpose<rt_128x16> { using type = rt_16x128; };
 } // namespace rt_shape
 } // namespace ducks
 } // namespace kittens
