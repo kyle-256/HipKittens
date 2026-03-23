@@ -235,6 +235,119 @@ struct st_16x128 {
     }
 };
 
+struct st_16x128_v2 {
+    static constexpr int rows = 16;
+    static constexpr int cols = 128;
+
+    template<typename _T>
+    static constexpr int bytes_per_thread() {
+        if constexpr (sizeof(_T) == 1) {
+            return 16;
+        } else {
+            static_assert(false, "Unsupported type");
+        }
+    }
+
+    template<typename _T>
+    __device__ __forceinline__ static const uint32_t swizzle (int2 coord) {
+        const int r = coord.x, c = coord.y;
+        using T = _T;
+
+        const uint32_t offset = sizeof(T)*(r*cols + c);
+
+        if constexpr (sizeof(T) == 1) {
+            const int swizzle = ((offset >> 7) & 7) << 4;
+            const int swizzled_offset = offset ^ swizzle;
+            return swizzled_offset;
+        } else {
+            static_assert(false, "Unsupported type");
+        }
+    }
+};
+
+struct st_16x128_v2a {
+    static constexpr int rows = 16;
+    static constexpr int cols = 128;
+
+    template<typename _T>
+    static constexpr int bytes_per_thread() {
+        if constexpr (sizeof(_T) == 1) {
+            return 16;
+        } else {
+            static_assert(false, "Unsupported type");
+        }
+    }
+
+    template<typename _T>
+    __device__ __forceinline__ static const uint32_t swizzle (int2 coord) {
+        const int r = coord.x, c = coord.y;
+        using T = _T;
+        const uint32_t offset = sizeof(T)*(r*cols + c);
+        if constexpr (sizeof(T) == 1) {
+            const int swizzle = ((offset >> 7) & 7) << 4;
+            const int swizzled_offset = offset ^ swizzle;
+            return swizzled_offset;
+        } else {
+            static_assert(false, "Unsupported type");
+        }
+    }
+};
+
+struct st_16x128_v3 {
+    static constexpr int rows = 16;
+    static constexpr int cols = 128;
+
+    template<typename _T>
+    static constexpr int bytes_per_thread() {
+        if constexpr (sizeof(_T) == 1) {
+            return 16;
+        } else {
+            static_assert(false, "Unsupported type");
+        }
+    }
+
+    template<typename _T>
+    __device__ __forceinline__ static const uint32_t swizzle (int2 coord) {
+        const int r = coord.x, c = coord.y;
+        using T = _T;
+
+        const uint32_t offset = sizeof(T)*(r*cols + c);
+
+        if constexpr (sizeof(T) == 1) {
+            const int swizzle = (r & 15) << 3;
+            const int swizzled_offset = offset ^ swizzle;
+            return swizzled_offset;
+        } else {
+            static_assert(false, "Unsupported type");
+        }
+    }
+};
+
+struct st_128x16 {
+    static constexpr int rows = 128;
+    static constexpr int cols = 16;
+
+    template<typename _T>
+    static constexpr int bytes_per_thread() {
+        if constexpr (sizeof(_T) == 1) {
+            return 16;
+        } else {
+            static_assert(false, "Unsupported type");
+        }
+    }
+
+    template<typename _T>
+    __device__ __forceinline__ static const uint32_t swizzle (int2 coord) {
+        using T = _T;
+        const uint32_t offset = sizeof(T)*(coord.x*cols + coord.y);
+        if constexpr (sizeof(T) == 1) {
+            return offset;
+        } else {
+            static_assert(false, "Unsupported type");
+        }
+    }
+};
+
 template<typename T>
 concept all = std::is_same_v<T, st_16x16> || 
               std::is_same_v<T, st_16x16_swizzled> || 
@@ -242,7 +355,11 @@ concept all = std::is_same_v<T, st_16x16> ||
               std::is_same_v<T, st_16x32> || 
               std::is_same_v<T, st_32x16> || 
               std::is_same_v<T, st_8x32>  ||
-              std::is_same_v<T, st_16x128>;
+              std::is_same_v<T, st_16x128> ||
+              std::is_same_v<T, st_16x128_v2> ||
+              std::is_same_v<T, st_16x128_v2a> ||
+              std::is_same_v<T, st_16x128_v3> ||
+              std::is_same_v<T, st_128x16>;
 
 
 } // namespace st_shape

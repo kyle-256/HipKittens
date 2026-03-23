@@ -283,6 +283,22 @@ __device__ __forceinline__ void ds_read_b64_tr_b16(const uint32_t smem_ptr, cons
   }
 }
 
+template<int GPR_START>
+__device__ __forceinline__ void ds_read_b64_tr_b8(const uint32_t smem_ptr, const int i_offset) {
+  constexpr int GPR_END = GPR_START + 1;
+  if constexpr (GPR_START >= 256) {
+    asm volatile("ds_read_b64_tr_b8 a[%0:%1], %2 offset:%3"
+      :
+      : "n"(GPR_START - 256), "n"(GPR_END - 256), "v"(smem_ptr), "i"(i_offset)
+      : "memory");
+  } else {
+    asm volatile("ds_read_b64_tr_b8 v[%0:%1], %2 offset:%3"
+      :
+      : "n"(GPR_START), "n"(GPR_END), "v"(smem_ptr), "i"(i_offset)
+      : "memory");
+  }
+}
+
 template <typename T = u32x4>
 __device__ __forceinline__ T ds_read_b128(const uint32_t smem_ptr, const int i_offset) {
   static_assert(sizeof(T) == sizeof(uint32_t) * 4);
