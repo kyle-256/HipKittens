@@ -24,6 +24,18 @@ using namespace kittens;
 #ifndef RRR_PREFETCH_LGKM
 #define RRR_PREFETCH_LGKM 8
 #endif
+#ifndef RRR_INIT0_VMCNT
+#define RRR_INIT0_VMCNT 4
+#endif
+#ifndef RRR_INIT1_VMCNT
+#define RRR_INIT1_VMCNT 6
+#endif
+#ifndef RRR_STEADY_VMCNT
+#define RRR_STEADY_VMCNT 6
+#endif
+#ifndef RRR_EPILOGUE_VMCNT
+#define RRR_EPILOGUE_VMCNT 4
+#endif
 #ifndef CRR_PREFETCH_LGKM
 #define CRR_PREFETCH_LGKM 3
 #endif
@@ -75,6 +87,9 @@ using namespace kittens;
 #ifndef RRR_B_REG_ROW_LOAD_TRANSPOSE
 #define RRR_B_REG_ROW_LOAD_TRANSPOSE 1
 #endif
+#ifndef RRR_B_REG_ROW_LOAD_ALIAS
+#define RRR_B_REG_ROW_LOAD_ALIAS 0
+#endif
 #ifndef CRR_USE_V3_SWIZZLE
 #define CRR_USE_V3_SWIZZLE 0
 #endif
@@ -95,6 +110,15 @@ using namespace kittens;
 #define CRR_STEADY_MID_BARRIER() __builtin_amdgcn_s_barrier()
 #else
 #define CRR_STEADY_MID_BARRIER() do {} while (0)
+#endif
+
+#ifndef RRR_ENABLE_SCHED_BARRIER
+#define RRR_ENABLE_SCHED_BARRIER 1
+#endif
+#if RRR_ENABLE_SCHED_BARRIER
+#define RRR_SCHED_BARRIER() __builtin_amdgcn_sched_barrier(0)
+#else
+#define RRR_SCHED_BARRIER() do {} while (0)
 #endif
 
 #define CRR_MMA_BEGIN() do { CRR_SCHED_BARRIER(); __builtin_amdgcn_s_setprio(1); } while (0)
@@ -663,10 +687,15 @@ void gemm_kernel(const layout_globals g) {
 #else
         auto load_b = [&](B_col_reg& dst, ST_v2& tile, int wi) {
         #if RRR_B_REG_ROW_LOAD_TRANSPOSE
-            B_row_reg tmp;
             auto sub = subtile_inplace<RBN, BK>(tile, {wi, 0});
+        #if RRR_B_REG_ROW_LOAD_ALIAS
+            auto& dst_row = reinterpret_cast<B_row_reg&>(dst);
+            load(dst_row, sub);
+        #else
+            B_row_reg tmp;
             load(tmp, sub);
             transpose(dst, tmp);
+        #endif
         #else
             load_col_from_v2_st(dst, tile, wi * RBN);
         #endif
@@ -688,7 +717,7 @@ void gemm_kernel(const layout_globals g) {
         G::load(As[tic][1], g.a, a_co(br*2+1, 0), soA);
 
         if (wm == 1) __builtin_amdgcn_s_barrier();
-        asm volatile("s_waitcnt vmcnt(4)");
+        TK_WAIT_VMCNT(RRR_INIT0_VMCNT);
         __builtin_amdgcn_s_barrier();
 
 #if RRR_ROW_SHARED_TRANSPOSE
@@ -703,7 +732,7 @@ void gemm_kernel(const layout_globals g) {
         G::load(Bs[toc][1], g.b, b_co(bc*2+1, 1), soB);
 #endif
 
-        asm volatile("s_waitcnt vmcnt(6)");
+        TK_WAIT_VMCNT(RRR_INIT1_VMCNT);
         __builtin_amdgcn_s_barrier();
 
         TK_PRAGMA_UNROLL(RRR_MAIN_UNROLL)
@@ -714,7 +743,7 @@ void gemm_kernel(const layout_globals g) {
             TK_WAIT_LGKM(RRR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); mma_AB(cA, a, b, cA); __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier(); __builtin_amdgcn_sched_barrier(0);
+            __builtin_amdgcn_s_barrier(); RRR_SCHED_BARRIER();
 
             load_a(a, As[tic][1], wm);
 #if RRR_ROW_SHARED_TRANSPOSE
@@ -732,7 +761,7 @@ void gemm_kernel(const layout_globals g) {
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); mma_AB(cD, a, b, cD); __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier(); __builtin_amdgcn_sched_barrier(0);
+            __builtin_amdgcn_s_barrier(); RRR_SCHED_BARRIER();
 
             load_a(a, As[tic][0], wm);
 #if RRR_ROW_SHARED_TRANSPOSE
@@ -740,7 +769,7 @@ void gemm_kernel(const layout_globals g) {
 #else
             G::load(Bs[tic][1], g.b, b_co(bc*2+1, k+2), soB);
 #endif
-            asm volatile("s_waitcnt vmcnt(6)"); __builtin_amdgcn_s_barrier();
+            TK_WAIT_VMCNT(RRR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); mma_AB(cB, a, b, cB); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
@@ -753,7 +782,7 @@ void gemm_kernel(const layout_globals g) {
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); mma_AB(cA, a, b, cA); __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier(); __builtin_amdgcn_sched_barrier(0);
+            __builtin_amdgcn_s_barrier(); RRR_SCHED_BARRIER();
 
             load_a(a, As[tic][1], wm);
             __builtin_amdgcn_s_barrier();
@@ -768,10 +797,10 @@ void gemm_kernel(const layout_globals g) {
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][0], wm);
-            asm volatile("s_waitcnt vmcnt(4)"); __builtin_amdgcn_s_barrier();
+            TK_WAIT_VMCNT(RRR_EPILOGUE_VMCNT); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); mma_AB(cB, a, b, cB); __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier(); __builtin_amdgcn_sched_barrier(0);
+            __builtin_amdgcn_s_barrier(); RRR_SCHED_BARRIER();
             tic ^= 1; toc ^= 1;
         }
 
@@ -784,7 +813,7 @@ void gemm_kernel(const layout_globals g) {
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
-            __builtin_amdgcn_s_barrier(); __builtin_amdgcn_sched_barrier(0);
+            __builtin_amdgcn_s_barrier(); RRR_SCHED_BARRIER();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); mma_AB(cC, a, b, cC); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
