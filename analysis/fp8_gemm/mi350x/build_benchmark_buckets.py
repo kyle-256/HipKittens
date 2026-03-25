@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import importlib.util
 import subprocess
 import sys
 from pathlib import Path
@@ -46,7 +47,12 @@ RECOMMENDED_BUCKETS = [
     {"name": "crr_m3584_main", "build_shape": (3584, 18944, 32768), "layouts": ("crr",)},
     {"name": "crr_m4096_main", "build_shape": (4096, 14336, 32768), "layouts": ("crr",)},
     {"name": "crr_m4608_main", "build_shape": (4608, 3584, 32768), "layouts": ("crr",)},
-    {"name": "crr_m6144_main", "build_shape": (6144, 4096, 32768), "layouts": ("crr",)},
+    {
+        "name": "crr_m6144_main",
+        "build_shape": (6144, 4096, 32768),
+        "layouts": ("crr",),
+        "macros": {"CRR_STEADY_VMCNT": 6, "CRR_EPILOGUE_VMCNT": 1},
+    },
     {"name": "crr_m8192_main", "build_shape": (8192, 29696, 32768), "layouts": ("crr",)},
     {"name": "crr_m10240_main", "build_shape": (10240, 8192, 32768), "layouts": ("crr",)},
     {"name": "crr_m12288_main", "build_shape": (12288, 4096, 16384), "layouts": ("crr",)},
@@ -79,9 +85,55 @@ def parse_csv_filter(raw: str | None) -> set[str] | None:
     return {item.strip().lower() for item in raw.split(",") if item.strip()}
 
 
-def select_buckets(layouts: set[str] | None, names: set[str] | None) -> list[dict]:
+def load_primus_benchmark_config(workdir: Path):
+    config_path = workdir.parents[3] / "Primus-Turbo" / "benchmark" / "ops" / "config.py"
+    if not config_path.is_file():
+        raise FileNotFoundError(f"Primus benchmark config not found: {config_path}")
+
+    spec = importlib.util.spec_from_file_location("primus_benchmark_config", config_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load benchmark config from {config_path}")
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def exact_gemm_benchmark_buckets(workdir: Path) -> list[dict]:
+    config = load_primus_benchmark_config(workdir)
+    shapes = set()
+    m_blk = 256
+    n_blk = 256
+    k_blk = 128
+
+    def align_up(value: int, block: int) -> int:
+        return ((value + block - 1) // block) * block
+
+    for model_config in config.DenseModelConfigs.values():
+        for batch_size in config.BATCH_SIZE_LIST:
+            for m_dim, n_dim, k_dim in config.gen_gemm_test_cases(model_config):
+                m_total = m_dim * batch_size
+                shapes.update(
+                    {
+                        (align_up(m_total, m_blk), align_up(n_dim, n_blk), align_up(k_dim, k_blk)),
+                        (align_up(m_total, m_blk), align_up(k_dim, n_blk), align_up(n_dim, k_blk)),
+                        (align_up(n_dim, m_blk), align_up(k_dim, n_blk), align_up(m_total, k_blk)),
+                    }
+                )
+
+    return [
+        {
+            "name": f"exact_{m_dim}x{n_dim}x{k_dim}",
+            "build_shape": (m_dim, n_dim, k_dim),
+            "layouts": ("rcr", "rrr", "crr"),
+        }
+        for m_dim, n_dim, k_dim in sorted(shapes)
+    ]
+
+
+def select_buckets(catalog: list[dict], layouts: set[str] | None, names: set[str] | None) -> list[dict]:
     selected = []
-    for bucket in RECOMMENDED_BUCKETS:
+    for bucket in catalog:
         bucket_layouts = {layout.lower() for layout in bucket["layouts"]}
         if layouts is not None and bucket_layouts.isdisjoint(layouts):
             continue
@@ -122,7 +174,7 @@ def build_bucket(bucket: dict, args, ext_suffix: str, workdir: Path, output_dir:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Build recommended HipKittens benchmark bucket modules.")
+    parser = argparse.ArgumentParser(description="Build HipKittens benchmark bucket modules.")
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -145,6 +197,12 @@ def main() -> int:
         help="Comma-separated bucket-name filter.",
     )
     parser.add_argument(
+        "--mode",
+        choices=("recommended", "exact-gemm"),
+        default="recommended",
+        help="Bucket catalog to build.",
+    )
+    parser.add_argument(
         "--skip-existing",
         action="store_true",
         help="Skip buckets whose extension module already exists.",
@@ -163,7 +221,12 @@ def main() -> int:
 
     layouts = parse_csv_filter(args.layouts)
     names = parse_csv_filter(args.names)
-    buckets = select_buckets(layouts, names)
+    if args.mode == "recommended":
+        catalog = RECOMMENDED_BUCKETS
+    else:
+        catalog = exact_gemm_benchmark_buckets(workdir)
+
+    buckets = select_buckets(catalog, layouts, names)
     if not buckets:
         print("No buckets selected.")
         return 0
