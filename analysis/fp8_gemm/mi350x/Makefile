@@ -3,6 +3,7 @@ GPU_TARGET=CDNA4
 
 TARGET ?= tk_fp8_layouts
 SRC ?= kernel_fp8_layouts.cpp
+THUNDERKITTENS_ROOT ?= $(abspath ../../..)
 
 # HIP variables
 ROCM_INSTALL_DIR := $(ROCM_PATH)
@@ -44,4 +45,4 @@ $(TARGET): $(SRC)
 
 # Clean target
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGET) $(TARGET)$(shell python3-config --extension-suffix)

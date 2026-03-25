@@ -12,6 +12,10 @@ using namespace kittens;
 #define N_DIM 8192
 #endif
 
+#ifndef TK_FP8_LAYOUTS_MODULE_NAME
+#define TK_FP8_LAYOUTS_MODULE_NAME tk_fp8_layouts
+#endif
+
 #define TK_STRINGIFY_IMPL(x) #x
 #define TK_STRINGIFY(x) TK_STRINGIFY_IMPL(x)
 #define TK_WAIT_LGKM(x) asm volatile("s_waitcnt lgkmcnt(" TK_STRINGIFY(x) ")")
@@ -1513,7 +1517,7 @@ void dispatch(layout_globals g) {
     gemm_kernel<L><<<g.grid(), g.block(), 0, g.stream>>>(g);
 }
 
-PYBIND11_MODULE(tk_fp8_layouts, m) {
+PYBIND11_MODULE(TK_FP8_LAYOUTS_MODULE_NAME, m) {
     m.doc() = "FP8 GEMM: RCR(mma_ABt), RRR(col_l+mma_AB), CRR(col_l+mma_AtB)";
     py::bind_function<dispatch<Layout::RCR>>(m, "gemm_rcr",
         &layout_globals::a, &layout_globals::b, &layout_globals::c);

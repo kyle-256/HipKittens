@@ -73,6 +73,13 @@ def benchmark_kernel(fn, warmup=num_warmup, iters=num_iters):
         timings.append(start_event.elapsed_time(end_event))
     return timings
 
+def compute_snr_db(ref, actual):
+    ref_f64 = ref.to(torch.float64)
+    actual_f64 = actual.to(torch.float64)
+    signal_power = ref_f64.norm().pow(2)
+    noise_power = (ref_f64 - actual_f64).norm().pow(2)
+    return 10 * torch.log10(signal_power / (noise_power + 1e-12)).item()
+
 def check_correctness(C_test, C_ref, label):
     C_test_f32 = C_test.float()
     C_ref_f32 = C_ref.float()
@@ -97,6 +104,15 @@ def check_correctness(C_test, C_ref, label):
     result_str = 'PASS' if ok else 'FAIL'
     print(f"    Result: {result_str}")
     return ok
+
+def summarize_accuracy(C_test, C_ref, label):
+    ok = check_correctness(C_test, C_ref, label)
+    snr_db = compute_snr_db(C_ref, C_test)
+    print(f"    SNR: {snr_db:.2f} dB")
+    return {
+        "correct": ok,
+        "snr_db": snr_db,
+    }
 
 print(
     f"=== FP8 GEMM Layout Benchmark (native layouts, no preshuffle): "
@@ -129,9 +145,16 @@ if "rcr" in requested_layouts:
 
     if check_results:
         C_ref_rcr = A_rcr[:M, :K].float() @ Bt_rcr[:N, :K].float().T
-        check_correctness(C_rcr[:M, :N], C_ref_rcr, "RCR")
+        accuracy_rcr = summarize_accuracy(C_rcr[:M, :N], C_ref_rcr, "RCR")
+    else:
+        accuracy_rcr = None
     print()
-    results[result_key]["rcr"] = {"avg_ms": avg_rcr, "tflops": tflops_rcr}
+    results[result_key]["rcr"] = {
+        "avg_ms": avg_rcr,
+        "tflops": tflops_rcr,
+    }
+    if accuracy_rcr is not None:
+        results[result_key]["rcr"].update(accuracy_rcr)
 else:
     avg_rcr = None
     tflops_rcr = None
@@ -149,9 +172,16 @@ if "rrr" in requested_layouts:
 
     if check_results:
         C_ref_rrr = A_rrr[:M, :K].float() @ B_rrr[:K, :N].float()
-        check_correctness(C_rrr[:M, :N], C_ref_rrr, "RRR")
+        accuracy_rrr = summarize_accuracy(C_rrr[:M, :N], C_ref_rrr, "RRR")
+    else:
+        accuracy_rrr = None
     print()
-    results[result_key]["rrr"] = {"avg_ms": avg_rrr, "tflops": tflops_rrr}
+    results[result_key]["rrr"] = {
+        "avg_ms": avg_rrr,
+        "tflops": tflops_rrr,
+    }
+    if accuracy_rrr is not None:
+        results[result_key]["rrr"].update(accuracy_rrr)
 else:
     avg_rrr = None
     tflops_rrr = None
@@ -169,9 +199,16 @@ if "crr" in requested_layouts:
 
     if check_results:
         C_ref_crr = At_crr[:K, :M].float().T @ B_crr[:K, :N].float()
-        check_correctness(C_crr[:M, :N], C_ref_crr, "CRR")
+        accuracy_crr = summarize_accuracy(C_crr[:M, :N], C_ref_crr, "CRR")
+    else:
+        accuracy_crr = None
     print()
-    results[result_key]["crr"] = {"avg_ms": avg_crr, "tflops": tflops_crr}
+    results[result_key]["crr"] = {
+        "avg_ms": avg_crr,
+        "tflops": tflops_crr,
+    }
+    if accuracy_crr is not None:
+        results[result_key]["crr"].update(accuracy_crr)
 else:
     avg_crr = None
     tflops_crr = None
