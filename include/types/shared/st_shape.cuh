@@ -359,6 +359,76 @@ struct st_128x16 {
     }
 };
 
+struct st_128x128_cdna4_fp8_a {
+    static constexpr int rows = 128;
+    static constexpr int cols = 128;
+    // The dual-padded CDNA4 layout needs 464B extra space for a 128x128 FP8 tile.
+    static constexpr int subtile_padding = 512;
+
+    template<typename _T>
+    static constexpr int bytes_per_thread() {
+        if constexpr (sizeof(_T) == 1) {
+            return 16;
+        } else {
+            static_assert(false, "Unsupported type");
+        }
+    }
+
+    template<typename _T>
+    __device__ __forceinline__ static const uint32_t swizzle(int2 coord) {
+        const int r = coord.x, c = coord.y;
+        using T = _T;
+
+        if constexpr (sizeof(T) == 1) {
+            const uint32_t base =
+                static_cast<uint32_t>(c) +
+                (static_cast<uint32_t>(r & 0x70) << 3) +
+                (static_cast<uint32_t>(r & 0x0f) << 10);
+            const uint32_t pad =
+                ((base >> 10) << 4) +
+                ((base >> 11) << 5);
+            return base + pad;
+        } else {
+            static_assert(false, "Unsupported type");
+        }
+    }
+};
+
+struct st_128x128_cdna4_fp8_b {
+    static constexpr int rows = 128;
+    static constexpr int cols = 128;
+    // The dual-padded CDNA4 layout needs 464B extra space for a 128x128 FP8 tile.
+    static constexpr int subtile_padding = 512;
+
+    template<typename _T>
+    static constexpr int bytes_per_thread() {
+        if constexpr (sizeof(_T) == 1) {
+            return 16;
+        } else {
+            static_assert(false, "Unsupported type");
+        }
+    }
+
+    template<typename _T>
+    __device__ __forceinline__ static const uint32_t swizzle(int2 coord) {
+        const int r = coord.x, c = coord.y;
+        using T = _T;
+
+        if constexpr (sizeof(T) == 1) {
+            const uint32_t base =
+                static_cast<uint32_t>(r) +
+                (static_cast<uint32_t>(c & 0x70) << 3) +
+                (static_cast<uint32_t>(c & 0x0f) << 10);
+            const uint32_t pad =
+                ((base >> 10) << 4) +
+                ((base >> 11) << 5);
+            return base + pad;
+        } else {
+            static_assert(false, "Unsupported type");
+        }
+    }
+};
+
 template<typename T>
 concept all = std::is_same_v<T, st_16x16> || 
               std::is_same_v<T, st_16x16_swizzled> || 
@@ -370,7 +440,9 @@ concept all = std::is_same_v<T, st_16x16> ||
               std::is_same_v<T, st_16x128_v2> ||
               std::is_same_v<T, st_16x128_v2a> ||
               std::is_same_v<T, st_16x128_v3> ||
-              std::is_same_v<T, st_128x16>;
+              std::is_same_v<T, st_128x16> ||
+              std::is_same_v<T, st_128x128_cdna4_fp8_a> ||
+              std::is_same_v<T, st_128x128_cdna4_fp8_b>;
 
 
 } // namespace st_shape

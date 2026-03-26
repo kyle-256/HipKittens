@@ -66,6 +66,21 @@ RECOMMENDED_BUCKETS = [
     {"name": "crr_m106496_main", "build_shape": (106496, 16384, 32768), "layouts": ("crr",)},
 ]
 
+EXACT_GEMM_SUPPORT_MODULES = [
+    {
+        "name": "support_crr_splitn_4096x8192x4096",
+        "build_shape": (4096, 8192, 4096),
+        "layouts": ("crr",),
+        "module_name": "tk_splitn_crr_4096x8192x4096",
+    },
+    {
+        "name": "support_crr_splitn_4096x8192x8192",
+        "build_shape": (4096, 8192, 8192),
+        "layouts": ("crr",),
+        "module_name": "tk_splitn_crr_4096x8192x8192",
+    },
+]
+
 
 def module_name(prefix: str, build_shape: tuple[int, int, int]) -> str:
     m_dim, n_dim, k_dim = build_shape
@@ -121,7 +136,7 @@ def exact_gemm_benchmark_buckets(workdir: Path) -> list[dict]:
                     }
                 )
 
-    return [
+    buckets = [
         {
             "name": f"exact_{m_dim}x{n_dim}x{k_dim}",
             "build_shape": (m_dim, n_dim, k_dim),
@@ -129,6 +144,8 @@ def exact_gemm_benchmark_buckets(workdir: Path) -> list[dict]:
         }
         for m_dim, n_dim, k_dim in sorted(shapes)
     ]
+    buckets.extend(EXACT_GEMM_SUPPORT_MODULES)
+    return buckets
 
 
 def select_buckets(catalog: list[dict], layouts: set[str] | None, names: set[str] | None) -> list[dict]:
@@ -145,7 +162,7 @@ def select_buckets(catalog: list[dict], layouts: set[str] | None, names: set[str
 
 def build_bucket(bucket: dict, args, ext_suffix: str, workdir: Path, output_dir: Path) -> None:
     build_shape = tuple(bucket["build_shape"])
-    mod_name = module_name(args.module_prefix, build_shape)
+    mod_name = bucket.get("module_name", module_name(args.module_prefix, build_shape))
     target = output_dir / mod_name
     artifact = target.with_name(target.name + ext_suffix)
     if args.skip_existing and artifact.exists():
