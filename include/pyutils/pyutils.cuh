@@ -45,6 +45,27 @@ template<ducks::gl::all GL> struct from_object<GL> {
         throw std::runtime_error("Expected a torch.Tensor");
     }
 };
+template<> struct from_object<const float *> {
+    static const float *make(pybind11::object obj) {
+        if (obj.is_none()) {
+            return nullptr;
+        }
+        if (pybind11::hasattr(obj, "__class__") &&
+            obj.attr("__class__").attr("__name__").cast<std::string>() == "Tensor") {
+            if (!obj.attr("is_contiguous")().cast<bool>()) {
+                throw std::runtime_error("Scale tensor must be contiguous");
+            }
+            if (obj.attr("device").attr("type").cast<std::string>() == "cpu") {
+                throw std::runtime_error("Scale tensor must be on CUDA device");
+            }
+            if (obj.attr("numel")().cast<int64_t>() != 1) {
+                throw std::runtime_error("Scale tensor must contain exactly one element");
+            }
+            return reinterpret_cast<const float *>(obj.attr("data_ptr")().cast<uint64_t>());
+        }
+        throw std::runtime_error("Expected a torch.Tensor or None");
+    }
+};
 
 template<typename T> concept has_dynamic_shared_memory = requires(T t) { { t.dynamic_shared_memory() } -> std::convertible_to<int>; };
 

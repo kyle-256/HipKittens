@@ -226,9 +226,9 @@ constexpr int _NUM_WARPS   = WARPS_M * WARPS_N;
 constexpr int _NUM_THREADS = _NUM_WARPS * WARP_THREADS;
 constexpr int RBM = BLK / WARPS_M / 2;   // 64
 constexpr int RBN = BLK / WARPS_N / 2;   // 32
-constexpr int BPR = M_DIM / BLK;
-constexpr int BPC = N_DIM / BLK;
-constexpr int KI  = K_DIM / BK;
+constexpr int DEFAULT_BPR = M_DIM / BLK;
+constexpr int DEFAULT_BPC = N_DIM / BLK;
+constexpr int DEFAULT_KI  = K_DIM / BK;
 
 using G = kittens::group<_NUM_WARPS>;
 using _gl_fp8  = gl<fp8e4m3, -1, -1, -1, -1>;
@@ -718,9 +718,13 @@ __device__ __forceinline__ void load_transpose(
 struct layout_globals {
     _gl_fp8 a, b;
     _gl_bf16 c;
-    float scale = 1.0f;
-    hipStream_t stream;
-    dim3 grid()  { return dim3(BPR * BPC); }
+    const float *scale_a_ptr = nullptr;
+    const float *scale_b_ptr = nullptr;
+    hipStream_t stream = 0;
+    int m_tiles = DEFAULT_BPR;
+    int n_tiles = DEFAULT_BPC;
+    int k_tiles = DEFAULT_KI;
+    dim3 grid()  { return dim3(m_tiles * n_tiles); }
     dim3 block() { return dim3(_NUM_THREADS); }
     size_t dynamic_shared_memory() { return 0; }
 };
@@ -729,7 +733,7 @@ template<Layout L>
 __global__ __launch_bounds__(_NUM_THREADS, 2)
 void gemm_kernel(const layout_globals g) {
     int bid = blockIdx.x;
-    int br = bid / BPC, bc = bid % BPC;
+    int br = bid / g.n_tiles, bc = bid % g.n_tiles;
     int wm = warpid() / WARPS_N, wn = warpid() % WARPS_N;
 
     rt_fl<RBM, RBN, col_l, rt_16x16_s> cA, cB, cC, cD;
@@ -778,7 +782,7 @@ void gemm_kernel(const layout_globals g) {
         __builtin_amdgcn_s_barrier();
 
         TK_PRAGMA_UNROLL(RCR_MAIN_UNROLL)
-        for (int k = 0; k < KI - 2; k++, tic ^= 1, toc ^= 1) {
+        for (int k = 0; k < g.k_tiles - 2; k++, tic ^= 1, toc ^= 1) {
             load_b(b0, Bs[tic][0], wn);
             load_a(a, As[tic][0], wm);
             G::load(As[toc][1], g.a, a_co(br*2+1, k+1), soA);
@@ -810,7 +814,7 @@ void gemm_kernel(const layout_globals g) {
         {
             load_b(b0, Bs[tic][0], wn);
             load_a(a, As[tic][0], wm);
-            G::load(As[toc][1], g.a, a_co(br*2+1, KI-1), soA);
+            G::load(As[toc][1], g.a, a_co(br*2+1, g.k_tiles-1), soA);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); mma_ABt(cA, a, b0, cA); __builtin_amdgcn_s_setprio(0);
@@ -982,7 +986,7 @@ void gemm_kernel(const layout_globals g) {
         __builtin_amdgcn_s_barrier();
 
         TK_PRAGMA_UNROLL(RRR_MAIN_UNROLL)
-        for (int k = 0; k < KI - 2; k++, tic ^= 1, toc ^= 1) {
+        for (int k = 0; k < g.k_tiles - 2; k++, tic ^= 1, toc ^= 1) {
             load_b(b, Bs[tic][0], wn);
             load_a(a, As[tic][0], wm);
             G::load(As[toc][1], g.a, a_co(br*2+1, k+1), soA);
@@ -1027,7 +1031,7 @@ void gemm_kernel(const layout_globals g) {
         {
             load_b(b, Bs[tic][0], wn);
             load_a(a, As[tic][0], wm);
-            G::load(As[toc][1], g.a, a_co(br*2+1, KI-1), soA);
+            G::load(As[toc][1], g.a, a_co(br*2+1, g.k_tiles-1), soA);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); RRR_MMA(cA, a, mma_b(b), cA); __builtin_amdgcn_s_setprio(0);
@@ -1232,7 +1236,7 @@ void gemm_kernel(const layout_globals g) {
 #endif
 
         TK_PRAGMA_UNROLL(CRR_MAIN_UNROLL)
-        for (int k = 0; k < KI - 2; k++, tic ^= 1, toc ^= 1) {
+        for (int k = 0; k < g.k_tiles - 2; k++, tic ^= 1, toc ^= 1) {
 #if CRR_BATCHED_PAIR_MMA
 #if CRR_A_LDS_REENCODE
             load_b(b0, Bs[tic][0], wn);
@@ -1374,7 +1378,7 @@ void gemm_kernel(const layout_globals g) {
             load_b(b0, Bs[tic][0], wn);
             load_b(b1, Bs[tic][1], wn);
             load_a(a, As[tic][0], wm);
-            global_load_a(As[toc][1], br*2+1, KI-1);
+            global_load_a(As[toc][1], br*2+1, g.k_tiles-1);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             CRR_MMA_BEGIN();
@@ -1418,7 +1422,7 @@ void gemm_kernel(const layout_globals g) {
 #if CRR_A_LDS_REENCODE
             load_b(b0, Bs[tic][0], wn);
             load_a(a, wm);
-            global_load_a(As[toc][1], br*2+1, KI-1);
+            global_load_a(As[toc][1], br*2+1, g.k_tiles-1);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); mma_AB(cA, a, b0, cA); __builtin_amdgcn_s_setprio(0);
@@ -1447,7 +1451,7 @@ void gemm_kernel(const layout_globals g) {
 #else
             load_b(b0, Bs[tic][0], wn);
             load_a(a, As[tic][0], wm);
-            global_load_a(As[toc][1], br*2+1, KI-1);
+            global_load_a(As[toc][1], br*2+1, g.k_tiles-1);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             CRR_MMA_BEGIN();
@@ -1626,13 +1630,17 @@ void gemm_kernel(const layout_globals g) {
         #endif
         }    }
 
-    // Apply the tensorwise descale before the global store so the Python
-    // bridge doesn't need to materialize an fp32 post-scale tensor.
-    if (g.scale != 1.0f) {
-        mul(cA, cA, g.scale);
-        mul(cB, cB, g.scale);
-        mul(cC, cC, g.scale);
-        mul(cD, cD, g.scale);
+    // Apply the tensorwise descale inside the kernel so callers can pass
+    // device-resident scale tensors without a host sync.
+    float scale_value = 1.0f;
+    if (g.scale_a_ptr != nullptr && g.scale_b_ptr != nullptr) {
+        scale_value = (*g.scale_a_ptr) * (*g.scale_b_ptr);
+    }
+    if (scale_value != 1.0f) {
+        mul(cA, cA, scale_value);
+        mul(cB, cB, scale_value);
+        mul(cC, cC, scale_value);
+        mul(cD, cD, scale_value);
     }
 
     // Store Output
@@ -1652,18 +1660,46 @@ void dispatch(layout_globals g) {
     gemm_kernel<L><<<g.grid(), g.block(), 0, g.stream>>>(g);
 }
 
+template<Layout L>
+void dispatch_runtime(layout_globals g) {
+    const int m = g.c.rows();
+    const int n = g.c.cols();
+    int k = 0;
+    if constexpr (L == Layout::RCR) {
+        k = g.a.cols();
+    } else if constexpr (L == Layout::RRR) {
+        k = g.a.cols();
+    } else {
+        k = g.a.rows();
+    }
+
+    if (m % BLK != 0 || n % BLK != 0 || k % BK != 0) {
+        throw std::runtime_error("HipKittens FP8 expects M/N aligned to 256 and K aligned to 128");
+    }
+
+    g.m_tiles = m / BLK;
+    g.n_tiles = n / BLK;
+    g.k_tiles = k / BK;
+    dispatch<L>(g);
+}
+
+#if !defined(TK_FP8_LAYOUTS_EMBEDDED)
 PYBIND11_MODULE(TK_FP8_LAYOUTS_MODULE_NAME, m) {
     m.doc() = "FP8 GEMM: RCR(mma_ABt), RRR(col_l+mma_AB), CRR(col_l+mma_AtB)";
-    py::bind_function<dispatch<Layout::RCR>>(m, "gemm_rcr",
+    py::bind_function<dispatch_runtime<Layout::RCR>>(m, "gemm_rcr",
         &layout_globals::a, &layout_globals::b, &layout_globals::c);
-    py::bind_function<dispatch<Layout::RCR>>(m, "gemm_rcr",
-        &layout_globals::a, &layout_globals::b, &layout_globals::c, &layout_globals::scale);
-    py::bind_function<dispatch<Layout::RRR>>(m, "gemm_rrr",
+    py::bind_function<dispatch_runtime<Layout::RCR>>(m, "gemm_rcr",
+        &layout_globals::a, &layout_globals::b, &layout_globals::c,
+        &layout_globals::scale_a_ptr, &layout_globals::scale_b_ptr);
+    py::bind_function<dispatch_runtime<Layout::RRR>>(m, "gemm_rrr",
         &layout_globals::a, &layout_globals::b, &layout_globals::c);
-    py::bind_function<dispatch<Layout::RRR>>(m, "gemm_rrr",
-        &layout_globals::a, &layout_globals::b, &layout_globals::c, &layout_globals::scale);
-    py::bind_function<dispatch<Layout::CRR>>(m, "gemm_crr",
+    py::bind_function<dispatch_runtime<Layout::RRR>>(m, "gemm_rrr",
+        &layout_globals::a, &layout_globals::b, &layout_globals::c,
+        &layout_globals::scale_a_ptr, &layout_globals::scale_b_ptr);
+    py::bind_function<dispatch_runtime<Layout::CRR>>(m, "gemm_crr",
         &layout_globals::a, &layout_globals::b, &layout_globals::c);
-    py::bind_function<dispatch<Layout::CRR>>(m, "gemm_crr",
-        &layout_globals::a, &layout_globals::b, &layout_globals::c, &layout_globals::scale);
+    py::bind_function<dispatch_runtime<Layout::CRR>>(m, "gemm_crr",
+        &layout_globals::a, &layout_globals::b, &layout_globals::c,
+        &layout_globals::scale_a_ptr, &layout_globals::scale_b_ptr);
 }
+#endif
