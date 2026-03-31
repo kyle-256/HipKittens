@@ -13,9 +13,12 @@
 #include <hip/hip_bf16.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_fp8.h>
+#include <hip/hip_ext_ocp.h>
 #include <hip/hip_runtime.h>
 #include <string>
 #include <bit>
+
+typedef uint32_t __amd_fp8x4_storage_t;
 
 
 namespace kittens {
@@ -63,6 +66,26 @@ using fp8e4m3_2 = __hip_fp8x2_e4m3_fnuz;
  */
 using fp8e4m3_4 = __hip_fp8x4_e4m3_fnuz;
 #endif
+/**
+ * @brief 8-bit exponent-only block-scaling scale type.
+ */
+using fp8e8m0 = __amd_scale_t;
+/**
+ * @brief Packed word of two 8-bit exponent-only block-scaling scale values.
+ */
+using fp8e8m0_2 = __amd_fp8x2_storage_t;
+/**
+ * @brief Packed word of four 8-bit exponent-only block-scaling scale values.
+ */
+using fp8e8m0_4 = __amd_fp8x4_storage_t;
+/**
+ * @brief Packed pair of FP4 E2M1 values used by ROCm OCP helpers.
+ */
+using fp4e2m1_2 = __hipext_ocp_fp4x2_e2m1;
+/**
+ * @brief Packed word of eight FP4 E2M1 values.
+ */
+using fp4e2m1_8 = __amd_fp4x8_storage_t;
 
 namespace ducks {
 /**
@@ -73,9 +96,19 @@ namespace ducks {
 namespace base_types {
 
 template<typename T>
-concept T2 = std::is_same_v<T, float2> || std::is_same_v<T, bf16_2> || std::is_same_v<T, half_2> || std::is_same_v<T, fp8e4m3_4>;
+concept T2 =
+    std::is_same_v<T, float2> ||
+    std::is_same_v<T, bf16_2> ||
+    std::is_same_v<T, half_2> ||
+    std::is_same_v<T, fp8e4m3_4> ||
+    std::is_same_v<T, fp8e8m0_4>;
 template<typename T>
-concept T1 = std::is_same_v<T, float>  || std::is_same_v<T, bf16  > || std::is_same_v<T, half> || std::is_same_v<T, fp8e4m3>;
+concept T1 =
+    std::is_same_v<T, float> ||
+    std::is_same_v<T, bf16> ||
+    std::is_same_v<T, half> ||
+    std::is_same_v<T, fp8e4m3> ||
+    std::is_same_v<T, fp8e8m0>;
 
 } // namespace base_types
 } // namespace ducks
@@ -155,6 +188,18 @@ template<> struct constants<fp8e4m3_2> {
 template<> struct constants<fp8e4m3_4> {
     static __device__ inline constexpr fp8e4m3_4 zero() { return std::bit_cast<fp8e4m3_4>(uint32_t(0x00000000)); }
     static __device__ inline constexpr fp8e4m3_4 one() { return std::bit_cast<fp8e4m3_4>(uint32_t(0x38383838)); }
+};
+template<> struct constants<fp8e8m0> {
+    static __device__ inline constexpr fp8e8m0 zero() { return std::bit_cast<fp8e8m0>(uint8_t(0x00)); } // not actually 0
+    static __device__ inline constexpr fp8e8m0 one() { return std::bit_cast<fp8e8m0>(uint8_t(0x7F)); }
+};
+template<> struct constants<fp8e8m0_2> {
+    static __device__ inline constexpr fp8e8m0_2 zero() { return std::bit_cast<fp8e8m0_2>(uint16_t(0x0000)); } // not actually 0
+    static __device__ inline constexpr fp8e8m0_2 one() { return std::bit_cast<fp8e8m0_2>(uint16_t(0x7F7F)); }
+};
+template<> struct constants<fp8e8m0_4> {
+    static __device__ inline constexpr fp8e8m0_4 zero() { return std::bit_cast<fp8e8m0_4>(uint32_t(0x00000000)); } // not actually 0
+    static __device__ inline constexpr fp8e8m0_4 one() { return std::bit_cast<fp8e8m0_4>(uint32_t(0x7F7F7F7F)); }
 };
 template<> struct constants<int> {
     static __device__ inline constexpr int zero()      { return 0; }
@@ -248,6 +293,16 @@ template<> struct packing<fp8e4m3_4> {
     static __host__ __device__ inline constexpr int num() { return 4; }
     using unpacked_type = fp8e4m3;
     using packed_type = fp8e4m3_4;
+};
+template<> struct packing<fp8e8m0> {
+    static __host__ __device__ inline constexpr int num() { return 1; }
+    using unpacked_type = fp8e8m0;
+    using packed_type = fp8e8m0_4;
+};
+template<> struct packing<fp8e8m0_4> {
+    static __host__ __device__ inline constexpr int num() { return 4; }
+    using unpacked_type = fp8e8m0;
+    using packed_type = fp8e8m0_4;
 };
 
 /**

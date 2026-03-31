@@ -55,12 +55,17 @@
      using dtype = T2; ///< Data type of the matrix elements
      using register_range = _register_range; ///< Register range for this tile.
  
-     static_assert(
-         std::is_same_v<dtype, bf16_2> || std::is_same_v<dtype, float2> || std::is_same_v<dtype, half_2> ||
-         std::is_same_v<dtype, __hip_fp8x4_e4m3> || std::is_same_v<dtype, __hip_fp8x4_e4m3_fnuz> ||
-         std::is_same_v<dtype, __hip_fp8x4_e5m2> || std::is_same_v<dtype, __hip_fp8x4_e5m2_fnuz>,
-         "art_base was provided an unsupported type."
-     );
+    static_assert(
+        std::is_same_v<dtype, bf16_2> ||
+        std::is_same_v<dtype, float2> ||
+        std::is_same_v<dtype, half_2> ||
+        std::is_same_v<dtype, __hip_fp8x4_e4m3> ||
+        std::is_same_v<dtype, __hip_fp8x4_e4m3_fnuz> ||
+        std::is_same_v<dtype, __hip_fp8x4_e5m2> ||
+        std::is_same_v<dtype, __hip_fp8x4_e5m2_fnuz> ||
+        std::is_same_v<dtype, fp8e8m0_4>,
+        "art_base was provided an unsupported type."
+    );
  
      static constexpr int rows                 = shape::rows; ///< Number of rows.
      static constexpr int cols                 = shape::cols; ///< Number of cols.
