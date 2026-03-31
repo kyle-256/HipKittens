@@ -744,6 +744,97 @@ __device__ __forceinline__ void rcr_mma_scaled_from_packs(
     }
 }
 
+template<int K_PHASE, int A_PACK_COUNT, int B_PACK_COUNT, size_t... I>
+__device__ __forceinline__ void rcr_mma_scaled_from_packs_phase_impl(
+    rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
+    const A_row_reg& a,
+    const RCR_B_reg& b,
+    const fp8e8m0_4 (&a_scale_packs)[A_PACK_COUNT],
+    const fp8e8m0_4 (&b_scale_packs)[B_PACK_COUNT],
+    std::index_sequence<I...>)
+{
+    constexpr int acc_w = RBN / 16;
+    static_assert(A_PACK_COUNT >= (RBM / 32), "insufficient A scale packs");
+    static_assert(B_PACK_COUNT >= ((RBN + 31) / 32), "insufficient B scale packs");
+
+    (
+        rcr_mma_scaled_base<
+            (K_PHASE << 1) | ((static_cast<int>(I) / acc_w) & 1),
+            (K_PHASE << 1) | (static_cast<int>(I) % acc_w & 1)
+        >(
+            acc,
+            a,
+            b,
+            static_cast<int>(I) / acc_w,
+            static_cast<int>(I) % acc_w,
+            a_scale_packs[(static_cast<int>(I) / acc_w) / 2],
+            b_scale_packs[(static_cast<int>(I) % acc_w) / 2]
+        ),
+        ...
+    );
+}
+
+template<int A_PACK_COUNT, int B_PACK_COUNT>
+__device__ __forceinline__ void rcr_mma_scaled_from_packs_phase(
+    rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
+    const A_row_reg& a,
+    const RCR_B_reg& b,
+    const fp8e8m0_4 (&a_scale_packs)[A_PACK_COUNT],
+    const fp8e8m0_4 (&b_scale_packs)[B_PACK_COUNT],
+    int k_phase)
+{
+    constexpr int acc_tiles = (RBM / 16) * (RBN / 16);
+    if (k_phase == 0) {
+        rcr_mma_scaled_from_packs_phase_impl<0>(
+            acc,
+            a,
+            b,
+            a_scale_packs,
+            b_scale_packs,
+            std::make_index_sequence<acc_tiles>{}
+        );
+    } else {
+        rcr_mma_scaled_from_packs_phase_impl<1>(
+            acc,
+            a,
+            b,
+            a_scale_packs,
+            b_scale_packs,
+            std::make_index_sequence<acc_tiles>{}
+        );
+    }
+}
+
+template<bool USE_PHASE_DISPATCH, int A_PACK_COUNT, int B_PACK_COUNT>
+__device__ __forceinline__ void rcr_mma_scaled_from_packs_exact(
+    rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
+    const A_row_reg& a,
+    const RCR_B_reg& b,
+    const fp8e8m0_4 (&a_scale_packs)[A_PACK_COUNT],
+    const fp8e8m0_4 (&b_scale_packs)[B_PACK_COUNT],
+    int k_phase)
+{
+    if constexpr (USE_PHASE_DISPATCH) {
+        rcr_mma_scaled_from_packs_phase(
+            acc,
+            a,
+            b,
+            a_scale_packs,
+            b_scale_packs,
+            k_phase
+        );
+    } else {
+        rcr_mma_scaled_from_packs(
+            acc,
+            a,
+            b,
+            a_scale_packs,
+            b_scale_packs,
+            k_phase
+        );
+    }
+}
+
 template<int opsel_a, int opsel_b>
 __device__ __forceinline__ void rrr_mma_scaled_base(
     rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
@@ -1550,6 +1641,49 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
     auto rcr_scale_b_base = [&](int half) {
         return bc * BLK + half * HB + wn * RBN;
     };
+    fp8e8m0_4 a0_scale_packs[RBM / 32];
+    fp8e8m0_4 a1_scale_packs[RBM / 32];
+    fp8e8m0_4 b0_scale_packs[(RBN + 31) / 32];
+    fp8e8m0_4 b1_scale_packs[(RBN + 31) / 32];
+    int cached_k_pair = -1;
+    auto ensure_scale_packs = [&](int k_pair) {
+        if (k_pair == cached_k_pair) {
+            return;
+        }
+        load_scale_packs_16x128<PRESHUFFLED_QUANT>(
+            a0_scale_packs,
+            g.a_scale,
+            rcr_scale_a_base(0),
+            k_pair,
+            lane_nonk,
+            lane_kblk
+        );
+        load_scale_packs_16x128<PRESHUFFLED_QUANT>(
+            a1_scale_packs,
+            g.a_scale,
+            rcr_scale_a_base(1),
+            k_pair,
+            lane_nonk,
+            lane_kblk
+        );
+        load_scale_packs_16x128<PRESHUFFLED_QUANT>(
+            b0_scale_packs,
+            g.b_scale,
+            rcr_scale_b_base(0),
+            k_pair,
+            lane_nonk,
+            lane_kblk
+        );
+        load_scale_packs_16x128<PRESHUFFLED_QUANT>(
+            b1_scale_packs,
+            g.b_scale,
+            rcr_scale_b_base(1),
+            k_pair,
+            lane_nonk,
+            lane_kblk
+        );
+        cached_k_pair = k_pair;
+    };
 
     int tic = 0, toc = 1;
     G::load(Bs[tic][0], g.b, {0, 0, bc * 2, 0}, swizzled_offsets_b);
@@ -1580,40 +1714,13 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
         G::load(As[toc][1], g.a, {0, 0, br * 2 + 1, k + 1}, swizzled_offsets_a);
         const int k_pair = k >> 1;
         const int k_phase = k & 1;
-        fp8e8m0_4 a0_scale_packs[RBM / 32];
-        fp8e8m0_4 a1_scale_packs[RBM / 32];
-        fp8e8m0_4 b0_scale_packs[(RBN + 31) / 32];
-        fp8e8m0_4 b1_scale_packs[(RBN + 31) / 32];
-        load_scale_packs_16x128<PRESHUFFLED_QUANT>(
-            a0_scale_packs,
-            g.a_scale,
-            rcr_scale_a_base(0),
-            k_pair,
-            lane_nonk,
-            lane_kblk
-        );
-        load_scale_packs_16x128<PRESHUFFLED_QUANT>(
-            b0_scale_packs,
-            g.b_scale,
-            rcr_scale_b_base(0),
-            k_pair,
-            lane_nonk,
-            lane_kblk
-        );
-        load_scale_packs_16x128<PRESHUFFLED_QUANT>(
-            b1_scale_packs,
-            g.b_scale,
-            rcr_scale_b_base(1),
-            k_pair,
-            lane_nonk,
-            lane_kblk
-        );
+        ensure_scale_packs(k_pair);
         TK_WAIT_LGKM(8);
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
-        rcr_mma_scaled_from_packs(cA, a, b0, a0_scale_packs, b0_scale_packs, k_phase);
+        rcr_mma_scaled_from_packs_exact<PRESHUFFLED_QUANT>(cA, a, b0, a0_scale_packs, b0_scale_packs, k_phase);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
@@ -1625,26 +1732,18 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
-        rcr_mma_scaled_from_packs(cB, a, b1, a0_scale_packs, b1_scale_packs, k_phase);
+        rcr_mma_scaled_from_packs_exact<PRESHUFFLED_QUANT>(cB, a, b1, a0_scale_packs, b1_scale_packs, k_phase);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
 
         auto as_subtile1 = kittens::subtile_inplace<RBM, BK>(As[tic][1], {wm, 0});
         rcr_exact_load_st_to_rt<RT_A, decltype(as_subtile1)>(a, as_subtile1);
         G::load(As[tic][0], g.a, {0, 0, br * 2, k + 2}, swizzled_offsets_a);
-        load_scale_packs_16x128<PRESHUFFLED_QUANT>(
-            a1_scale_packs,
-            g.a_scale,
-            rcr_scale_a_base(1),
-            k_pair,
-            lane_nonk,
-            lane_kblk
-        );
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
-        rcr_mma_scaled_from_packs(cC, a, b0, a1_scale_packs, b0_scale_packs, k_phase);
+        rcr_mma_scaled_from_packs_exact<PRESHUFFLED_QUANT>(cC, a, b0, a1_scale_packs, b0_scale_packs, k_phase);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
@@ -1654,7 +1753,7 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
         __builtin_amdgcn_s_barrier();
 
         __builtin_amdgcn_s_setprio(1);
-        rcr_mma_scaled_from_packs(cD, a, b1, a1_scale_packs, b1_scale_packs, k_phase);
+        rcr_mma_scaled_from_packs_exact<PRESHUFFLED_QUANT>(cD, a, b1, a1_scale_packs, b1_scale_packs, k_phase);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
     }
@@ -1669,39 +1768,12 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
         G::load(As[toc][1], g.a, {0, 0, br * 2 + 1, k + 1}, swizzled_offsets_a);
         const int k_pair = k >> 1;
         const int k_phase = k & 1;
-        fp8e8m0_4 a0_scale_packs[RBM / 32];
-        fp8e8m0_4 a1_scale_packs[RBM / 32];
-        fp8e8m0_4 b0_scale_packs[(RBN + 31) / 32];
-        fp8e8m0_4 b1_scale_packs[(RBN + 31) / 32];
-        load_scale_packs_16x128<PRESHUFFLED_QUANT>(
-            a0_scale_packs,
-            g.a_scale,
-            rcr_scale_a_base(0),
-            k_pair,
-            lane_nonk,
-            lane_kblk
-        );
-        load_scale_packs_16x128<PRESHUFFLED_QUANT>(
-            b0_scale_packs,
-            g.b_scale,
-            rcr_scale_b_base(0),
-            k_pair,
-            lane_nonk,
-            lane_kblk
-        );
-        load_scale_packs_16x128<PRESHUFFLED_QUANT>(
-            b1_scale_packs,
-            g.b_scale,
-            rcr_scale_b_base(1),
-            k_pair,
-            lane_nonk,
-            lane_kblk
-        );
+        ensure_scale_packs(k_pair);
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
-        rcr_mma_scaled_from_packs(cA, a, b0, a0_scale_packs, b0_scale_packs, k_phase);
+        rcr_mma_scaled_from_packs_exact<PRESHUFFLED_QUANT>(cA, a, b0, a0_scale_packs, b0_scale_packs, k_phase);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
@@ -1712,26 +1784,18 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
-        rcr_mma_scaled_from_packs(cB, a, b1, a0_scale_packs, b1_scale_packs, k_phase);
+        rcr_mma_scaled_from_packs_exact<PRESHUFFLED_QUANT>(cB, a, b1, a0_scale_packs, b1_scale_packs, k_phase);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
 
         auto as_subtile1 = kittens::subtile_inplace<RBM, BK>(As[tic][1], {wm, 0});
         rcr_exact_load_st_to_rt<RT_A, decltype(as_subtile1)>(a, as_subtile1);
-        load_scale_packs_16x128<PRESHUFFLED_QUANT>(
-            a1_scale_packs,
-            g.a_scale,
-            rcr_scale_a_base(1),
-            k_pair,
-            lane_nonk,
-            lane_kblk
-        );
         TK_WAIT_VMCNT(4);
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
-        rcr_mma_scaled_from_packs(cC, a, b0, a1_scale_packs, b0_scale_packs, k_phase);
+        rcr_mma_scaled_from_packs_exact<PRESHUFFLED_QUANT>(cC, a, b0, a1_scale_packs, b0_scale_packs, k_phase);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
 
@@ -1741,7 +1805,7 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
-        rcr_mma_scaled_from_packs(cD, a, b1, a1_scale_packs, b1_scale_packs, k_phase);
+        rcr_mma_scaled_from_packs_exact<PRESHUFFLED_QUANT>(cD, a, b1, a1_scale_packs, b1_scale_packs, k_phase);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
@@ -1755,40 +1819,13 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
         rcr_exact_load_st_to_rt<RT_A, decltype(as_subtile0)>(a, as_subtile0);
         const int k_pair = (k_iters - 1) >> 1;
         const int k_phase = (k_iters - 1) & 1;
-        fp8e8m0_4 a0_scale_packs[RBM / 32];
-        fp8e8m0_4 a1_scale_packs[RBM / 32];
-        fp8e8m0_4 b0_scale_packs[(RBN + 31) / 32];
-        fp8e8m0_4 b1_scale_packs[(RBN + 31) / 32];
-        load_scale_packs_16x128<PRESHUFFLED_QUANT>(
-            a0_scale_packs,
-            g.a_scale,
-            rcr_scale_a_base(0),
-            k_pair,
-            lane_nonk,
-            lane_kblk
-        );
-        load_scale_packs_16x128<PRESHUFFLED_QUANT>(
-            b0_scale_packs,
-            g.b_scale,
-            rcr_scale_b_base(0),
-            k_pair,
-            lane_nonk,
-            lane_kblk
-        );
-        load_scale_packs_16x128<PRESHUFFLED_QUANT>(
-            b1_scale_packs,
-            g.b_scale,
-            rcr_scale_b_base(1),
-            k_pair,
-            lane_nonk,
-            lane_kblk
-        );
+        ensure_scale_packs(k_pair);
         TK_WAIT_VMCNT(0);
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
-        rcr_mma_scaled_from_packs(cA, a, b0, a0_scale_packs, b0_scale_packs, k_phase);
+        rcr_mma_scaled_from_packs_exact<PRESHUFFLED_QUANT>(cA, a, b0, a0_scale_packs, b0_scale_packs, k_phase);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
 
@@ -1799,26 +1836,18 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
-        rcr_mma_scaled_from_packs(cB, a, b1, a0_scale_packs, b1_scale_packs, k_phase);
+        rcr_mma_scaled_from_packs_exact<PRESHUFFLED_QUANT>(cB, a, b1, a0_scale_packs, b1_scale_packs, k_phase);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
 
         auto as_subtile1 = kittens::subtile_inplace<RBM, BK>(As[tic][1], {wm, 0});
         rcr_exact_load_st_to_rt<RT_A, decltype(as_subtile1)>(a, as_subtile1);
-        load_scale_packs_16x128<PRESHUFFLED_QUANT>(
-            a1_scale_packs,
-            g.a_scale,
-            rcr_scale_a_base(1),
-            k_pair,
-            lane_nonk,
-            lane_kblk
-        );
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
-        rcr_mma_scaled_from_packs(cC, a, b0, a1_scale_packs, b0_scale_packs, k_phase);
-        rcr_mma_scaled_from_packs(cD, a, b1, a1_scale_packs, b1_scale_packs, k_phase);
+        rcr_mma_scaled_from_packs_exact<PRESHUFFLED_QUANT>(cC, a, b0, a1_scale_packs, b0_scale_packs, k_phase);
+        rcr_mma_scaled_from_packs_exact<PRESHUFFLED_QUANT>(cD, a, b1, a1_scale_packs, b1_scale_packs, k_phase);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
     }
