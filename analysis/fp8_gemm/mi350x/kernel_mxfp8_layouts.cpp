@@ -318,6 +318,15 @@ constexpr int TAIL_BLOCK_N = 16;
 #ifndef GEMM_BLOCK_SWIZZLE_GROUP_M
 #define GEMM_BLOCK_SWIZZLE_GROUP_M 4
 #endif
+#ifndef MXFP8_RCR_FAST_ENABLE
+#define MXFP8_RCR_FAST_ENABLE 0
+#endif
+#ifndef MXFP8_RCR_OPSEL_A
+#define MXFP8_RCR_OPSEL_A 0
+#endif
+#ifndef MXFP8_RCR_OPSEL_B
+#define MXFP8_RCR_OPSEL_B 0
+#endif
 
 using G = kittens::group<_NUM_WARPS>;
 using _gl_fp8  = gl<fp8e4m3, -1, -1, -1, -1>;
@@ -510,6 +519,45 @@ __device__ __forceinline__ void rcr_mma(
 #endif
 }
 
+__device__ __forceinline__ fp8e8m0_4 load_scale_pack_128(
+    const _gl_scale& src,
+    int row,
+    int k_iter);
+
+__device__ __forceinline__ void rcr_mma_scaled_candidate(
+    rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
+    const A_row_reg& a,
+    const RCR_B_reg& b,
+    const _gl_scale& a_scale,
+    const _gl_scale& b_scale,
+    int a_row_base,
+    int b_row_base,
+    int k_iter)
+{
+    const int lane_row = kittens::laneid() % 16;
+    constexpr int acc_h = RBM / 16;
+    constexpr int acc_w = RBN / 16;
+
+    #pragma unroll
+    for (int n = 0; n < acc_h; ++n) {
+        const fp8e8m0_4 a_scale_pack =
+            load_scale_pack_128(a_scale, a_row_base + n * 16 + lane_row, k_iter);
+        #pragma unroll
+        for (int m = 0; m < acc_w; ++m) {
+            const fp8e8m0_4 b_scale_pack =
+                load_scale_pack_128(b_scale, b_row_base + m * 16 + lane_row, k_iter);
+            mma_ABt_base_scaled<MXFP8_RCR_OPSEL_A, MXFP8_RCR_OPSEL_B>(
+                acc.tiles[n][m],
+                a.tiles[n][0],
+                b.tiles[m][0],
+                acc.tiles[n][m],
+                &a_scale_pack,
+                &b_scale_pack
+            );
+        }
+    }
+}
+
 __device__ __noinline__ void rcr_rhs_mma(
     rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
     const A_row_reg& a,
@@ -566,6 +614,29 @@ __device__ __forceinline__ float load_bf16_scalar(const _gl_bf16& src, int row, 
 
 __device__ __forceinline__ float load_scale_scalar(const _gl_scale& src, int row, int k_block) {
     return __amd_scale_to_float(src[coord<>(row, k_block)]);
+}
+
+__device__ __forceinline__ fp8e8m0_4 load_scale_pack_128(
+    const _gl_scale& src,
+    int row,
+    int k_iter)
+{
+    auto encode_scale = [&](int k_block) -> uint32_t {
+        constexpr int8_t scale_nan = -128;
+        constexpr uint32_t scale_bias = 127;
+        const int8_t scale_exp = src[coord<>(row, k_block)];
+        if (scale_exp == scale_nan) {
+            return 0xffu;
+        }
+        return (static_cast<uint32_t>(static_cast<uint8_t>(scale_exp)) + scale_bias) & 0xffu;
+    };
+
+    const int k_base = k_iter * 4;
+    const uint32_t s0 = encode_scale(k_base + 0);
+    const uint32_t s1 = encode_scale(k_base + 1);
+    const uint32_t s2 = encode_scale(k_base + 2);
+    const uint32_t s3 = encode_scale(k_base + 3);
+    return static_cast<fp8e8m0_4>(s0 | (s1 << 8) | (s2 << 16) | (s3 << 24));
 }
 
 __device__ __forceinline__ void store_bf16_scalar(const _gl_bf16& dst, int row, int col, float value) {
@@ -935,6 +1006,26 @@ void gemm_kernel(const layout_globals g) {
         auto b_tile = [&](int stage, int which) -> ST_rcr& {
             return Bs[stage][which == 0 ? rcr_b0_slot : rcr_b1_slot];
         };
+#if MXFP8_RCR_FAST_ENABLE
+        auto rcr_scale_a_base = [&](int half) {
+            return br * BLK + half * HB + wm * RBM;
+        };
+        auto rcr_scale_b_base = [&](int half) {
+            return bc * BLK + half * HB + wn * RBN;
+        };
+        auto rcr_mma_fast = [&](auto& acc, const A_row_reg& lhs, const RCR_B_reg& rhs, int a_half, int b_half, int k_iter) {
+            rcr_mma_scaled_candidate(
+                acc,
+                lhs,
+                rhs,
+                g.a_scale,
+                g.b_scale,
+                rcr_scale_a_base(a_half),
+                rcr_scale_b_base(b_half),
+                k_iter
+            );
+        };
+#endif
 
         int tic = 0, toc = 1;
         G::load(b_tile(tic, 0), g.b, b_co(bc*2,   0), soB);
@@ -1296,26 +1387,50 @@ void gemm_kernel(const layout_globals g) {
             G::load(As[toc][1], g.a, a_co(br*2+1, k+1), soA);
             TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rcr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1);
+#if MXFP8_RCR_FAST_ENABLE
+            rcr_mma_fast(cA, a, b0, 0, 0, k);
+#else
+            rcr_mma(cA, a, b0);
+#endif
+            __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
 
             load_b(b1, b_tile(tic, 1), wn);
             G::load(b_tile(tic, 0), g.b, b_co(bc*2, k+2), soB);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); RCR_RHS_MMA(cB, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1);
+#if MXFP8_RCR_FAST_ENABLE
+            rcr_mma_fast(cB, a, b1, 0, 1, k);
+#else
+            RCR_RHS_MMA(cB, a, b1);
+#endif
+            __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
             G::load(As[tic][0], g.a, a_co(br*2, k+2), soA);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rcr_mma(cC, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1);
+#if MXFP8_RCR_FAST_ENABLE
+            rcr_mma_fast(cC, a, b0, 1, 0, k);
+#else
+            rcr_mma(cC, a, b0);
+#endif
+            __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
 
             G::load(b_tile(tic, 1), g.b, b_co(bc*2+1, k+2), soB);
             TK_WAIT_VMCNT(RCR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
-            __builtin_amdgcn_s_setprio(1); RCR_RHS_MMA(cD, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1);
+#if MXFP8_RCR_FAST_ENABLE
+            rcr_mma_fast(cD, a, b1, 1, 1, k);
+#else
+            RCR_RHS_MMA(cD, a, b1);
+#endif
+            __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 #endif
         }
@@ -1352,25 +1467,49 @@ void gemm_kernel(const layout_globals g) {
             G::load(As[toc][1], g.a, a_co(br*2+1, g.ki-1), soA);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rcr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1);
+#if MXFP8_RCR_FAST_ENABLE
+            rcr_mma_fast(cA, a, b0, 0, 0, g.ki - 2);
+#else
+            rcr_mma(cA, a, b0);
+#endif
+            __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
 
             load_b(b1, b_tile(tic, 1), wn);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); RCR_RHS_MMA(cB, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1);
+#if MXFP8_RCR_FAST_ENABLE
+            rcr_mma_fast(cB, a, b1, 0, 1, g.ki - 2);
+#else
+            RCR_RHS_MMA(cB, a, b1);
+#endif
+            __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
             TK_WAIT_VMCNT(RCR_EPILOGUE_VMCNT); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rcr_mma(cC, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1);
+#if MXFP8_RCR_FAST_ENABLE
+            rcr_mma_fast(cC, a, b0, 1, 0, g.ki - 2);
+#else
+            rcr_mma(cC, a, b0);
+#endif
+            __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_b(b0, b_tile(toc, 0), wn);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); RCR_RHS_MMA(cD, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1);
+#if MXFP8_RCR_FAST_ENABLE
+            rcr_mma_fast(cD, a, b1, 1, 1, g.ki - 2);
+#else
+            RCR_RHS_MMA(cD, a, b1);
+#endif
+            __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
             tic ^= 1; toc ^= 1;
 #endif
@@ -1400,21 +1539,38 @@ void gemm_kernel(const layout_globals g) {
             load_a(a, As[tic][0], wm);
             asm volatile("s_waitcnt vmcnt(0)"); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rcr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1);
+#if MXFP8_RCR_FAST_ENABLE
+            rcr_mma_fast(cA, a, b0, 0, 0, g.ki - 1);
+#else
+            rcr_mma(cA, a, b0);
+#endif
+            __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_b(b1, b_tile(tic, 1), wn);
             __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); RCR_RHS_MMA(cB, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1);
+#if MXFP8_RCR_FAST_ENABLE
+            rcr_mma_fast(cB, a, b1, 0, 1, g.ki - 1);
+#else
+            RCR_RHS_MMA(cB, a, b1);
+#endif
+            __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1);
+#if MXFP8_RCR_FAST_ENABLE
+            rcr_mma_fast(cC, a, b0, 1, 0, g.ki - 1);
+            rcr_mma_fast(cD, a, b1, 1, 1, g.ki - 1);
+#else
             rcr_mma(cC, a, b0);
             RCR_RHS_MMA(cD, a, b1);
+#endif
             __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 #endif
@@ -2266,14 +2422,36 @@ void dispatch(layout_globals g) {
         g.k = static_cast<int>(g.b.rows());
     }
 
-    // Correctness-first reference path. Fast scaled-MFMA kernels will plug into
-    // the same ABI once the scale packing and opsel wiring are finalized.
+    // Default to the correctness-first tail path. Experimental fast RCR can be
+    // enabled explicitly to validate scale packing against the reference kernel.
     g.fast_m = 0;
     g.fast_n = 0;
     g.fast_k = 0;
     g.bpr = 0;
     g.bpc = 0;
     g.ki = 0;
+
+#if MXFP8_RCR_FAST_ENABLE
+    if constexpr (L == Layout::RCR) {
+        g.fast_m = (g.m / BLK) * BLK;
+        g.fast_n = (g.n / BLK) * BLK;
+        g.fast_k = (g.k / BK) * BK;
+        g.bpr = g.fast_m / BLK;
+        g.bpc = g.fast_n / BLK;
+        g.ki = g.fast_k / BK;
+
+        if (g.bpr > 0 && g.bpc > 0 && g.ki >= 2) {
+            gemm_kernel<L><<<g.grid(), g.block(), 0, g.stream>>>(g);
+        } else {
+            g.fast_m = 0;
+            g.fast_n = 0;
+            g.fast_k = 0;
+            g.bpr = 0;
+            g.bpc = 0;
+            g.ki = 0;
+        }
+    }
+#endif
 
     dim3 tail_block(TAIL_BLOCK_N, TAIL_BLOCK_M);
     dim3 tail_grid(
