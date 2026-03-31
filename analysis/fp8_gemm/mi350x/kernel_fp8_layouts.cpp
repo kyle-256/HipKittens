@@ -798,8 +798,11 @@ __device__ __forceinline__ void gemm_compute_block_coords(
 #endif
 }
 
+#include "rcr_exact_4wave_fastpath.inc"
 #include "rcr_exact_8wave_fastpath.inc"
 #include "rrr_exact_8wave_fastpath.inc"
+#include "crr_exact_4wave_fastpath.inc"
+#include "crr_exact_8wave_double_pump_fastpath.inc"
 #include "crr_exact_8wave_fastpath.inc"
 
 template<Layout L>
@@ -2245,6 +2248,14 @@ void dispatch(layout_globals g) {
         g.k = static_cast<int>(g.b.rows());
     }
 
+#if RCR_USE_EXACT_4WAVE_FASTPATH
+    if constexpr (L == Layout::RCR) {
+        if (rcr_can_use_exact_4wave(g)) {
+            dispatch_rcr_exact_4wave(g);
+            return;
+        }
+    }
+#endif
 #if RCR_USE_EXACT_8WAVE_FASTPATH
     if constexpr (L == Layout::RCR) {
         if (rcr_can_use_exact_8wave(g)) {
@@ -2257,6 +2268,22 @@ void dispatch(layout_globals g) {
     if constexpr (L == Layout::RRR) {
         if (rrr_can_use_exact_8wave(g)) {
             dispatch_rrr_exact_8wave(g);
+            return;
+        }
+    }
+#endif
+#if CRR_USE_EXACT_4WAVE_FASTPATH
+    if constexpr (L == Layout::CRR) {
+        if (crr_can_use_exact_4wave(g)) {
+            dispatch_crr_exact_4wave(g);
+            return;
+        }
+    }
+#endif
+#if CRR_USE_EXACT_8WAVE_DOUBLE_PUMP_FASTPATH
+    if constexpr (L == Layout::CRR) {
+        if (crr_can_use_exact_8wave_double_pump(g)) {
+            dispatch_crr_exact_8wave_double_pump(g);
             return;
         }
     }
