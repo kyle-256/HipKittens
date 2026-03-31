@@ -4,58 +4,109 @@
 - Repository: `HipKittens`
 - Target area: `analysis/fp8_gemm/mi350x`
 - Hardware assumption: `gfx950` / `MI350X`
-- Primary goal: keep strict `no-preshuffle` while pushing `RRR` and `CRR` toward `RCR`
+- Primary goal: keep strict native layouts while pushing `RCR`, `RRR`, and `CRR` to the required performance gates without losing correctness
 
 ## Important File Map
 - `analysis/fp8_gemm/mi350x/kernel_fp8_layouts.cpp`: main FP8 layout kernel and macro controls
-- `analysis/fp8_gemm/mi350x/test_python.py`: benchmark and correctness harness, supports padded build dims
+- `analysis/fp8_gemm/mi350x/test_python.py`: benchmark and correctness harness with mandatory SNR and determinism gates
 - `analysis/fp8_gemm/mi350x/tune_mnk_yaml.py`: strict shape sweep driver for `mnk.yaml`
 - `include/ops/warp/memory/tile/shared_to_register.cuh`: FP8 shared-store support used by CRR experiments
 - `include/types/shared/st_shape.cuh` and `include/types/shared/st.cuh`: shared-tile swizzle and padding definitions
-- `/shared_nfs/kyle/triton_bench/mnk.yaml`: external shape list used for full tuning
+- `primus_turbo/pytorch/kernels/gemm/gemm_fp8_impl.py`: Primus-Turbo integration point for the HipKittens backend
+
+## Acceptance Gate
+- Formal benchmark command:
+
+```bash
+HIP_VISIBLE_DEVICES=7 FP8_LAYOUTS=rcr,rrr,crr FP8_WARMUP=50 FP8_ITERS=200 FP8_CHECK=1 FP8_DETERMINISM_RUNS=5 python3 test_python.py 8192 8192 8192
+```
+
+- Each requested layout must satisfy all of:
+  - numerical correctness pass
+  - `SNR > 48 dB`
+  - deterministic output across repeated runs
+- `test_python.py` exits with code `1` if the success gate is not met.
+- Performance gates still matter:
+  - `RCR > 3100 TFLOPS`
+  - `RRR >= 95% of RCR`
+  - `CRR >= 95% of RCR`
 
 ## Important Constraints
-- Strict `no-preshuffle` means no global-coordinate reinterpretation tricks for `RRR` or `CRR`.
-- Keep `RRR_ROW_SHARED_TRANSPOSE=0` and `CRR_ROW_SHARED_TRANSPOSE=0` unless the user explicitly waives that rule.
-- The bank-conflict fix relies on inter-subtile padding in the `v2` / `v2a` shared layouts; do not remove it casually.
+- Strict native-layout support means no Python `.t().contiguous()` workaround for `RRR` or `CRR`.
+- Primus integration must not rely on host-side padding to paper over unsupported shapes.
+- Keep `RRR_ROW_SHARED_TRANSPOSE=0` and `CRR_ROW_SHARED_TRANSPOSE=0` unless the user explicitly waives strict `no-preshuffle`.
+- The bank-conflict fix relies on shared-layout swizzle and padding behavior; do not remove those pieces casually.
 - Sequential build-and-run loops are safer than concurrent sweeps because the Python extension binary is shared.
 
+## Failure Signatures And First Checks
+- `CRR` loses SNR or becomes non-deterministic after loader edits:
+  - re-check `ds_read_b64_tr_b8`
+  - keep the corrected single-address plus immediate-offset form
+  - keep early-clobber `=&v` on asm outputs
+- Irregular shapes or small `K` fail while large aligned shapes pass:
+  - check the dynamic-shape path
+  - verify runtime `m/n/k`, `bpr/bpc/ki`
+  - verify the `ki >= 2` guard before entering the fast kernel
+  - make sure the scalar tail kernel handles the remainder
+- `RRR` becomes fast but numerically wrong, often in the bottom-right output region:
+  - re-check the dual-`B` schedule
+  - verify `cD` still consumes the correct `A` fragment
+  - watch for register lifetime mistakes around prefetch overlap
+- Throughput improves only after replacing the fast loader with scalar row-load logic:
+  - treat this as a debug aid, not an acceptable final solution
+- `RRR` or `CRR` ratios move a lot while absolute TFLOPS barely changes:
+  - compare both absolute TFLOPS and `% of RCR`
+  - large ratio swings can come from `RCR` moving
+- A candidate looks faster but compile remarks show much higher `VGPRs`, spills, or LDS pressure:
+  - treat the speedup as suspect until the formal run confirms it
+
+## Debug Workflow
+1. Decide whether the current blocker is correctness, determinism, `RCR`, or `RRR/CRR` relative performance.
+2. Make one meaningful kernel change at a time.
+3. Rebuild from `analysis/fp8_gemm/mi350x`.
+4. Run a small smoke test first.
+5. If the smoke test is clean, run the formal `GPU7 / 8192^3 / 50 / 200` benchmark.
+6. After any meaningful throughput movement, inspect:
+   - bank conflict
+   - MFMA utilization
+   - cache utilization
+   - compile resource remarks (`VGPRs`, spills, occupancy, LDS)
+7. Only keep a branch if it survives both the success gate and the performance gate.
+
+## Durable Findings
+- Loader correctness is foundational:
+  - the FP8 col-loader bug was real
+  - the corrected `ds_read_b64_tr_b8` form plus early-clobber fixed `CRR` non-determinism and numerical drift
+- Dynamic shapes must be kernel-native:
+  - runtime `m/n/k`
+  - runtime `bpr/bpc/ki`
+  - fast aligned interior path
+  - scalar tail path for edge tiles and `K` tail
+  - `ki >= 2` before entering the fast path
+- `RRR` fast path:
+  - preserve the dual-`B` schedule
+  - preserve the fixed operand lifetime so `cD` sees the correct `A` fragment
+- `CRR` fast path:
+  - strict deterministic loader path is the safe baseline
+  - `CRR_BATCHED_PAIR_MMA=1` can help, but only with validated wait/prefetch settings and full SNR/determinism checks
+- Bank-conflict evaluation rule:
+  - real progress means a hardware-friendly fast path that also stays correct
+  - do not accept scalar-gather or other obviously throughput-killing paths as final answers
+
 ## Known Dead Ends
-- `CRR_A_LDS_REENCODE=1`: compiled only after adding FP8 shared-store support, but performed very poorly because LDS usage and pressure exploded.
-- `CRR_USE_V3_SWIZZLE=1`: screened and measured worse than baseline.
-- Small mapping or explicit-SRD tuning alone: useful for screening, not enough to close the strict CRR gap.
+- `CRR_A_LDS_REENCODE=1`: compiled after adding FP8 shared-store support, but performance collapsed due to LDS pressure.
+- `CRR_USE_V3_SWIZZLE=1`: measured worse than the strict baseline.
 - Old row-shared transpose paths: fast, but not valid under strict `no-preshuffle`.
-- Full-tile `alias_transposed_register_tile` style reinterpret-cast for `RRR`: increased `VGPRs` to about `250` and pushed `RRR` back to roughly `97%` of `RCR` in quick validation.
+- Full-tile reinterpret-cast aliasing for `RRR`: raised `VGPRs` too much and regressed the useful path.
+- Pure waitcnt or explicit-SRD micro-tweaks without fixing operand semantics first: low-yield and misleading.
 
-## Benchmark Notes
-- Quick screen: `FP8_WARMUP=50`, `FP8_ITERS=10`
-- Stable comparison: `FP8_WARMUP=200`, `FP8_ITERS=50`
-- Final confirmation for target claims: `FP8_WARMUP=400`, `FP8_ITERS=100`
-- Use `FP8_LAYOUTS=RCR,RRR,CRR` when comparing ratios.
-- `test_python.py` accepts `FP8_BUILD_M`, `FP8_BUILD_N`, `FP8_BUILD_K`, `FP8_LAYOUTS`, `FP8_CHECK`, and `FP8_OUTPUT`.
-- For arbitrary shapes, the benchmark harness now pads inputs and checks only valid slices.
-- In recent runs, absolute `RRR` throughput clustered near `3125-3135 TFLOPS`; many ratio swings came from `RCR` moving, not from large `RRR` moves.
-
-## Latest Strict Findings
-- The strict baseline remains `RRR_B_REG_ROW_LOAD_TRANSPOSE=1`, `CRR_A_REG_ROW_LOAD_TRANSPOSE=1`, and `CRR_B_REG_ROW_LOAD_TRANSPOSE=1`.
-- A representative long run with current defaults (`400/100`) landed around `RCR 3223`, `RRR 3125`, `CRR 3145 TFLOPS`, which is roughly `96.9% / 97.6%` of `RCR`.
-- The strongest recent `RRR` screening neighborhood was:
-  - `RRR_MAIN_UNROLL=4`
-  - `RRR_PREFETCH_LGKM=5 or 8`
-  - `RRR_INIT0_VMCNT=4`
-  - `RRR_INIT1_VMCNT=8`
-  - `RRR_STEADY_VMCNT=4 or 5`
-  - `RRR_EPILOGUE_VMCNT=5 or 6`
-- Short screens in that neighborhood occasionally cleared `98%`, but longer runs did not hold consistently enough to call the issue solved.
-- A lighter experimental path now exists: `RRR_B_REG_ROW_LOAD_ALIAS=1` aliases `B_col_reg` to `B_row_reg` only inside `load_b()`. It gave a small absolute `RRR` gain versus `tmp + transpose`, but not enough to close the remaining long-run gap by itself.
-- `RRR_ENABLE_SCHED_BARRIER` was exposed as a macro so the next round can screen barrier placement without editing the loop body again. Default `1` keeps existing behavior.
-
-## Promising Next Branches
-- Reduced-M or `192x256`-style CRR to lower accumulator and A-register pressure.
-- Producer-consumer only after checking that extra warps do not push the kernel over the VGPR cliff.
-- For `RRR`, test `RRR_ENABLE_SCHED_BARRIER=0` together with the alias/no-alias loader path inside the `unroll=4`, `prefetch=5 or 8`, `init1=8`, `steady=4 or 5` neighborhood.
-- Any structural branch should be screened on `8192x8192x8192` before a full `mnk.yaml` sweep.
+## Primus-Turbo Integration Rules
+- Valid native layouts are `RCR`, `RRR`, and `CRR`.
+- Backend selection goes through `PRIMUS_TURBO_GEMM_BACKEND=HIPKITTENS`.
+- Tensorwise scale should stay fused as `a_scale_inv * b_scale_inv`.
+- Do not add Python transpose or host-padding workarounds to make HipKittens appear to support a shape.
+- When reporting progress, compare against `HIPBLASLT` and `TRITON` on the same benchmark shape and settings.
 
 ## Artifact Policy
 - Keep reusable source changes and reusable tuning YAML or scripts.
-- Do not keep `.tmp_*.json`, `gpucore.*`, `pmc_*`, `.bak*`, ad-hoc profiling scripts, or one-off benchmark dumps in commits.
+- Do not keep `.tmp_*.json`, `gpucore.*`, `pmc_*`, `.bak*`, generated ISA files, ad-hoc profiling scripts, or one-off benchmark dumps in commits.
