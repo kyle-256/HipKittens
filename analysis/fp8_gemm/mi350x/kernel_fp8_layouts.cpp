@@ -19,7 +19,19 @@ using namespace kittens;
 #define TK_PRAGMA_UNROLL(x) _Pragma(TK_STRINGIFY(unroll x))
 
 #ifndef RCR_PREFETCH_LGKM
-#define RCR_PREFETCH_LGKM 8
+#define RCR_PREFETCH_LGKM 4
+#endif
+#ifndef RCR_INIT0_VMCNT
+#define RCR_INIT0_VMCNT 4
+#endif
+#ifndef RCR_INIT1_VMCNT
+#define RCR_INIT1_VMCNT 6
+#endif
+#ifndef RCR_STEADY_VMCNT
+#define RCR_STEADY_VMCNT 4
+#endif
+#ifndef RCR_EPILOGUE_VMCNT
+#define RCR_EPILOGUE_VMCNT 4
 #endif
 #ifndef RRR_PREFETCH_LGKM
 #define RRR_PREFETCH_LGKM 8
@@ -31,17 +43,113 @@ using namespace kittens;
 #define RRR_INIT1_VMCNT 6
 #endif
 #ifndef RRR_STEADY_VMCNT
-#define RRR_STEADY_VMCNT 6
+#define RRR_STEADY_VMCNT 4
 #endif
 #ifndef RRR_EPILOGUE_VMCNT
-#define RRR_EPILOGUE_VMCNT 4
+#define RRR_EPILOGUE_VMCNT 2
 #endif
 #ifndef CRR_PREFETCH_LGKM
-#define CRR_PREFETCH_LGKM 1
+#define CRR_PREFETCH_LGKM 3
 #endif
 
 #ifndef RCR_MAIN_UNROLL
 #define RCR_MAIN_UNROLL 2
+#endif
+#ifndef RCR_BATCHED_PAIR_MMA
+#define RCR_BATCHED_PAIR_MMA 0
+#endif
+#ifndef RCR_BATCHED_EPILOGUE_MMA
+#define RCR_BATCHED_EPILOGUE_MMA 0
+#endif
+#ifndef RCR_TWO_TILE_SCHEDULE
+#define RCR_TWO_TILE_SCHEDULE 0
+#endif
+#ifndef RCR_SINGLE_STAGE
+#define RCR_SINGLE_STAGE 0
+#endif
+#ifndef RCR_SINGLE_STAGE_INIT_VMCNT
+#define RCR_SINGLE_STAGE_INIT_VMCNT 0
+#endif
+#ifndef RCR_SINGLE_STAGE_STEADY_VMCNT
+#define RCR_SINGLE_STAGE_STEADY_VMCNT 0
+#endif
+#ifndef RCR_PAIR_B1_TOP_WAIT
+#define RCR_PAIR_B1_TOP_WAIT 0
+#endif
+#ifndef RCR_PAIR_B1_TOP_VMCNT
+#define RCR_PAIR_B1_TOP_VMCNT 0
+#endif
+#ifndef RCR_PAIR_INNER_SCHED_BARRIER
+#define RCR_PAIR_INNER_SCHED_BARRIER 0
+#endif
+#ifndef RCR_PAIR_INNER_WG_BARRIER
+#define RCR_PAIR_INNER_WG_BARRIER 0
+#endif
+#ifndef RCR_PAIR_KEEP_B_REGS
+#define RCR_PAIR_KEEP_B_REGS 0
+#endif
+#ifndef RCR_PAIR_REVERSE_MMA_ORDER
+#define RCR_PAIR_REVERSE_MMA_ORDER 0
+#endif
+#ifndef RCR_PAIR_POST_B1_WAIT
+#define RCR_PAIR_POST_B1_WAIT 0
+#endif
+#ifndef RCR_B_REG_COL_LOAD
+#define RCR_B_REG_COL_LOAD 0
+#endif
+#ifndef RCR_B_REG_MMA_ALIAS
+#define RCR_B_REG_MMA_ALIAS 0
+#endif
+#ifndef RCR_B1_NOINLINE_MMA
+#define RCR_B1_NOINLINE_MMA 0
+#endif
+#ifndef RCR_SWAP_STORE_HALVES
+#define RCR_SWAP_STORE_HALVES 0
+#endif
+#ifndef RCR_PAIR_SWAP_B_LOADS
+#define RCR_PAIR_SWAP_B_LOADS 0
+#endif
+#ifndef RCR_PAIR_SERIALIZE_FUTURE_B_LOADS
+#define RCR_PAIR_SERIALIZE_FUTURE_B_LOADS 0
+#endif
+#ifndef RCR_PAIR_FUTURE_B_GAP_VMCNT
+#define RCR_PAIR_FUTURE_B_GAP_VMCNT 0
+#endif
+#ifndef RCR_PAIR_SWAP_FUTURE_B_ORDER
+#define RCR_PAIR_SWAP_FUTURE_B_ORDER 0
+#endif
+#ifndef RCR_PAIR_LATE_B1_PREFETCH
+#define RCR_PAIR_LATE_B1_PREFETCH 0
+#endif
+#ifndef RCR_PAIR_SPLIT_CD
+#define RCR_PAIR_SPLIT_CD 0
+#endif
+#ifndef RCR_PAIR_DUP_RHS_REGS
+#define RCR_PAIR_DUP_RHS_REGS 0
+#endif
+#ifndef RCR_PAIR_NOINLINE_RHS_COPY
+#define RCR_PAIR_NOINLINE_RHS_COPY 0
+#endif
+#ifndef RCR_PAIR_SPLIT_CB
+#define RCR_PAIR_SPLIT_CB 0
+#endif
+#ifndef RCR_PAIR_CB_RELOAD_LAST_WN
+#define RCR_PAIR_CB_RELOAD_LAST_WN 0
+#endif
+#ifndef RCR_PAIR_CB_NOINLINE_LAST_WN
+#define RCR_PAIR_CB_NOINLINE_LAST_WN 0
+#endif
+#ifndef RCR_PAIR_CB_ALT_LOAD_LAST_WN
+#define RCR_PAIR_CB_ALT_LOAD_LAST_WN 0
+#endif
+#ifndef RCR_SWAP_B_BUFFER_ASSIGN
+#define RCR_SWAP_B_BUFFER_ASSIGN 0
+#endif
+#ifndef RCR_USE_V2_SHARED
+#define RCR_USE_V2_SHARED 1
+#endif
+#ifndef RCR_USE_V2A_SHARED
+#define RCR_USE_V2A_SHARED 0
 #endif
 #ifndef RRR_MAIN_UNROLL
 #define RRR_MAIN_UNROLL 4
@@ -58,10 +166,10 @@ using namespace kittens;
 #define CRR_INIT0_VMCNT 2
 #endif
 #ifndef CRR_INIT1_VMCNT
-#define CRR_INIT1_VMCNT 4
+#define CRR_INIT1_VMCNT 6
 #endif
 #ifndef CRR_STEADY_VMCNT
-#define CRR_STEADY_VMCNT 6
+#define CRR_STEADY_VMCNT 4
 #endif
 #ifndef CRR_EPILOGUE_VMCNT
 #define CRR_EPILOGUE_VMCNT 2
@@ -94,13 +202,13 @@ using namespace kittens;
 #define CRR_USE_V3_SWIZZLE 0
 #endif
 #ifndef CRR_A_REG_ROW_LOAD_TRANSPOSE
-#define CRR_A_REG_ROW_LOAD_TRANSPOSE 0
+#define CRR_A_REG_ROW_LOAD_TRANSPOSE 1
 #endif
 #ifndef CRR_B_REG_ROW_LOAD_TRANSPOSE
 #define CRR_B_REG_ROW_LOAD_TRANSPOSE 0
 #endif
 #ifndef CRR_A_REG_ROW_LOAD_ALIAS
-#define CRR_A_REG_ROW_LOAD_ALIAS 0
+#define CRR_A_REG_ROW_LOAD_ALIAS 1
 #endif
 #ifndef CRR_B_REG_ROW_LOAD_ALIAS
 #define CRR_B_REG_ROW_LOAD_ALIAS 0
@@ -130,6 +238,25 @@ using namespace kittens;
 #define RRR_SCHED_BARRIER() do {} while (0)
 #endif
 
+#ifndef RCR_ENABLE_SCHED_BARRIER
+#define RCR_ENABLE_SCHED_BARRIER 1
+#endif
+#if RCR_ENABLE_SCHED_BARRIER
+#define RCR_SCHED_BARRIER() __builtin_amdgcn_sched_barrier(0)
+#else
+#define RCR_SCHED_BARRIER() do {} while (0)
+#endif
+#if RCR_PAIR_INNER_SCHED_BARRIER
+#define RCR_PAIR_INNER_BARRIER() RCR_SCHED_BARRIER()
+#else
+#define RCR_PAIR_INNER_BARRIER() do {} while (0)
+#endif
+#if RCR_PAIR_INNER_WG_BARRIER
+#define RCR_PAIR_INNER_WG_SYNC() do { __builtin_amdgcn_s_barrier(); asm volatile("s_waitcnt lgkmcnt(0)"); } while (0)
+#else
+#define RCR_PAIR_INNER_WG_SYNC() do {} while (0)
+#endif
+
 #define CRR_MMA_BEGIN() do { CRR_SCHED_BARRIER(); __builtin_amdgcn_s_setprio(1); } while (0)
 #define CRR_MMA_END() do { __builtin_amdgcn_s_setprio(0); CRR_SCHED_BARRIER(); } while (0)
 
@@ -156,15 +283,41 @@ using namespace kittens;
 #error "RRR_B_REG_ROW_LOAD_TRANSPOSE only supports the strict non-row-shared path"
 #endif
 
-constexpr int BLK = 256, BK = 128;
+#ifndef GEMM_BLOCK_SIZE
+#define GEMM_BLOCK_SIZE 256
+#endif
+#ifndef GEMM_K_BLOCK
+#define GEMM_K_BLOCK 128
+#endif
+#ifndef GEMM_WARPS_M
+#define GEMM_WARPS_M 2
+#endif
+#ifndef GEMM_WARPS_N
+#define GEMM_WARPS_N 4
+#endif
+
+constexpr int BLK = GEMM_BLOCK_SIZE, BK = GEMM_K_BLOCK;
 constexpr int HB  = BLK / 2;
-constexpr int WARPS_M = 2, WARPS_N = 4;
+constexpr int WARPS_M = GEMM_WARPS_M, WARPS_N = GEMM_WARPS_N;
 constexpr int _NUM_WARPS   = WARPS_M * WARPS_N;
 constexpr int _NUM_THREADS = _NUM_WARPS * WARP_THREADS;
 constexpr int RBM = BLK / WARPS_M / 2;   // 64
 constexpr int RBN = BLK / WARPS_N / 2;   // 32
 constexpr int TAIL_BLOCK_M = 16;
 constexpr int TAIL_BLOCK_N = 16;
+
+#ifndef GEMM_MIN_BLOCKS_PER_CU
+#define GEMM_MIN_BLOCKS_PER_CU 2
+#endif
+#ifndef GEMM_BLOCK_SWIZZLE
+#define GEMM_BLOCK_SWIZZLE 0
+#endif
+#ifndef GEMM_BLOCK_SWIZZLE_NUM_XCDS
+#define GEMM_BLOCK_SWIZZLE_NUM_XCDS 8
+#endif
+#ifndef GEMM_BLOCK_SWIZZLE_GROUP_M
+#define GEMM_BLOCK_SWIZZLE_GROUP_M 4
+#endif
 
 using G = kittens::group<_NUM_WARPS>;
 using _gl_fp8  = gl<fp8e4m3, -1, -1, -1, -1>;
@@ -183,6 +336,11 @@ using ST_crr_a_reenc = st_fp8e4m3<RBM, BK, st_16x128_s>;
 // Col-layout register tiles (for B in RRR, A/B in CRR)
 using A_col_reg = rt_fp8e4m3<BK, RBM, col_l, rt_128x16_s>;  // 128×64
 using B_col_reg = rt_fp8e4m3<BK, RBN, col_l, rt_128x16_s>;  // 128×32
+#if RCR_B_REG_COL_LOAD && !RCR_B_REG_MMA_ALIAS
+using RCR_B_reg = B_col_reg;
+#else
+using RCR_B_reg = B_row_reg;
+#endif
 
 using ST_v2  = st_fp8e4m3<HB, BK, st_16x128_v2_s>;
 using ST_v2a = st_fp8e4m3<HB, BK, st_16x128_v2a_s>;
@@ -333,6 +491,51 @@ __device__ __forceinline__ void rrr_mma(
     mma_AB(acc, a, b, acc);
 #endif
 }
+
+__device__ __forceinline__ void rcr_mma(
+    rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
+    const A_row_reg& a,
+    const RCR_B_reg& b)
+{
+#if RCR_B_REG_COL_LOAD
+#if RCR_B_REG_MMA_ALIAS
+    const auto& b_col = reinterpret_cast<const B_col_reg&>(b);
+    mma_AB(acc, a, b_col, acc);
+#else
+    mma_AB(acc, a, b, acc);
+#endif
+#else
+    mma_ABt(acc, a, b, acc);
+#endif
+}
+
+__device__ __noinline__ void rcr_rhs_mma(
+    rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
+    const A_row_reg& a,
+    const RCR_B_reg& b)
+{
+    rcr_mma(acc, a, b);
+}
+
+__device__ __noinline__ RCR_B_reg rcr_rhs_copy(const RCR_B_reg b)
+{
+    return b;
+}
+
+#if RCR_B1_NOINLINE_MMA
+#define RCR_RHS_MMA(acc, a, b) rcr_rhs_mma(acc, a, b)
+#else
+#define RCR_RHS_MMA(acc, a, b) rcr_mma(acc, a, b)
+#endif
+
+#if RCR_PAIR_CB_NOINLINE_LAST_WN
+#define RCR_PAIR_CB_MMA(acc, a, b, wn) do { \
+    if ((wn) == WARPS_N - 1) rcr_rhs_mma((acc), (a), (b)); \
+    else rcr_mma((acc), (a), (b)); \
+} while (0)
+#else
+#define RCR_PAIR_CB_MMA(acc, a, b, wn) RCR_RHS_MMA((acc), (a), (b))
+#endif
 
 __device__ __forceinline__ void crr_mma(
     rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
@@ -558,11 +761,53 @@ struct layout_globals {
     size_t dynamic_shared_memory() { return 0; }
 };
 
+__device__ __forceinline__ int gemm_chiplet_swizzle_bid(int bid, int num_wgs) {
+#if GEMM_BLOCK_SWIZZLE
+    if (num_wgs >= GEMM_BLOCK_SWIZZLE_NUM_XCDS &&
+        (num_wgs % GEMM_BLOCK_SWIZZLE_NUM_XCDS) == 0) {
+        return
+            (bid % GEMM_BLOCK_SWIZZLE_NUM_XCDS) *
+                (num_wgs / GEMM_BLOCK_SWIZZLE_NUM_XCDS) +
+            (bid / GEMM_BLOCK_SWIZZLE_NUM_XCDS);
+    }
+#endif
+    return bid;
+}
+
+__device__ __forceinline__ void gemm_compute_block_coords(
+    int bid, int bpr, int bpc, int &br, int &bc) {
+#if GEMM_BLOCK_SWIZZLE
+    bid = gemm_chiplet_swizzle_bid(bid, gridDim.x);
+    const int num_wgid_in_group = GEMM_BLOCK_SWIZZLE_GROUP_M * bpc;
+    const int group_id = bid / num_wgid_in_group;
+    const int first_pid_m = group_id * GEMM_BLOCK_SWIZZLE_GROUP_M;
+    const int group_size_m =
+        (first_pid_m + GEMM_BLOCK_SWIZZLE_GROUP_M <= bpr)
+            ? GEMM_BLOCK_SWIZZLE_GROUP_M
+            : (bpr - first_pid_m);
+    if (group_size_m <= 0) {
+        br = bpr;
+        bc = bpc;
+        return;
+    }
+    br = first_pid_m + ((bid % num_wgid_in_group) % group_size_m);
+    bc = (bid % num_wgid_in_group) / group_size_m;
+#else
+    br = bid / bpc;
+    bc = bid % bpc;
+#endif
+}
+
+#include "rcr_exact_8wave_fastpath.inc"
+#include "rrr_exact_8wave_fastpath.inc"
+#include "crr_exact_8wave_fastpath.inc"
+
 template<Layout L>
-__global__ __launch_bounds__(_NUM_THREADS, 2)
+__global__ __launch_bounds__(_NUM_THREADS, GEMM_MIN_BLOCKS_PER_CU)
 void gemm_kernel(const layout_globals g) {
     int bid = blockIdx.x;
-    int br = bid / g.bpc, bc = bid % g.bpc;
+    int br, bc;
+    gemm_compute_block_coords(bid, g.bpr, g.bpc, br, bc);
     if (br >= g.bpr || bc >= g.bpc || g.ki <= 0) {
         return;
     }
@@ -572,118 +817,574 @@ void gemm_kernel(const layout_globals g) {
     zero(cA); zero(cB); zero(cC); zero(cD);
 
     if constexpr (L == Layout::RCR) {
-        __shared__ ST_row As[2][2];
-        __shared__ ST_row Bs[2][2];
+#if RCR_USE_V2A_SHARED
+        using ST_rcr = ST_v2a;
+#elif RCR_USE_V2_SHARED
+        using ST_rcr = ST_v2;
+#else
+        using ST_rcr = ST_row;
+#endif
+#if RCR_SINGLE_STAGE
+        __shared__ ST_rcr As[2];
+        __shared__ ST_rcr Bs[2];
         A_row_reg a;
         B_row_reg b0, b1;
 
-        constexpr int bpt = ST_row::underlying_subtile_bytes_per_thread;
+        constexpr int bpt = ST_rcr::underlying_subtile_bytes_per_thread;
         constexpr int bpm = bpt * _NUM_THREADS;
-        constexpr int mpt = ST_row::rows * ST_row::cols * sizeof(fp8e4m3) / bpm;
+        constexpr int mpt = ST_rcr::rows * ST_rcr::cols * sizeof(fp8e4m3) / bpm;
         uint32_t soA[mpt], soB[mpt];
-        G::prefill_swizzled_offsets(As[0][0], g.a, soA);
-        G::prefill_swizzled_offsets(Bs[0][0], g.b, soB);
+        G::prefill_swizzled_offsets(As[0], g.a, soA);
+        G::prefill_swizzled_offsets(Bs[0], g.b, soB);
 
-        auto a_co = [&](int s, int k) -> coord<ST_row> { return {0, 0, s, k}; };
-        auto b_co = [&](int s, int k) -> coord<ST_row> { return {0, 0, s, k}; };
+        auto a_co = [&](int s, int k) -> coord<ST_rcr> { return {0, 0, s, k}; };
+        auto b_co = [&](int s, int k) -> coord<ST_rcr> { return {0, 0, s, k}; };
 
-        auto load_a = [&](A_row_reg& dst, ST_row& tile, int wi) {
+        auto load_a = [&](A_row_reg& dst, ST_rcr& tile, int wi) {
             auto sub = subtile_inplace<RBM, BK>(tile, {wi, 0});
             load(dst, sub);
         };
-        auto load_b = [&](B_row_reg& dst, ST_row& tile, int wi) {
+        auto load_b = [&](B_row_reg& dst, ST_rcr& tile, int wi) {
             auto sub = subtile_inplace<RBN, BK>(tile, {wi, 0});
             load(dst, sub);
         };
 
+        G::load(Bs[0], g.b, b_co(bc*2,   0), soB);
+        G::load(As[0], g.a, a_co(br*2,   0), soA);
+        G::load(Bs[1], g.b, b_co(bc*2+1, 0), soB);
+        G::load(As[1], g.a, a_co(br*2+1, 0), soA);
+
+        if (wm == 1) __builtin_amdgcn_s_barrier();
+        TK_WAIT_VMCNT(RCR_SINGLE_STAGE_INIT_VMCNT);
+        __builtin_amdgcn_s_barrier();
+
+        for (int k = 0; k < g.ki; ++k) {
+            load_b(b0, Bs[0], wn);
+            load_a(a, As[0], wm);
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); mma_ABt(cA, a, b0, cA); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
+
+            load_b(b1, Bs[1], wn);
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); mma_ABt(cB, a, b1, cB); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_a(a, As[1], wm);
+            if (k + 1 < g.ki) {
+                G::load(Bs[0], g.b, b_co(bc*2,   k+1), soB);
+                G::load(As[0], g.a, a_co(br*2,   k+1), soA);
+            }
+            __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); mma_ABt(cC, a, b0, cC); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
+
+            if (k + 1 < g.ki) {
+                G::load(Bs[1], g.b, b_co(bc*2+1, k+1), soB);
+                G::load(As[1], g.a, a_co(br*2+1, k+1), soA);
+                TK_WAIT_VMCNT(RCR_SINGLE_STAGE_STEADY_VMCNT);
+            }
+            __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); mma_ABt(cD, a, b1, cD); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+        }
+#else
+        __shared__ ST_rcr As[2][2];
+        __shared__ ST_rcr Bs[2][2];
+        A_row_reg a;
+        RCR_B_reg b0, b1;
+
+        constexpr int bpt = ST_rcr::underlying_subtile_bytes_per_thread;
+        constexpr int bpm = bpt * _NUM_THREADS;
+        constexpr int mpt = ST_rcr::rows * ST_rcr::cols * sizeof(fp8e4m3) / bpm;
+        uint32_t soA[mpt], soB[mpt];
+        G::prefill_swizzled_offsets(As[0][0], g.a, soA);
+        G::prefill_swizzled_offsets(Bs[0][0], g.b, soB);
+
+        auto a_co = [&](int s, int k) -> coord<ST_rcr> { return {0, 0, s, k}; };
+        auto b_co = [&](int s, int k) -> coord<ST_rcr> { return {0, 0, s, k}; };
+
+        auto load_a = [&](A_row_reg& dst, ST_rcr& tile, int wi) {
+            auto sub = subtile_inplace<RBM, BK>(tile, {wi, 0});
+            load(dst, sub);
+        };
+        auto load_b = [&](RCR_B_reg& dst, ST_rcr& tile, int wi) {
+#if RCR_B_REG_COL_LOAD && !RCR_B_REG_MMA_ALIAS
+#if RCR_USE_V2A_SHARED
+            load_col_from_v2a_st(dst, tile, wi * RBN);
+#elif RCR_USE_V2_SHARED
+            load_col_from_v2_st(dst, tile, wi * RBN);
+#else
+            B_row_reg tmp;
+            auto sub = subtile_inplace<RBN, BK>(tile, {wi, 0});
+            load(tmp, sub);
+            transpose(dst, tmp);
+#endif
+#else
+            auto sub = subtile_inplace<RBN, BK>(tile, {wi, 0});
+            load(dst, sub);
+#endif
+        };
+
+        constexpr int rcr_b0_slot = RCR_SWAP_B_BUFFER_ASSIGN ? 1 : 0;
+        constexpr int rcr_b1_slot = RCR_SWAP_B_BUFFER_ASSIGN ? 0 : 1;
+        auto b_tile = [&](int stage, int which) -> ST_rcr& {
+            return Bs[stage][which == 0 ? rcr_b0_slot : rcr_b1_slot];
+        };
+
         int tic = 0, toc = 1;
-        G::load(Bs[tic][0], g.b, b_co(bc*2,   0), soB);
+        G::load(b_tile(tic, 0), g.b, b_co(bc*2,   0), soB);
         G::load(As[tic][0], g.a, a_co(br*2,   0), soA);
-        G::load(Bs[tic][1], g.b, b_co(bc*2+1, 0), soB);
+        G::load(b_tile(tic, 1), g.b, b_co(bc*2+1, 0), soB);
         G::load(As[tic][1], g.a, a_co(br*2+1, 0), soA);
 
         if (wm == 1) __builtin_amdgcn_s_barrier();
-        TK_WAIT_VMCNT(CRR_INIT0_VMCNT);
+        TK_WAIT_VMCNT(RCR_INIT0_VMCNT);
         __builtin_amdgcn_s_barrier();
 
-        G::load(Bs[toc][0], g.b, b_co(bc*2,   1), soB);
+        G::load(b_tile(toc, 0), g.b, b_co(bc*2,   1), soB);
         G::load(As[toc][0], g.a, a_co(br*2,   1), soA);
-        G::load(Bs[toc][1], g.b, b_co(bc*2+1, 1), soB);
+        G::load(b_tile(toc, 1), g.b, b_co(bc*2+1, 1), soB);
 
-        TK_WAIT_VMCNT(CRR_INIT1_VMCNT);
+        TK_WAIT_VMCNT(RCR_INIT1_VMCNT);
         __builtin_amdgcn_s_barrier();
 
+        #if RCR_TWO_TILE_SCHEDULE
+        if ((g.ki & 1) == 0) {
+            auto main_loop_iter = [&](int tile) {
+                load_b(b0, Bs[0][0], wn);
+                load_a(a, As[0][0], wm);
+                G::load(As[1][1], g.a, a_co(br*2+1, tile+1), soA);
+                TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
+
+                asm volatile("s_waitcnt lgkmcnt(0)");
+                __builtin_amdgcn_s_setprio(1); mma_ABt(cA, a, b0, cA); __builtin_amdgcn_s_setprio(0);
+                __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
+
+                load_b(b1, Bs[0][1], wn);
+                G::load(Bs[0][0], g.b, b_co(bc*2, tile+2), soB);
+                __builtin_amdgcn_s_barrier();
+
+                asm volatile("s_waitcnt lgkmcnt(0)");
+                __builtin_amdgcn_s_setprio(1); mma_ABt(cB, a, b1, cB); __builtin_amdgcn_s_setprio(0);
+                __builtin_amdgcn_s_barrier();
+
+                load_a(a, As[0][1], wm);
+                G::load(As[0][0], g.a, a_co(br*2, tile+2), soA);
+                __builtin_amdgcn_s_barrier();
+
+                asm volatile("s_waitcnt lgkmcnt(0)");
+                __builtin_amdgcn_s_setprio(1); mma_ABt(cC, a, b0, cC); __builtin_amdgcn_s_setprio(0);
+                __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
+
+                load_b(b0, Bs[1][0], wn);
+                G::load(Bs[0][1], g.b, b_co(bc*2+1, tile+2), soB);
+                asm volatile("s_waitcnt vmcnt(6)"); __builtin_amdgcn_s_barrier();
+
+                __builtin_amdgcn_s_setprio(1); mma_ABt(cD, a, b1, cD); __builtin_amdgcn_s_setprio(0);
+                __builtin_amdgcn_s_barrier();
+
+                load_a(a, As[1][0], wm);
+                G::load(As[0][1], g.a, a_co(br*2+1, tile+2), soA);
+                TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
+
+                asm volatile("s_waitcnt lgkmcnt(0)");
+                __builtin_amdgcn_s_setprio(1); mma_ABt(cA, a, b0, cA); __builtin_amdgcn_s_setprio(0);
+                __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
+
+                load_b(b1, Bs[1][1], wn);
+                G::load(Bs[1][0], g.b, b_co(bc*2, tile+3), soB);
+                __builtin_amdgcn_s_barrier();
+
+                asm volatile("s_waitcnt lgkmcnt(0)");
+                __builtin_amdgcn_s_setprio(1); mma_ABt(cB, a, b1, cB); __builtin_amdgcn_s_setprio(0);
+                __builtin_amdgcn_s_barrier();
+
+                load_a(a, As[1][1], wm);
+                G::load(As[1][0], g.a, a_co(br*2, tile+3), soA);
+                __builtin_amdgcn_s_barrier();
+
+                asm volatile("s_waitcnt lgkmcnt(0)");
+                __builtin_amdgcn_s_setprio(1); mma_ABt(cC, a, b0, cC); __builtin_amdgcn_s_setprio(0);
+                __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
+
+                G::load(Bs[1][1], g.b, b_co(bc*2+1, tile+3), soB);
+                asm volatile("s_waitcnt vmcnt(6)"); __builtin_amdgcn_s_barrier();
+
+                __builtin_amdgcn_s_setprio(1); mma_ABt(cD, a, b1, cD); __builtin_amdgcn_s_setprio(0);
+                __builtin_amdgcn_s_barrier();
+            };
+
+            TK_PRAGMA_UNROLL(RCR_MAIN_UNROLL)
+            for (int tile = 0; tile < g.ki - 2; tile += 2) {
+                main_loop_iter(tile);
+            }
+
+            {
+                const int tile = g.ki - 2;
+                load_b(b0, Bs[tic][0], wn);
+                load_a(a, As[tic][0], wm);
+                G::load(As[toc][1], g.a, a_co(br*2+1, tile+1), soA);
+                __builtin_amdgcn_s_barrier();
+                asm volatile("s_waitcnt lgkmcnt(0)");
+                __builtin_amdgcn_s_setprio(1); mma_ABt(cA, a, b0, cA); __builtin_amdgcn_s_setprio(0);
+                __builtin_amdgcn_s_barrier();
+
+                load_b(b1, Bs[tic][1], wn);
+                __builtin_amdgcn_s_barrier();
+                asm volatile("s_waitcnt lgkmcnt(0)");
+                __builtin_amdgcn_s_setprio(1); mma_ABt(cB, a, b1, cB); __builtin_amdgcn_s_setprio(0);
+                __builtin_amdgcn_s_barrier();
+
+                load_a(a, As[tic][1], wm);
+                asm volatile("s_waitcnt vmcnt(4)"); __builtin_amdgcn_s_barrier();
+                asm volatile("s_waitcnt lgkmcnt(0)");
+                __builtin_amdgcn_s_setprio(1);
+                mma_ABt(cC, a, b0, cC);
+                mma_ABt(cD, a, b1, cD);
+                __builtin_amdgcn_s_setprio(0);
+                __builtin_amdgcn_s_barrier();
+                tic ^= 1; toc ^= 1;
+            }
+
+            {
+                load_b(b0, Bs[tic][0], wn);
+                load_a(a, As[tic][0], wm);
+                asm volatile("s_waitcnt vmcnt(2)"); __builtin_amdgcn_s_barrier();
+                asm volatile("s_waitcnt lgkmcnt(0)");
+                __builtin_amdgcn_s_setprio(1); mma_ABt(cA, a, b0, cA); __builtin_amdgcn_s_setprio(0);
+                __builtin_amdgcn_s_barrier();
+
+                load_b(b1, Bs[tic][1], wn);
+                asm volatile("s_waitcnt vmcnt(0)"); __builtin_amdgcn_s_barrier();
+                asm volatile("s_waitcnt lgkmcnt(0)");
+                __builtin_amdgcn_s_setprio(1); mma_ABt(cB, a, b1, cB); __builtin_amdgcn_s_setprio(0);
+                __builtin_amdgcn_s_barrier();
+
+                load_a(a, As[tic][1], wm);
+                __builtin_amdgcn_s_barrier();
+                asm volatile("s_waitcnt lgkmcnt(0)");
+                __builtin_amdgcn_s_setprio(1);
+                mma_ABt(cC, a, b0, cC);
+                mma_ABt(cD, a, b1, cD);
+                __builtin_amdgcn_s_setprio(0);
+                __builtin_amdgcn_s_barrier();
+            }
+        } else
+        #endif
+        {
         TK_PRAGMA_UNROLL(RCR_MAIN_UNROLL)
         for (int k = 0; k < g.ki - 2; k++, tic ^= 1, toc ^= 1) {
-            load_b(b0, Bs[tic][0], wn);
+#if RCR_BATCHED_PAIR_MMA
+#if RCR_PAIR_SWAP_B_LOADS
+            load_b(b0, b_tile(tic, 1), wn);
+#else
+            load_b(b0, b_tile(tic, 0), wn);
+#endif
+            load_a(a, As[tic][0], wm);
+#if RCR_PAIR_B1_TOP_WAIT
+            if (k >= 2) {
+                TK_WAIT_VMCNT(RCR_PAIR_B1_TOP_VMCNT); __builtin_amdgcn_s_barrier();
+            }
+#endif
+#if RCR_PAIR_SWAP_B_LOADS
+            load_b(b1, b_tile(tic, 0), wn);
+#else
+            load_b(b1, b_tile(tic, 1), wn);
+#endif
+#if RCR_PAIR_POST_B1_WAIT
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_barrier();
+#endif
+#if RCR_PAIR_KEEP_B_REGS
+            const auto b0_pair = b0;
+            const auto b1_pair = b1;
+#endif
+#if RCR_PAIR_NOINLINE_RHS_COPY
+            const auto b1_pair_cB = rcr_rhs_copy(b1);
+            const auto b1_pair_cD = rcr_rhs_copy(b1);
+#elif RCR_PAIR_DUP_RHS_REGS
+            const auto b1_pair_cB = b1;
+            const auto b1_pair_cD = b1;
+#endif
+            G::load(As[toc][1], g.a, a_co(br*2+1, k+1), soA);
+            TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+#if RCR_PAIR_CB_RELOAD_LAST_WN
+#if !RCR_PAIR_KEEP_B_REGS && !RCR_PAIR_DUP_RHS_REGS && !RCR_PAIR_NOINLINE_RHS_COPY
+            if (wn == WARPS_N - 1) {
+                load_b(b1, b_tile(tic, 1), wn);
+                asm volatile("s_waitcnt lgkmcnt(0)");
+            }
+#endif
+#endif
+            __builtin_amdgcn_s_setprio(1);
+#if RCR_PAIR_SPLIT_CB
+#if RCR_PAIR_KEEP_B_REGS
+            rcr_mma(cA, a, b0_pair);
+#else
+            rcr_mma(cA, a, b0);
+#endif
+            __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
+
+            load_b(b1, b_tile(tic, 1), wn);
+            G::load(b_tile(tic, 0), g.b, b_co(bc*2, k+2), soB);
+            __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1);
+#if RCR_PAIR_KEEP_B_REGS
+            RCR_PAIR_CB_MMA(cB, a, b1_pair, wn);
+#elif RCR_PAIR_NOINLINE_RHS_COPY || RCR_PAIR_DUP_RHS_REGS
+            RCR_PAIR_CB_MMA(cB, a, b1_pair_cB, wn);
+#else
+            RCR_PAIR_CB_MMA(cB, a, b1, wn);
+#endif
+#else
+#if RCR_PAIR_REVERSE_MMA_ORDER
+#if RCR_PAIR_KEEP_B_REGS
+            RCR_PAIR_CB_MMA(cB, a, b1_pair, wn);
+            RCR_PAIR_INNER_BARRIER();
+            RCR_PAIR_INNER_WG_SYNC();
+            rcr_mma(cA, a, b0_pair);
+#else
+#if RCR_PAIR_DUP_RHS_REGS
+            RCR_PAIR_CB_MMA(cB, a, b1_pair_cB, wn);
+            RCR_PAIR_INNER_BARRIER();
+            RCR_PAIR_INNER_WG_SYNC();
+            rcr_mma(cA, a, b0);
+#else
+#if RCR_PAIR_CB_ALT_LOAD_LAST_WN
+            if (wn == WARPS_N - 1) {
+                RCR_B_reg b1_lane;
+                load_b(b1_lane, b_tile(tic, 1), wn);
+                asm volatile("s_waitcnt lgkmcnt(0)");
+                RCR_RHS_MMA(cB, a, b1_lane);
+            } else {
+                RCR_PAIR_CB_MMA(cB, a, b1, wn);
+            }
+#else
+            RCR_PAIR_CB_MMA(cB, a, b1, wn);
+#endif
+            RCR_PAIR_INNER_BARRIER();
+            RCR_PAIR_INNER_WG_SYNC();
+            rcr_mma(cA, a, b0);
+#endif
+#endif
+#else
+#if RCR_PAIR_KEEP_B_REGS
+            rcr_mma(cA, a, b0_pair);
+            RCR_PAIR_INNER_BARRIER();
+            RCR_PAIR_INNER_WG_SYNC();
+            RCR_PAIR_CB_MMA(cB, a, b1_pair, wn);
+#else
+            rcr_mma(cA, a, b0);
+            RCR_PAIR_INNER_BARRIER();
+            RCR_PAIR_INNER_WG_SYNC();
+#if RCR_PAIR_DUP_RHS_REGS
+            RCR_PAIR_CB_MMA(cB, a, b1_pair_cB, wn);
+#else
+#if RCR_PAIR_CB_ALT_LOAD_LAST_WN
+            if (wn == WARPS_N - 1) {
+                RCR_B_reg b1_lane;
+                load_b(b1_lane, b_tile(tic, 1), wn);
+                asm volatile("s_waitcnt lgkmcnt(0)");
+                RCR_RHS_MMA(cB, a, b1_lane);
+            } else {
+                RCR_PAIR_CB_MMA(cB, a, b1, wn);
+            }
+#else
+            RCR_PAIR_CB_MMA(cB, a, b1, wn);
+#endif
+#endif
+#endif
+#endif
+#endif
+            __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
+
+#if RCR_PAIR_SPLIT_CB
+#if !RCR_PAIR_LATE_B1_PREFETCH
+            G::load(b_tile(tic, 1), g.b, b_co(bc*2+1, k+2), soB);
+#endif
+#else
+        #if RCR_PAIR_SWAP_FUTURE_B_ORDER
+        #if !RCR_PAIR_LATE_B1_PREFETCH && !RCR_PAIR_SPLIT_CD
+            G::load(b_tile(tic, 1), g.b, b_co(bc*2+1, k+2), soB);
+        #endif
+        #if RCR_PAIR_SERIALIZE_FUTURE_B_LOADS
+            TK_WAIT_VMCNT(RCR_PAIR_FUTURE_B_GAP_VMCNT); __builtin_amdgcn_s_barrier();
+        #endif
+            G::load(b_tile(tic, 0), g.b, b_co(bc*2, k+2), soB);
+        #else
+            G::load(b_tile(tic, 0), g.b, b_co(bc*2, k+2), soB);
+        #if RCR_PAIR_SERIALIZE_FUTURE_B_LOADS
+            TK_WAIT_VMCNT(RCR_PAIR_FUTURE_B_GAP_VMCNT); __builtin_amdgcn_s_barrier();
+        #endif
+        #if !RCR_PAIR_LATE_B1_PREFETCH && !RCR_PAIR_SPLIT_CD
+            G::load(b_tile(tic, 1), g.b, b_co(bc*2+1, k+2), soB);
+        #endif
+        #endif
+#endif
+            load_a(a, As[tic][1], wm);
+            G::load(As[tic][0], g.a, a_co(br*2, k+2), soA);
+            TK_WAIT_VMCNT(RCR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1);
+#if RCR_PAIR_SPLIT_CD
+#if RCR_PAIR_KEEP_B_REGS
+            rcr_mma(cC, a, b0_pair);
+#else
+            rcr_mma(cC, a, b0);
+#endif
+            __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
+            G::load(b_tile(tic, 1), g.b, b_co(bc*2+1, k+2), soB);
+            TK_WAIT_VMCNT(RCR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1);
+#if RCR_PAIR_KEEP_B_REGS
+            RCR_RHS_MMA(cD, a, b1_pair);
+#else
+            RCR_RHS_MMA(cD, a, b1);
+#endif
+#else
+#if RCR_PAIR_REVERSE_MMA_ORDER
+#if RCR_PAIR_KEEP_B_REGS
+            RCR_RHS_MMA(cD, a, b1_pair);
+            RCR_PAIR_INNER_BARRIER();
+            rcr_mma(cC, a, b0_pair);
+#else
+#if RCR_PAIR_DUP_RHS_REGS
+            RCR_RHS_MMA(cD, a, b1_pair_cD);
+            RCR_PAIR_INNER_BARRIER();
+            rcr_mma(cC, a, b0);
+#else
+            RCR_RHS_MMA(cD, a, b1);
+            RCR_PAIR_INNER_BARRIER();
+            rcr_mma(cC, a, b0);
+#endif
+#endif
+#else
+#if RCR_PAIR_KEEP_B_REGS
+            rcr_mma(cC, a, b0_pair);
+            RCR_PAIR_INNER_BARRIER();
+            RCR_RHS_MMA(cD, a, b1_pair);
+#else
+            rcr_mma(cC, a, b0);
+            RCR_PAIR_INNER_BARRIER();
+#if RCR_PAIR_DUP_RHS_REGS
+            RCR_RHS_MMA(cD, a, b1_pair_cD);
+#else
+            RCR_RHS_MMA(cD, a, b1);
+#endif
+#endif
+#endif
+#endif
+            __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
+#if RCR_PAIR_LATE_B1_PREFETCH
+            G::load(b_tile(tic, 1), g.b, b_co(bc*2+1, k+2), soB);
+#endif
+#else
+            load_b(b0, b_tile(tic, 0), wn);
             load_a(a, As[tic][0], wm);
             G::load(As[toc][1], g.a, a_co(br*2+1, k+1), soA);
             TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); mma_ABt(cA, a, b0, cA); __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier(); __builtin_amdgcn_sched_barrier(0);
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
 
-            load_b(b1, Bs[tic][1], wn);
-            G::load(Bs[tic][0], g.b, b_co(bc*2, k+2), soB);
+            load_b(b1, b_tile(tic, 1), wn);
+            G::load(b_tile(tic, 0), g.b, b_co(bc*2, k+2), soB);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); mma_ABt(cB, a, b1, cB); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); RCR_RHS_MMA(cB, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
             G::load(As[tic][0], g.a, a_co(br*2, k+2), soA);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); mma_ABt(cC, a, b0, cC); __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier(); __builtin_amdgcn_sched_barrier(0);
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cC, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
 
-            G::load(Bs[tic][1], g.b, b_co(bc*2+1, k+2), soB);
-            asm volatile("s_waitcnt vmcnt(6)"); __builtin_amdgcn_s_barrier();
-            __builtin_amdgcn_s_setprio(1); mma_ABt(cD, a, b1, cD); __builtin_amdgcn_s_setprio(0);
+            G::load(b_tile(tic, 1), g.b, b_co(bc*2+1, k+2), soB);
+            TK_WAIT_VMCNT(RCR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
+            __builtin_amdgcn_s_setprio(1); RCR_RHS_MMA(cD, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
+#endif
+        }
         }
 
         {
-            load_b(b0, Bs[tic][0], wn);
+#if RCR_BATCHED_EPILOGUE_MMA
+            load_b(b0, b_tile(tic, 0), wn);
+            load_b(b1, b_tile(tic, 1), wn);
             load_a(a, As[tic][0], wm);
             G::load(As[toc][1], g.a, a_co(br*2+1, g.ki-1), soA);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); mma_ABt(cA, a, b0, cA); __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier(); __builtin_amdgcn_sched_barrier(0);
+            __builtin_amdgcn_s_setprio(1);
+            mma_ABt(cA, a, b0, cA);
+            mma_ABt(cB, a, b1, cB);
+            __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
 
-            load_b(b1, Bs[tic][1], wn);
+            load_a(a, As[tic][1], wm);
+            TK_WAIT_VMCNT(RCR_EPILOGUE_VMCNT); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1);
+            mma_ABt(cC, a, b0, cC);
+            mma_ABt(cD, a, b1, cD);
+            __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_b(b0, b_tile(toc, 0), wn);
+            tic ^= 1; toc ^= 1;
+#else
+            load_b(b0, b_tile(tic, 0), wn);
+            load_a(a, As[tic][0], wm);
+            G::load(As[toc][1], g.a, a_co(br*2+1, g.ki-1), soA);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); mma_ABt(cB, a, b1, cB); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
+
+            load_b(b1, b_tile(tic, 1), wn);
+            __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); RCR_RHS_MMA(cB, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
-            asm volatile("s_waitcnt vmcnt(4)"); __builtin_amdgcn_s_barrier();
+            TK_WAIT_VMCNT(RCR_EPILOGUE_VMCNT); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); mma_ABt(cC, a, b0, cC); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cC, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
-            load_b(b0, Bs[toc][0], wn);
+            load_b(b0, b_tile(toc, 0), wn);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); mma_ABt(cD, a, b1, cD); __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier(); __builtin_amdgcn_sched_barrier(0);
+            __builtin_amdgcn_s_setprio(1); RCR_RHS_MMA(cD, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
             tic ^= 1; toc ^= 1;
+#endif
         }
 
         {
+#if RCR_BATCHED_EPILOGUE_MMA
             load_a(a, As[tic][0], wm);
+            load_b(b1, b_tile(tic, 1), wn);
             asm volatile("s_waitcnt vmcnt(0)"); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); mma_ABt(cA, a, b0, cA); __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-
-            load_b(b1, Bs[tic][1], wn);
-            __builtin_amdgcn_s_barrier(); __builtin_amdgcn_sched_barrier(0);
-            asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); mma_ABt(cB, a, b1, cB); __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
+            __builtin_amdgcn_s_setprio(1);
+            mma_ABt(cA, a, b0, cA);
+            mma_ABt(cB, a, b1, cB);
+            __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
 
             load_a(a, As[tic][1], wm);
             __builtin_amdgcn_s_barrier();
@@ -693,7 +1394,30 @@ void gemm_kernel(const layout_globals g) {
             mma_ABt(cD, a, b1, cD);
             __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
+#else
+            load_a(a, As[tic][0], wm);
+            asm volatile("s_waitcnt vmcnt(0)"); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_b(b1, b_tile(tic, 1), wn);
+            __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); RCR_RHS_MMA(cB, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_a(a, As[tic][1], wm);
+            __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1);
+            rcr_mma(cC, a, b0);
+            RCR_RHS_MMA(cD, a, b1);
+            __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+#endif
         }
+#endif
 
     } else if constexpr (L == Layout::RRR) {
         __shared__ ST_row As[2][2];
@@ -1454,10 +2178,17 @@ void gemm_kernel(const layout_globals g) {
 
     // Store Output
     if (wm == 0) __builtin_amdgcn_s_barrier();
+#if RCR_SWAP_STORE_HALVES
+    store(g.c, cB, {0, 0, br*WARPS_M*2+wm,         bc*WARPS_N*2+wn});
+    store(g.c, cA, {0, 0, br*WARPS_M*2+wm,         bc*WARPS_N*2+WARPS_N+wn});
+    store(g.c, cD, {0, 0, br*WARPS_M*2+WARPS_M+wm, bc*WARPS_N*2+wn});
+    store(g.c, cC, {0, 0, br*WARPS_M*2+WARPS_M+wm, bc*WARPS_N*2+WARPS_N+wn});
+#else
     store(g.c, cA, {0, 0, br*WARPS_M*2+wm,         bc*WARPS_N*2+wn});
     store(g.c, cB, {0, 0, br*WARPS_M*2+wm,         bc*WARPS_N*2+WARPS_N+wn});
     store(g.c, cC, {0, 0, br*WARPS_M*2+WARPS_M+wm, bc*WARPS_N*2+wn});
     store(g.c, cD, {0, 0, br*WARPS_M*2+WARPS_M+wm, bc*WARPS_N*2+WARPS_N+wn});
+#endif
 }
 
 template<Layout L>
@@ -1513,6 +2244,32 @@ void dispatch(layout_globals g) {
     } else {
         g.k = static_cast<int>(g.b.rows());
     }
+
+#if RCR_USE_EXACT_8WAVE_FASTPATH
+    if constexpr (L == Layout::RCR) {
+        if (rcr_can_use_exact_8wave(g)) {
+            dispatch_rcr_exact_8wave(g);
+            return;
+        }
+    }
+#endif
+#if RRR_USE_EXACT_8WAVE_FASTPATH
+    if constexpr (L == Layout::RRR) {
+        if (rrr_can_use_exact_8wave(g)) {
+            dispatch_rrr_exact_8wave(g);
+            return;
+        }
+    }
+#endif
+#if CRR_USE_EXACT_8WAVE_FASTPATH
+    if constexpr (L == Layout::CRR) {
+        if (crr_can_use_exact_8wave(g)) {
+            dispatch_crr_exact_8wave(g);
+            return;
+        }
+    }
+#endif
+
     g.fast_m = (g.m / BLK) * BLK;
     g.fast_n = (g.n / BLK) * BLK;
     g.fast_k = (g.k / BK) * BK;
