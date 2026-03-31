@@ -227,6 +227,34 @@ __device__ static inline void mma_AB_base_scaled(rt_base<float, ducks::rt_layout
     }
 }
 
+template<int n, int m, ducks::rt::col_layout D, ducks::rt::row_layout A, ducks::rt::col_layout B, ducks::rt::col_layout C>
+__device__ static inline void mma_AB_scaled_one(D &d,
+                                                const A &a,
+                                                const B &b,
+                                                const C &c,
+                                                const fp8e8m0_4 *scale_a,
+                                                const fp8e8m0_4 *scale_b) {
+    mma_AB_base_scaled<n, m>(
+        d.tiles[n][m],
+        a.tiles[n][0],
+        b.tiles[0][m],
+        c.tiles[n][m],
+        scale_a,
+        scale_b
+    );
+    #pragma unroll
+    for(int k = 1; k < A::width; k++) {
+        mma_AB_base_scaled<n, m>(
+            d.tiles[n][m],
+            a.tiles[n][k],
+            b.tiles[k][m],
+            d.tiles[n][m],
+            scale_a,
+            scale_b
+        );
+    }
+}
+
 /**
  * @brief Base dot product operation for row layout.
  *
@@ -307,6 +335,34 @@ __device__ static inline void mma_ABt_base_scaled(rt_base<float, ducks::rt_layou
         mfma1616128_scaled<opsel_a, opsel_b>(d.data, a.data, b.data, c.data, scale_a, scale_b);
     } else {
         static_assert(false, "Unsupported scaled shape combination");
+    }
+}
+
+template<int n, int m, ducks::rt::col_layout D, ducks::rt::row_layout A, ducks::rt::row_layout B, ducks::rt::col_layout C>
+__device__ static inline void mma_ABt_scaled_one(D &d,
+                                                 const A &a,
+                                                 const B &b,
+                                                 const C &c,
+                                                 const fp8e8m0_4 *scale_a,
+                                                 const fp8e8m0_4 *scale_b) {
+    mma_ABt_base_scaled<n, m>(
+        d.tiles[n][m],
+        a.tiles[n][0],
+        b.tiles[m][0],
+        c.tiles[n][m],
+        scale_a,
+        scale_b
+    );
+    #pragma unroll
+    for(int k = 1; k < A::width; k++) {
+        mma_ABt_base_scaled<n, m>(
+            d.tiles[n][m],
+            a.tiles[n][k],
+            b.tiles[m][k],
+            d.tiles[n][m],
+            scale_a,
+            scale_b
+        );
     }
 }
 
@@ -391,6 +447,34 @@ __device__ static inline void mma_AtB_base_scaled(rt_base<float, ducks::rt_layou
         mfma1616128_scaled<opsel_a, opsel_b>(d.data, a.data, b.data, c.data, scale_a, scale_b);
     } else {
         static_assert(false, "Unsupported scaled shape combination");
+    }
+}
+
+template<int n, int m, ducks::rt::col_layout D, ducks::rt::col_layout A, ducks::rt::col_layout B, ducks::rt::col_layout C>
+__device__ static inline void mma_AtB_scaled_one(D &d,
+                                                 const A &a,
+                                                 const B &b,
+                                                 const C &c,
+                                                 const fp8e8m0_4 *scale_a,
+                                                 const fp8e8m0_4 *scale_b) {
+    mma_AtB_base_scaled<n, m>(
+        d.tiles[n][m],
+        a.tiles[0][n],
+        b.tiles[0][m],
+        c.tiles[n][m],
+        scale_a,
+        scale_b
+    );
+    #pragma unroll
+    for(int k = 1; k < A::height; k++) {
+        mma_AtB_base_scaled<n, m>(
+            d.tiles[n][m],
+            a.tiles[k][n],
+            b.tiles[k][m],
+            d.tiles[n][m],
+            scale_a,
+            scale_b
+        );
     }
 }
 /**
@@ -492,7 +576,18 @@ __device__ static inline void mma_AB(D &d,
     }
 }
 
-template<int opsel_a, int opsel_b, ducks::rt::col_layout D, ducks::rt::row_layout A, ducks::rt::col_layout B, ducks::rt::col_layout C>
+template<ducks::rt::col_layout D, ducks::rt::row_layout A, ducks::rt::col_layout B, ducks::rt::col_layout C, size_t... I>
+__device__ static inline void mma_AB_scaled_impl(D &d,
+                                                 const A &a,
+                                                 const B &b,
+                                                 const C &c,
+                                                 const fp8e8m0_4 *scale_a,
+                                                 const fp8e8m0_4 *scale_b,
+                                                 std::index_sequence<I...>) {
+    (mma_AB_scaled_one<I / D::width, I % D::width>(d, a, b, c, scale_a, scale_b), ...);
+}
+
+template<ducks::rt::col_layout D, ducks::rt::row_layout A, ducks::rt::col_layout B, ducks::rt::col_layout C>
 __device__ static inline void mma_AB_scaled(D &d,
                                             const A &a,
                                             const B &b,
@@ -507,32 +602,10 @@ __device__ static inline void mma_AB_scaled(D &d,
                   std::is_same_v<typename A::T, fp8e4m3> &&
                   std::is_same_v<typename B::T, fp8e4m3> &&
                   std::is_same_v<typename C::T, float>);
-
-    #pragma unroll
-    for(int n = 0; n < D::height; n++) {
-        #pragma unroll
-        for(int m = 0; m < D::width; m++) {
-            mma_AB_base_scaled<opsel_a, opsel_b>(
-                d.tiles[n][m],
-                a.tiles[n][0],
-                b.tiles[0][m],
-                c.tiles[n][m],
-                scale_a,
-                scale_b
-            );
-            #pragma unroll
-            for(int k = 1; k < A::width; k++) {
-                mma_AB_base_scaled<opsel_a, opsel_b>(
-                    d.tiles[n][m],
-                    a.tiles[n][k],
-                    b.tiles[k][m],
-                    d.tiles[n][m],
-                    scale_a,
-                    scale_b
-                );
-            }
-        }
-    }
+    mma_AB_scaled_impl(
+        d, a, b, c, scale_a, scale_b,
+        std::make_index_sequence<D::height * D::width>{}
+    );
 }
 
 /**
@@ -591,7 +664,18 @@ __device__ static inline void mma_ABt(D &d,
     }
 }
 
-template<int opsel_a, int opsel_b, ducks::rt::col_layout D, ducks::rt::row_layout A, ducks::rt::row_layout B, ducks::rt::col_layout C>
+template<ducks::rt::col_layout D, ducks::rt::row_layout A, ducks::rt::row_layout B, ducks::rt::col_layout C, size_t... I>
+__device__ static inline void mma_ABt_scaled_impl(D &d,
+                                                  const A &a,
+                                                  const B &b,
+                                                  const C &c,
+                                                  const fp8e8m0_4 *scale_a,
+                                                  const fp8e8m0_4 *scale_b,
+                                                  std::index_sequence<I...>) {
+    (mma_ABt_scaled_one<I / D::width, I % D::width>(d, a, b, c, scale_a, scale_b), ...);
+}
+
+template<ducks::rt::col_layout D, ducks::rt::row_layout A, ducks::rt::row_layout B, ducks::rt::col_layout C>
 __device__ static inline void mma_ABt_scaled(D &d,
                                              const A &a,
                                              const B &b,
@@ -606,32 +690,10 @@ __device__ static inline void mma_ABt_scaled(D &d,
                   std::is_same_v<typename A::T, fp8e4m3> &&
                   std::is_same_v<typename B::T, fp8e4m3> &&
                   std::is_same_v<typename C::T, float>);
-
-    #pragma unroll
-    for(int n = 0; n < D::height; n++) {
-        #pragma unroll
-        for(int m = 0; m < D::width; m++) {
-            mma_ABt_base_scaled<opsel_a, opsel_b>(
-                d.tiles[n][m],
-                a.tiles[n][0],
-                b.tiles[m][0],
-                c.tiles[n][m],
-                scale_a,
-                scale_b
-            );
-            #pragma unroll
-            for(int k = 1; k < A::width; k++) {
-                mma_ABt_base_scaled<opsel_a, opsel_b>(
-                    d.tiles[n][m],
-                    a.tiles[n][k],
-                    b.tiles[m][k],
-                    d.tiles[n][m],
-                    scale_a,
-                    scale_b
-                );
-            }
-        }
-    }
+    mma_ABt_scaled_impl(
+        d, a, b, c, scale_a, scale_b,
+        std::make_index_sequence<D::height * D::width>{}
+    );
 }
 /**
  * @brief Matrix multiply-accumulate operation with transposed A.
@@ -688,7 +750,18 @@ __device__ static inline void mma_AtB(D &d,
     }
 }
 
-template<int opsel_a, int opsel_b, ducks::rt::col_layout D, ducks::rt::col_layout A, ducks::rt::col_layout B, ducks::rt::col_layout C>
+template<ducks::rt::col_layout D, ducks::rt::col_layout A, ducks::rt::col_layout B, ducks::rt::col_layout C, size_t... I>
+__device__ static inline void mma_AtB_scaled_impl(D &d,
+                                                  const A &a,
+                                                  const B &b,
+                                                  const C &c,
+                                                  const fp8e8m0_4 *scale_a,
+                                                  const fp8e8m0_4 *scale_b,
+                                                  std::index_sequence<I...>) {
+    (mma_AtB_scaled_one<I / D::width, I % D::width>(d, a, b, c, scale_a, scale_b), ...);
+}
+
+template<ducks::rt::col_layout D, ducks::rt::col_layout A, ducks::rt::col_layout B, ducks::rt::col_layout C>
 __device__ static inline void mma_AtB_scaled(D &d,
                                              const A &a,
                                              const B &b,
@@ -703,32 +776,10 @@ __device__ static inline void mma_AtB_scaled(D &d,
                   std::is_same_v<typename A::T, fp8e4m3> &&
                   std::is_same_v<typename B::T, fp8e4m3> &&
                   std::is_same_v<typename C::T, float>);
-
-    #pragma unroll
-    for(int n = 0; n < D::height; n++) {
-        #pragma unroll
-        for(int m = 0; m < D::width; m++) {
-            mma_AtB_base_scaled<opsel_a, opsel_b>(
-                d.tiles[n][m],
-                a.tiles[0][n],
-                b.tiles[0][m],
-                c.tiles[n][m],
-                scale_a,
-                scale_b
-            );
-            #pragma unroll
-            for(int k = 1; k < A::height; k++) {
-                mma_AtB_base_scaled<opsel_a, opsel_b>(
-                    d.tiles[n][m],
-                    a.tiles[k][n],
-                    b.tiles[k][m],
-                    d.tiles[n][m],
-                    scale_a,
-                    scale_b
-                );
-            }
-        }
-    }
+    mma_AtB_scaled_impl(
+        d, a, b, c, scale_a, scale_b,
+        std::make_index_sequence<D::height * D::width>{}
+    );
 }
 
 /**
