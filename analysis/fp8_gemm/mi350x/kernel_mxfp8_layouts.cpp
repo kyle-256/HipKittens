@@ -524,6 +524,13 @@ __device__ __forceinline__ fp8e8m0_4 load_scale_pair_pack_16x128(
     int lane_nonk,
     int lane_kblk);
 
+__device__ __forceinline__ fp8e8m0_4 load_scale_pair_pack_16x128_preshuffled(
+    const _gl_scale& src,
+    int nonk_group_base,
+    int k_pair,
+    int lane_nonk,
+    int lane_kblk);
+
 template<int opsel_a, int opsel_b>
 __device__ __forceinline__ void rcr_mma_scaled_base(
     rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
@@ -575,6 +582,7 @@ __device__ __forceinline__ void rcr_mma_scaled_dispatch(
     }
 }
 
+template<bool PRESHUFFLED_QUANT>
 __device__ __forceinline__ void rcr_mma_scaled_candidate(
     rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
     const A_row_reg& a,
@@ -597,25 +605,45 @@ __device__ __forceinline__ void rcr_mma_scaled_candidate(
     fp8e8m0_4 a_scale_packs[a_pack_count];
     #pragma unroll
     for (int g = 0; g < a_pack_count; ++g) {
-        a_scale_packs[g] = load_scale_pair_pack_16x128(
-            a_scale,
-            a_tile_base + g * 32,
-            k_pair,
-            lane_nonk,
-            lane_kblk
-        );
+        if constexpr (PRESHUFFLED_QUANT) {
+            a_scale_packs[g] = load_scale_pair_pack_16x128_preshuffled(
+                a_scale,
+                a_tile_base + g * 32,
+                k_pair,
+                lane_nonk,
+                lane_kblk
+            );
+        } else {
+            a_scale_packs[g] = load_scale_pair_pack_16x128(
+                a_scale,
+                a_tile_base + g * 32,
+                k_pair,
+                lane_nonk,
+                lane_kblk
+            );
+        }
     }
 
     fp8e8m0_4 b_scale_packs[b_pack_count];
     #pragma unroll
     for (int g = 0; g < b_pack_count; ++g) {
-        b_scale_packs[g] = load_scale_pair_pack_16x128(
-            b_scale,
-            b_tile_base + g * 32,
-            k_pair,
-            lane_nonk,
-            lane_kblk
-        );
+        if constexpr (PRESHUFFLED_QUANT) {
+            b_scale_packs[g] = load_scale_pair_pack_16x128_preshuffled(
+                b_scale,
+                b_tile_base + g * 32,
+                k_pair,
+                lane_nonk,
+                lane_kblk
+            );
+        } else {
+            b_scale_packs[g] = load_scale_pair_pack_16x128(
+                b_scale,
+                b_tile_base + g * 32,
+                k_pair,
+                lane_nonk,
+                lane_kblk
+            );
+        }
     }
 
     #pragma unroll
@@ -698,6 +726,37 @@ __device__ __forceinline__ float load_scale_scalar(const _gl_scale& src, int row
     return __amd_scale_to_float(src[coord<>(row, k_block)]);
 }
 
+__device__ __forceinline__ float decode_scale_raw_e8m0(uint8_t raw)
+{
+    if (raw == 0xffu) {
+        return NAN;
+    }
+    const uint32_t bits = static_cast<uint32_t>(raw) << 23;
+    return std::bit_cast<float>(bits);
+}
+
+__device__ __forceinline__ int preshuffled_scale_offset(int row, int k_block)
+{
+    const int row_in_group = row & 31;
+    const int half = row_in_group >> 4;
+    const int lane_nonk = row_in_group & 15;
+    const int k_pair = k_block >> 3;
+    const int two = (k_block >> 2) & 1;
+    const int four = k_block & 3;
+    return ((k_pair * 4 + four) * 16 + lane_nonk) * 4 + two * 2 + half;
+}
+
+__device__ __forceinline__ float load_scale_scalar_preshuffled(
+    const _gl_scale& src,
+    int row,
+    int k_block)
+{
+    const int row_group = row >> 5;
+    const int offset = preshuffled_scale_offset(row, k_block);
+    const uint8_t raw = static_cast<uint8_t>(src[coord<>(row_group, offset)]);
+    return decode_scale_raw_e8m0(raw);
+}
+
 __device__ __forceinline__ uint32_t encode_scale_e8m0(
     const _gl_scale& src,
     int row,
@@ -730,6 +789,21 @@ __device__ __forceinline__ fp8e8m0_4 load_scale_pair_pack_16x128(
     const uint32_t s2 = encode_scale_e8m0(src, nonk_group_base + 0 * 16 + lane_nonk, k_base + 4);
     const uint32_t s3 = encode_scale_e8m0(src, nonk_group_base + 1 * 16 + lane_nonk, k_base + 4);
     return static_cast<fp8e8m0_4>(s0 | (s1 << 8) | (s2 << 16) | (s3 << 24));
+}
+
+__device__ __forceinline__ fp8e8m0_4 load_scale_pair_pack_16x128_preshuffled(
+    const _gl_scale& src,
+    int nonk_group_base,
+    int k_pair,
+    int lane_nonk,
+    int lane_kblk)
+{
+    const int row_group = nonk_group_base >> 5;
+    const int offset = ((k_pair * 4 + lane_kblk) * 16 + lane_nonk) * 4;
+    const int index = src.idx(coord<>(row_group, offset));
+    return std::bit_cast<fp8e8m0_4>(
+        *reinterpret_cast<const uint32_t*>(src.raw_ptr + index)
+    );
 }
 
 __device__ __forceinline__ void store_bf16_scalar(const _gl_bf16& dst, int row, int col, float value) {
@@ -921,6 +995,7 @@ struct layout_globals {
     _gl_fp8 a, b;
     _gl_scale a_scale, b_scale;
     _gl_bf16 c;
+    bool preshuffled_quant = false;
     float scale = 1.0f;
     hipStream_t stream = nullptr;
     int m = 0, n = 0, k = 0;
@@ -968,7 +1043,7 @@ __device__ __forceinline__ void gemm_compute_block_coords(
 #endif
 }
 
-template<Layout L>
+template<Layout L, bool PRESHUFFLED_QUANT=false>
 __global__ __launch_bounds__(_NUM_THREADS, GEMM_MIN_BLOCKS_PER_CU)
 void gemm_kernel(const layout_globals g) {
     int bid = blockIdx.x;
@@ -1107,7 +1182,7 @@ void gemm_kernel(const layout_globals g) {
             return bc * BLK + half * HB + wn * RBN;
         };
         auto rcr_mma_fast = [&](auto& acc, const A_row_reg& lhs, const RCR_B_reg& rhs, int a_half, int b_half, int k_iter) {
-            rcr_mma_scaled_candidate(
+            rcr_mma_scaled_candidate<PRESHUFFLED_QUANT>(
                 acc,
                 lhs,
                 rhs,
@@ -2442,7 +2517,7 @@ void gemm_kernel(const layout_globals g) {
 #endif
 }
 
-template<Layout L>
+template<Layout L, bool PRESHUFFLED_QUANT=false>
 __global__ void gemm_tail_kernel(const layout_globals g) {
     const int row = blockIdx.y * blockDim.y + threadIdx.y;
     const int col = blockIdx.x * blockDim.x + threadIdx.x;
@@ -2464,26 +2539,38 @@ __global__ void gemm_tail_kernel(const layout_globals g) {
         if constexpr (L == Layout::RCR) {
             const float a =
                 load_fp8_scalar(g.a, row, kk) *
-                load_scale_scalar(g.a_scale, row, k_block);
+                (PRESHUFFLED_QUANT
+                    ? load_scale_scalar_preshuffled(g.a_scale, row, k_block)
+                    : load_scale_scalar(g.a_scale, row, k_block));
             const float b =
                 load_fp8_scalar(g.b, col, kk) *
-                load_scale_scalar(g.b_scale, col, k_block);
+                (PRESHUFFLED_QUANT
+                    ? load_scale_scalar_preshuffled(g.b_scale, col, k_block)
+                    : load_scale_scalar(g.b_scale, col, k_block));
             acc += a * b;
         } else if constexpr (L == Layout::RRR) {
             const float a =
                 load_fp8_scalar(g.a, row, kk) *
-                load_scale_scalar(g.a_scale, row, k_block);
+                (PRESHUFFLED_QUANT
+                    ? load_scale_scalar_preshuffled(g.a_scale, row, k_block)
+                    : load_scale_scalar(g.a_scale, row, k_block));
             const float b =
                 load_fp8_scalar(g.b, kk, col) *
-                load_scale_scalar(g.b_scale, col, k_block);
+                (PRESHUFFLED_QUANT
+                    ? load_scale_scalar_preshuffled(g.b_scale, col, k_block)
+                    : load_scale_scalar(g.b_scale, col, k_block));
             acc += a * b;
         } else {
             const float a =
                 load_fp8_scalar(g.a, kk, row) *
-                load_scale_scalar(g.a_scale, row, k_block);
+                (PRESHUFFLED_QUANT
+                    ? load_scale_scalar_preshuffled(g.a_scale, row, k_block)
+                    : load_scale_scalar(g.a_scale, row, k_block));
             const float b =
                 load_fp8_scalar(g.b, kk, col) *
-                load_scale_scalar(g.b_scale, col, k_block);
+                (PRESHUFFLED_QUANT
+                    ? load_scale_scalar_preshuffled(g.b_scale, col, k_block)
+                    : load_scale_scalar(g.b_scale, col, k_block));
             acc += a * b;
         }
     }
@@ -2496,14 +2583,20 @@ __global__ void gemm_tail_kernel(const layout_globals g) {
     }
 }
 
-template __global__ void gemm_kernel<Layout::RCR>(const layout_globals);
-template __global__ void gemm_kernel<Layout::RRR>(const layout_globals);
-template __global__ void gemm_kernel<Layout::CRR>(const layout_globals);
-template __global__ void gemm_tail_kernel<Layout::RCR>(const layout_globals);
-template __global__ void gemm_tail_kernel<Layout::RRR>(const layout_globals);
-template __global__ void gemm_tail_kernel<Layout::CRR>(const layout_globals);
+template __global__ void gemm_kernel<Layout::RCR, false>(const layout_globals);
+template __global__ void gemm_kernel<Layout::RCR, true>(const layout_globals);
+template __global__ void gemm_kernel<Layout::RRR, false>(const layout_globals);
+template __global__ void gemm_kernel<Layout::RRR, true>(const layout_globals);
+template __global__ void gemm_kernel<Layout::CRR, false>(const layout_globals);
+template __global__ void gemm_kernel<Layout::CRR, true>(const layout_globals);
+template __global__ void gemm_tail_kernel<Layout::RCR, false>(const layout_globals);
+template __global__ void gemm_tail_kernel<Layout::RCR, true>(const layout_globals);
+template __global__ void gemm_tail_kernel<Layout::RRR, false>(const layout_globals);
+template __global__ void gemm_tail_kernel<Layout::RRR, true>(const layout_globals);
+template __global__ void gemm_tail_kernel<Layout::CRR, false>(const layout_globals);
+template __global__ void gemm_tail_kernel<Layout::CRR, true>(const layout_globals);
 
-template<Layout L>
+template<Layout L, bool PRESHUFFLED_QUANT=false>
 void dispatch(layout_globals g) {
     g.m = static_cast<int>(g.c.rows());
     g.n = static_cast<int>(g.c.cols());
@@ -2534,7 +2627,7 @@ void dispatch(layout_globals g) {
         g.ki = g.fast_k / BK;
 
         if (g.bpr > 0 && g.bpc > 0 && g.ki >= 2) {
-            gemm_kernel<L><<<g.grid(), g.block(), 0, g.stream>>>(g);
+            gemm_kernel<L, PRESHUFFLED_QUANT><<<g.grid(), g.block(), 0, g.stream>>>(g);
         } else {
             g.fast_m = 0;
             g.fast_n = 0;
@@ -2552,8 +2645,13 @@ void dispatch(layout_globals g) {
             kittens::ceil_div(g.n, TAIL_BLOCK_N),
             kittens::ceil_div(g.m, TAIL_BLOCK_M)
         );
-        gemm_tail_kernel<L><<<tail_grid, tail_block, 0, g.stream>>>(g);
+        gemm_tail_kernel<L, PRESHUFFLED_QUANT><<<tail_grid, tail_block, 0, g.stream>>>(g);
     }
+}
+
+template<Layout L>
+void dispatch_pq(layout_globals g) {
+    dispatch<L, true>(g);
 }
 
 PYBIND11_MODULE(tk_mxfp8_layouts, m) {
@@ -2567,6 +2665,18 @@ PYBIND11_MODULE(tk_mxfp8_layouts, m) {
         &layout_globals::a_scale, &layout_globals::b_scale,
         &layout_globals::c);
     py::bind_function<dispatch<Layout::CRR>>(m, "gemm_crr",
+        &layout_globals::a, &layout_globals::b,
+        &layout_globals::a_scale, &layout_globals::b_scale,
+        &layout_globals::c);
+    py::bind_function<dispatch_pq<Layout::RCR>>(m, "gemm_rcr_pq",
+        &layout_globals::a, &layout_globals::b,
+        &layout_globals::a_scale, &layout_globals::b_scale,
+        &layout_globals::c);
+    py::bind_function<dispatch_pq<Layout::RRR>>(m, "gemm_rrr_pq",
+        &layout_globals::a, &layout_globals::b,
+        &layout_globals::a_scale, &layout_globals::b_scale,
+        &layout_globals::c);
+    py::bind_function<dispatch_pq<Layout::CRR>>(m, "gemm_crr_pq",
         &layout_globals::a, &layout_globals::b,
         &layout_globals::a_scale, &layout_globals::b_scale,
         &layout_globals::c);

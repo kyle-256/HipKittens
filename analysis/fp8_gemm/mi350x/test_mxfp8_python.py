@@ -36,6 +36,7 @@ num_warmup = int(os.environ.get("MXFP8_WARMUP", "10"))
 num_iters = int(os.environ.get("MXFP8_ITERS", "20"))
 determinism_runs = max(1, int(os.environ.get("MXFP8_DETERMINISM_RUNS", "1")))
 snr_threshold_db = float(os.environ.get("MXFP8_SNR_THRESHOLD_DB", "48.0"))
+use_preshuffle_quant = os.environ.get("MXFP8_PRESHUFFLE_QUANT", "0") != "0"
 requested_layouts = {
     layout.strip().lower()
     for layout in os.environ.get("MXFP8_LAYOUTS", "rcr,rrr,crr").split(",")
@@ -50,9 +51,10 @@ k_blocks = (build_K + 31) // 32
 
 
 def default_output_path():
+    suffix = "_pq" if use_preshuffle_quant else ""
     if M == N == K:
-        return f"mxfp8_layout_results_{M}.json"
-    return f"mxfp8_layout_results_{M}x{N}x{K}.json"
+        return f"mxfp8_layout_results_{M}{suffix}.json"
+    return f"mxfp8_layout_results_{M}x{N}x{K}{suffix}.json"
 
 
 def generate_fp8_matrix(total_rows, total_cols, valid_rows, valid_cols):
@@ -74,6 +76,31 @@ def generate_scale_matrix(total_rows, total_k_blocks, valid_rows):
         device="cuda",
     )
     return scales
+
+
+def encode_scale_matrix_raw(scale_exp):
+    raw = (scale_exp.to(torch.int16) + 127).to(torch.uint8)
+    return torch.where(
+        scale_exp == -128,
+        torch.full_like(raw, 0xFF, dtype=torch.uint8),
+        raw,
+    )
+
+
+def preshuffle_scale_matrix_mfma16(scale_exp):
+    rows, k_blocks_local = scale_exp.shape
+    padded_rows = math.ceil(rows / 32) * 32
+    padded_k_blocks = math.ceil(k_blocks_local / 8) * 8
+    raw = torch.full(
+        (padded_rows, padded_k_blocks),
+        0x7F,
+        dtype=torch.uint8,
+        device=scale_exp.device,
+    )
+    raw[:rows, :k_blocks_local] = encode_scale_matrix_raw(scale_exp)
+    shuffled = raw.view(padded_rows // 32, 2, 16, padded_k_blocks // 8, 2, 4, 1)
+    shuffled = shuffled.permute(0, 3, 5, 2, 4, 1, 6).contiguous()
+    return shuffled.view(padded_rows // 32, padded_k_blocks * 32)
 
 
 def expand_row_scales(scale_exp, cols):
@@ -168,7 +195,7 @@ def check_correctness(C_test, C_ref, label):
 
 
 print(
-    f"=== MXFP8 GEMM Layout Benchmark (reference tail path): "
+    f"=== MXFP8 GEMM Layout Benchmark ({'preshuffle-quant' if use_preshuffle_quant else 'reference scale layout'}): "
     f"M={M}, N={N}, K={K} ==="
 )
 if (build_M, build_N, build_K) != (M, N, K):
@@ -205,13 +232,20 @@ if "rcr" in requested_layouts:
     print("--- RCR Layout: C = A @ B^T ---")
     A = generate_fp8_matrix(build_M, build_K, M, K)
     B = generate_fp8_matrix(build_N, build_K, N, K)
-    A_scale = generate_scale_matrix(build_M, k_blocks, M)
-    B_scale = generate_scale_matrix(build_N, k_blocks, N)
+    A_scale_exp = generate_scale_matrix(build_M, k_blocks, M)
+    B_scale_exp = generate_scale_matrix(build_N, k_blocks, N)
+    if use_preshuffle_quant:
+        A_scale = preshuffle_scale_matrix_mfma16(A_scale_exp)
+        B_scale = preshuffle_scale_matrix_mfma16(B_scale_exp)
+        run = lambda: tk_mxfp8_layouts.gemm_rcr_pq(A, B, A_scale, B_scale, C)
+    else:
+        A_scale = A_scale_exp
+        B_scale = B_scale_exp
+        run = lambda: tk_mxfp8_layouts.gemm_rcr(A, B, A_scale, B_scale, C)
     C = torch.zeros(build_M, build_N, dtype=torch.bfloat16, device="cuda")
-    run = lambda: tk_mxfp8_layouts.gemm_rcr(A, B, A_scale, B_scale, C)
     timings = benchmark_kernel(run, C)
-    A_ref = A[:M, :K].float() * expand_row_scales(A_scale[:M, :k_blocks], K)
-    B_ref = B[:N, :K].float() * expand_row_scales(B_scale[:N, :k_blocks], K)
+    A_ref = A[:M, :K].float() * expand_row_scales(A_scale_exp[:M, :k_blocks], K)
+    B_ref = B[:N, :K].float() * expand_row_scales(B_scale_exp[:N, :k_blocks], K)
     C_ref = A_ref @ B_ref.T
     record_result("rcr", timings, C, C_ref, run)
 
@@ -219,13 +253,20 @@ if "rrr" in requested_layouts:
     print("--- RRR Layout: C = A @ B ---")
     A = generate_fp8_matrix(build_M, build_K, M, K)
     B = generate_fp8_matrix(build_K, build_N, K, N)
-    A_scale = generate_scale_matrix(build_M, k_blocks, M)
-    B_scale = generate_scale_matrix(build_N, k_blocks, N)
+    A_scale_exp = generate_scale_matrix(build_M, k_blocks, M)
+    B_scale_exp = generate_scale_matrix(build_N, k_blocks, N)
+    if use_preshuffle_quant:
+        A_scale = preshuffle_scale_matrix_mfma16(A_scale_exp)
+        B_scale = preshuffle_scale_matrix_mfma16(B_scale_exp)
+        run = lambda: tk_mxfp8_layouts.gemm_rrr_pq(A, B, A_scale, B_scale, C)
+    else:
+        A_scale = A_scale_exp
+        B_scale = B_scale_exp
+        run = lambda: tk_mxfp8_layouts.gemm_rrr(A, B, A_scale, B_scale, C)
     C = torch.zeros(build_M, build_N, dtype=torch.bfloat16, device="cuda")
-    run = lambda: tk_mxfp8_layouts.gemm_rrr(A, B, A_scale, B_scale, C)
     timings = benchmark_kernel(run, C)
-    A_ref = A[:M, :K].float() * expand_row_scales(A_scale[:M, :k_blocks], K)
-    B_ref = B[:K, :N].float() * expand_col_scales(B_scale[:N, :k_blocks], K)
+    A_ref = A[:M, :K].float() * expand_row_scales(A_scale_exp[:M, :k_blocks], K)
+    B_ref = B[:K, :N].float() * expand_col_scales(B_scale_exp[:N, :k_blocks], K)
     C_ref = A_ref @ B_ref
     record_result("rrr", timings, C, C_ref, run)
 
@@ -233,13 +274,20 @@ if "crr" in requested_layouts:
     print("--- CRR Layout: C = A^T @ B ---")
     A = generate_fp8_matrix(build_K, build_M, K, M)
     B = generate_fp8_matrix(build_K, build_N, K, N)
-    A_scale = generate_scale_matrix(build_M, k_blocks, M)
-    B_scale = generate_scale_matrix(build_N, k_blocks, N)
+    A_scale_exp = generate_scale_matrix(build_M, k_blocks, M)
+    B_scale_exp = generate_scale_matrix(build_N, k_blocks, N)
+    if use_preshuffle_quant:
+        A_scale = preshuffle_scale_matrix_mfma16(A_scale_exp)
+        B_scale = preshuffle_scale_matrix_mfma16(B_scale_exp)
+        run = lambda: tk_mxfp8_layouts.gemm_crr_pq(A, B, A_scale, B_scale, C)
+    else:
+        A_scale = A_scale_exp
+        B_scale = B_scale_exp
+        run = lambda: tk_mxfp8_layouts.gemm_crr(A, B, A_scale, B_scale, C)
     C = torch.zeros(build_M, build_N, dtype=torch.bfloat16, device="cuda")
-    run = lambda: tk_mxfp8_layouts.gemm_crr(A, B, A_scale, B_scale, C)
     timings = benchmark_kernel(run, C)
-    A_ref = A[:K, :M].float() * expand_col_scales(A_scale[:M, :k_blocks], K)
-    B_ref = B[:K, :N].float() * expand_col_scales(B_scale[:N, :k_blocks], K)
+    A_ref = A[:K, :M].float() * expand_col_scales(A_scale_exp[:M, :k_blocks], K)
+    B_ref = B[:K, :N].float() * expand_col_scales(B_scale_exp[:N, :k_blocks], K)
     C_ref = A_ref.T @ B_ref
     record_result("crr", timings, C, C_ref, run)
 
