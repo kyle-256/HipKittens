@@ -1,100 +1,73 @@
 ---
 name: fp8-strict-layout-tuning
-description: Tune HipKittens FP8 layout GEMM kernels on gfx950/MI350X under strict no-preshuffle constraints. Use when optimizing or benchmarking analysis/fp8_gemm/mi350x RCR/RRR/CRR kernels, sweeping mnk.yaml shapes, comparing layout throughput, or cleaning tuning artifacts before commit.
+description: Debug and optimize HipKittens FP8 layout GEMM kernels on gfx950/MI350X under strict native-layout constraints. Use when working on analysis/fp8_gemm/mi350x RCR/RRR/CRR performance, SNR, determinism, bank conflicts, dynamic-shape support, or Primus-Turbo HipKittens backend integration.
 ---
 # FP8 Strict Layout Tuning
 
 ## When To Use
-- User asks to optimize `analysis/fp8_gemm/mi350x` FP8 GEMM.
-- User mentions `RRR`, `CRR`, `RCR`, `mnk.yaml`, `gfx950`, `MI350X`, `bank conflict`, or `no-preshuffle`.
-- Existing tuning work should be resumed instead of rediscovered.
+- User asks to debug or optimize `analysis/fp8_gemm/mi350x` FP8 GEMM.
+- User mentions `RCR`, `RRR`, `CRR`, `bank conflict`, `SNR`, `deterministic`, `GPU7`, `gfx950`, `MI350X`, or `Primus-Turbo`.
+- Existing layout-kernel tuning knowledge should be reused instead of rediscovered.
 
-## Non-Negotiable Constraints
-- Default to `HIP_VISIBLE_DEVICES=0`.
+## Hard Rules
+- Formal acceptance runs use `HIP_VISIBLE_DEVICES=7`.
+- Success means every requested layout passes numerical correctness, `SNR > 48 dB`, and determinism. Anything else is a failure.
+- Keep layout handling native. No Python `.t().contiguous()` workaround. No host-side padding workaround for Primus integration.
 - Treat `RRR_ROW_SHARED_TRANSPOSE=1` and `CRR_ROW_SHARED_TRANSPOSE=1` as invalid unless the user explicitly relaxes strict `no-preshuffle`.
-- Keep `CRR_A_LDS_REENCODE=0` unless debugging that specific failed path.
-- Do not commit `.tmp_*.json`, `gpucore.*`, `pmc_*`, `.bak*`, benchmark dumps, or ad-hoc profiling scripts.
-- Treat stray `.nfs*` files as OS artifacts; try deleting them, but if they are busy, leave them untracked rather than forcing cleanup.
+- After every substantial kernel change: compile, run, then inspect bank conflict, MFMA utilization, and cache utilization before continuing to tune.
+- Do not claim a win from short runs alone.
+- Do not commit `.tmp_*.json`, `gpucore.*`, `pmc_*`, `.bak*`, generated ISA, benchmark dumps, or ad-hoc profiling scripts.
 - Only create a git commit when the user explicitly asks.
-- Avoid parallel `make` plus benchmark workflows that overwrite the same `tk_fp8_layouts` extension binary.
+- Avoid overlapping `make` and benchmark jobs that overwrite the shared `tk_fp8_layouts` extension binary.
 
 ## Primary Files
 - `analysis/fp8_gemm/mi350x/kernel_fp8_layouts.cpp`
 - `analysis/fp8_gemm/mi350x/test_python.py`
 - `analysis/fp8_gemm/mi350x/tune_mnk_yaml.py`
 - `include/ops/warp/memory/tile/shared_to_register.cuh`
+- `primus_turbo/pytorch/kernels/gemm/gemm_fp8_impl.py`
 
-## Quick Workflow
+## Required Commands
 1. Build from `analysis/fp8_gemm/mi350x`:
 
 ```bash
-export THUNDERKITTENS_ROOT="/shared_nfs/kyle/HipKittens"
-HIP_VISIBLE_DEVICES=0 make -j4
+THUNDERKITTENS_ROOT=/workspace/code/HipKittens ROCM_PATH=/opt/rocm make -j4
 ```
 
-2. Run a quick correctness and throughput smoke test:
+2. Run a quick smoke test:
 
 ```bash
-HIP_VISIBLE_DEVICES=0 FP8_WARMUP=50 FP8_ITERS=10 FP8_LAYOUTS=RCR,RRR,CRR FP8_CHECK=1 python3 test_python.py 8192 8192 8192
+HIP_VISIBLE_DEVICES=7 FP8_WARMUP=1 FP8_ITERS=1 FP8_LAYOUTS=rcr,rrr,crr FP8_CHECK=1 FP8_DETERMINISM_RUNS=2 python3 test_python.py 256 256 128
 ```
 
-3. Run a stable comparison before claiming a win:
+3. Run the formal acceptance benchmark:
 
 ```bash
-HIP_VISIBLE_DEVICES=0 FP8_WARMUP=200 FP8_ITERS=50 FP8_LAYOUTS=RCR,RRR,CRR FP8_CHECK=0 python3 test_python.py 8192 8192 8192
+HIP_VISIBLE_DEVICES=7 FP8_WARMUP=50 FP8_ITERS=200 FP8_LAYOUTS=rcr,rrr,crr FP8_CHECK=1 FP8_DETERMINISM_RUNS=5 python3 test_python.py 8192 8192 8192
 ```
 
-4. Before claiming `>98% of RCR`, rerun a longer confirmation:
+4. For Primus-Turbo benchmarking, compare the same shapes against `HIPBLASLT` and `TRITON` backends rather than looking at HipKittens in isolation.
 
-```bash
-HIP_VISIBLE_DEVICES=0 FP8_WARMUP=400 FP8_ITERS=100 FP8_LAYOUTS=RCR,RRR,CRR FP8_CHECK=0 python3 test_python.py 8192 8192 8192
-```
+## Debug Workflow
+1. Identify the actual blocker first: correctness/SNR, determinism, absolute `RCR`, or `RRR/CRR` ratio.
+2. Change one kernel idea at a time. Do not mix loader, schedule, and waitcnt experiments in the same edit.
+3. Rebuild, then run a smoke test. Only run the formal `8192^3 / 50 / 200 / GPU7` benchmark after the smoke test is clean.
+4. If throughput moved, inspect bank conflict, MFMA utilization, cache utilization, and compile resource remarks (`VGPRs`, spills, occupancy, LDS) before making another tweak.
+5. Keep only durable source changes and reusable tuning inputs. Remove one-off artifacts.
 
-5. For non-native shapes, use `FP8_BUILD_M`, `FP8_BUILD_N`, and `FP8_BUILD_K`, or let `tune_mnk_yaml.py` compute padded build sizes.
+## Durable Debugging Priors
+- The FP8 col-loader bug was real. Keep the `ds_read_b64_tr_b8` path in the corrected single-address form with early-clobber `=&v` outputs.
+- Dynamic shapes must remain kernel-native: runtime `m/n/k`, runtime `bpr/bpc/ki`, fast interior kernel, scalar tail kernel, and `ki >= 2` guarding the fast kernel.
+- `RRR` recovered through the dual-`B` schedule plus the fixed `cD` operand lifetime. Do not replace this with Python workarounds.
+- `CRR` should stay on the strict deterministic path. `CRR_BATCHED_PAIR_MMA=1` is acceptable only if SNR and determinism still pass.
+- `RCR > 3100 TFLOPS` on `8192x8192x8192` with `50/200/GPU7` remains a hard gate.
+- `RRR` and `CRR` still need to stay at or above `95%` of `RCR` while keeping the success gate above.
 
-## Shape Tuning
-Use the strict tuning driver:
-
-```bash
-HIP_VISIBLE_DEVICES=0 python3 tune_mnk_yaml.py --mnk-file /shared_nfs/kyle/triton_bench/mnk.yaml --output hipk_tuned_mnk.yaml
-```
-
-- The committed candidate set is strict `no-preshuffle`.
-- If you edit candidate macros, keep `RRR_ROW_SHARED_TRANSPOSE=0` and `CRR_ROW_SHARED_TRANSPOSE=0` unless the user explicitly allows semantic transpose tricks.
-- After any structural kernel change, rerun one representative `8192x8192x8192` benchmark before launching a full sweep.
-
-## How To Judge Progress
-- Compare `RRR` and `CRR` as `% of RCR`, not only absolute TFLOPS.
-- Also track absolute `RRR` and `CRR` TFLOPS because `RCR` can move enough to hide whether a candidate actually improved.
-- Use long runs for regressions or wins; short runs are only for screening.
-- Short runs can show `RRR` or `CRR` above `100%` of `RCR`; do not treat that as final proof.
-- Watch compile remarks for `VGPRs`, `VGPRs Spill`, `ScratchSize`, `LDS Size`, and occupancy.
-- If a change increases spills or pushes LDS too close to the 160 KB CU budget, treat it as suspect even if a short run looks faster.
-
-## How To Report Results
-For each meaningful experiment, record:
-- Macro set or code branch.
-- Quick result and long result.
-- Compile resource remarks if the structure changed.
-- Whether the path stays strict `no-preshuffle`.
-- Whether the change is promising enough to keep, revert, or move into `tune_mnk_yaml.py`.
-
-## Current Priors
-- Low-level `waitcnt`, mapping, or SRD micro-tweaks are low yield by themselves.
-- `CRR_USE_V3_SWIZZLE=1` and `CRR_A_LDS_REENCODE=1` are known poor directions.
-- The valid strict path that moved the needle is row-load plus register-transpose for `RRR_B` and `CRR_A/B`; keep that as the main baseline.
-- For `RRR`, the most promising neighborhood is `RRR_MAIN_UNROLL=4`, `RRR_PREFETCH_LGKM=5 or 8`, `RRR_INIT1_VMCNT=8`, and `RRR_STEADY_VMCNT=4 or 5` with `RRR_EPILOGUE_VMCNT=5 or 6`.
-- Full-tile reinterpret-cast aliasing is a known bad idea because it raised `VGPRs` and regressed `RRR`.
-- The lighter `RRR_B_REG_ROW_LOAD_ALIAS=1` path inside `load_b()` is worth screening, but so far it is only a small absolute TFLOPS gain, not a complete fix.
-- `RRR_ENABLE_SCHED_BARRIER` now exists as a safe tuning knob; default `1` preserves current behavior.
-- The highest-value remaining branches are reduced-M or `192x256`-style CRR kernels, then producer-consumer if register pressure stays sane.
-
-## Cleanup Before Commit
-Use targeted cleanup and keep only source or reusable tuning inputs:
-
-```bash
-git clean -fd -- analysis/fp8_gemm/mi350x/.tmp_* analysis/fp8_gemm/mi350x/gpucore.* analysis/fp8_gemm/mi350x/fp8_layout_results_*.json analysis/fp8_gemm/mi350x/kernel_fp8_layouts.cpp.bak* analysis/fp8_gemm/mi350x/pmc_crr analysis/fp8_gemm/mi350x/pmc_rrr analysis/fp8_gemm/mi350x/tmp_fp8_mnk_result.json
-```
+## What Not To Do
+- Do not accept Python transpose, host-side padding, or scalar row-loader fallbacks as final fixes.
+- Do not start with random waitcnt or SRD tweaks before operand semantics are correct.
+- Do not trust a speedup that adds spills, collapses occupancy, or only wins on a short run.
+- Do not keep temporary results or scratch scripts in the tree.
 
 ## Additional Reference
-- Detailed context and known dead ends: [reference.md](reference.md)
+- For failure signatures, known-good directions, and integration rules, see [reference.md](reference.md)
