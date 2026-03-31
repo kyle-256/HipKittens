@@ -321,6 +321,12 @@ constexpr int TAIL_BLOCK_N = 16;
 #ifndef MXFP8_RCR_FAST_ENABLE
 #define MXFP8_RCR_FAST_ENABLE 0
 #endif
+#ifndef MXFP8_RRR_FAST_ENABLE
+#define MXFP8_RRR_FAST_ENABLE 0
+#endif
+#ifndef MXFP8_CRR_FAST_ENABLE
+#define MXFP8_CRR_FAST_ENABLE 0
+#endif
 using G = kittens::group<_NUM_WARPS>;
 using _gl_fp8  = gl<fp8e4m3, -1, -1, -1, -1>;
 using _gl_scale = gl<fp8e8m0, -1, -1, -1, -1>;
@@ -654,6 +660,316 @@ __device__ __forceinline__ void rcr_mma_scaled_candidate(
         for (int m = 0; m < acc_w; ++m) {
             const int b_opsel = (k_phase << 1) | (m & 1);
             rcr_mma_scaled_dispatch(
+                acc,
+                a,
+                b,
+                n,
+                m,
+                a_opsel,
+                b_opsel,
+                a_scale_pack,
+                b_scale_packs[m / 2]
+            );
+        }
+    }
+}
+
+template<int opsel_a, int opsel_b>
+__device__ __forceinline__ void rrr_mma_scaled_base(
+    rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
+    const A_row_reg& a,
+    const B_col_reg& b,
+    int n,
+    int m,
+    const fp8e8m0_4& a_scale_pack,
+    const fp8e8m0_4& b_scale_pack)
+{
+#if RRR_B_REG_ROW_LOAD_TRANSPOSE && RRR_B_REG_ROW_LOAD_ALIAS
+    const auto& b_row = reinterpret_cast<const B_row_reg&>(b);
+    mma_ABt_base_scaled<opsel_a, opsel_b>(
+        acc.tiles[n][m],
+        a.tiles[n][0],
+        b_row.tiles[m][0],
+        acc.tiles[n][m],
+        &a_scale_pack,
+        &b_scale_pack
+    );
+#else
+    mma_AB_base_scaled<opsel_a, opsel_b>(
+        acc.tiles[n][m],
+        a.tiles[n][0],
+        b.tiles[0][m],
+        acc.tiles[n][m],
+        &a_scale_pack,
+        &b_scale_pack
+    );
+#endif
+}
+
+__device__ __forceinline__ void rrr_mma_scaled_dispatch(
+    rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
+    const A_row_reg& a,
+    const B_col_reg& b,
+    int n,
+    int m,
+    int opsel_a,
+    int opsel_b,
+    const fp8e8m0_4& a_scale_pack,
+    const fp8e8m0_4& b_scale_pack)
+{
+    switch ((opsel_a << 2) | opsel_b) {
+        case 0x0: rrr_mma_scaled_base<0, 0>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0x1: rrr_mma_scaled_base<0, 1>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0x2: rrr_mma_scaled_base<0, 2>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0x3: rrr_mma_scaled_base<0, 3>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0x4: rrr_mma_scaled_base<1, 0>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0x5: rrr_mma_scaled_base<1, 1>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0x6: rrr_mma_scaled_base<1, 2>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0x7: rrr_mma_scaled_base<1, 3>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0x8: rrr_mma_scaled_base<2, 0>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0x9: rrr_mma_scaled_base<2, 1>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0xa: rrr_mma_scaled_base<2, 2>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0xb: rrr_mma_scaled_base<2, 3>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0xc: rrr_mma_scaled_base<3, 0>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0xd: rrr_mma_scaled_base<3, 1>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0xe: rrr_mma_scaled_base<3, 2>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0xf: rrr_mma_scaled_base<3, 3>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+    }
+}
+
+template<bool PRESHUFFLED_QUANT>
+__device__ __forceinline__ void rrr_mma_scaled_candidate(
+    rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
+    const A_row_reg& a,
+    const B_col_reg& b,
+    const _gl_scale& a_scale,
+    const _gl_scale& b_scale,
+    int a_tile_base,
+    int b_tile_base,
+    int k_iter)
+{
+    const int lane_nonk = kittens::laneid() % 16;
+    const int lane_kblk = kittens::laneid() / 16;
+    const int k_pair = k_iter / 2;
+    const int k_phase = k_iter & 1;
+    constexpr int acc_h = RBM / 16;
+    constexpr int acc_w = RBN / 16;
+    constexpr int a_pack_count = RBM / 32;
+    constexpr int b_pack_count = (RBN + 31) / 32;
+
+    fp8e8m0_4 a_scale_packs[a_pack_count];
+    #pragma unroll
+    for (int g = 0; g < a_pack_count; ++g) {
+        if constexpr (PRESHUFFLED_QUANT) {
+            a_scale_packs[g] = load_scale_pair_pack_16x128_preshuffled(
+                a_scale,
+                a_tile_base + g * 32,
+                k_pair,
+                lane_nonk,
+                lane_kblk
+            );
+        } else {
+            a_scale_packs[g] = load_scale_pair_pack_16x128(
+                a_scale,
+                a_tile_base + g * 32,
+                k_pair,
+                lane_nonk,
+                lane_kblk
+            );
+        }
+    }
+
+    fp8e8m0_4 b_scale_packs[b_pack_count];
+    #pragma unroll
+    for (int g = 0; g < b_pack_count; ++g) {
+        if constexpr (PRESHUFFLED_QUANT) {
+            b_scale_packs[g] = load_scale_pair_pack_16x128_preshuffled(
+                b_scale,
+                b_tile_base + g * 32,
+                k_pair,
+                lane_nonk,
+                lane_kblk
+            );
+        } else {
+            b_scale_packs[g] = load_scale_pair_pack_16x128(
+                b_scale,
+                b_tile_base + g * 32,
+                k_pair,
+                lane_nonk,
+                lane_kblk
+            );
+        }
+    }
+
+    #pragma unroll
+    for (int n = 0; n < acc_h; ++n) {
+        const int a_opsel = (k_phase << 1) | (n & 1);
+        const fp8e8m0_4 a_scale_pack = a_scale_packs[n / 2];
+        #pragma unroll
+        for (int m = 0; m < acc_w; ++m) {
+            const int b_opsel = (k_phase << 1) | (m & 1);
+            rrr_mma_scaled_dispatch(
+                acc,
+                a,
+                b,
+                n,
+                m,
+                a_opsel,
+                b_opsel,
+                a_scale_pack,
+                b_scale_packs[m / 2]
+            );
+        }
+    }
+}
+
+template<int opsel_a, int opsel_b>
+__device__ __forceinline__ void crr_mma_scaled_base(
+    rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
+    const A_col_reg& a,
+    const B_col_reg& b,
+    int n,
+    int m,
+    const fp8e8m0_4& a_scale_pack,
+    const fp8e8m0_4& b_scale_pack)
+{
+#if CRR_A_REG_ROW_LOAD_TRANSPOSE && CRR_A_REG_ROW_LOAD_ALIAS
+    const auto& a_row = reinterpret_cast<const A_row_reg&>(a);
+    #if CRR_B_REG_ROW_LOAD_TRANSPOSE && CRR_B_REG_ROW_LOAD_ALIAS
+    const auto& b_row = reinterpret_cast<const B_row_reg&>(b);
+    mma_ABt_base_scaled<opsel_a, opsel_b>(
+        acc.tiles[n][m],
+        a_row.tiles[n][0],
+        b_row.tiles[m][0],
+        acc.tiles[n][m],
+        &a_scale_pack,
+        &b_scale_pack
+    );
+    #else
+    mma_AB_base_scaled<opsel_a, opsel_b>(
+        acc.tiles[n][m],
+        a_row.tiles[n][0],
+        b.tiles[0][m],
+        acc.tiles[n][m],
+        &a_scale_pack,
+        &b_scale_pack
+    );
+    #endif
+#else
+    mma_AtB_base_scaled<opsel_a, opsel_b>(
+        acc.tiles[n][m],
+        a.tiles[0][n],
+        b.tiles[0][m],
+        acc.tiles[n][m],
+        &a_scale_pack,
+        &b_scale_pack
+    );
+#endif
+}
+
+__device__ __forceinline__ void crr_mma_scaled_dispatch(
+    rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
+    const A_col_reg& a,
+    const B_col_reg& b,
+    int n,
+    int m,
+    int opsel_a,
+    int opsel_b,
+    const fp8e8m0_4& a_scale_pack,
+    const fp8e8m0_4& b_scale_pack)
+{
+    switch ((opsel_a << 2) | opsel_b) {
+        case 0x0: crr_mma_scaled_base<0, 0>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0x1: crr_mma_scaled_base<0, 1>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0x2: crr_mma_scaled_base<0, 2>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0x3: crr_mma_scaled_base<0, 3>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0x4: crr_mma_scaled_base<1, 0>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0x5: crr_mma_scaled_base<1, 1>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0x6: crr_mma_scaled_base<1, 2>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0x7: crr_mma_scaled_base<1, 3>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0x8: crr_mma_scaled_base<2, 0>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0x9: crr_mma_scaled_base<2, 1>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0xa: crr_mma_scaled_base<2, 2>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0xb: crr_mma_scaled_base<2, 3>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0xc: crr_mma_scaled_base<3, 0>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0xd: crr_mma_scaled_base<3, 1>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0xe: crr_mma_scaled_base<3, 2>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0xf: crr_mma_scaled_base<3, 3>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+    }
+}
+
+template<bool PRESHUFFLED_QUANT>
+__device__ __forceinline__ void crr_mma_scaled_candidate(
+    rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
+    const A_col_reg& a,
+    const B_col_reg& b,
+    const _gl_scale& a_scale,
+    const _gl_scale& b_scale,
+    int a_tile_base,
+    int b_tile_base,
+    int k_iter)
+{
+    const int lane_nonk = kittens::laneid() % 16;
+    const int lane_kblk = kittens::laneid() / 16;
+    const int k_pair = k_iter / 2;
+    const int k_phase = k_iter & 1;
+    constexpr int acc_h = RBM / 16;
+    constexpr int acc_w = RBN / 16;
+    constexpr int a_pack_count = RBM / 32;
+    constexpr int b_pack_count = (RBN + 31) / 32;
+
+    fp8e8m0_4 a_scale_packs[a_pack_count];
+    #pragma unroll
+    for (int g = 0; g < a_pack_count; ++g) {
+        if constexpr (PRESHUFFLED_QUANT) {
+            a_scale_packs[g] = load_scale_pair_pack_16x128_preshuffled(
+                a_scale,
+                a_tile_base + g * 32,
+                k_pair,
+                lane_nonk,
+                lane_kblk
+            );
+        } else {
+            a_scale_packs[g] = load_scale_pair_pack_16x128(
+                a_scale,
+                a_tile_base + g * 32,
+                k_pair,
+                lane_nonk,
+                lane_kblk
+            );
+        }
+    }
+
+    fp8e8m0_4 b_scale_packs[b_pack_count];
+    #pragma unroll
+    for (int g = 0; g < b_pack_count; ++g) {
+        if constexpr (PRESHUFFLED_QUANT) {
+            b_scale_packs[g] = load_scale_pair_pack_16x128_preshuffled(
+                b_scale,
+                b_tile_base + g * 32,
+                k_pair,
+                lane_nonk,
+                lane_kblk
+            );
+        } else {
+            b_scale_packs[g] = load_scale_pair_pack_16x128(
+                b_scale,
+                b_tile_base + g * 32,
+                k_pair,
+                lane_nonk,
+                lane_kblk
+            );
+        }
+    }
+
+    #pragma unroll
+    for (int n = 0; n < acc_h; ++n) {
+        const int a_opsel = (k_phase << 1) | (n & 1);
+        const fp8e8m0_4 a_scale_pack = a_scale_packs[n / 2];
+        #pragma unroll
+        for (int m = 0; m < acc_w; ++m) {
+            const int b_opsel = (k_phase << 1) | (m & 1);
+            crr_mma_scaled_dispatch(
                 acc,
                 a,
                 b,
@@ -1827,6 +2143,31 @@ void gemm_kernel(const layout_globals g) {
 #endif
 
         int tic = 0, toc = 1;
+#if MXFP8_RRR_FAST_ENABLE
+        auto rrr_scale_a_base = [&](int half) {
+            return br * BLK + half * HB + wm * RBM;
+        };
+        auto rrr_scale_b_base = [&](int half) {
+            return bc * BLK + half * HB + wn * RBN;
+        };
+        auto rrr_mma_fast = [&](auto& acc, const A_row_reg& lhs, const B_col_reg& rhs, int a_half, int b_half, int k_iter) {
+            rrr_mma_scaled_candidate<PRESHUFFLED_QUANT>(
+                acc,
+                lhs,
+                rhs,
+                g.a_scale,
+                g.b_scale,
+                rrr_scale_a_base(a_half),
+                rrr_scale_b_base(b_half),
+                k_iter
+            );
+        };
+#define RRR_DO_MMA(acc, lhs, rhs, a_half, b_half, k_iter) \
+        rrr_mma_fast((acc), (lhs), (rhs), (a_half), (b_half), (k_iter))
+#else
+#define RRR_DO_MMA(acc, lhs, rhs, a_half, b_half, k_iter) \
+        rrr_mma((acc), (lhs), (rhs))
+#endif
 #if RRR_ROW_SHARED_TRANSPOSE
         load_transpose<_NUM_THREADS>(Bs[tic][0], g.b, b_co(bc*2,   0), soB);
 #else
@@ -1870,9 +2211,9 @@ void gemm_kernel(const layout_globals g) {
             TK_WAIT_LGKM(RRR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
 #if RRR_B_REG_ROW_LOAD_TRANSPOSE && RRR_B_REG_ROW_LOAD_ALIAS
-            __builtin_amdgcn_s_setprio(1); rrr_mma(cA, a, b0_keep); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); RRR_DO_MMA(cA, a, b0_keep, 0, 0, k); __builtin_amdgcn_s_setprio(0);
 #else
-            __builtin_amdgcn_s_setprio(1); rrr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); RRR_DO_MMA(cA, a, b0, 0, 0, k); __builtin_amdgcn_s_setprio(0);
 #endif
             __builtin_amdgcn_s_barrier(); RRR_SCHED_BARRIER();
 
@@ -1889,9 +2230,9 @@ void gemm_kernel(const layout_globals g) {
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1);
 #if RRR_B_REG_ROW_LOAD_TRANSPOSE && RRR_B_REG_ROW_LOAD_ALIAS
-            rrr_mma(cB, a, b1_keep);
+            RRR_DO_MMA(cB, a, b1_keep, 0, 1, k);
 #else
-            rrr_mma(cB, a, b1);
+            RRR_DO_MMA(cB, a, b1, 0, 1, k);
 #endif
             __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
@@ -1905,9 +2246,9 @@ void gemm_kernel(const layout_globals g) {
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
 #if RRR_B_REG_ROW_LOAD_TRANSPOSE && RRR_B_REG_ROW_LOAD_ALIAS
-            __builtin_amdgcn_s_setprio(1); rrr_mma(cC, a, b0_keep); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); RRR_DO_MMA(cC, a, b0_keep, 1, 0, k); __builtin_amdgcn_s_setprio(0);
 #else
-            __builtin_amdgcn_s_setprio(1); rrr_mma(cC, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); RRR_DO_MMA(cC, a, b0, 1, 0, k); __builtin_amdgcn_s_setprio(0);
 #endif
             __builtin_amdgcn_s_barrier(); RRR_SCHED_BARRIER();
 
@@ -1916,9 +2257,9 @@ void gemm_kernel(const layout_globals g) {
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1);
 #if RRR_B_REG_ROW_LOAD_TRANSPOSE && RRR_B_REG_ROW_LOAD_ALIAS
-            rrr_mma(cD, a, b1_keep);
+            RRR_DO_MMA(cD, a, b1_keep, 1, 1, k);
 #else
-            rrr_mma(cD, a, b1);
+            RRR_DO_MMA(cD, a, b1, 1, 1, k);
 #endif
             __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
@@ -1934,9 +2275,9 @@ void gemm_kernel(const layout_globals g) {
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
 #if RRR_B_REG_ROW_LOAD_TRANSPOSE && RRR_B_REG_ROW_LOAD_ALIAS
-            __builtin_amdgcn_s_setprio(1); rrr_mma(cA, a, b0_keep); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); RRR_DO_MMA(cA, a, b0_keep, 0, 0, g.ki - 2); __builtin_amdgcn_s_setprio(0);
 #else
-            __builtin_amdgcn_s_setprio(1); rrr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); RRR_DO_MMA(cA, a, b0, 0, 0, g.ki - 2); __builtin_amdgcn_s_setprio(0);
 #endif
             __builtin_amdgcn_s_barrier(); RRR_SCHED_BARRIER();
 
@@ -1948,9 +2289,9 @@ void gemm_kernel(const layout_globals g) {
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1);
 #if RRR_B_REG_ROW_LOAD_TRANSPOSE && RRR_B_REG_ROW_LOAD_ALIAS
-            rrr_mma(cB, a, b1_keep);
+            RRR_DO_MMA(cB, a, b1_keep, 0, 1, g.ki - 2);
 #else
-            rrr_mma(cB, a, b1);
+            RRR_DO_MMA(cB, a, b1, 0, 1, g.ki - 2);
 #endif
             __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
@@ -1959,9 +2300,9 @@ void gemm_kernel(const layout_globals g) {
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
 #if RRR_B_REG_ROW_LOAD_TRANSPOSE && RRR_B_REG_ROW_LOAD_ALIAS
-            __builtin_amdgcn_s_setprio(1); rrr_mma(cC, a, b0_keep); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); RRR_DO_MMA(cC, a, b0_keep, 1, 0, g.ki - 2); __builtin_amdgcn_s_setprio(0);
 #else
-            __builtin_amdgcn_s_setprio(1); rrr_mma(cC, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); RRR_DO_MMA(cC, a, b0, 1, 0, g.ki - 2); __builtin_amdgcn_s_setprio(0);
 #endif
             __builtin_amdgcn_s_barrier();
 
@@ -1969,9 +2310,9 @@ void gemm_kernel(const layout_globals g) {
             TK_WAIT_VMCNT(RRR_EPILOGUE_VMCNT); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
 #if RRR_B_REG_ROW_LOAD_TRANSPOSE && RRR_B_REG_ROW_LOAD_ALIAS
-            __builtin_amdgcn_s_setprio(1); rrr_mma(cD, a, b1_keep); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); RRR_DO_MMA(cD, a, b1_keep, 1, 1, g.ki - 2); __builtin_amdgcn_s_setprio(0);
 #else
-            __builtin_amdgcn_s_setprio(1); rrr_mma(cD, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); RRR_DO_MMA(cD, a, b1, 1, 1, g.ki - 2); __builtin_amdgcn_s_setprio(0);
 #endif
             __builtin_amdgcn_s_barrier(); RRR_SCHED_BARRIER();
             tic ^= 1; toc ^= 1;
@@ -1985,9 +2326,9 @@ void gemm_kernel(const layout_globals g) {
             asm volatile("s_waitcnt vmcnt(0)"); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
 #if RRR_B_REG_ROW_LOAD_TRANSPOSE && RRR_B_REG_ROW_LOAD_ALIAS
-            __builtin_amdgcn_s_setprio(1); rrr_mma(cA, a, b0_keep); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); RRR_DO_MMA(cA, a, b0_keep, 0, 0, g.ki - 1); __builtin_amdgcn_s_setprio(0);
 #else
-            __builtin_amdgcn_s_setprio(1); rrr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); RRR_DO_MMA(cA, a, b0, 0, 0, g.ki - 1); __builtin_amdgcn_s_setprio(0);
 #endif
             __builtin_amdgcn_s_barrier();
 
@@ -1999,9 +2340,9 @@ void gemm_kernel(const layout_globals g) {
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1);
 #if RRR_B_REG_ROW_LOAD_TRANSPOSE && RRR_B_REG_ROW_LOAD_ALIAS
-            rrr_mma(cB, a, b1_keep);
+            RRR_DO_MMA(cB, a, b1_keep, 0, 1, g.ki - 1);
 #else
-            rrr_mma(cB, a, b1);
+            RRR_DO_MMA(cB, a, b1, 0, 1, g.ki - 1);
 #endif
             __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
@@ -2011,15 +2352,17 @@ void gemm_kernel(const layout_globals g) {
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1);
 #if RRR_B_REG_ROW_LOAD_TRANSPOSE && RRR_B_REG_ROW_LOAD_ALIAS
-            rrr_mma(cC, a, b0_keep);
-            rrr_mma(cD, a, b1_keep);
+            RRR_DO_MMA(cC, a, b0_keep, 1, 0, g.ki - 1);
+            RRR_DO_MMA(cD, a, b1_keep, 1, 1, g.ki - 1);
 #else
-            rrr_mma(cC, a, b0);
-            rrr_mma(cD, a, b1);
+            RRR_DO_MMA(cC, a, b0, 1, 0, g.ki - 1);
+            RRR_DO_MMA(cD, a, b1, 1, 1, g.ki - 1);
 #endif
             __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
         }
+
+#undef RRR_DO_MMA
 
     } else if constexpr (L == Layout::CRR) {
 #if CRR_ROW_SHARED_TRANSPOSE
@@ -2157,6 +2500,31 @@ void gemm_kernel(const layout_globals g) {
 #endif
 
         int tic = 0, toc = 1;
+#if MXFP8_CRR_FAST_ENABLE
+        auto crr_scale_a_base = [&](int half) {
+            return br * BLK + half * HB + wm * RBM;
+        };
+        auto crr_scale_b_base = [&](int half) {
+            return bc * BLK + half * HB + wn * RBN;
+        };
+        auto crr_mma_fast = [&](auto& acc, const A_col_reg& lhs, const B_col_reg& rhs, int a_half, int b_half, int k_iter) {
+            crr_mma_scaled_candidate<PRESHUFFLED_QUANT>(
+                acc,
+                lhs,
+                rhs,
+                g.a_scale,
+                g.b_scale,
+                crr_scale_a_base(a_half),
+                crr_scale_b_base(b_half),
+                k_iter
+            );
+        };
+#define CRR_DO_MMA(acc, lhs, rhs, a_half, b_half, k_iter) \
+        crr_mma_fast((acc), (lhs), (rhs), (a_half), (b_half), (k_iter))
+#else
+#define CRR_DO_MMA(acc, lhs, rhs, a_half, b_half, k_iter) \
+        crr_mma((acc), (lhs), (rhs))
+#endif
         global_load_b(Bs[tic][0], bc*2,   0);
         global_load_a(As[tic][0], br*2,   0);
         global_load_b(Bs[tic][1], bc*2+1, 0);
@@ -2213,8 +2581,8 @@ void gemm_kernel(const layout_globals g) {
             TK_WAIT_LGKM(CRR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             CRR_MMA_BEGIN();
-            crr_mma(cA, a, b0);
-            crr_mma(cB, a, b1);
+            CRR_DO_MMA(cA, a, b0, 0, 0, k);
+            CRR_DO_MMA(cB, a, b1, 0, 1, k);
             CRR_MMA_END();
             CRR_STEADY_MID_BARRIER(); CRR_SCHED_BARRIER();
 
@@ -2224,8 +2592,8 @@ void gemm_kernel(const layout_globals g) {
             TK_WAIT_VMCNT(CRR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             CRR_MMA_BEGIN();
-            crr_mma(cC, a, b0);
-            crr_mma(cD, a, b1);
+            CRR_DO_MMA(cC, a, b0, 1, 0, k);
+            CRR_DO_MMA(cD, a, b1, 1, 1, k);
             CRR_MMA_END();
             __builtin_amdgcn_s_barrier();
             global_load_b(Bs[tic][0], bc*2, k+2);
@@ -2241,9 +2609,9 @@ void gemm_kernel(const layout_globals g) {
             asm volatile("s_waitcnt lgkmcnt(0)");
             CRR_MMA_BEGIN();
 #if CRR_A_REG_ROW_LOAD_TRANSPOSE && CRR_A_REG_ROW_LOAD_ALIAS
-            crr_mma(cA, a, b0_keep);
+            CRR_DO_MMA(cA, a, b0_keep, 0, 0, k);
 #else
-            crr_mma(cA, a, b0);
+            CRR_DO_MMA(cA, a, b0, 0, 0, k);
 #endif
             CRR_MMA_END();
             __builtin_amdgcn_s_barrier(); CRR_SCHED_BARRIER();
@@ -2257,9 +2625,9 @@ void gemm_kernel(const layout_globals g) {
             asm volatile("s_waitcnt lgkmcnt(0)");
             CRR_MMA_BEGIN();
 #if CRR_A_REG_ROW_LOAD_TRANSPOSE && CRR_A_REG_ROW_LOAD_ALIAS
-            crr_mma(cB, a, b1_keep);
+            CRR_DO_MMA(cB, a, b1_keep, 0, 1, k);
 #else
-            crr_mma(cB, a, b1);
+            CRR_DO_MMA(cB, a, b1, 0, 1, k);
 #endif
             CRR_MMA_END();
             __builtin_amdgcn_s_barrier();
@@ -2270,9 +2638,9 @@ void gemm_kernel(const layout_globals g) {
             asm volatile("s_waitcnt lgkmcnt(0)");
             CRR_MMA_BEGIN();
 #if CRR_A_REG_ROW_LOAD_TRANSPOSE && CRR_A_REG_ROW_LOAD_ALIAS
-            crr_mma(cC, a, b0_keep);
+            CRR_DO_MMA(cC, a, b0_keep, 1, 0, k);
 #else
-            crr_mma(cC, a, b0);
+            CRR_DO_MMA(cC, a, b0, 1, 0, k);
 #endif
             CRR_MMA_END();
             __builtin_amdgcn_s_barrier(); CRR_SCHED_BARRIER();
@@ -2281,9 +2649,9 @@ void gemm_kernel(const layout_globals g) {
             TK_WAIT_VMCNT(CRR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
             CRR_MMA_BEGIN();
 #if CRR_A_REG_ROW_LOAD_TRANSPOSE && CRR_A_REG_ROW_LOAD_ALIAS
-            crr_mma(cD, a, b1_keep);
+            CRR_DO_MMA(cD, a, b1_keep, 1, 1, k);
 #else
-            crr_mma(cD, a, b1);
+            CRR_DO_MMA(cD, a, b1, 1, 1, k);
 #endif
             CRR_MMA_END();
             __builtin_amdgcn_s_barrier();
@@ -2299,8 +2667,8 @@ void gemm_kernel(const layout_globals g) {
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             CRR_MMA_BEGIN();
-            crr_mma(cA, a, b0);
-            crr_mma(cB, a, b1);
+            CRR_DO_MMA(cA, a, b0, 0, 0, g.ki - 2);
+            CRR_DO_MMA(cB, a, b1, 0, 1, g.ki - 2);
             CRR_MMA_END();
             __builtin_amdgcn_s_barrier(); CRR_SCHED_BARRIER();
 
@@ -2308,8 +2676,8 @@ void gemm_kernel(const layout_globals g) {
             TK_WAIT_VMCNT(CRR_EPILOGUE_VMCNT); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             CRR_MMA_BEGIN();
-            crr_mma(cC, a, b0);
-            crr_mma(cD, a, b1);
+            CRR_DO_MMA(cC, a, b0, 1, 0, g.ki - 2);
+            CRR_DO_MMA(cD, a, b1, 1, 1, g.ki - 2);
             CRR_MMA_END();
             __builtin_amdgcn_s_barrier();
 
@@ -2356,9 +2724,9 @@ void gemm_kernel(const layout_globals g) {
             asm volatile("s_waitcnt lgkmcnt(0)");
             CRR_MMA_BEGIN();
 #if CRR_A_REG_ROW_LOAD_TRANSPOSE && CRR_A_REG_ROW_LOAD_ALIAS
-            crr_mma(cA, a, b0_keep);
+            CRR_DO_MMA(cA, a, b0_keep, 0, 0, g.ki - 2);
 #else
-            crr_mma(cA, a, b0);
+            CRR_DO_MMA(cA, a, b0, 0, 0, g.ki - 2);
 #endif
             CRR_MMA_END();
             __builtin_amdgcn_s_barrier(); CRR_SCHED_BARRIER();
@@ -2371,9 +2739,9 @@ void gemm_kernel(const layout_globals g) {
             asm volatile("s_waitcnt lgkmcnt(0)");
             CRR_MMA_BEGIN();
 #if CRR_A_REG_ROW_LOAD_TRANSPOSE && CRR_A_REG_ROW_LOAD_ALIAS
-            crr_mma(cB, a, b1_keep);
+            CRR_DO_MMA(cB, a, b1_keep, 0, 1, g.ki - 2);
 #else
-            crr_mma(cB, a, b1);
+            CRR_DO_MMA(cB, a, b1, 0, 1, g.ki - 2);
 #endif
             CRR_MMA_END();
             __builtin_amdgcn_s_barrier();
@@ -2383,9 +2751,9 @@ void gemm_kernel(const layout_globals g) {
             asm volatile("s_waitcnt lgkmcnt(0)");
             CRR_MMA_BEGIN();
 #if CRR_A_REG_ROW_LOAD_TRANSPOSE && CRR_A_REG_ROW_LOAD_ALIAS
-            crr_mma(cC, a, b0_keep);
+            CRR_DO_MMA(cC, a, b0_keep, 1, 0, g.ki - 2);
 #else
-            crr_mma(cC, a, b0);
+            CRR_DO_MMA(cC, a, b0, 1, 0, g.ki - 2);
 #endif
             CRR_MMA_END();
             __builtin_amdgcn_s_barrier();
@@ -2395,9 +2763,9 @@ void gemm_kernel(const layout_globals g) {
             asm volatile("s_waitcnt lgkmcnt(0)");
             CRR_MMA_BEGIN();
 #if CRR_A_REG_ROW_LOAD_TRANSPOSE && CRR_A_REG_ROW_LOAD_ALIAS
-            crr_mma(cD, a, b1_keep);
+            CRR_DO_MMA(cD, a, b1_keep, 1, 1, g.ki - 2);
 #else
-            crr_mma(cD, a, b1);
+            CRR_DO_MMA(cD, a, b1, 1, 1, g.ki - 2);
 #endif
             CRR_MMA_END();
             __builtin_amdgcn_s_barrier(); CRR_SCHED_BARRIER();
@@ -2413,8 +2781,8 @@ void gemm_kernel(const layout_globals g) {
             asm volatile("s_waitcnt vmcnt(0)"); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             CRR_MMA_BEGIN();
-            crr_mma(cA, a, b0);
-            crr_mma(cB, a, b1);
+            CRR_DO_MMA(cA, a, b0, 0, 0, g.ki - 1);
+            CRR_DO_MMA(cB, a, b1, 0, 1, g.ki - 1);
             CRR_MMA_END();
             __builtin_amdgcn_s_barrier(); CRR_SCHED_BARRIER();
 
@@ -2422,8 +2790,8 @@ void gemm_kernel(const layout_globals g) {
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             CRR_MMA_BEGIN();
-            crr_mma(cC, a, b0);
-            crr_mma(cD, a, b1);
+            CRR_DO_MMA(cC, a, b0, 1, 0, g.ki - 1);
+            CRR_DO_MMA(cD, a, b1, 1, 1, g.ki - 1);
             CRR_MMA_END();
             __builtin_amdgcn_s_barrier();
 #else
@@ -2458,9 +2826,9 @@ void gemm_kernel(const layout_globals g) {
             asm volatile("s_waitcnt lgkmcnt(0)");
             CRR_MMA_BEGIN();
 #if CRR_A_REG_ROW_LOAD_TRANSPOSE && CRR_A_REG_ROW_LOAD_ALIAS
-            crr_mma(cA, a, b0_keep);
+            CRR_DO_MMA(cA, a, b0_keep, 0, 0, g.ki - 1);
 #else
-            crr_mma(cA, a, b0);
+            CRR_DO_MMA(cA, a, b0, 0, 0, g.ki - 1);
 #endif
             CRR_MMA_END();
             __builtin_amdgcn_s_barrier();
@@ -2473,9 +2841,9 @@ void gemm_kernel(const layout_globals g) {
             asm volatile("s_waitcnt lgkmcnt(0)");
             CRR_MMA_BEGIN();
 #if CRR_A_REG_ROW_LOAD_TRANSPOSE && CRR_A_REG_ROW_LOAD_ALIAS
-            crr_mma(cB, a, b1_keep);
+            CRR_DO_MMA(cB, a, b1_keep, 0, 1, g.ki - 1);
 #else
-            crr_mma(cB, a, b1);
+            CRR_DO_MMA(cB, a, b1, 0, 1, g.ki - 1);
 #endif
             CRR_MMA_END();
             __builtin_amdgcn_s_barrier();
@@ -2485,17 +2853,20 @@ void gemm_kernel(const layout_globals g) {
             asm volatile("s_waitcnt lgkmcnt(0)");
             CRR_MMA_BEGIN();
 #if CRR_A_REG_ROW_LOAD_TRANSPOSE && CRR_A_REG_ROW_LOAD_ALIAS
-            crr_mma(cC, a, b0_keep);
-            crr_mma(cD, a, b1_keep);
+            CRR_DO_MMA(cC, a, b0_keep, 1, 0, g.ki - 1);
+            CRR_DO_MMA(cD, a, b1_keep, 1, 1, g.ki - 1);
 #else
-            crr_mma(cC, a, b0);
-            crr_mma(cD, a, b1);
+            CRR_DO_MMA(cC, a, b0, 1, 0, g.ki - 1);
+            CRR_DO_MMA(cD, a, b1, 1, 1, g.ki - 1);
 #endif
             CRR_MMA_END();
             __builtin_amdgcn_s_barrier();
 #endif
         #endif
-        }    }
+        }
+
+#undef CRR_DO_MMA
+    }
 
     mul(cA, cA, g.scale);
     mul(cB, cB, g.scale);
@@ -2617,8 +2988,16 @@ void dispatch(layout_globals g) {
     g.bpc = 0;
     g.ki = 0;
 
-#if MXFP8_RCR_FAST_ENABLE
+    bool enable_fast = false;
     if constexpr (L == Layout::RCR) {
+        enable_fast = MXFP8_RCR_FAST_ENABLE;
+    } else if constexpr (L == Layout::RRR) {
+        enable_fast = MXFP8_RRR_FAST_ENABLE;
+    } else {
+        enable_fast = MXFP8_CRR_FAST_ENABLE;
+    }
+
+    if (enable_fast) {
         g.fast_m = (g.m / BLK) * BLK;
         g.fast_n = (g.n / BLK) * BLK;
         g.fast_k = (g.k / BK) * BK;
@@ -2637,7 +3016,6 @@ void dispatch(layout_globals g) {
             g.ki = 0;
         }
     }
-#endif
 
     if (g.fast_m != g.m || g.fast_n != g.n || g.fast_k != g.k || g.ki == 0) {
         dim3 tail_block(TAIL_BLOCK_N, TAIL_BLOCK_M);
