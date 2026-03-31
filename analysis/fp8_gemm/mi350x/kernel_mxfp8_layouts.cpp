@@ -321,13 +321,6 @@ constexpr int TAIL_BLOCK_N = 16;
 #ifndef MXFP8_RCR_FAST_ENABLE
 #define MXFP8_RCR_FAST_ENABLE 0
 #endif
-#ifndef MXFP8_RCR_OPSEL_A
-#define MXFP8_RCR_OPSEL_A 0
-#endif
-#ifndef MXFP8_RCR_OPSEL_B
-#define MXFP8_RCR_OPSEL_B 0
-#endif
-
 using G = kittens::group<_NUM_WARPS>;
 using _gl_fp8  = gl<fp8e4m3, -1, -1, -1, -1>;
 using _gl_scale = gl<fp8e8m0, -1, -1, -1, -1>;
@@ -519,10 +512,68 @@ __device__ __forceinline__ void rcr_mma(
 #endif
 }
 
-__device__ __forceinline__ fp8e8m0_4 load_scale_pack_128(
+__device__ __forceinline__ uint32_t encode_scale_e8m0(
     const _gl_scale& src,
     int row,
-    int k_iter);
+    int k_block);
+
+__device__ __forceinline__ fp8e8m0_4 load_scale_pair_pack_16x128(
+    const _gl_scale& src,
+    int nonk_group_base,
+    int k_pair,
+    int lane_nonk,
+    int lane_kblk);
+
+template<int opsel_a, int opsel_b>
+__device__ __forceinline__ void rcr_mma_scaled_base(
+    rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
+    const A_row_reg& a,
+    const RCR_B_reg& b,
+    int n,
+    int m,
+    const fp8e8m0_4& a_scale_pack,
+    const fp8e8m0_4& b_scale_pack)
+{
+    mma_ABt_base_scaled<opsel_a, opsel_b>(
+        acc.tiles[n][m],
+        a.tiles[n][0],
+        b.tiles[m][0],
+        acc.tiles[n][m],
+        &a_scale_pack,
+        &b_scale_pack
+    );
+}
+
+__device__ __forceinline__ void rcr_mma_scaled_dispatch(
+    rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
+    const A_row_reg& a,
+    const RCR_B_reg& b,
+    int n,
+    int m,
+    int opsel_a,
+    int opsel_b,
+    const fp8e8m0_4& a_scale_pack,
+    const fp8e8m0_4& b_scale_pack)
+{
+    switch ((opsel_a << 2) | opsel_b) {
+        case 0x0: rcr_mma_scaled_base<0, 0>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0x1: rcr_mma_scaled_base<0, 1>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0x2: rcr_mma_scaled_base<0, 2>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0x3: rcr_mma_scaled_base<0, 3>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0x4: rcr_mma_scaled_base<1, 0>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0x5: rcr_mma_scaled_base<1, 1>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0x6: rcr_mma_scaled_base<1, 2>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0x7: rcr_mma_scaled_base<1, 3>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0x8: rcr_mma_scaled_base<2, 0>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0x9: rcr_mma_scaled_base<2, 1>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0xa: rcr_mma_scaled_base<2, 2>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0xb: rcr_mma_scaled_base<2, 3>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0xc: rcr_mma_scaled_base<3, 0>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0xd: rcr_mma_scaled_base<3, 1>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0xe: rcr_mma_scaled_base<3, 2>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+        case 0xf: rcr_mma_scaled_base<3, 3>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
+    }
+}
 
 __device__ __forceinline__ void rcr_mma_scaled_candidate(
     rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
@@ -530,29 +581,60 @@ __device__ __forceinline__ void rcr_mma_scaled_candidate(
     const RCR_B_reg& b,
     const _gl_scale& a_scale,
     const _gl_scale& b_scale,
-    int a_row_base,
-    int b_row_base,
+    int a_tile_base,
+    int b_tile_base,
     int k_iter)
 {
-    const int lane_row = kittens::laneid() % 16;
+    const int lane_nonk = kittens::laneid() % 16;
+    const int lane_kblk = kittens::laneid() / 16;
+    const int k_pair = k_iter / 2;
+    const int k_phase = k_iter & 1;
     constexpr int acc_h = RBM / 16;
     constexpr int acc_w = RBN / 16;
+    constexpr int a_pack_count = RBM / 32;
+    constexpr int b_pack_count = (RBN + 31) / 32;
+
+    fp8e8m0_4 a_scale_packs[a_pack_count];
+    #pragma unroll
+    for (int g = 0; g < a_pack_count; ++g) {
+        a_scale_packs[g] = load_scale_pair_pack_16x128(
+            a_scale,
+            a_tile_base + g * 32,
+            k_pair,
+            lane_nonk,
+            lane_kblk
+        );
+    }
+
+    fp8e8m0_4 b_scale_packs[b_pack_count];
+    #pragma unroll
+    for (int g = 0; g < b_pack_count; ++g) {
+        b_scale_packs[g] = load_scale_pair_pack_16x128(
+            b_scale,
+            b_tile_base + g * 32,
+            k_pair,
+            lane_nonk,
+            lane_kblk
+        );
+    }
 
     #pragma unroll
     for (int n = 0; n < acc_h; ++n) {
-        const fp8e8m0_4 a_scale_pack =
-            load_scale_pack_128(a_scale, a_row_base + n * 16 + lane_row, k_iter);
+        const int a_opsel = (k_phase << 1) | (n & 1);
+        const fp8e8m0_4 a_scale_pack = a_scale_packs[n / 2];
         #pragma unroll
         for (int m = 0; m < acc_w; ++m) {
-            const fp8e8m0_4 b_scale_pack =
-                load_scale_pack_128(b_scale, b_row_base + m * 16 + lane_row, k_iter);
-            mma_ABt_base_scaled<MXFP8_RCR_OPSEL_A, MXFP8_RCR_OPSEL_B>(
-                acc.tiles[n][m],
-                a.tiles[n][0],
-                b.tiles[m][0],
-                acc.tiles[n][m],
-                &a_scale_pack,
-                &b_scale_pack
+            const int b_opsel = (k_phase << 1) | (m & 1);
+            rcr_mma_scaled_dispatch(
+                acc,
+                a,
+                b,
+                n,
+                m,
+                a_opsel,
+                b_opsel,
+                a_scale_pack,
+                b_scale_packs[m / 2]
             );
         }
     }
@@ -616,26 +698,37 @@ __device__ __forceinline__ float load_scale_scalar(const _gl_scale& src, int row
     return __amd_scale_to_float(src[coord<>(row, k_block)]);
 }
 
-__device__ __forceinline__ fp8e8m0_4 load_scale_pack_128(
+__device__ __forceinline__ uint32_t encode_scale_e8m0(
     const _gl_scale& src,
     int row,
-    int k_iter)
+    int k_block)
 {
-    auto encode_scale = [&](int k_block) -> uint32_t {
-        constexpr int8_t scale_nan = -128;
-        constexpr uint32_t scale_bias = 127;
-        const int8_t scale_exp = src[coord<>(row, k_block)];
-        if (scale_exp == scale_nan) {
-            return 0xffu;
-        }
-        return (static_cast<uint32_t>(static_cast<uint8_t>(scale_exp)) + scale_bias) & 0xffu;
-    };
+    constexpr int8_t scale_nan = -128;
+    constexpr uint32_t scale_bias = 127;
+    constexpr uint32_t scale_one = 0x7fu;
+    if (k_block < 0 || k_block >= static_cast<int>(src.cols())) {
+        return scale_one;
+    }
 
-    const int k_base = k_iter * 4;
-    const uint32_t s0 = encode_scale(k_base + 0);
-    const uint32_t s1 = encode_scale(k_base + 1);
-    const uint32_t s2 = encode_scale(k_base + 2);
-    const uint32_t s3 = encode_scale(k_base + 3);
+    const int8_t scale_exp = src[coord<>(row, k_block)];
+    if (scale_exp == scale_nan) {
+        return 0xffu;
+    }
+    return (static_cast<uint32_t>(static_cast<uint8_t>(scale_exp)) + scale_bias) & 0xffu;
+}
+
+__device__ __forceinline__ fp8e8m0_4 load_scale_pair_pack_16x128(
+    const _gl_scale& src,
+    int nonk_group_base,
+    int k_pair,
+    int lane_nonk,
+    int lane_kblk)
+{
+    const int k_base = k_pair * 8 + lane_kblk;
+    const uint32_t s0 = encode_scale_e8m0(src, nonk_group_base + 0 * 16 + lane_nonk, k_base + 0);
+    const uint32_t s1 = encode_scale_e8m0(src, nonk_group_base + 1 * 16 + lane_nonk, k_base + 0);
+    const uint32_t s2 = encode_scale_e8m0(src, nonk_group_base + 0 * 16 + lane_nonk, k_base + 4);
+    const uint32_t s3 = encode_scale_e8m0(src, nonk_group_base + 1 * 16 + lane_nonk, k_base + 4);
     return static_cast<fp8e8m0_4>(s0 | (s1 << 8) | (s2 << 16) | (s3 << 24));
 }
 
@@ -2453,12 +2546,14 @@ void dispatch(layout_globals g) {
     }
 #endif
 
-    dim3 tail_block(TAIL_BLOCK_N, TAIL_BLOCK_M);
-    dim3 tail_grid(
-        kittens::ceil_div(g.n, TAIL_BLOCK_N),
-        kittens::ceil_div(g.m, TAIL_BLOCK_M)
-    );
-    gemm_tail_kernel<L><<<tail_grid, tail_block, 0, g.stream>>>(g);
+    if (g.fast_m != g.m || g.fast_n != g.n || g.fast_k != g.k || g.ki == 0) {
+        dim3 tail_block(TAIL_BLOCK_N, TAIL_BLOCK_M);
+        dim3 tail_grid(
+            kittens::ceil_div(g.n, TAIL_BLOCK_N),
+            kittens::ceil_div(g.m, TAIL_BLOCK_M)
+        );
+        gemm_tail_kernel<L><<<tail_grid, tail_block, 0, g.stream>>>(g);
+    }
 }
 
 PYBIND11_MODULE(tk_mxfp8_layouts, m) {
