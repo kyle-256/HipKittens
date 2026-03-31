@@ -159,6 +159,32 @@ Potental issues:
 
 Under [HipKittens/analysis](https://github.com/HazyResearch/HipKittens/tree/main/analysis) we provide scripts and instructions to benchmark all the HK kernels from our paper. This will sweep over different dimensions and settings, and we provide plotting scripts. 
 
+### FP8 layout tuning on MI350X
+
+The strict native-layout FP8 GEMM tuning harness for MI350X lives under `analysis/fp8_gemm/mi350x`.
+The main files are:
+
+- `kernel_fp8_layouts.cpp`: main dispatch, generic kernels, and exact fast-path routing.
+- `rcr_exact_4wave_fastpath.inc`: exact `RCR` 4-wave path for the fixed `8192x8192x8192` specialization.
+- `crr_exact_8wave_fastpath.inc`: stable strict `CRR` exact 8-wave path.
+- `crr_exact_4wave_fastpath.inc`: experimental strict `CRR` 4-wave path, kept separate for tuning.
+- `crr_exact_8wave_double_pump_fastpath.inc`: experimental strict `CRR` 8-wave double-pump schedule, split out from the stable path for isolated benchmarking.
+
+Build and run the formal MI350X FP8 benchmark from `analysis/fp8_gemm/mi350x`:
+
+```bash
+THUNDERKITTENS_ROOT=/workdir/HipKittens ROCM_PATH=/opt/rocm make -j4
+HIP_VISIBLE_DEVICES=7 FP8_WARMUP=50 FP8_ITERS=200 FP8_LAYOUTS=rcr,rrr,crr FP8_CHECK=1 FP8_DETERMINISM_RUNS=5 python3 test_python.py 8192 8192 8192
+```
+
+For `CRR`, the exact-path variants are selected at build time with macros:
+
+- `CRR_USE_EXACT_8WAVE_FASTPATH=1`: stable strict `CRR` 8-wave exact path.
+- `CRR_USE_EXACT_4WAVE_FASTPATH=1`: experimental strict `CRR` 4-wave exact path.
+- `CRR_USE_EXACT_8WAVE_DOUBLE_PUMP_FASTPATH=1`: experimental strict `CRR` 8-wave double-pump variant.
+
+Only enable one strict `CRR` exact variant at a time when benchmarking so the routing is unambiguous.
+
 **Note:** We also provide the instructions to reproduce our baselines (Triton, CK, HipBLASLT, Mojo, etc.) in [HipKittens/analysis/baselines](https://github.com/HazyResearch/HipKittens/tree/main/analysis/baselines)! As these are constantly evolving frameworks, we remind that our results are collected in November 2025.
 
 ## Training
