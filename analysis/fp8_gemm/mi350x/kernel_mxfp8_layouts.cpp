@@ -540,6 +540,15 @@ __device__ __forceinline__ fp8e8m0_4 load_scale_pair_pack_16x128_preshuffled(
     int lane_nonk,
     int lane_kblk);
 
+__device__ __forceinline__ const uint8_t* preshuffled_scale_row_base_ptr(
+    const _gl_scale& src,
+    int row_group);
+
+__device__ __forceinline__ fp8e8m0_4 load_scale_pair_pack_16x128_preshuffled_from_row_base(
+    const uint8_t* row_base,
+    int k_pair,
+    uint32_t lane_byte_offset);
+
 template<int opsel_a, int opsel_b>
 __device__ __forceinline__ void rcr_mma_scaled_base(
     rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
@@ -1365,6 +1374,25 @@ __device__ __forceinline__ fp8e8m0_4 load_scale_pair_pack_16x128_preshuffled(
     );
 }
 
+__device__ __forceinline__ const uint8_t* preshuffled_scale_row_base_ptr(
+    const _gl_scale& src,
+    int row_group)
+{
+    const int index = src.idx(coord<>(row_group, 0));
+    return reinterpret_cast<const uint8_t*>(src.raw_ptr + index);
+}
+
+__device__ __forceinline__ fp8e8m0_4 load_scale_pair_pack_16x128_preshuffled_from_row_base(
+    const uint8_t* row_base,
+    int k_pair,
+    uint32_t lane_byte_offset)
+{
+    const uint32_t byte_offset = (static_cast<uint32_t>(k_pair) << 8) + lane_byte_offset;
+    return std::bit_cast<fp8e8m0_4>(
+        *reinterpret_cast<const uint32_t*>(row_base + byte_offset)
+    );
+}
+
 __device__ __forceinline__ void store_bf16_scalar(const _gl_bf16& dst, int row, int col, float value) {
     dst[coord<>(row, col)] = base_types::convertor<bf16, float>::convert(value);
 }
@@ -1732,43 +1760,103 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
     fp8e8m0_4 a1_scale_packs[RBM / 32];
     fp8e8m0_4 b0_scale_packs[(RBN + 31) / 32];
     fp8e8m0_4 b1_scale_packs[(RBN + 31) / 32];
+    const uint32_t lane_scale_byte_offset =
+        (static_cast<uint32_t>(lane_kblk) << 6) |
+        (static_cast<uint32_t>(lane_nonk) << 2);
+    const uint8_t* a0_scale_row_bases[RBM / 32];
+    const uint8_t* a1_scale_row_bases[RBM / 32];
+    const uint8_t* b0_scale_row_bases[(RBN + 31) / 32];
+    const uint8_t* b1_scale_row_bases[(RBN + 31) / 32];
+    if constexpr (PRESHUFFLED_QUANT) {
+        #pragma unroll
+        for (int pack_idx = 0; pack_idx < RBM / 32; ++pack_idx) {
+            a0_scale_row_bases[pack_idx] = preshuffled_scale_row_base_ptr(
+                g.a_scale,
+                (rcr_scale_a_base(0) + pack_idx * 32) >> 5
+            );
+            a1_scale_row_bases[pack_idx] = preshuffled_scale_row_base_ptr(
+                g.a_scale,
+                (rcr_scale_a_base(1) + pack_idx * 32) >> 5
+            );
+        }
+        #pragma unroll
+        for (int pack_idx = 0; pack_idx < (RBN + 31) / 32; ++pack_idx) {
+            b0_scale_row_bases[pack_idx] = preshuffled_scale_row_base_ptr(
+                g.b_scale,
+                (rcr_scale_b_base(0) + pack_idx * 32) >> 5
+            );
+            b1_scale_row_bases[pack_idx] = preshuffled_scale_row_base_ptr(
+                g.b_scale,
+                (rcr_scale_b_base(1) + pack_idx * 32) >> 5
+            );
+        }
+    }
     int cached_k_pair = -1;
     auto ensure_scale_packs = [&](int k_pair) {
         if (k_pair == cached_k_pair) {
             return;
         }
-        load_scale_packs_16x128<PRESHUFFLED_QUANT>(
-            a0_scale_packs,
-            g.a_scale,
-            rcr_scale_a_base(0),
-            k_pair,
-            lane_nonk,
-            lane_kblk
-        );
-        load_scale_packs_16x128<PRESHUFFLED_QUANT>(
-            a1_scale_packs,
-            g.a_scale,
-            rcr_scale_a_base(1),
-            k_pair,
-            lane_nonk,
-            lane_kblk
-        );
-        load_scale_packs_16x128<PRESHUFFLED_QUANT>(
-            b0_scale_packs,
-            g.b_scale,
-            rcr_scale_b_base(0),
-            k_pair,
-            lane_nonk,
-            lane_kblk
-        );
-        load_scale_packs_16x128<PRESHUFFLED_QUANT>(
-            b1_scale_packs,
-            g.b_scale,
-            rcr_scale_b_base(1),
-            k_pair,
-            lane_nonk,
-            lane_kblk
-        );
+        if constexpr (PRESHUFFLED_QUANT) {
+            #pragma unroll
+            for (int pack_idx = 0; pack_idx < RBM / 32; ++pack_idx) {
+                a0_scale_packs[pack_idx] = load_scale_pair_pack_16x128_preshuffled_from_row_base(
+                    a0_scale_row_bases[pack_idx],
+                    k_pair,
+                    lane_scale_byte_offset
+                );
+                a1_scale_packs[pack_idx] = load_scale_pair_pack_16x128_preshuffled_from_row_base(
+                    a1_scale_row_bases[pack_idx],
+                    k_pair,
+                    lane_scale_byte_offset
+                );
+            }
+            #pragma unroll
+            for (int pack_idx = 0; pack_idx < (RBN + 31) / 32; ++pack_idx) {
+                b0_scale_packs[pack_idx] = load_scale_pair_pack_16x128_preshuffled_from_row_base(
+                    b0_scale_row_bases[pack_idx],
+                    k_pair,
+                    lane_scale_byte_offset
+                );
+                b1_scale_packs[pack_idx] = load_scale_pair_pack_16x128_preshuffled_from_row_base(
+                    b1_scale_row_bases[pack_idx],
+                    k_pair,
+                    lane_scale_byte_offset
+                );
+            }
+        } else {
+            load_scale_packs_16x128<false>(
+                a0_scale_packs,
+                g.a_scale,
+                rcr_scale_a_base(0),
+                k_pair,
+                lane_nonk,
+                lane_kblk
+            );
+            load_scale_packs_16x128<false>(
+                a1_scale_packs,
+                g.a_scale,
+                rcr_scale_a_base(1),
+                k_pair,
+                lane_nonk,
+                lane_kblk
+            );
+            load_scale_packs_16x128<false>(
+                b0_scale_packs,
+                g.b_scale,
+                rcr_scale_b_base(0),
+                k_pair,
+                lane_nonk,
+                lane_kblk
+            );
+            load_scale_packs_16x128<false>(
+                b1_scale_packs,
+                g.b_scale,
+                rcr_scale_b_base(1),
+                k_pair,
+                lane_nonk,
+                lane_kblk
+            );
+        }
         cached_k_pair = k_pair;
     };
 
