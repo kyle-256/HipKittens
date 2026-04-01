@@ -547,16 +547,16 @@ __device__ __forceinline__ void rcr_mma_scaled_base(
     const RCR_B_reg& b,
     int n,
     int m,
-    const fp8e8m0_4& a_scale_pack,
-    const fp8e8m0_4& b_scale_pack)
+    const fp8e8m0_4 a_scale_pack,
+    const fp8e8m0_4 b_scale_pack)
 {
     mma_ABt_base_scaled<opsel_a, opsel_b>(
         acc.tiles[n][m],
         a.tiles[n][0],
         b.tiles[m][0],
         acc.tiles[n][m],
-        &a_scale_pack,
-        &b_scale_pack
+        a_scale_pack,
+        b_scale_pack
     );
 }
 
@@ -568,8 +568,8 @@ __device__ __forceinline__ void rcr_mma_scaled_dispatch(
     int m,
     int opsel_a,
     int opsel_b,
-    const fp8e8m0_4& a_scale_pack,
-    const fp8e8m0_4& b_scale_pack)
+    const fp8e8m0_4 a_scale_pack,
+    const fp8e8m0_4 b_scale_pack)
 {
     switch ((opsel_a << 2) | opsel_b) {
         case 0x0: rcr_mma_scaled_base<0, 0>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
@@ -744,54 +744,143 @@ __device__ __forceinline__ void rcr_mma_scaled_from_packs(
     }
 }
 
-template<int K_PHASE, int A_PACK_COUNT, int B_PACK_COUNT, size_t... I>
-__device__ __forceinline__ void rcr_mma_scaled_from_packs_phase_impl(
-    rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
+using rcr_exact_intx8_t = int __attribute__((__vector_size__(8 * sizeof(int))));
+using rcr_exact_floatx4_t = float __attribute__((__vector_size__(4 * sizeof(float))));
+
+struct alignas(16) rcr_exact_acc {
+    rcr_exact_floatx4_t regs[(RBM / 16) * (RBN / 16)];
+};
+
+template<int OPSEL_A, int OPSEL_B>
+__device__ __forceinline__ void rcr_exact_mfma_scale_builtin_inplace(
+    rcr_exact_floatx4_t& d,
+    const rcr_exact_intx8_t& a,
+    const rcr_exact_intx8_t& b,
+    fp8e8m0_4 scale_a,
+    fp8e8m0_4 scale_b)
+{
+    d = __builtin_amdgcn_mfma_scale_f32_16x16x128_f8f6f4(
+        a,
+        b,
+        d,
+        0,
+        0,
+        OPSEL_A,
+        scale_a,
+        OPSEL_B,
+        scale_b
+    );
+}
+
+template<typename RT_C>
+__device__ __forceinline__ void rcr_exact_acc_to_rt(
+    RT_C& dst,
+    const rcr_exact_acc& src,
+    float scale)
+{
+    static_assert(RT_C::rows == RBM && RT_C::cols == RBN, "unexpected exact accumulator shape");
+
+    #pragma unroll
+    for (int row = 0; row < (RBM / 16); ++row) {
+        #pragma unroll
+        for (int col = 0; col < (RBN / 16); ++col) {
+            *reinterpret_cast<rcr_exact_floatx4_t*>(&dst.tiles[row][col].data[0]) =
+                src.regs[row * (RBN / 16) + col] * scale;
+        }
+    }
+}
+
+template<int K_PHASE, int ROW_BASE, int A_PACK_COUNT, int B_PACK_COUNT>
+__device__ __forceinline__ void rcr_mma_scaled_from_packs_phase_row(
+    rcr_exact_acc& acc,
     const A_row_reg& a,
     const RCR_B_reg& b,
     const fp8e8m0_4 (&a_scale_packs)[A_PACK_COUNT],
-    const fp8e8m0_4 (&b_scale_packs)[B_PACK_COUNT],
-    std::index_sequence<I...>)
+    const fp8e8m0_4 (&b_scale_packs)[B_PACK_COUNT])
 {
-    constexpr int acc_w = RBN / 16;
-    static_assert(A_PACK_COUNT >= (RBM / 32), "insufficient A scale packs");
-    static_assert(B_PACK_COUNT >= ((RBN + 31) / 32), "insufficient B scale packs");
+    static_assert(RBM == 64 && RBN == 32, "RCR exact builtin helper expects a 64x32 accumulator tile");
+    static_assert(ROW_BASE >= 0 && ROW_BASE < 4, "invalid row base");
+    static_assert(A_PACK_COUNT >= 2, "RCR exact builtin helper expects two A scale packs");
+    static_assert(B_PACK_COUNT >= 1, "RCR exact builtin helper expects one B scale pack");
 
-    (
-        rcr_mma_scaled_base<
-            (K_PHASE << 1) | ((static_cast<int>(I) / acc_w) & 1),
-            (K_PHASE << 1) | (static_cast<int>(I) % acc_w & 1)
-        >(
-            acc,
-            a,
-            b,
-            static_cast<int>(I) / acc_w,
-            static_cast<int>(I) % acc_w,
-            a_scale_packs[(static_cast<int>(I) / acc_w) / 2],
-            b_scale_packs[(static_cast<int>(I) % acc_w) / 2]
-        ),
-        ...
+    auto& d0 = acc.regs[ROW_BASE * (RBN / 16) + 0];
+    auto& d1 = acc.regs[ROW_BASE * (RBN / 16) + 1];
+
+    const auto& a0 = *reinterpret_cast<const rcr_exact_intx8_t*>(&a.tiles[ROW_BASE][0].data[0]);
+    const auto& b0 = *reinterpret_cast<const rcr_exact_intx8_t*>(&b.tiles[0][0].data[0]);
+    const auto& b1 = *reinterpret_cast<const rcr_exact_intx8_t*>(&b.tiles[1][0].data[0]);
+    const fp8e8m0_4 a_scale0 = a_scale_packs[ROW_BASE / 2];
+    const fp8e8m0_4 b_scale0 = b_scale_packs[0];
+
+    if constexpr (K_PHASE == 0 && ((ROW_BASE & 1) == 0)) {
+        rcr_exact_mfma_scale_builtin_inplace<0, 0>(d0, a0, b0, a_scale0, b_scale0);
+        rcr_exact_mfma_scale_builtin_inplace<0, 1>(d1, a0, b1, a_scale0, b_scale0);
+    } else if constexpr (K_PHASE == 0 && ((ROW_BASE & 1) == 1)) {
+        rcr_exact_mfma_scale_builtin_inplace<1, 0>(d0, a0, b0, a_scale0, b_scale0);
+        rcr_exact_mfma_scale_builtin_inplace<1, 1>(d1, a0, b1, a_scale0, b_scale0);
+    } else if constexpr (K_PHASE == 1 && ((ROW_BASE & 1) == 0)) {
+        rcr_exact_mfma_scale_builtin_inplace<2, 2>(d0, a0, b0, a_scale0, b_scale0);
+        rcr_exact_mfma_scale_builtin_inplace<2, 3>(d1, a0, b1, a_scale0, b_scale0);
+    } else {
+        rcr_exact_mfma_scale_builtin_inplace<3, 2>(d0, a0, b0, a_scale0, b_scale0);
+        rcr_exact_mfma_scale_builtin_inplace<3, 3>(d1, a0, b1, a_scale0, b_scale0);
+    }
+}
+
+template<int K_PHASE, int A_PACK_COUNT, int B_PACK_COUNT>
+__device__ __forceinline__ void rcr_mma_scaled_from_packs_phase_impl(
+    rcr_exact_acc& acc,
+    const A_row_reg& a,
+    const RCR_B_reg& b,
+    const fp8e8m0_4 (&a_scale_packs)[A_PACK_COUNT],
+    const fp8e8m0_4 (&b_scale_packs)[B_PACK_COUNT])
+{
+    rcr_mma_scaled_from_packs_phase_row<K_PHASE, 0>(
+        acc,
+        a,
+        b,
+        a_scale_packs,
+        b_scale_packs
+    );
+    rcr_mma_scaled_from_packs_phase_row<K_PHASE, 1>(
+        acc,
+        a,
+        b,
+        a_scale_packs,
+        b_scale_packs
+    );
+    rcr_mma_scaled_from_packs_phase_row<K_PHASE, 2>(
+        acc,
+        a,
+        b,
+        a_scale_packs,
+        b_scale_packs
+    );
+    rcr_mma_scaled_from_packs_phase_row<K_PHASE, 3>(
+        acc,
+        a,
+        b,
+        a_scale_packs,
+        b_scale_packs
     );
 }
 
 template<int A_PACK_COUNT, int B_PACK_COUNT>
 __device__ __forceinline__ void rcr_mma_scaled_from_packs_phase(
-    rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
+    rcr_exact_acc& acc,
     const A_row_reg& a,
     const RCR_B_reg& b,
     const fp8e8m0_4 (&a_scale_packs)[A_PACK_COUNT],
     const fp8e8m0_4 (&b_scale_packs)[B_PACK_COUNT],
     int k_phase)
 {
-    constexpr int acc_tiles = (RBM / 16) * (RBN / 16);
     if (k_phase == 0) {
         rcr_mma_scaled_from_packs_phase_impl<0>(
             acc,
             a,
             b,
             a_scale_packs,
-            b_scale_packs,
-            std::make_index_sequence<acc_tiles>{}
+            b_scale_packs
         );
     } else {
         rcr_mma_scaled_from_packs_phase_impl<1>(
@@ -799,8 +888,7 @@ __device__ __forceinline__ void rcr_mma_scaled_from_packs_phase(
             a,
             b,
             a_scale_packs,
-            b_scale_packs,
-            std::make_index_sequence<acc_tiles>{}
+            b_scale_packs
         );
     }
 }
@@ -814,25 +902,35 @@ __device__ __forceinline__ void rcr_mma_scaled_from_packs_exact(
     const fp8e8m0_4 (&b_scale_packs)[B_PACK_COUNT],
     int k_phase)
 {
-    if constexpr (USE_PHASE_DISPATCH) {
-        rcr_mma_scaled_from_packs_phase(
-            acc,
-            a,
-            b,
-            a_scale_packs,
-            b_scale_packs,
-            k_phase
-        );
-    } else {
-        rcr_mma_scaled_from_packs(
-            acc,
-            a,
-            b,
-            a_scale_packs,
-            b_scale_packs,
-            k_phase
-        );
-    }
+    static_assert(!USE_PHASE_DISPATCH, "RT_C exact helper is only for the non-PQ path");
+    rcr_mma_scaled_from_packs(
+        acc,
+        a,
+        b,
+        a_scale_packs,
+        b_scale_packs,
+        k_phase
+    );
+}
+
+template<bool USE_PHASE_DISPATCH, int A_PACK_COUNT, int B_PACK_COUNT>
+__device__ __forceinline__ void rcr_mma_scaled_from_packs_exact(
+    rcr_exact_acc& acc,
+    const A_row_reg& a,
+    const RCR_B_reg& b,
+    const fp8e8m0_4 (&a_scale_packs)[A_PACK_COUNT],
+    const fp8e8m0_4 (&b_scale_packs)[B_PACK_COUNT],
+    int k_phase)
+{
+    (void)USE_PHASE_DISPATCH;
+    rcr_mma_scaled_from_packs_phase(
+        acc,
+        a,
+        b,
+        a_scale_packs,
+        b_scale_packs,
+        k_phase
+    );
 }
 
 template<int opsel_a, int opsel_b>
@@ -842,8 +940,8 @@ __device__ __forceinline__ void rrr_mma_scaled_base(
     const B_col_reg& b,
     int n,
     int m,
-    const fp8e8m0_4& a_scale_pack,
-    const fp8e8m0_4& b_scale_pack)
+    const fp8e8m0_4 a_scale_pack,
+    const fp8e8m0_4 b_scale_pack)
 {
 #if RRR_B_REG_ROW_LOAD_TRANSPOSE && RRR_B_REG_ROW_LOAD_ALIAS
     const auto& b_row = reinterpret_cast<const B_row_reg&>(b);
@@ -852,8 +950,8 @@ __device__ __forceinline__ void rrr_mma_scaled_base(
         a.tiles[n][0],
         b_row.tiles[m][0],
         acc.tiles[n][m],
-        &a_scale_pack,
-        &b_scale_pack
+        a_scale_pack,
+        b_scale_pack
     );
 #else
     mma_AB_base_scaled<opsel_a, opsel_b>(
@@ -861,8 +959,8 @@ __device__ __forceinline__ void rrr_mma_scaled_base(
         a.tiles[n][0],
         b.tiles[0][m],
         acc.tiles[n][m],
-        &a_scale_pack,
-        &b_scale_pack
+        a_scale_pack,
+        b_scale_pack
     );
 #endif
 }
@@ -875,8 +973,8 @@ __device__ __forceinline__ void rrr_mma_scaled_dispatch(
     int m,
     int opsel_a,
     int opsel_b,
-    const fp8e8m0_4& a_scale_pack,
-    const fp8e8m0_4& b_scale_pack)
+    const fp8e8m0_4 a_scale_pack,
+    const fp8e8m0_4 b_scale_pack)
 {
     switch ((opsel_a << 2) | opsel_b) {
         case 0x0: rrr_mma_scaled_base<0, 0>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
@@ -991,8 +1089,8 @@ __device__ __forceinline__ void crr_mma_scaled_base(
     const B_col_reg& b,
     int n,
     int m,
-    const fp8e8m0_4& a_scale_pack,
-    const fp8e8m0_4& b_scale_pack)
+    const fp8e8m0_4 a_scale_pack,
+    const fp8e8m0_4 b_scale_pack)
 {
 #if CRR_A_REG_ROW_LOAD_TRANSPOSE && CRR_A_REG_ROW_LOAD_ALIAS
     const auto& a_row = reinterpret_cast<const A_row_reg&>(a);
@@ -1003,8 +1101,8 @@ __device__ __forceinline__ void crr_mma_scaled_base(
         a_row.tiles[n][0],
         b_row.tiles[m][0],
         acc.tiles[n][m],
-        &a_scale_pack,
-        &b_scale_pack
+        a_scale_pack,
+        b_scale_pack
     );
     #else
     mma_AB_base_scaled<opsel_a, opsel_b>(
@@ -1012,8 +1110,8 @@ __device__ __forceinline__ void crr_mma_scaled_base(
         a_row.tiles[n][0],
         b.tiles[0][m],
         acc.tiles[n][m],
-        &a_scale_pack,
-        &b_scale_pack
+        a_scale_pack,
+        b_scale_pack
     );
     #endif
 #else
@@ -1022,8 +1120,8 @@ __device__ __forceinline__ void crr_mma_scaled_base(
         a.tiles[0][n],
         b.tiles[0][m],
         acc.tiles[n][m],
-        &a_scale_pack,
-        &b_scale_pack
+        a_scale_pack,
+        b_scale_pack
     );
 #endif
 }
@@ -1036,8 +1134,8 @@ __device__ __forceinline__ void crr_mma_scaled_dispatch(
     int m,
     int opsel_a,
     int opsel_b,
-    const fp8e8m0_4& a_scale_pack,
-    const fp8e8m0_4& b_scale_pack)
+    const fp8e8m0_4 a_scale_pack,
+    const fp8e8m0_4 b_scale_pack)
 {
     switch ((opsel_a << 2) | opsel_b) {
         case 0x0: crr_mma_scaled_base<0, 0>(acc, a, b, n, m, a_scale_pack, b_scale_pack); break;
@@ -1609,11 +1707,14 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
     using RT_A = A_row_reg;
     using RT_B = B_row_reg;
     using RT_C = rt_fl<RBM, RBN, col_l, rt_16x16_s>;
+    using ExactAcc = std::conditional_t<PRESHUFFLED_QUANT, rcr_exact_acc, RT_C>;
 
     RT_A a;
     RT_B b0, b1;
-    RT_C cA, cB, cC, cD;
-    zero(cA); zero(cB); zero(cC); zero(cD);
+    ExactAcc cA{}, cB{}, cC{}, cD{};
+    if constexpr (!PRESHUFFLED_QUANT) {
+        zero(cA); zero(cB); zero(cC); zero(cD);
+    }
 
     const int bid = blockIdx.x;
     const int br = bid / blocks_per_col;
@@ -1852,26 +1953,48 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
         __builtin_amdgcn_s_barrier();
     }
 
-    mul(cA, cA, g.scale);
-    mul(cB, cB, g.scale);
-    mul(cC, cC, g.scale);
-    mul(cD, cD, g.scale);
-
     if (wm == 0) {
         __builtin_amdgcn_s_barrier();
     }
 
+    if constexpr (PRESHUFFLED_QUANT) {
+        RT_C c_store;
 #if RCR_SWAP_STORE_HALVES
-    store(g.c, cB, {0, 0, br * WARPS_M * 2 + wm,         bc * WARPS_N * 2 + wn});
-    store(g.c, cA, {0, 0, br * WARPS_M * 2 + wm,         bc * WARPS_N * 2 + WARPS_N + wn});
-    store(g.c, cD, {0, 0, br * WARPS_M * 2 + WARPS_M + wm, bc * WARPS_N * 2 + wn});
-    store(g.c, cC, {0, 0, br * WARPS_M * 2 + WARPS_M + wm, bc * WARPS_N * 2 + WARPS_N + wn});
+        rcr_exact_acc_to_rt(c_store, cB, g.scale);
+        store(g.c, c_store, {0, 0, br * WARPS_M * 2 + wm,         bc * WARPS_N * 2 + wn});
+        rcr_exact_acc_to_rt(c_store, cA, g.scale);
+        store(g.c, c_store, {0, 0, br * WARPS_M * 2 + wm,         bc * WARPS_N * 2 + WARPS_N + wn});
+        rcr_exact_acc_to_rt(c_store, cD, g.scale);
+        store(g.c, c_store, {0, 0, br * WARPS_M * 2 + WARPS_M + wm, bc * WARPS_N * 2 + wn});
+        rcr_exact_acc_to_rt(c_store, cC, g.scale);
+        store(g.c, c_store, {0, 0, br * WARPS_M * 2 + WARPS_M + wm, bc * WARPS_N * 2 + WARPS_N + wn});
 #else
-    store(g.c, cA, {0, 0, br * WARPS_M * 2 + wm,         bc * WARPS_N * 2 + wn});
-    store(g.c, cB, {0, 0, br * WARPS_M * 2 + wm,         bc * WARPS_N * 2 + WARPS_N + wn});
-    store(g.c, cC, {0, 0, br * WARPS_M * 2 + WARPS_M + wm, bc * WARPS_N * 2 + wn});
-    store(g.c, cD, {0, 0, br * WARPS_M * 2 + WARPS_M + wm, bc * WARPS_N * 2 + WARPS_N + wn});
+        rcr_exact_acc_to_rt(c_store, cA, g.scale);
+        store(g.c, c_store, {0, 0, br * WARPS_M * 2 + wm,         bc * WARPS_N * 2 + wn});
+        rcr_exact_acc_to_rt(c_store, cB, g.scale);
+        store(g.c, c_store, {0, 0, br * WARPS_M * 2 + wm,         bc * WARPS_N * 2 + WARPS_N + wn});
+        rcr_exact_acc_to_rt(c_store, cC, g.scale);
+        store(g.c, c_store, {0, 0, br * WARPS_M * 2 + WARPS_M + wm, bc * WARPS_N * 2 + wn});
+        rcr_exact_acc_to_rt(c_store, cD, g.scale);
+        store(g.c, c_store, {0, 0, br * WARPS_M * 2 + WARPS_M + wm, bc * WARPS_N * 2 + WARPS_N + wn});
 #endif
+    } else {
+        mul(cA, cA, g.scale);
+        mul(cB, cB, g.scale);
+        mul(cC, cC, g.scale);
+        mul(cD, cD, g.scale);
+#if RCR_SWAP_STORE_HALVES
+        store(g.c, cB, {0, 0, br * WARPS_M * 2 + wm,         bc * WARPS_N * 2 + wn});
+        store(g.c, cA, {0, 0, br * WARPS_M * 2 + wm,         bc * WARPS_N * 2 + WARPS_N + wn});
+        store(g.c, cD, {0, 0, br * WARPS_M * 2 + WARPS_M + wm, bc * WARPS_N * 2 + wn});
+        store(g.c, cC, {0, 0, br * WARPS_M * 2 + WARPS_M + wm, bc * WARPS_N * 2 + WARPS_N + wn});
+#else
+        store(g.c, cA, {0, 0, br * WARPS_M * 2 + wm,         bc * WARPS_N * 2 + wn});
+        store(g.c, cB, {0, 0, br * WARPS_M * 2 + wm,         bc * WARPS_N * 2 + WARPS_N + wn});
+        store(g.c, cC, {0, 0, br * WARPS_M * 2 + WARPS_M + wm, bc * WARPS_N * 2 + wn});
+        store(g.c, cD, {0, 0, br * WARPS_M * 2 + WARPS_M + wm, bc * WARPS_N * 2 + WARPS_N + wn});
+#endif
+    }
 }
 
 __host__ inline bool rcr_can_use_exact_8wave_scaled(const layout_globals& g) {

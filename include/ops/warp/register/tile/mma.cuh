@@ -129,8 +129,8 @@ __device__ static inline void mfma1616128_scaled(      float2 (&D)[2],
                                                  const fp8e4m3_4 (&A)[8],
                                                  const fp8e4m3_4 (&B)[8],
                                                  const float2 (&C)[2],
-                                                 const fp8e8m0_4 *scale_a,
-                                                 const fp8e8m0_4 *scale_b) {
+                                                 const fp8e8m0_4 scale_a,
+                                                 const fp8e8m0_4 scale_b) {
     typedef __attribute__((__vector_size__(8 * sizeof(int)))) int intx8_t;
     typedef __attribute__((__vector_size__(4 * sizeof(float)))) float floatx4_t;
 
@@ -141,12 +141,11 @@ __device__ static inline void mfma1616128_scaled(      float2 (&D)[2],
         0,
         0,
         opsel_a,
-        *scale_a,
+        scale_a,
         opsel_b,
-        *scale_b
+        scale_b
     )};
 }
-
 
 /**
  * @brief Base matrix multiply-accumulate operation for row layout.
@@ -202,8 +201,8 @@ __device__ static inline void mma_AB_base_scaled(rt_base<float, ducks::rt_layout
                                                  const rt_base<MM_Operand_T, ducks::rt_layout::row, A_shape> &a,
                                                  const rt_base<MM_Operand_T, ducks::rt_layout::col, B_shape> &b,
                                                  const rt_base<float, ducks::rt_layout::col, C_shape> &c,
-                                                 const fp8e8m0_4 *scale_a,
-                                                 const fp8e8m0_4 *scale_b) {
+                                                 const fp8e8m0_4 scale_a,
+                                                 const fp8e8m0_4 scale_b) {
 
     static_assert(std::is_same_v<D_shape, C_shape>, "D and C must have the same shape");
 
@@ -232,8 +231,8 @@ __device__ static inline void mma_AB_scaled_one(D &d,
                                                 const A &a,
                                                 const B &b,
                                                 const C &c,
-                                                const fp8e8m0_4 *scale_a,
-                                                const fp8e8m0_4 *scale_b) {
+                                                const fp8e8m0_4 scale_a,
+                                                const fp8e8m0_4 scale_b) {
     mma_AB_base_scaled<n, m>(
         d.tiles[n][m],
         a.tiles[n][0],
@@ -313,8 +312,8 @@ __device__ static inline void mma_ABt_base_scaled(rt_base<float, ducks::rt_layou
     const rt_base<MM_Operand_T, ducks::rt_layout::row, A_shape> &a,
     const rt_base<MM_Operand_T, ducks::rt_layout::row, B_shape> &b,
     const rt_base<float, ducks::rt_layout::col, C_shape> &c,
-    const fp8e8m0_4 *scale_a,
-    const fp8e8m0_4 *scale_b) {
+    const fp8e8m0_4 scale_a,
+    const fp8e8m0_4 scale_b) {
 
     static_assert(std::is_same_v<D_shape, C_shape>, "D and C must have the same shape");
 
@@ -343,8 +342,8 @@ __device__ static inline void mma_ABt_scaled_one(D &d,
                                                  const A &a,
                                                  const B &b,
                                                  const C &c,
-                                                 const fp8e8m0_4 *scale_a,
-                                                 const fp8e8m0_4 *scale_b) {
+                                                 const fp8e8m0_4 scale_a,
+                                                 const fp8e8m0_4 scale_b) {
     mma_ABt_base_scaled<n, m>(
         d.tiles[n][m],
         a.tiles[n][0],
@@ -425,8 +424,8 @@ __device__ static inline void mma_AtB_base_scaled(rt_base<float, ducks::rt_layou
                                                   const rt_base<MM_Operand_T, ducks::rt_layout::col, A_shape> &a,
                                                   const rt_base<MM_Operand_T, ducks::rt_layout::col, B_shape> &b,
                                                   const rt_base<float, ducks::rt_layout::col, C_shape> &c,
-                                                  const fp8e8m0_4 *scale_a,
-                                                  const fp8e8m0_4 *scale_b) {
+                                                  const fp8e8m0_4 scale_a,
+                                                  const fp8e8m0_4 scale_b) {
 
     static_assert(std::is_same_v<D_shape, C_shape>, "D and C must have the same shape");
 
@@ -455,8 +454,8 @@ __device__ static inline void mma_AtB_scaled_one(D &d,
                                                  const A &a,
                                                  const B &b,
                                                  const C &c,
-                                                 const fp8e8m0_4 *scale_a,
-                                                 const fp8e8m0_4 *scale_b) {
+                                                 const fp8e8m0_4 scale_a,
+                                                 const fp8e8m0_4 scale_b) {
     mma_AtB_base_scaled<n, m>(
         d.tiles[n][m],
         a.tiles[0][n],
@@ -581,8 +580,8 @@ __device__ static inline void mma_AB_scaled_impl(D &d,
                                                  const A &a,
                                                  const B &b,
                                                  const C &c,
-                                                 const fp8e8m0_4 *scale_a,
-                                                 const fp8e8m0_4 *scale_b,
+                                                 const fp8e8m0_4 scale_a,
+                                                 const fp8e8m0_4 scale_b,
                                                  std::index_sequence<I...>) {
     (mma_AB_scaled_one<I / D::width, I % D::width>(d, a, b, c, scale_a, scale_b), ...);
 }
@@ -592,8 +591,8 @@ __device__ static inline void mma_AB_scaled(D &d,
                                             const A &a,
                                             const B &b,
                                             const C &c,
-                                            const fp8e8m0_4 *scale_a,
-                                            const fp8e8m0_4 *scale_b) {
+                                            const fp8e8m0_4 scale_a,
+                                            const fp8e8m0_4 scale_b) {
     static_assert(D::rows == A::rows && D::cols == B::cols);
     static_assert(A::cols == B::rows);
     static_assert(D::rows == C::rows && D::cols == C::cols);
@@ -669,8 +668,8 @@ __device__ static inline void mma_ABt_scaled_impl(D &d,
                                                   const A &a,
                                                   const B &b,
                                                   const C &c,
-                                                  const fp8e8m0_4 *scale_a,
-                                                  const fp8e8m0_4 *scale_b,
+                                                  const fp8e8m0_4 scale_a,
+                                                  const fp8e8m0_4 scale_b,
                                                   std::index_sequence<I...>) {
     (mma_ABt_scaled_one<I / D::width, I % D::width>(d, a, b, c, scale_a, scale_b), ...);
 }
@@ -680,8 +679,8 @@ __device__ static inline void mma_ABt_scaled(D &d,
                                              const A &a,
                                              const B &b,
                                              const C &c,
-                                             const fp8e8m0_4 *scale_a,
-                                             const fp8e8m0_4 *scale_b) {
+                                             const fp8e8m0_4 scale_a,
+                                             const fp8e8m0_4 scale_b) {
     static_assert(D::rows == A::rows && D::cols == B::rows);
     static_assert(A::cols == B::cols);
     static_assert(D::rows == C::rows && D::cols == C::cols);
@@ -755,8 +754,8 @@ __device__ static inline void mma_AtB_scaled_impl(D &d,
                                                   const A &a,
                                                   const B &b,
                                                   const C &c,
-                                                  const fp8e8m0_4 *scale_a,
-                                                  const fp8e8m0_4 *scale_b,
+                                                  const fp8e8m0_4 scale_a,
+                                                  const fp8e8m0_4 scale_b,
                                                   std::index_sequence<I...>) {
     (mma_AtB_scaled_one<I / D::width, I % D::width>(d, a, b, c, scale_a, scale_b), ...);
 }
@@ -766,8 +765,8 @@ __device__ static inline void mma_AtB_scaled(D &d,
                                              const A &a,
                                              const B &b,
                                              const C &c,
-                                             const fp8e8m0_4 *scale_a,
-                                             const fp8e8m0_4 *scale_b) {
+                                             const fp8e8m0_4 scale_a,
+                                             const fp8e8m0_4 scale_b) {
     static_assert(D::rows == A::cols && D::cols == B::cols);
     static_assert(A::rows == B::rows);
     static_assert(D::rows == C::rows && D::cols == C::cols);
@@ -834,4 +833,5 @@ __device__ static inline void mma_AtBt(D &d,
         }
     }
 }
-}
+
+} // namespace kittens
