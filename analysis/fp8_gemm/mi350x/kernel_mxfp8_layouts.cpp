@@ -790,8 +790,23 @@ __device__ __forceinline__ void rcr_exact_acc_to_rt(
     }
 }
 
-template<int K_PHASE, int ROW_BASE, int A_PACK_COUNT, int B_PACK_COUNT>
-__device__ __forceinline__ void rcr_mma_scaled_from_packs_phase_row(
+template<int PACK_COUNT>
+__device__ __forceinline__ void remap_phase_scale_packs_16x128(
+    fp8e8m0_4 (&dst)[PACK_COUNT],
+    const fp8e8m0_4 (&src)[PACK_COUNT],
+    int k_phase)
+{
+    const uint32_t shift = static_cast<uint32_t>(k_phase & 1) << 4;
+    #pragma unroll
+    for (int g = 0; g < PACK_COUNT; ++g) {
+        dst[g] = std::bit_cast<fp8e8m0_4>(
+            std::bit_cast<uint32_t>(src[g]) >> shift
+        );
+    }
+}
+
+template<int ROW_BASE, int A_PACK_COUNT, int B_PACK_COUNT>
+__device__ __forceinline__ void rcr_mma_scaled_from_packs_fixed_phase_row(
     rcr_exact_acc& acc,
     const A_row_reg& a,
     const RCR_B_reg& b,
@@ -812,85 +827,51 @@ __device__ __forceinline__ void rcr_mma_scaled_from_packs_phase_row(
     const fp8e8m0_4 a_scale0 = a_scale_packs[ROW_BASE / 2];
     const fp8e8m0_4 b_scale0 = b_scale_packs[0];
 
-    if constexpr (K_PHASE == 0 && ((ROW_BASE & 1) == 0)) {
+    if constexpr ((ROW_BASE & 1) == 0) {
         rcr_exact_mfma_scale_builtin_inplace<0, 0>(d0, a0, b0, a_scale0, b_scale0);
         rcr_exact_mfma_scale_builtin_inplace<0, 1>(d1, a0, b1, a_scale0, b_scale0);
-    } else if constexpr (K_PHASE == 0 && ((ROW_BASE & 1) == 1)) {
+    } else {
         rcr_exact_mfma_scale_builtin_inplace<1, 0>(d0, a0, b0, a_scale0, b_scale0);
         rcr_exact_mfma_scale_builtin_inplace<1, 1>(d1, a0, b1, a_scale0, b_scale0);
-    } else if constexpr (K_PHASE == 1 && ((ROW_BASE & 1) == 0)) {
-        rcr_exact_mfma_scale_builtin_inplace<2, 2>(d0, a0, b0, a_scale0, b_scale0);
-        rcr_exact_mfma_scale_builtin_inplace<2, 3>(d1, a0, b1, a_scale0, b_scale0);
-    } else {
-        rcr_exact_mfma_scale_builtin_inplace<3, 2>(d0, a0, b0, a_scale0, b_scale0);
-        rcr_exact_mfma_scale_builtin_inplace<3, 3>(d1, a0, b1, a_scale0, b_scale0);
     }
 }
 
-template<int K_PHASE, int A_PACK_COUNT, int B_PACK_COUNT>
-__device__ __forceinline__ void rcr_mma_scaled_from_packs_phase_impl(
+template<int A_PACK_COUNT, int B_PACK_COUNT>
+__device__ __forceinline__ void rcr_mma_scaled_from_packs_fixed_phase_impl(
     rcr_exact_acc& acc,
     const A_row_reg& a,
     const RCR_B_reg& b,
     const fp8e8m0_4 (&a_scale_packs)[A_PACK_COUNT],
     const fp8e8m0_4 (&b_scale_packs)[B_PACK_COUNT])
 {
-    rcr_mma_scaled_from_packs_phase_row<K_PHASE, 0>(
+    rcr_mma_scaled_from_packs_fixed_phase_row<0>(
         acc,
         a,
         b,
         a_scale_packs,
         b_scale_packs
     );
-    rcr_mma_scaled_from_packs_phase_row<K_PHASE, 1>(
+    rcr_mma_scaled_from_packs_fixed_phase_row<1>(
         acc,
         a,
         b,
         a_scale_packs,
         b_scale_packs
     );
-    rcr_mma_scaled_from_packs_phase_row<K_PHASE, 2>(
+    rcr_mma_scaled_from_packs_fixed_phase_row<2>(
         acc,
         a,
         b,
         a_scale_packs,
         b_scale_packs
     );
-    rcr_mma_scaled_from_packs_phase_row<K_PHASE, 3>(
+    rcr_mma_scaled_from_packs_fixed_phase_row<3>(
         acc,
         a,
         b,
         a_scale_packs,
         b_scale_packs
     );
-}
-
-template<int A_PACK_COUNT, int B_PACK_COUNT>
-__device__ __forceinline__ void rcr_mma_scaled_from_packs_phase(
-    rcr_exact_acc& acc,
-    const A_row_reg& a,
-    const RCR_B_reg& b,
-    const fp8e8m0_4 (&a_scale_packs)[A_PACK_COUNT],
-    const fp8e8m0_4 (&b_scale_packs)[B_PACK_COUNT],
-    int k_phase)
-{
-    if (k_phase == 0) {
-        rcr_mma_scaled_from_packs_phase_impl<0>(
-            acc,
-            a,
-            b,
-            a_scale_packs,
-            b_scale_packs
-        );
-    } else {
-        rcr_mma_scaled_from_packs_phase_impl<1>(
-            acc,
-            a,
-            b,
-            a_scale_packs,
-            b_scale_packs
-        );
-    }
 }
 
 template<bool USE_PHASE_DISPATCH, int A_PACK_COUNT, int B_PACK_COUNT>
@@ -923,13 +904,16 @@ __device__ __forceinline__ void rcr_mma_scaled_from_packs_exact(
     int k_phase)
 {
     (void)USE_PHASE_DISPATCH;
-    rcr_mma_scaled_from_packs_phase(
+    fp8e8m0_4 a_phase_packs[A_PACK_COUNT];
+    fp8e8m0_4 b_phase_packs[B_PACK_COUNT];
+    remap_phase_scale_packs_16x128(a_phase_packs, a_scale_packs, k_phase);
+    remap_phase_scale_packs_16x128(b_phase_packs, b_scale_packs, k_phase);
+    rcr_mma_scaled_from_packs_fixed_phase_impl(
         acc,
         a,
         b,
-        a_scale_packs,
-        b_scale_packs,
-        k_phase
+        a_phase_packs,
+        b_phase_packs
     );
 }
 
