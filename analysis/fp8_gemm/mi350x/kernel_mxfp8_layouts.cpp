@@ -1694,7 +1694,9 @@ static_assert(std::is_same_v<RCR_B_reg, B_row_reg>, "MXFP8 exact RCR fast path a
 template<bool PRESHUFFLED_QUANT>
 __global__ __launch_bounds__(_NUM_THREADS, GEMM_MIN_BLOCKS_PER_CU)
 void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
-    const int blocks_per_col = g.n / BLK;
+    static_assert(N_DIM % BLK == 0, "MXFP8 exact 8-wave fast path requires N_DIM divisible by BLK");
+    static_assert(K_DIM % BK == 0, "MXFP8 exact 8-wave fast path requires K_DIM divisible by BK");
+    constexpr int blocks_per_col = N_DIM / BLK;
     const int k_iters = g.k / BK;
     constexpr int half_block_size_row = BLK / 2;
     constexpr int half_block_size_col = BLK / 2;
@@ -1812,10 +1814,10 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
         rcr_exact_load_st_to_rt<RT_B, decltype(bs_subtile0)>(b0, bs_subtile0);
         auto as_subtile0 = kittens::subtile_inplace<RBM, BK>(As[tic][0], {wm, 0});
         rcr_exact_load_st_to_rt<RT_A, decltype(as_subtile0)>(a, as_subtile0);
-        G::load(As[toc][1], g.a, {0, 0, br * 2 + 1, k + 1}, swizzled_offsets_a);
         const int k_pair = k >> 1;
         const int k_phase = k & 1;
         ensure_scale_packs(k_pair);
+        G::load(As[toc][1], g.a, {0, 0, br * 2 + 1, k + 1}, swizzled_offsets_a);
         TK_WAIT_LGKM(8);
         __builtin_amdgcn_s_barrier();
 
