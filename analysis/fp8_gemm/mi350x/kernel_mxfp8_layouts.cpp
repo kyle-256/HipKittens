@@ -1388,8 +1388,21 @@ __device__ __forceinline__ fp8e8m0_4 load_scale_pair_pack_16x128_preshuffled_fro
     uint32_t lane_byte_offset)
 {
     const uint32_t byte_offset = (static_cast<uint32_t>(k_pair) << 8) + lane_byte_offset;
+    std::uintptr_t as_int = reinterpret_cast<std::uintptr_t>(row_base);
+    std::uint64_t as_u64 = static_cast<std::uint64_t>(as_int);
+    auto to_sgpr_u32_local = [](uint32_t x) {
+        x = __builtin_amdgcn_readfirstlane(x);
+        asm volatile("" : "+s"(x));
+        return x;
+    };
+    buffer_resource br{
+        static_cast<uint64_t>(to_sgpr_u32_local(static_cast<uint32_t>(as_u64))) |
+            (static_cast<uint64_t>(to_sgpr_u32_local(static_cast<uint32_t>(as_u64 >> 32))) << 32),
+        to_sgpr_u32_local(0xFFFFFFFFu),
+        to_sgpr_u32_local(0x00020000u)
+    };
     return std::bit_cast<fp8e8m0_4>(
-        *reinterpret_cast<const uint32_t*>(row_base + byte_offset)
+        macros::buffer_load_dword<uint32_t>(br, byte_offset)
     );
 }
 
