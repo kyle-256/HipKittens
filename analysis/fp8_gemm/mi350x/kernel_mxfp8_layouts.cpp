@@ -354,6 +354,9 @@ constexpr int TAIL_BLOCK_N = 16;
 #ifndef MXFP8_RCR_EXACT_PQ_KPAIR_INLINE_SCALE_ENABLE
 #define MXFP8_RCR_EXACT_PQ_KPAIR_INLINE_SCALE_ENABLE 0
 #endif
+#ifndef MXFP8_RCR_EXACT_PQ_PIPELINE_SCALE_ENABLE
+#define MXFP8_RCR_EXACT_PQ_PIPELINE_SCALE_ENABLE 0
+#endif
 #ifndef MXFP8_RRR_FAST_ENABLE
 #define MXFP8_RRR_FAST_ENABLE 0
 #endif
@@ -1878,6 +1881,10 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
     const int scale_stage_a_loader_idx = block_scale_a_row_base_index(wm, wn >> 1, wn & 1);
     const int scale_stage_b_loader_idx = block_scale_b_row_base_index(wn, wm, 0);
 #endif
+#if MXFP8_RCR_EXACT_PQ_PIPELINE_SCALE_ENABLE
+    i32x4 a0p0_srsrc = {}, a0p1_srsrc = {}, a1p0_srsrc = {}, a1p1_srsrc = {};
+    i32x4 b0p0_srsrc = {}, b1p0_srsrc = {};
+#endif
     if constexpr (PRESHUFFLED_QUANT) {
         #pragma unroll
         for (int pack_idx = 0; pack_idx < RBM / 32; ++pack_idx) {
@@ -1901,6 +1908,16 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
                 (rcr_scale_b_base(1) + pack_idx * 32) >> 5
             );
         }
+#if MXFP8_RCR_EXACT_PQ_PIPELINE_SCALE_ENABLE
+        a0p0_srsrc = make_srsrc(a0_scale_row_bases[0], 0xFFFFFFFF);
+        a1p0_srsrc = make_srsrc(a1_scale_row_bases[0], 0xFFFFFFFF);
+        b0p0_srsrc = make_srsrc(b0_scale_row_bases[0], 0xFFFFFFFF);
+        b1p0_srsrc = make_srsrc(b1_scale_row_bases[0], 0xFFFFFFFF);
+        if constexpr (RBM / 32 > 1) {
+            a0p1_srsrc = make_srsrc(a0_scale_row_bases[1], 0xFFFFFFFF);
+            a1p1_srsrc = make_srsrc(a1_scale_row_bases[1], 0xFFFFFFFF);
+        }
+#endif
 #if MXFP8_RCR_EXACT_PQ_SCALE_LDS_ENABLE
         // Cooperatively cache the 16 unique preshuffled row-base slabs for the CTA.
         for (int wm_idx = 0; wm_idx < WARPS_M; ++wm_idx) {
@@ -2394,18 +2411,6 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
         TK_WAIT_VMCNT(6);
         __builtin_amdgcn_s_barrier();
 
-#if MXFP8_RCR_EXACT_PQ_PREFETCH_NEXT_PAIR_ENABLE
-        if constexpr (PRESHUFFLED_QUANT) {
-            if (k_phase == 1) {
-                const int next_k = k + 1;
-                const int next_k_pair = next_k >> 1;
-                if (next_k < k_iters - 2 && next_k_pair != cached_k_pair) {
-                    load_scale_packs_for_pair(next_k_pair);
-                    cached_k_pair = next_k_pair;
-                }
-            }
-        }
-#endif
         __builtin_amdgcn_s_setprio(1);
 #if MXFP8_RCR_EXACT_PQ_SCALAR_PHASE_PACKS_ENABLE
         if constexpr (PRESHUFFLED_QUANT) {
@@ -2436,6 +2441,36 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
         const int k_iters_main = k_iters - 2;
         const int k_pairs = k_iters_main / 2;
         const int k_remainder = k_iters_main - k_pairs * 2;
+#if MXFP8_RCR_EXACT_PQ_PIPELINE_SCALE_ENABLE
+        auto load_scale_buffer = [&](int k_pair) __attribute__((always_inline)) {
+            if constexpr (PRESHUFFLED_QUANT) {
+                const uint32_t voff = (static_cast<uint32_t>(k_pair) << 8) + lane_scale_byte_offset;
+                a0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(a0p0_srsrc, voff, 0, 0));
+                a1_scale_packs[0] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(a1p0_srsrc, voff, 0, 0));
+                if constexpr (RBM / 32 > 1) {
+                    a0_scale_packs[1] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(a0p1_srsrc, voff, 0, 0));
+                    a1_scale_packs[1] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(a1p1_srsrc, voff, 0, 0));
+                }
+                b0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(b0p0_srsrc, voff, 0, 0));
+                b1_scale_packs[0] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(b1p0_srsrc, voff, 0, 0));
+            } else {
+                load_scale_packs_for_pair(k_pair);
+            }
+        };
+        for (int k_pair = 0; k_pair < k_pairs; k_pair++) {
+            load_scale_buffer(k_pair);
+            #pragma unroll
+            for (int phase = 0; phase < 2; phase++) {
+                do_k_iter_body(k_pair * 2 + phase, phase);
+                tic ^= 1; toc ^= 1;
+            }
+        }
+        if (k_remainder) {
+            load_scale_buffer(k_pairs);
+            do_k_iter_body(k_pairs * 2, 0);
+            tic ^= 1; toc ^= 1;
+        }
+#else
         for (int k_pair = 0; k_pair < k_pairs; k_pair++) {
 #if !MXFP8_RCR_EXACT_PQ_KPAIR_INLINE_SCALE_ENABLE
             load_scale_packs_for_pair(k_pair);
@@ -2453,6 +2488,7 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
             do_k_iter_body(k_pairs * 2, 0);
             tic ^= 1; toc ^= 1;
         }
+#endif
     }
 #else
     }
