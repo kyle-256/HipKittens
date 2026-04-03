@@ -1,0 +1,12 @@
+{
+    "256x256x256": {
+        "crr": {
+            "avg_ms": 0.02160019986331463,
+            "tflops": 1.5534315521305992,
+            "snr_db": 49.54547129946093,
+            "deterministic": true,
+            "determinism_max_abs_diff": 0.0,
+            "quality_ok": true
+        }
+    }
+}

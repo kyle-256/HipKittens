@@ -216,6 +216,9 @@ using namespace kittens;
 #ifndef RRR_USE_V2A_SWIZZLE
 #define RRR_USE_V2A_SWIZZLE 0
 #endif
+#ifndef RRR_USE_V3_SWIZZLE
+#define RRR_USE_V3_SWIZZLE 0
+#endif
 
 #if CRR_ENABLE_SCHED_BARRIER
 #define CRR_SCHED_BARRIER() __builtin_amdgcn_sched_barrier(0)
@@ -1311,6 +1314,172 @@ __device__ __forceinline__ void crr_mma_scaled_candidate(
             );
         }
     }
+}
+
+template<int A_PACK_COUNT, int B_PACK_COUNT>
+__device__ __forceinline__ void rrr_mma_scaled_from_packs(
+    rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
+    const A_row_reg& a,
+    const B_col_reg& b,
+    const fp8e8m0_4 (&a_scale_packs)[A_PACK_COUNT],
+    const fp8e8m0_4 (&b_scale_packs)[B_PACK_COUNT],
+    int k_phase)
+{
+    constexpr int acc_h = RBM / 16;
+    constexpr int acc_w = RBN / 16;
+    static_assert(A_PACK_COUNT >= (RBM / 32), "insufficient A scale packs");
+    static_assert(B_PACK_COUNT >= ((RBN + 31) / 32), "insufficient B scale packs");
+    #pragma unroll
+    for (int n = 0; n < acc_h; ++n) {
+        const int a_opsel = (k_phase << 1) | (n & 1);
+        const fp8e8m0_4 a_scale_pack = a_scale_packs[n / 2];
+        #pragma unroll
+        for (int m = 0; m < acc_w; ++m) {
+            const int b_opsel = (k_phase << 1) | (m & 1);
+            rrr_mma_scaled_dispatch(acc, a, b, n, m, a_opsel, b_opsel,
+                                    a_scale_pack, b_scale_packs[m / 2]);
+        }
+    }
+}
+
+template<int A_PACK_COUNT, int B_PACK_COUNT>
+__device__ __forceinline__ void crr_mma_scaled_from_packs(
+    rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
+    const A_col_reg& a,
+    const B_col_reg& b,
+    const fp8e8m0_4 (&a_scale_packs)[A_PACK_COUNT],
+    const fp8e8m0_4 (&b_scale_packs)[B_PACK_COUNT],
+    int k_phase)
+{
+    constexpr int acc_h = RBM / 16;
+    constexpr int acc_w = RBN / 16;
+    static_assert(A_PACK_COUNT >= (RBM / 32), "insufficient A scale packs");
+    static_assert(B_PACK_COUNT >= ((RBN + 31) / 32), "insufficient B scale packs");
+    #pragma unroll
+    for (int n = 0; n < acc_h; ++n) {
+        const int a_opsel = (k_phase << 1) | (n & 1);
+        const fp8e8m0_4 a_scale_pack = a_scale_packs[n / 2];
+        #pragma unroll
+        for (int m = 0; m < acc_w; ++m) {
+            const int b_opsel = (k_phase << 1) | (m & 1);
+            crr_mma_scaled_dispatch(acc, a, b, n, m, a_opsel, b_opsel,
+                                    a_scale_pack, b_scale_packs[m / 2]);
+        }
+    }
+}
+
+template<int A_PACK_COUNT, int B_PACK_COUNT>
+__device__ __forceinline__ void rrr_mma_scaled_from_packs_fixed_phase(
+    rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
+    const A_row_reg& a,
+    const B_col_reg& b,
+    const fp8e8m0_4 (&a_scale_packs)[A_PACK_COUNT],
+    const fp8e8m0_4 (&b_scale_packs)[B_PACK_COUNT])
+{
+    static_assert(RBM == 64 && RBN == 32, "fixed_phase helper expects 64x32 tile");
+    static_assert(A_PACK_COUNT >= 2 && B_PACK_COUNT >= 1);
+    rrr_mma_scaled_base<0, 0>(acc, a, b, 0, 0, a_scale_packs[0], b_scale_packs[0]);
+    rrr_mma_scaled_base<0, 1>(acc, a, b, 0, 1, a_scale_packs[0], b_scale_packs[0]);
+    rrr_mma_scaled_base<1, 0>(acc, a, b, 1, 0, a_scale_packs[0], b_scale_packs[0]);
+    rrr_mma_scaled_base<1, 1>(acc, a, b, 1, 1, a_scale_packs[0], b_scale_packs[0]);
+    rrr_mma_scaled_base<0, 0>(acc, a, b, 2, 0, a_scale_packs[1], b_scale_packs[0]);
+    rrr_mma_scaled_base<0, 1>(acc, a, b, 2, 1, a_scale_packs[1], b_scale_packs[0]);
+    rrr_mma_scaled_base<1, 0>(acc, a, b, 3, 0, a_scale_packs[1], b_scale_packs[0]);
+    rrr_mma_scaled_base<1, 1>(acc, a, b, 3, 1, a_scale_packs[1], b_scale_packs[0]);
+}
+
+template<int A_PACK_COUNT, int B_PACK_COUNT>
+__device__ __forceinline__ void crr_mma_scaled_from_packs_fixed_phase(
+    rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
+    const A_col_reg& a,
+    const B_col_reg& b,
+    const fp8e8m0_4 (&a_scale_packs)[A_PACK_COUNT],
+    const fp8e8m0_4 (&b_scale_packs)[B_PACK_COUNT])
+{
+    static_assert(RBM == 64 && RBN == 32, "fixed_phase helper expects 64x32 tile");
+    static_assert(A_PACK_COUNT >= 2 && B_PACK_COUNT >= 1);
+    crr_mma_scaled_base<0, 0>(acc, a, b, 0, 0, a_scale_packs[0], b_scale_packs[0]);
+    crr_mma_scaled_base<0, 1>(acc, a, b, 0, 1, a_scale_packs[0], b_scale_packs[0]);
+    crr_mma_scaled_base<1, 0>(acc, a, b, 1, 0, a_scale_packs[0], b_scale_packs[0]);
+    crr_mma_scaled_base<1, 1>(acc, a, b, 1, 1, a_scale_packs[0], b_scale_packs[0]);
+    crr_mma_scaled_base<0, 0>(acc, a, b, 2, 0, a_scale_packs[1], b_scale_packs[0]);
+    crr_mma_scaled_base<0, 1>(acc, a, b, 2, 1, a_scale_packs[1], b_scale_packs[0]);
+    crr_mma_scaled_base<1, 0>(acc, a, b, 3, 0, a_scale_packs[1], b_scale_packs[0]);
+    crr_mma_scaled_base<1, 1>(acc, a, b, 3, 1, a_scale_packs[1], b_scale_packs[0]);
+}
+
+template<int V> struct phase_t { static constexpr int value = V; };
+
+template<int K_PHASE, int A_PACK_COUNT, int B_PACK_COUNT>
+__device__ __forceinline__ void rrr_mma_scaled_phase(
+    rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
+    const A_row_reg& a,
+    const B_col_reg& b,
+    const fp8e8m0_4 (&a_scale_packs)[A_PACK_COUNT],
+    const fp8e8m0_4 (&b_scale_packs)[B_PACK_COUNT])
+{
+    static_assert(K_PHASE == 0 || K_PHASE == 1);
+    static_assert(RBM == 64 && RBN == 32);
+    static_assert(A_PACK_COUNT >= 2 && B_PACK_COUNT >= 1);
+    constexpr int lo = K_PHASE * 2;
+    constexpr int hi = K_PHASE * 2 + 1;
+    rrr_mma_scaled_base<lo, lo>(acc, a, b, 0, 0, a_scale_packs[0], b_scale_packs[0]);
+    rrr_mma_scaled_base<lo, hi>(acc, a, b, 0, 1, a_scale_packs[0], b_scale_packs[0]);
+    rrr_mma_scaled_base<hi, lo>(acc, a, b, 1, 0, a_scale_packs[0], b_scale_packs[0]);
+    rrr_mma_scaled_base<hi, hi>(acc, a, b, 1, 1, a_scale_packs[0], b_scale_packs[0]);
+    rrr_mma_scaled_base<lo, lo>(acc, a, b, 2, 0, a_scale_packs[1], b_scale_packs[0]);
+    rrr_mma_scaled_base<lo, hi>(acc, a, b, 2, 1, a_scale_packs[1], b_scale_packs[0]);
+    rrr_mma_scaled_base<hi, lo>(acc, a, b, 3, 0, a_scale_packs[1], b_scale_packs[0]);
+    rrr_mma_scaled_base<hi, hi>(acc, a, b, 3, 1, a_scale_packs[1], b_scale_packs[0]);
+}
+
+template<int A_PACK_COUNT, int B_PACK_COUNT>
+__device__ __forceinline__ void rrr_mma_scaled_from_raw_packs(
+    rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
+    const A_row_reg& a,
+    const B_col_reg& b,
+    const fp8e8m0_4 (&a_scale_packs)[A_PACK_COUNT],
+    const fp8e8m0_4 (&b_scale_packs)[B_PACK_COUNT],
+    int k_phase)
+{
+    if (k_phase == 0) rrr_mma_scaled_phase<0>(acc, a, b, a_scale_packs, b_scale_packs);
+    else              rrr_mma_scaled_phase<1>(acc, a, b, a_scale_packs, b_scale_packs);
+}
+
+template<int K_PHASE, int A_PACK_COUNT, int B_PACK_COUNT>
+__device__ __forceinline__ void crr_mma_scaled_phase(
+    rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
+    const A_col_reg& a,
+    const B_col_reg& b,
+    const fp8e8m0_4 (&a_scale_packs)[A_PACK_COUNT],
+    const fp8e8m0_4 (&b_scale_packs)[B_PACK_COUNT])
+{
+    static_assert(K_PHASE == 0 || K_PHASE == 1);
+    static_assert(RBM == 64 && RBN == 32);
+    static_assert(A_PACK_COUNT >= 2 && B_PACK_COUNT >= 1);
+    constexpr int lo = K_PHASE * 2;
+    constexpr int hi = K_PHASE * 2 + 1;
+    crr_mma_scaled_base<lo, lo>(acc, a, b, 0, 0, a_scale_packs[0], b_scale_packs[0]);
+    crr_mma_scaled_base<lo, hi>(acc, a, b, 0, 1, a_scale_packs[0], b_scale_packs[0]);
+    crr_mma_scaled_base<hi, lo>(acc, a, b, 1, 0, a_scale_packs[0], b_scale_packs[0]);
+    crr_mma_scaled_base<hi, hi>(acc, a, b, 1, 1, a_scale_packs[0], b_scale_packs[0]);
+    crr_mma_scaled_base<lo, lo>(acc, a, b, 2, 0, a_scale_packs[1], b_scale_packs[0]);
+    crr_mma_scaled_base<lo, hi>(acc, a, b, 2, 1, a_scale_packs[1], b_scale_packs[0]);
+    crr_mma_scaled_base<hi, lo>(acc, a, b, 3, 0, a_scale_packs[1], b_scale_packs[0]);
+    crr_mma_scaled_base<hi, hi>(acc, a, b, 3, 1, a_scale_packs[1], b_scale_packs[0]);
+}
+
+template<int A_PACK_COUNT, int B_PACK_COUNT>
+__device__ __forceinline__ void crr_mma_scaled_from_raw_packs(
+    rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
+    const A_col_reg& a,
+    const B_col_reg& b,
+    const fp8e8m0_4 (&a_scale_packs)[A_PACK_COUNT],
+    const fp8e8m0_4 (&b_scale_packs)[B_PACK_COUNT],
+    int k_phase)
+{
+    if (k_phase == 0) crr_mma_scaled_phase<0>(acc, a, b, a_scale_packs, b_scale_packs);
+    else              crr_mma_scaled_phase<1>(acc, a, b, a_scale_packs, b_scale_packs);
 }
 
 __device__ __noinline__ void rcr_rhs_mma(
@@ -2791,6 +2960,8 @@ __host__ inline void dispatch_rcr_exact_8wave_scaled(const layout_globals& g) {
 #endif
 
 #include "rcr_mxfp8_4wave_fastpath.inc"
+#include "rrr_mxfp8_exact_8wave_fastpath.inc"
+#include "crr_mxfp8_exact_8wave_fastpath.inc"
 
 template<Layout L, bool PRESHUFFLED_QUANT=false>
 __global__ __launch_bounds__(_NUM_THREADS, GEMM_MIN_BLOCKS_PER_CU)
@@ -3583,17 +3754,53 @@ void gemm_kernel(const layout_globals g) {
         auto rrr_scale_b_base = [&](int half) {
             return bc * BLK + half * HB + wn * RBN;
         };
+        const int rrr_lane_nonk = kittens::laneid() % 16;
+        const int rrr_lane_kblk = kittens::laneid() / 16;
+        constexpr int rrr_a_pack_count = RBM / 32;
+        constexpr int rrr_b_pack_count = (RBN + 31) / 32;
+        fp8e8m0_4 rrr_a0_scale_packs[rrr_a_pack_count];
+        fp8e8m0_4 rrr_a1_scale_packs[rrr_a_pack_count];
+        fp8e8m0_4 rrr_b0_scale_packs[rrr_b_pack_count];
+        fp8e8m0_4 rrr_b1_scale_packs[rrr_b_pack_count];
+        int rrr_cached_k_pair = -1;
+        auto rrr_load_scale_packs = [&](int k_pair) __attribute__((always_inline)) {
+            if (k_pair == rrr_cached_k_pair) return;
+            rrr_cached_k_pair = k_pair;
+            #pragma unroll
+            for (int p = 0; p < rrr_a_pack_count; ++p) {
+                if constexpr (PRESHUFFLED_QUANT) {
+                    rrr_a0_scale_packs[p] = load_scale_pair_pack_16x128_preshuffled(
+                        g.a_scale, rrr_scale_a_base(0) + p * 32, k_pair, rrr_lane_nonk, rrr_lane_kblk);
+                    rrr_a1_scale_packs[p] = load_scale_pair_pack_16x128_preshuffled(
+                        g.a_scale, rrr_scale_a_base(1) + p * 32, k_pair, rrr_lane_nonk, rrr_lane_kblk);
+                } else {
+                    rrr_a0_scale_packs[p] = load_scale_pair_pack_16x128(
+                        g.a_scale, rrr_scale_a_base(0) + p * 32, k_pair, rrr_lane_nonk, rrr_lane_kblk);
+                    rrr_a1_scale_packs[p] = load_scale_pair_pack_16x128(
+                        g.a_scale, rrr_scale_a_base(1) + p * 32, k_pair, rrr_lane_nonk, rrr_lane_kblk);
+                }
+            }
+            #pragma unroll
+            for (int p = 0; p < rrr_b_pack_count; ++p) {
+                if constexpr (PRESHUFFLED_QUANT) {
+                    rrr_b0_scale_packs[p] = load_scale_pair_pack_16x128_preshuffled(
+                        g.b_scale, rrr_scale_b_base(0) + p * 32, k_pair, rrr_lane_nonk, rrr_lane_kblk);
+                    rrr_b1_scale_packs[p] = load_scale_pair_pack_16x128_preshuffled(
+                        g.b_scale, rrr_scale_b_base(1) + p * 32, k_pair, rrr_lane_nonk, rrr_lane_kblk);
+                } else {
+                    rrr_b0_scale_packs[p] = load_scale_pair_pack_16x128(
+                        g.b_scale, rrr_scale_b_base(0) + p * 32, k_pair, rrr_lane_nonk, rrr_lane_kblk);
+                    rrr_b1_scale_packs[p] = load_scale_pair_pack_16x128(
+                        g.b_scale, rrr_scale_b_base(1) + p * 32, k_pair, rrr_lane_nonk, rrr_lane_kblk);
+                }
+            }
+        };
         auto rrr_mma_fast = [&](auto& acc, const A_row_reg& lhs, const B_col_reg& rhs, int a_half, int b_half, int k_iter) {
-            rrr_mma_scaled_candidate<PRESHUFFLED_QUANT>(
-                acc,
-                lhs,
-                rhs,
-                g.a_scale,
-                g.b_scale,
-                rrr_scale_a_base(a_half),
-                rrr_scale_b_base(b_half),
-                k_iter
-            );
+            const int k_phase = k_iter & 1;
+            rrr_load_scale_packs(k_iter >> 1);
+            const auto& a_packs = (a_half == 0) ? rrr_a0_scale_packs : rrr_a1_scale_packs;
+            const auto& b_packs = (b_half == 0) ? rrr_b0_scale_packs : rrr_b1_scale_packs;
+            rrr_mma_scaled_from_packs(acc, lhs, rhs, a_packs, b_packs, k_phase);
         };
 #define RRR_DO_MMA(acc, lhs, rhs, a_half, b_half, k_iter) \
         rrr_mma_fast((acc), (lhs), (rhs), (a_half), (b_half), (k_iter))
@@ -3940,17 +4147,53 @@ void gemm_kernel(const layout_globals g) {
         auto crr_scale_b_base = [&](int half) {
             return bc * BLK + half * HB + wn * RBN;
         };
+        const int crr_lane_nonk = kittens::laneid() % 16;
+        const int crr_lane_kblk = kittens::laneid() / 16;
+        constexpr int crr_a_pack_count = RBM / 32;
+        constexpr int crr_b_pack_count = (RBN + 31) / 32;
+        fp8e8m0_4 crr_a0_scale_packs[crr_a_pack_count];
+        fp8e8m0_4 crr_a1_scale_packs[crr_a_pack_count];
+        fp8e8m0_4 crr_b0_scale_packs[crr_b_pack_count];
+        fp8e8m0_4 crr_b1_scale_packs[crr_b_pack_count];
+        int crr_cached_k_pair = -1;
+        auto crr_load_scale_packs = [&](int k_pair) __attribute__((always_inline)) {
+            if (k_pair == crr_cached_k_pair) return;
+            crr_cached_k_pair = k_pair;
+            #pragma unroll
+            for (int p = 0; p < crr_a_pack_count; ++p) {
+                if constexpr (PRESHUFFLED_QUANT) {
+                    crr_a0_scale_packs[p] = load_scale_pair_pack_16x128_preshuffled(
+                        g.a_scale, crr_scale_a_base(0) + p * 32, k_pair, crr_lane_nonk, crr_lane_kblk);
+                    crr_a1_scale_packs[p] = load_scale_pair_pack_16x128_preshuffled(
+                        g.a_scale, crr_scale_a_base(1) + p * 32, k_pair, crr_lane_nonk, crr_lane_kblk);
+                } else {
+                    crr_a0_scale_packs[p] = load_scale_pair_pack_16x128(
+                        g.a_scale, crr_scale_a_base(0) + p * 32, k_pair, crr_lane_nonk, crr_lane_kblk);
+                    crr_a1_scale_packs[p] = load_scale_pair_pack_16x128(
+                        g.a_scale, crr_scale_a_base(1) + p * 32, k_pair, crr_lane_nonk, crr_lane_kblk);
+                }
+            }
+            #pragma unroll
+            for (int p = 0; p < crr_b_pack_count; ++p) {
+                if constexpr (PRESHUFFLED_QUANT) {
+                    crr_b0_scale_packs[p] = load_scale_pair_pack_16x128_preshuffled(
+                        g.b_scale, crr_scale_b_base(0) + p * 32, k_pair, crr_lane_nonk, crr_lane_kblk);
+                    crr_b1_scale_packs[p] = load_scale_pair_pack_16x128_preshuffled(
+                        g.b_scale, crr_scale_b_base(1) + p * 32, k_pair, crr_lane_nonk, crr_lane_kblk);
+                } else {
+                    crr_b0_scale_packs[p] = load_scale_pair_pack_16x128(
+                        g.b_scale, crr_scale_b_base(0) + p * 32, k_pair, crr_lane_nonk, crr_lane_kblk);
+                    crr_b1_scale_packs[p] = load_scale_pair_pack_16x128(
+                        g.b_scale, crr_scale_b_base(1) + p * 32, k_pair, crr_lane_nonk, crr_lane_kblk);
+                }
+            }
+        };
         auto crr_mma_fast = [&](auto& acc, const A_col_reg& lhs, const B_col_reg& rhs, int a_half, int b_half, int k_iter) {
-            crr_mma_scaled_candidate<PRESHUFFLED_QUANT>(
-                acc,
-                lhs,
-                rhs,
-                g.a_scale,
-                g.b_scale,
-                crr_scale_a_base(a_half),
-                crr_scale_b_base(b_half),
-                k_iter
-            );
+            const int k_phase = k_iter & 1;
+            crr_load_scale_packs(k_iter >> 1);
+            const auto& a_packs = (a_half == 0) ? crr_a0_scale_packs : crr_a1_scale_packs;
+            const auto& b_packs = (b_half == 0) ? crr_b0_scale_packs : crr_b1_scale_packs;
+            crr_mma_scaled_from_packs(acc, lhs, rhs, a_packs, b_packs, k_phase);
         };
 #define CRR_DO_MMA(acc, lhs, rhs, a_half, b_half, k_iter) \
         crr_mma_fast((acc), (lhs), (rhs), (a_half), (b_half), (k_iter))
@@ -4425,6 +4668,24 @@ void dispatch(layout_globals g) {
     if constexpr (L == Layout::RCR) {
         if (rcr_can_use_exact_8wave_scaled(g)) {
             dispatch_rcr_exact_8wave_scaled<PRESHUFFLED_QUANT>(g);
+            return;
+        }
+    }
+#endif
+
+#if MXFP8_RRR_EXACT_8WAVE_FAST_ENABLE
+    if constexpr (L == Layout::RRR) {
+        if (rrr_can_use_exact_8wave_scaled(g)) {
+            dispatch_rrr_exact_8wave_scaled<PRESHUFFLED_QUANT>(g);
+            return;
+        }
+    }
+#endif
+
+#if MXFP8_CRR_EXACT_8WAVE_FAST_ENABLE
+    if constexpr (L == Layout::CRR) {
+        if (crr_can_use_exact_8wave_scaled(g)) {
+            dispatch_crr_exact_8wave_scaled<PRESHUFFLED_QUANT>(g);
             return;
         }
     }
