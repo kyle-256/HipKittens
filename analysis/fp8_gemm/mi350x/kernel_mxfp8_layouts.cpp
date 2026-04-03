@@ -345,6 +345,15 @@ constexpr int TAIL_BLOCK_N = 16;
 #ifndef MXFP8_RCR_EXACT_PQ_EARLY_SCALE_LOAD_ENABLE
 #define MXFP8_RCR_EXACT_PQ_EARLY_SCALE_LOAD_ENABLE 1
 #endif
+#ifndef MXFP8_RCR_EXACT_PQ_KPAIR_LOOP_ENABLE
+#define MXFP8_RCR_EXACT_PQ_KPAIR_LOOP_ENABLE 0
+#endif
+#ifndef MXFP8_RCR_EXACT_PQ_PHASE_GUARD_ENABLE
+#define MXFP8_RCR_EXACT_PQ_PHASE_GUARD_ENABLE 0
+#endif
+#ifndef MXFP8_RCR_EXACT_PQ_KPAIR_INLINE_SCALE_ENABLE
+#define MXFP8_RCR_EXACT_PQ_KPAIR_INLINE_SCALE_ENABLE 0
+#endif
 #ifndef MXFP8_RRR_FAST_ENABLE
 #define MXFP8_RRR_FAST_ENABLE 0
 #endif
@@ -2245,6 +2254,14 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
     TK_WAIT_VMCNT(6);
     __builtin_amdgcn_s_barrier();
 
+#if MXFP8_RCR_EXACT_PQ_KPAIR_LOOP_ENABLE
+    auto do_k_iter_body = [&](int k, int k_phase) __attribute__((always_inline)) {
+#if MXFP8_RCR_EXACT_PQ_KPAIR_INLINE_SCALE_ENABLE
+        if (k_phase == 0) {
+            load_scale_packs_for_pair(k >> 1);
+        }
+#endif
+#else
     #pragma unroll 2
     for (int k = 0; k < k_iters - 2; k++, tic ^= 1, toc ^= 1) {
         const int k_pair = k >> 1;
@@ -2252,12 +2269,15 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
 #if MXFP8_RCR_EXACT_PQ_EARLY_SCALE_LOAD_ENABLE
         ensure_scale_packs(k_pair);
 #endif
+#endif
         auto bs_subtile0 = kittens::subtile_inplace<RBN, BK>(Bs[tic][0], {wn, 0});
         rcr_exact_load_st_to_rt<RT_B, decltype(bs_subtile0)>(b0, bs_subtile0);
         auto as_subtile0 = kittens::subtile_inplace<RBM, BK>(As[tic][0], {wm, 0});
         rcr_exact_load_st_to_rt<RT_A, decltype(as_subtile0)>(a, as_subtile0);
+#if !MXFP8_RCR_EXACT_PQ_KPAIR_LOOP_ENABLE
 #if !MXFP8_RCR_EXACT_PQ_EARLY_SCALE_LOAD_ENABLE
         ensure_scale_packs(k_pair);
+#endif
 #endif
 #if MXFP8_RCR_EXACT_PQ_SCALAR_PHASE_PACKS_ENABLE
         const fp8e8m0_4 a0_phase_pack0 = remap_phase_scale_pack_16x128_single(a0_scale_packs[0], k_phase);
@@ -2410,7 +2430,33 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
 #endif
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
+#if MXFP8_RCR_EXACT_PQ_KPAIR_LOOP_ENABLE
+    };
+    {
+        const int k_iters_main = k_iters - 2;
+        const int k_pairs = k_iters_main / 2;
+        const int k_remainder = k_iters_main - k_pairs * 2;
+        for (int k_pair = 0; k_pair < k_pairs; k_pair++) {
+#if !MXFP8_RCR_EXACT_PQ_KPAIR_INLINE_SCALE_ENABLE
+            load_scale_packs_for_pair(k_pair);
+#endif
+            #pragma unroll
+            for (int phase = 0; phase < 2; phase++) {
+                do_k_iter_body(k_pair * 2 + phase, phase);
+                tic ^= 1; toc ^= 1;
+            }
+        }
+        if (k_remainder) {
+#if !MXFP8_RCR_EXACT_PQ_KPAIR_INLINE_SCALE_ENABLE
+            load_scale_packs_for_pair(k_pairs);
+#endif
+            do_k_iter_body(k_pairs * 2, 0);
+            tic ^= 1; toc ^= 1;
+        }
     }
+#else
+    }
+#endif
 
     {
         const int k = k_iters - 2;
