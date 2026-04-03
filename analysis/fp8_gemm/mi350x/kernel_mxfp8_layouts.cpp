@@ -1909,13 +1909,29 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
             );
         }
 #if MXFP8_RCR_EXACT_PQ_PIPELINE_SCALE_ENABLE
-        a0p0_srsrc = make_srsrc(a0_scale_row_bases[0], 0xFFFFFFFF);
-        a1p0_srsrc = make_srsrc(a1_scale_row_bases[0], 0xFFFFFFFF);
-        b0p0_srsrc = make_srsrc(b0_scale_row_bases[0], 0xFFFFFFFF);
-        b1p0_srsrc = make_srsrc(b1_scale_row_bases[0], 0xFFFFFFFF);
-        if constexpr (RBM / 32 > 1) {
-            a0p1_srsrc = make_srsrc(a0_scale_row_bases[1], 0xFFFFFFFF);
-            a1p1_srsrc = make_srsrc(a1_scale_row_bases[1], 0xFFFFFFFF);
+        {
+            auto make_scale_srd = [](const void* ptr) -> i32x4 {
+                i32x4 srd = std::bit_cast<i32x4>(
+                    make_buffer_resource(
+                        static_cast<uint64_t>(reinterpret_cast<std::uintptr_t>(ptr)),
+                        0xFFFFFFFFu,
+                        0x00110000u
+                    )
+                );
+                srd[0] = __builtin_amdgcn_readfirstlane(srd[0]);
+                srd[1] = __builtin_amdgcn_readfirstlane(srd[1]);
+                srd[2] = __builtin_amdgcn_readfirstlane(srd[2]);
+                srd[3] = __builtin_amdgcn_readfirstlane(srd[3]);
+                return srd;
+            };
+            a0p0_srsrc = make_scale_srd(a0_scale_row_bases[0]);
+            a1p0_srsrc = make_scale_srd(a1_scale_row_bases[0]);
+            b0p0_srsrc = make_scale_srd(b0_scale_row_bases[0]);
+            b1p0_srsrc = make_scale_srd(b1_scale_row_bases[0]);
+            if constexpr (RBM / 32 > 1) {
+                a0p1_srsrc = make_scale_srd(a0_scale_row_bases[1]);
+                a1p1_srsrc = make_scale_srd(a1_scale_row_bases[1]);
+            }
         }
 #endif
 #if MXFP8_RCR_EXACT_PQ_SCALE_LDS_ENABLE
@@ -2444,15 +2460,15 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
 #if MXFP8_RCR_EXACT_PQ_PIPELINE_SCALE_ENABLE
         auto load_scale_buffer = [&](int k_pair) __attribute__((always_inline)) {
             if constexpr (PRESHUFFLED_QUANT) {
-                const uint32_t voff = (static_cast<uint32_t>(k_pair) << 8) + lane_scale_byte_offset;
-                a0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(a0p0_srsrc, voff, 0, 0));
-                a1_scale_packs[0] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(a1p0_srsrc, voff, 0, 0));
+                const uint32_t soff = static_cast<uint32_t>(k_pair) << 8;
+                a0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(a0p0_srsrc, lane_scale_byte_offset, soff, 0));
+                a1_scale_packs[0] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(a1p0_srsrc, lane_scale_byte_offset, soff, 0));
                 if constexpr (RBM / 32 > 1) {
-                    a0_scale_packs[1] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(a0p1_srsrc, voff, 0, 0));
-                    a1_scale_packs[1] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(a1p1_srsrc, voff, 0, 0));
+                    a0_scale_packs[1] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(a0p1_srsrc, lane_scale_byte_offset, soff, 0));
+                    a1_scale_packs[1] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(a1p1_srsrc, lane_scale_byte_offset, soff, 0));
                 }
-                b0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(b0p0_srsrc, voff, 0, 0));
-                b1_scale_packs[0] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(b1p0_srsrc, voff, 0, 0));
+                b0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(b0p0_srsrc, lane_scale_byte_offset, soff, 0));
+                b1_scale_packs[0] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(b1p0_srsrc, lane_scale_byte_offset, soff, 0));
             } else {
                 load_scale_packs_for_pair(k_pair);
             }

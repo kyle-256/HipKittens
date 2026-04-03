@@ -65,11 +65,26 @@ python3 test_mxfp8_python.py 8192 8192 8192
 ## Current Validated Status
 - The active high-value path is `MXFP8 RCR exact + preshuffle-quant`.
 - In the current PQ path, both `A_scale` and `B_scale` are preshuffled.
-- The latest valid recent-commit sweep winner is `768b60fa`.
+- Best known: `buffer_load + SGPR SRD + KPAIR_LOOP` at **3031 TFLOPS** (batch timing, 90.9% of FP8).
+
+### Current performance (batch timing: warmup 100, iters 200)
+
+| Version | TFLOPS | Spills | Scratch | SNR | vs FP8 |
+| --- | ---: | ---: | ---: | --- | --- |
+| FP8 per-tensor (baseline) | 3335 | 0 | 0 | - | 100% |
+| MXFP8 buffer_load + SGPR SRD | 3031 | 3 | 16 B | 49.60 dB PASS | 90.9% |
+| MXFP8 KPAIR_LOOP (global_load) | 2999 | 8 | 36 B | 49.60 dB PASS | 90.0% |
+
+Build flags for current best:
+```
+-DMXFP8_RCR_EXACT_8WAVE_FAST_ENABLE=1
+-DMXFP8_RCR_EXACT_PQ_KPAIR_LOOP_ENABLE=1
+-DMXFP8_RCR_EXACT_PQ_PIPELINE_SCALE_ENABLE=1
+```
 
 ### Recent commit sweep
 All rows below used the same `8192^3`, `RCR + PQ`, `warmup=50`, `iters=200`,
-correctness-on, determinism-on benchmark.
+correctness-on, determinism-on benchmark (per-iteration timing).
 
 | Rank | Commit | TFLOPS | Avg ms | Status | Note |
 | --- | --- | ---: | ---: | --- | --- |
@@ -83,11 +98,13 @@ correctness-on, determinism-on benchmark.
 | - | `4de0a032` | 2620.01 | 0.4197 | FAIL | Fast but invalid. Correctness and determinism fail. |
 
 ## Durable Findings
-- The best current lever is scale-pack scheduling, not a new kernel family.
-- Moving `ensure_scale_packs(k_pair)` earlier in the exact 8-wave loop is the current winning direction.
-- That schedule change hides part of the scale-pack load/use chain and reduced the PQ kernel compile remark from `255 VGPRs` to `239 VGPRs` in the winning source state.
+- **KPAIR_LOOP** (2x manual unroll of the k-pair loop) is the single most impactful optimization, boosting from ~2650 to ~3000 TFLOPS (+13%).
+- **buffer_load with SGPR SRD** (`readfirstlane` to eliminate waterfall loops, `soffset` for scalar k-pair offset) reduces spills from 8 to 3 and adds another +1%.
+- The remaining ~9% gap to FP8 comes from: scale load vmcnt stall (~5%), scale remap v_lshr_b32 (~2.5%), mfma_scale 16-byte instruction overhead (~1.6%).
+- Software pipelining of scale loads fails due to the 256 VGPR limit: any cross-iteration live range for scale_packs causes 150-200 spills.
+- LDS caching of scales is infeasible: tile double-buffers already consume the full 64 KB LDS.
 - `MXFP8_PRESHUFFLE_QUANT=1` means both `A_scale` and `B_scale` are preshuffled. Any scheduling analysis should treat both sides as part of the critical path.
-- When benchmarking revisions, use isolated worktrees and identical long-run settings. Short runs are screening only.
+- When benchmarking, use batch timing (warmup + contiguous measured iterations) to avoid GPU DVFS clock drops from per-iteration `torch.cuda.synchronize()`.
 
 ## Known Dead Ends
 - `4de0a032` scale-pack `buffer_load_dword` path: invalid at large `K`; correctness and determinism fail.

@@ -185,6 +185,31 @@ For `CRR`, the exact-path variants are selected at build time with macros:
 
 Only enable one strict `CRR` exact variant at a time when benchmarking so the routing is unambiguous.
 
+### MXFP8 layout tuning on MI350X
+
+The MXFP8 (microscaling FP8) GEMM tuning harness shares the same directory (`analysis/fp8_gemm/mi350x`).
+Scale tensors use `preshuffle-quant` (pre-shuffled E8M0 scales); A/B data matrices stay in their original layout.
+
+Build and run the MXFP8 benchmark:
+
+```bash
+# Build with KPAIR_LOOP + buffer_load pipeline
+THUNDERKITTENS_ROOT=/workdir/HipKittens ROCM_PATH=/opt/rocm \
+  CPPFLAGS='-DMXFP8_RCR_EXACT_8WAVE_FAST_ENABLE=1 -DMXFP8_RCR_EXACT_PQ_KPAIR_LOOP_ENABLE=1 -DMXFP8_RCR_EXACT_PQ_PIPELINE_SCALE_ENABLE=1' \
+  make -B TARGET=tk_mxfp8_layouts SRC=kernel_mxfp8_layouts.cpp
+
+# Batch benchmark (warmup 100, measure 200 iters)
+MXFP8_PRESHUFFLE_QUANT=1 MXFP8_LAYOUTS=rcr python3 test_mxfp8_python.py 8192 8192 8192
+```
+
+Current MXFP8 RCR performance on `8192x8192x8192` (preshuffle-quant, batch timing):
+
+| Version | TFLOPS | Spills | SNR | vs FP8 |
+| --- | ---: | ---: | --- | --- |
+| buffer_load + SGPR SRD + KPAIR_LOOP | 3031 | 3 | 49.60 dB PASS | 90.9% |
+| KPAIR_LOOP (global_load baseline) | 2999 | 8 | 49.60 dB PASS | 90.0% |
+| Pre-KPAIR_LOOP baseline | ~2650 | 0 | 49.60 dB PASS | ~79.4% |
+
 **Note:** We also provide the instructions to reproduce our baselines (Triton, CK, HipBLASLT, Mojo, etc.) in [HipKittens/analysis/baselines](https://github.com/HazyResearch/HipKittens/tree/main/analysis/baselines)! As these are constantly evolving frameworks, we remind that our results are collected in November 2025.
 
 ## Training

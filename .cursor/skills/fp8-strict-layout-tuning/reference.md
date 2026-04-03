@@ -55,9 +55,11 @@ MXFP8_PRESHUFFLE_QUANT=1 MXFP8_LAYOUTS=rcr MXFP8_WARMUP=50 MXFP8_ITERS=200 MXFP8
 ## Current Validated Status
 - `MXFP8 RCR exact + preshuffle-quant` is the active high-value path.
 - In the current PQ path, both `A_scale` and `B_scale` are preshuffled.
-- The latest valid recent-commit sweep winner is `768b60fa` at `2648.81 TFLOPS`, `0.4151 ms`, `SNR 49.6 dB`, determinism `PASS`.
+- **Current best**: `buffer_load + SGPR SRD + KPAIR_LOOP` at **3031 TFLOPS** (batch timing), 3 spills, SNR 49.60 dB, determinism PASS.
+- The pre-KPAIR_LOOP commit sweep winner was `768b60fa` at `2648.81 TFLOPS`.
 - `4de0a032` reached `2620.01 TFLOPS` but is invalid: correctness and determinism fail on `8192`.
 - When the user asks which revision is best, compare revisions in isolated worktrees with identical long-run settings.
+- Use batch timing (warmup 100, measure 200 contiguous iters) to avoid GPU DVFS clock drops.
 
 ## Important Constraints
 - Strict native-layout support means no Python `.t().contiguous()` workaround for `RRR` or `CRR`.
