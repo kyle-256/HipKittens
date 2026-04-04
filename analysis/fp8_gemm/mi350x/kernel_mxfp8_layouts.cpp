@@ -2960,6 +2960,8 @@ __host__ inline void dispatch_rcr_exact_8wave_scaled(const layout_globals& g) {
 #endif
 
 #include "rcr_mxfp8_4wave_fastpath.inc"
+#include "crr_mxfp8_4wave_fastpath.inc"
+#include "rrr_mxfp8_4wave_fastpath.inc"
 #include "rrr_mxfp8_exact_8wave_fastpath.inc"
 #include "crr_mxfp8_exact_8wave_fastpath.inc"
 
@@ -4673,10 +4675,28 @@ void dispatch(layout_globals g) {
     }
 #endif
 
+#if MXFP8_RRR_4WAVE_FAST_ENABLE
+    if constexpr (L == Layout::RRR) {
+        if (mxfp8_rrr_4wave::can_use(g)) {
+            mxfp8_rrr_4wave::dispatch<PRESHUFFLED_QUANT>(g);
+            return;
+        }
+    }
+#endif
+
 #if MXFP8_RRR_EXACT_8WAVE_FAST_ENABLE
     if constexpr (L == Layout::RRR) {
         if (rrr_can_use_exact_8wave_scaled(g)) {
             dispatch_rrr_exact_8wave_scaled<PRESHUFFLED_QUANT>(g);
+            return;
+        }
+    }
+#endif
+
+#if MXFP8_CRR_4WAVE_FAST_ENABLE
+    if constexpr (L == Layout::CRR) {
+        if (mxfp8_crr_4wave::can_use(g)) {
+            mxfp8_crr_4wave::dispatch<PRESHUFFLED_QUANT>(g);
             return;
         }
     }
@@ -4744,6 +4764,33 @@ void dispatch_pq(layout_globals g) {
     dispatch<L, true>(g);
 }
 
+__global__ void diag_load_transpose_kernel(
+    _gl_fp8 g_b, fp8e4m3* __restrict__ out)
+{
+    using ST = st_fp8e4m3<128, 128, st_16x128_s>;
+    __shared__ ST tile;
+
+    constexpr int bpt = ST::underlying_subtile_bytes_per_thread;
+    constexpr int bpm = bpt * 512;
+    constexpr int mpt = ST::rows * ST::cols * sizeof(fp8e4m3) / bpm;
+    uint32_t soB[mpt];
+    prefill_transpose_swizzled_offsets<512>(tile, g_b, soB);
+
+    coord<ST> idx{0, 0, 0, 0};
+    load_transpose<512>(tile, g_b, idx, soB);
+
+    asm volatile("s_waitcnt vmcnt(0)");
+    __builtin_amdgcn_s_barrier();
+
+    const int tid = threadIdx.x;
+    constexpr int elems_per_thread = 128 * 128 / 512;
+    #pragma unroll
+    for (int i = 0; i < elems_per_thread; i++) {
+        int byte_idx = tid * elems_per_thread + i;
+        out[byte_idx] = reinterpret_cast<fp8e4m3*>(&tile.data[0])[byte_idx];
+    }
+}
+
 PYBIND11_MODULE(tk_mxfp8_layouts, m) {
     m.doc() = "MXFP8 GEMM reference path with layout-aware scales";
     py::bind_function<dispatch<Layout::RCR>>(m, "gemm_rcr",
@@ -4770,4 +4817,16 @@ PYBIND11_MODULE(tk_mxfp8_layouts, m) {
         &layout_globals::a, &layout_globals::b,
         &layout_globals::a_scale, &layout_globals::b_scale,
         &layout_globals::c);
+
+    m.def("diag_load_transpose", [](pybind11::object b_obj, pybind11::object out_obj) {
+        uint64_t b_ptr = b_obj.attr("data_ptr")().cast<uint64_t>();
+        uint64_t out_ptr = out_obj.attr("data_ptr")().cast<uint64_t>();
+        auto b_shape = b_obj.attr("shape").cast<pybind11::tuple>();
+        int K = pybind11::cast<int>(b_shape[0]);
+        int N = pybind11::cast<int>(b_shape[1]);
+
+        _gl_fp8 g_b(reinterpret_cast<fp8e4m3*>(b_ptr), 1, 1, K, N);
+        diag_load_transpose_kernel<<<1, 512>>>(g_b, reinterpret_cast<fp8e4m3*>(out_ptr));
+        hipDeviceSynchronize();
+    });
 }

@@ -1,9 +1,25 @@
 {
     "256x256x256": {
+        "rcr": {
+            "avg_ms": 0.05084410049021244,
+            "tflops": 0.6599474014976285,
+            "snr_db": 49.56072536627374,
+            "deterministic": true,
+            "determinism_max_abs_diff": 0.0,
+            "quality_ok": true
+        },
+        "rrr": {
+            "avg_ms": 0.04726830013096332,
+            "tflops": 0.7098717725628557,
+            "snr_db": 49.598592150390274,
+            "deterministic": true,
+            "determinism_max_abs_diff": 0.0,
+            "quality_ok": true
+        },
         "crr": {
-            "avg_ms": 0.02160019986331463,
-            "tflops": 1.5534315521305992,
-            "snr_db": 49.54547129946093,
+            "avg_ms": 0.05142409987747669,
+            "tflops": 0.6525040220431072,
+            "snr_db": 49.62113295388061,
             "deterministic": true,
             "determinism_max_abs_diff": 0.0,
             "quality_ok": true

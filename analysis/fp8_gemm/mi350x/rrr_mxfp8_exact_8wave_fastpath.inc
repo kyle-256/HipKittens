@@ -3,6 +3,9 @@
 #ifndef MXFP8_RRR_EXACT_8WAVE_FAST_ENABLE
 #define MXFP8_RRR_EXACT_8WAVE_FAST_ENABLE 0
 #endif
+#ifndef MXFP8_RRR_EXACT_PQ_PIPELINE_SCALE_ENABLE
+#define MXFP8_RRR_EXACT_PQ_PIPELINE_SCALE_ENABLE 0
+#endif
 
 #if MXFP8_RRR_EXACT_8WAVE_FAST_ENABLE
 
@@ -43,19 +46,86 @@ void rrr_exact_8wave_scaled_kernel(const layout_globals g) {
     };
     const int lane_nonk = kittens::laneid() % 16;
     const int lane_kblk = kittens::laneid() / 16;
+    const uint32_t lane_scale_byte_offset =
+        (static_cast<uint32_t>(lane_kblk) << 6) |
+        (static_cast<uint32_t>(lane_nonk) << 2);
 
     constexpr int rrr_a_pack_count = RBM / 32;
     constexpr int rrr_b_pack_count = (RBN + 31) / 32;
     fp8e8m0_4 a0_scale_packs[rrr_a_pack_count], a1_scale_packs[rrr_a_pack_count];
     fp8e8m0_4 b0_scale_packs[rrr_b_pack_count], b1_scale_packs[rrr_b_pack_count];
+    const uint8_t* a0_scale_row_bases[rrr_a_pack_count];
+    const uint8_t* a1_scale_row_bases[rrr_a_pack_count];
+    const uint8_t* b0_scale_row_bases[rrr_b_pack_count];
+    const uint8_t* b1_scale_row_bases[rrr_b_pack_count];
+#if MXFP8_RRR_EXACT_PQ_PIPELINE_SCALE_ENABLE
+    i32x4 a0p0_srsrc = {}, a0p1_srsrc = {}, a1p0_srsrc = {}, a1p1_srsrc = {};
+    i32x4 b0p0_srsrc = {}, b1p0_srsrc = {};
+#endif
+    if constexpr (PRESHUFFLED_QUANT) {
+        #pragma unroll
+        for (int p = 0; p < rrr_a_pack_count; ++p) {
+            a0_scale_row_bases[p] = preshuffled_scale_row_base_ptr(
+                g.a_scale, (rrr_scale_a_base(0) + p * 32) >> 5);
+            a1_scale_row_bases[p] = preshuffled_scale_row_base_ptr(
+                g.a_scale, (rrr_scale_a_base(1) + p * 32) >> 5);
+        }
+        #pragma unroll
+        for (int p = 0; p < rrr_b_pack_count; ++p) {
+            b0_scale_row_bases[p] = preshuffled_scale_row_base_ptr(
+                g.b_scale, (rrr_scale_b_base(0) + p * 32) >> 5);
+            b1_scale_row_bases[p] = preshuffled_scale_row_base_ptr(
+                g.b_scale, (rrr_scale_b_base(1) + p * 32) >> 5);
+        }
+#if MXFP8_RRR_EXACT_PQ_PIPELINE_SCALE_ENABLE
+        {
+            auto make_scale_srd = [](const void* ptr) -> i32x4 {
+                i32x4 srd = std::bit_cast<i32x4>(
+                    make_buffer_resource(
+                        static_cast<uint64_t>(reinterpret_cast<std::uintptr_t>(ptr)),
+                        0xFFFFFFFFu,
+                        0x00110000u
+                    )
+                );
+                srd[0] = __builtin_amdgcn_readfirstlane(srd[0]);
+                srd[1] = __builtin_amdgcn_readfirstlane(srd[1]);
+                srd[2] = __builtin_amdgcn_readfirstlane(srd[2]);
+                srd[3] = __builtin_amdgcn_readfirstlane(srd[3]);
+                return srd;
+            };
+            a0p0_srsrc = make_scale_srd(a0_scale_row_bases[0]);
+            a1p0_srsrc = make_scale_srd(a1_scale_row_bases[0]);
+            b0p0_srsrc = make_scale_srd(b0_scale_row_bases[0]);
+            b1p0_srsrc = make_scale_srd(b1_scale_row_bases[0]);
+            if constexpr (rrr_a_pack_count > 1) {
+                a0p1_srsrc = make_scale_srd(a0_scale_row_bases[1]);
+                a1p1_srsrc = make_scale_srd(a1_scale_row_bases[1]);
+            }
+        }
+#endif
+    }
     auto load_scale_packs = [&](int k_pair) __attribute__((always_inline)) {
+#if MXFP8_RRR_EXACT_PQ_PIPELINE_SCALE_ENABLE
+        if constexpr (PRESHUFFLED_QUANT) {
+            const uint32_t soff = static_cast<uint32_t>(k_pair) << 8;
+            a0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(a0p0_srsrc, lane_scale_byte_offset, soff, 0));
+            a1_scale_packs[0] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(a1p0_srsrc, lane_scale_byte_offset, soff, 0));
+            if constexpr (rrr_a_pack_count > 1) {
+                a0_scale_packs[1] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(a0p1_srsrc, lane_scale_byte_offset, soff, 0));
+                a1_scale_packs[1] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(a1p1_srsrc, lane_scale_byte_offset, soff, 0));
+            }
+            b0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(b0p0_srsrc, lane_scale_byte_offset, soff, 0));
+            b1_scale_packs[0] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(b1p0_srsrc, lane_scale_byte_offset, soff, 0));
+            return;
+        }
+#endif
         #pragma unroll
         for (int p = 0; p < rrr_a_pack_count; ++p) {
             if constexpr (PRESHUFFLED_QUANT) {
-                a0_scale_packs[p] = load_scale_pair_pack_16x128_preshuffled(
-                    g.a_scale, rrr_scale_a_base(0) + p * 32, k_pair, lane_nonk, lane_kblk);
-                a1_scale_packs[p] = load_scale_pair_pack_16x128_preshuffled(
-                    g.a_scale, rrr_scale_a_base(1) + p * 32, k_pair, lane_nonk, lane_kblk);
+                a0_scale_packs[p] = load_scale_pair_pack_16x128_preshuffled_from_row_base(
+                    a0_scale_row_bases[p], k_pair, lane_scale_byte_offset);
+                a1_scale_packs[p] = load_scale_pair_pack_16x128_preshuffled_from_row_base(
+                    a1_scale_row_bases[p], k_pair, lane_scale_byte_offset);
             } else {
                 a0_scale_packs[p] = load_scale_pair_pack_16x128(
                     g.a_scale, rrr_scale_a_base(0) + p * 32, k_pair, lane_nonk, lane_kblk);
@@ -66,10 +136,10 @@ void rrr_exact_8wave_scaled_kernel(const layout_globals g) {
         #pragma unroll
         for (int p = 0; p < rrr_b_pack_count; ++p) {
             if constexpr (PRESHUFFLED_QUANT) {
-                b0_scale_packs[p] = load_scale_pair_pack_16x128_preshuffled(
-                    g.b_scale, rrr_scale_b_base(0) + p * 32, k_pair, lane_nonk, lane_kblk);
-                b1_scale_packs[p] = load_scale_pair_pack_16x128_preshuffled(
-                    g.b_scale, rrr_scale_b_base(1) + p * 32, k_pair, lane_nonk, lane_kblk);
+                b0_scale_packs[p] = load_scale_pair_pack_16x128_preshuffled_from_row_base(
+                    b0_scale_row_bases[p], k_pair, lane_scale_byte_offset);
+                b1_scale_packs[p] = load_scale_pair_pack_16x128_preshuffled_from_row_base(
+                    b1_scale_row_bases[p], k_pair, lane_scale_byte_offset);
             } else {
                 b0_scale_packs[p] = load_scale_pair_pack_16x128(
                     g.b_scale, rrr_scale_b_base(0) + p * 32, k_pair, lane_nonk, lane_kblk);

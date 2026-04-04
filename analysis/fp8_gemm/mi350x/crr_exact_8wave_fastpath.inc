@@ -42,10 +42,10 @@ static_assert(BK == 128, "Exact 8-wave fast path requires BK=128");
 static_assert(WARPS_M == 2, "Exact 8-wave fast path requires WARPS_M=2");
 static_assert(WARPS_N == 4, "Exact 8-wave fast path requires WARPS_N=4");
 static_assert(!CRR_ROW_SHARED_TRANSPOSE, "Exact CRR fast path only supports strict shared layout");
-static_assert(!CRR_USE_V3_SWIZZLE, "Exact CRR fast path is wired for v2/v2a shared layouts");
-static_assert(!CRR_A_LDS_REENCODE, "Exact CRR fast path does not support A LDS reencode");
 static_assert(CRR_A_REG_ROW_LOAD_TRANSPOSE == 1, "Exact CRR fast path expects default A row-load transpose");
 static_assert(CRR_A_REG_ROW_LOAD_ALIAS == 1, "Exact CRR fast path expects default A row-load alias");
+static_assert(!CRR_USE_V3_SWIZZLE, "Exact CRR fast path is wired for v2/v2a shared layouts");
+static_assert(!CRR_A_LDS_REENCODE, "Exact CRR fast path does not support A LDS reencode");
 static_assert(CRR_B_REG_ROW_LOAD_TRANSPOSE == 0, "Exact CRR fast path expects default B col-load path");
 static_assert(CRR_B_REG_ROW_LOAD_ALIAS == 0, "Exact CRR fast path expects default B col-load path");
 static_assert(CRR_BATCHED_PAIR_MMA == 1, "Exact CRR fast path expects batched pair MMA");
@@ -161,15 +161,15 @@ void crr_exact_8wave_kernel(const crr_exact_8wave_globals g) {
     G::prefill_swizzled_offsets(Bs[0][0], g.b, soB);
 
     auto a_co = [&](int s, int k) -> coord<ST_crr_a> { return {0, 0, k, s}; };
-    auto b_co = [&](int s, int k) -> coord<ST_crr_b> { return {0, 0, k, s}; };
     auto global_load_a = [&](ST_crr_a& tile, int s, int k) {
         G::load(tile, g.a, a_co(s, k), soA);
     };
-    auto global_load_b = [&](ST_crr_b& tile, int s, int k) {
-        G::load(tile, g.b, b_co(s, k), soB);
-    };
     auto load_a = [&](A_col_reg& dst, ST_crr_a& tile, int wi) {
         load_col_from_v2a_st(dst, tile, wi * RBM);
+    };
+    auto b_co = [&](int s, int k) -> coord<ST_crr_b> { return {0, 0, k, s}; };
+    auto global_load_b = [&](ST_crr_b& tile, int s, int k) {
+        G::load(tile, g.b, b_co(s, k), soB);
     };
     auto load_b = [&](B_col_reg& dst, ST_crr_b& tile, int wi) {
         load_col_from_v2_st(dst, tile, wi * RBN);

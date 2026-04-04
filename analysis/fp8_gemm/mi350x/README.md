@@ -19,6 +19,36 @@ Use this README as the task handoff before editing `kernel_mxfp8_layouts.cpp`,
 - `mxfp4` target throughput is `2x` the `mxfp8` throughput.
 - Re-run performance sequentially when background GPU jobs may exist. Do not trust overlapped runs.
 
+## Performance Targets
+
+All targets use `8192x8192x8192`, SNR > 48 dB, deterministic output.
+
+### FP8 per-tensor
+| Layout | Target | Current | Status |
+| --- | ---: | ---: | --- |
+| RCR | > 3100 TFLOPS | 3130 TFLOPS | **PASS** |
+| RRR | >= 95% of RCR | 3121 TFLOPS (99.7%) | **PASS** |
+| CRR | >= 95% of RCR | 2914 TFLOPS (93.1%) | FAIL — bottleneck: `ds_read_b64_tr_b8` 8B vs RCR's `ds_read_b128` 16B |
+
+### MXFP8 (preshuffle-quant)
+| Layout | Target | Current | Status |
+| --- | ---: | ---: | --- |
+| RCR | approach FP8 (~3100+) | 3031 TFLOPS (90.9% of FP8) | in progress |
+| RRR | >= 95% of MXFP8 RCR | not benchmarked at 8192 | TODO |
+| CRR | >= 95% of MXFP8 RCR | 1085 TFLOPS (35.8% of RCR) | TODO — not optimized |
+
+### MXFP4
+| Layout | Target | Current | Status |
+| --- | ---: | ---: | --- |
+| RCR | 5500 TFLOPS | — | TODO |
+| RRR | 5450 TFLOPS | — | TODO |
+| CRR | 5400 TFLOPS | — | TODO |
+
+### Priority order
+1. FP8 CRR → close 92.9% → 95% gap (or accept if hardware-limited)
+2. MXFP8 RRR / CRR → bring to 95% of MXFP8 RCR
+3. MXFP4 RCR / RRR / CRR → 5500 / 5450 / 5400 TFLOPS
+
 ## Important Files
 - `kernel_fp8_layouts.cpp`
 - `kernel_mxfp8_layouts.cpp`

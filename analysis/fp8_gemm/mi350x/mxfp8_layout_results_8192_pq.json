@@ -1,9 +1,9 @@
 {
     "8192x8192x8192": {
-        "rrr": {
-            "avg_ms": 0.38763876542449,
-            "tflops": 2836.433622865253,
-            "snr_db": 49.594630165399984,
+        "rcr": {
+            "avg_ms": 0.38206192523241045,
+            "tflops": 2877.836170424888,
+            "snr_db": 49.59524594384642,
             "deterministic": true,
             "determinism_max_abs_diff": 0.0,
             "quality_ok": true
