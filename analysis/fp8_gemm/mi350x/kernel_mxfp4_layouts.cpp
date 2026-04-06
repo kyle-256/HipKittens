@@ -281,21 +281,6 @@ void mxfp4_rcr_pq_kernel(const layout_globals g) {
         auto bs0 = kittens::subtile_inplace<RBN, BK>(Bs[0], {wn, 0});
         auto bs1 = kittens::subtile_inplace<RBN, BK>(Bs[1], {wn, 0});
 
-        fp4_load_st_to_rt(a_rt, as0);
-        fp4_load_st_to_rt(b0_rt, bs0);
-        fp4_load_st_to_rt(b1_rt, bs1);
-        asm volatile("s_waitcnt lgkmcnt(0)");
-        __builtin_amdgcn_sched_barrier(0);
-
-        fp4_intx8_t A0 = fp4_extract_tile(a_rt, 0);
-        fp4_intx8_t A1 = fp4_extract_tile(a_rt, 1);
-        fp4_intx8_t A2 = fp4_extract_tile(a_rt, 2);
-        fp4_intx8_t A3 = fp4_extract_tile(a_rt, 3);
-        fp4_intx8_t B0_0 = fp4_extract_tile(b0_rt, 0);
-        fp4_intx8_t B0_1 = fp4_extract_tile(b0_rt, 1);
-        fp4_intx8_t B1_0 = fp4_extract_tile(b1_rt, 0);
-        fp4_intx8_t B1_1 = fp4_extract_tile(b1_rt, 1);
-
         fp8e8m0_4 a0_raw[a_packs], a1_raw[a_packs];
         fp8e8m0_4 b0_raw[b_packs], b1_raw[b_packs];
         #pragma unroll
@@ -308,16 +293,26 @@ void mxfp4_rcr_pq_kernel(const layout_globals g) {
             b0_raw[p] = load_pq_scale(b0_sb[p], bt, lane_soff);
             b1_raw[p] = load_pq_scale(b1_sb[p], bt, lane_soff);
         }
-        asm volatile("s_waitcnt vmcnt(0)");
+
+        fp4_load_st_to_rt(a_rt, as0);
+        fp4_load_st_to_rt(b0_rt, bs0);
+        fp4_load_st_to_rt(b1_rt, bs1);
+        asm volatile("s_waitcnt lgkmcnt(0) vmcnt(0)");
+        __builtin_amdgcn_sched_barrier(0);
+
+        fp4_intx8_t A0 = fp4_extract_tile(a_rt, 0);
+        fp4_intx8_t A1 = fp4_extract_tile(a_rt, 1);
+        fp4_intx8_t A2 = fp4_extract_tile(a_rt, 2);
+        fp4_intx8_t A3 = fp4_extract_tile(a_rt, 3);
+        fp4_intx8_t B0_0 = fp4_extract_tile(b0_rt, 0);
+        fp4_intx8_t B0_1 = fp4_extract_tile(b0_rt, 1);
+        fp4_intx8_t B1_0 = fp4_extract_tile(b1_rt, 0);
+        fp4_intx8_t B1_1 = fp4_extract_tile(b1_rt, 1);
 
         fp8e8m0_4 a0p0_lo = remap_phase(a0_raw[0], 0);
         fp8e8m0_4 a0p1_lo = remap_phase(a0_raw[1], 0);
         fp8e8m0_4 b0p_lo  = remap_phase(b0_raw[0], 0);
         fp8e8m0_4 b1p_lo  = remap_phase(b1_raw[0], 0);
-        fp8e8m0_4 a0p0_hi = remap_phase(a0_raw[0], 1);
-        fp8e8m0_4 a0p1_hi = remap_phase(a0_raw[1], 1);
-        fp8e8m0_4 b0p_hi  = remap_phase(b0_raw[0], 1);
-        fp8e8m0_4 b1p_hi  = remap_phase(b1_raw[0], 1);
 
         // Phase 0: M-half 0
         fp4_mma_all_subtiles<false>(cA, A0, A1, A2, A3, B0_0, B0_1, a0p0_lo, a0p1_lo, b0p_lo);
@@ -336,17 +331,20 @@ void mxfp4_rcr_pq_kernel(const layout_globals g) {
 
         fp8e8m0_4 a1p0_lo = remap_phase(a1_raw[0], 0);
         fp8e8m0_4 a1p1_lo = remap_phase(a1_raw[1], 0);
-        fp8e8m0_4 a1p0_hi = remap_phase(a1_raw[0], 1);
-        fp8e8m0_4 a1p1_hi = remap_phase(a1_raw[1], 1);
 
         fp4_mma_all_subtiles<false>(cC, A1_0, A1_1, A1_2, A1_3, B0_0, B0_1, a1p0_lo, a1p1_lo, b0p_lo);
         fp4_mma_all_subtiles<false>(cD, A1_0, A1_1, A1_2, A1_3, B1_0, B1_1, a1p0_lo, a1p1_lo, b1p_lo);
 
-        // Phase 1: M-half 1 first (cC/cD gap: 8 MFMAs from Phase 0 cD)
+        // Phase 1: M-half 1 first — compute hi scales on demand
+        fp8e8m0_4 a1p0_hi = remap_phase(a1_raw[0], 1);
+        fp8e8m0_4 a1p1_hi = remap_phase(a1_raw[1], 1);
+        fp8e8m0_4 b0p_hi  = remap_phase(b0_raw[0], 1);
+        fp8e8m0_4 b1p_hi  = remap_phase(b1_raw[0], 1);
+
         fp4_mma_all_subtiles<true>(cC, A1_0, A1_1, A1_2, A1_3, B0_0, B0_1, a1p0_hi, a1p1_hi, b0p_hi);
         fp4_mma_all_subtiles<true>(cD, A1_0, A1_1, A1_2, A1_3, B1_0, B1_1, a1p0_hi, a1p1_hi, b1p_hi);
 
-        // Phase 1: M-half 0 (cA/cB gap: >=32 MFMAs from phase 0 end)
+        // Phase 1: M-half 0
         fp4_load_st_to_rt(a_rt, as0);
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_sched_barrier(0);
@@ -355,6 +353,9 @@ void mxfp4_rcr_pq_kernel(const layout_globals g) {
         A1 = fp4_extract_tile(a_rt, 1);
         A2 = fp4_extract_tile(a_rt, 2);
         A3 = fp4_extract_tile(a_rt, 3);
+
+        fp8e8m0_4 a0p0_hi = remap_phase(a0_raw[0], 1);
+        fp8e8m0_4 a0p1_hi = remap_phase(a0_raw[1], 1);
 
         fp4_mma_all_subtiles<true>(cA, A0, A1, A2, A3, B0_0, B0_1, a0p0_hi, a0p1_hi, b0p_hi);
         fp4_mma_all_subtiles<true>(cB, A0, A1, A2, A3, B1_0, B1_1, a0p0_hi, a0p1_hi, b1p_hi);
