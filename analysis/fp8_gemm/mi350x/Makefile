@@ -35,6 +35,10 @@ ICXXFLAGS += $(PY_LDFLAGS)
 ICXXFLAGS+= -I${THUNDERKITTENS_ROOT}/include -I${THUNDERKITTENS_ROOT}/prototype $(shell python3 -m pybind11 --includes) -shared -fPIC -Rpass-analysis=kernel-resource-usage
 
 
+# Optional: FP8 blockwise reference kernels (separate module tk_fp8_blockwise_layouts)
+BLOCKWISE_TARGET ?= tk_fp8_blockwise_layouts
+BLOCKWISE_SRC ?= kernel_fp8_blockwise_layouts.cpp
+
 # Default target
 all: $(TARGET)
 
@@ -42,6 +46,10 @@ $(TARGET): $(SRC)
 	$(HIPCXX) $(SRC) $(HIPFLAGS) $(ICXXFLAGS) $(ICPPFLAGS) $(ILDFLAGS) \
 	    -o $(TARGET)$(shell python3-config --extension-suffix) 
 
+$(BLOCKWISE_TARGET): $(BLOCKWISE_SRC)
+	$(HIPCXX) $(BLOCKWISE_SRC) $(HIPFLAGS) $(ICXXFLAGS) $(ICPPFLAGS) $(ILDFLAGS) \
+	    -o $(BLOCKWISE_TARGET)$(shell python3-config --extension-suffix)
+
 # Clean target
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGET) $(BLOCKWISE_TARGET)
