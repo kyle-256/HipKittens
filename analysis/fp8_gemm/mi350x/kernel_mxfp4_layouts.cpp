@@ -314,14 +314,12 @@ void mxfp4_rcr_pq_kernel(const layout_globals g) {
         fp8e8m0_4 b0p_lo  = remap_phase(b0_raw[0], 0);
         fp8e8m0_4 b1p_lo  = remap_phase(b1_raw[0], 0);
 
-        // Phase 0: M-half 0, cA
-        fp4_mma_all_subtiles<false>(cA, A0, A1, A2, A3, B0_0, B0_1, a0p0_lo, a0p1_lo, b0p_lo);
-
-        // Fire A1 (M-half 1) reload — overlaps with cB MMA
+        // Fire A1 (M-half 1) reload early — overlaps with cA + cB MMA
         auto as1 = kittens::subtile_inplace<RBM, BK>(As[1], {wm, 0});
         fp4_load_st_to_rt(a_rt, as1);
 
-        // Phase 0: M-half 0, cB — A1 loads in background
+        // Phase 0: M-half 0
+        fp4_mma_all_subtiles<false>(cA, A0, A1, A2, A3, B0_0, B0_1, a0p0_lo, a0p1_lo, b0p_lo);
         fp4_mma_all_subtiles<false>(cB, A0, A1, A2, A3, B1_0, B1_1, a0p0_lo, a0p1_lo, b1p_lo);
 
         // Collect A1 data
