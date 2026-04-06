@@ -1,5 +1,5 @@
 // FP8 blockwise GEMM — MFMA (RCR/NT), scalar reference (RRR/CRR).
-// CK-style MFMA-level double-buffered partial + global-load scales.
+// Triple-buffered MFMA-level partial (2-MFMA gap covers execution latency).
 // Scale layout: a_scale [Kb, M], b_scale [Kb, Nb] (pre-transposed).
 
 #include "kittens.cuh"
@@ -25,60 +25,41 @@ using acc_tile = rt_fl<RBM, RBN, col_l, rt_16x16_s>;
 #define BW_DIAG_CONST_SCALE 0
 #endif
 
-__device__ __forceinline__ void base_sfz(
-    float2 (&c)[2], float2 (&p)[2],
-    const _gl_f32& asc, float bs, int ki, int m_base, int r16)
-{
-    float* pf = reinterpret_cast<float*>(p);
-    float* cf = reinterpret_cast<float*>(c);
-    #pragma unroll
-    for (int d = 0; d < 4; ++d) {
-#if BW_DIAG_CONST_SCALE
-        float s = 1.0f;
-#else
-        float s = asc[coord<>(ki, m_base + r16 + d)] * bs;
-#endif
-        cf[d] += pf[d] * s;
-        pf[d] = 0.f;
-    }
-}
-
+// Triple-buffered MFMA-level partial: 2-MFMA gap covers ~64-cycle execution latency.
+// sv[16] passed from caller (preloaded, shared across left/right N-halves).
 __device__ __forceinline__ void mma_ABt_bscale(
-    acc_tile& c,
-    const A_row_reg& a, const B_row_reg& b,
-    const _gl_f32& asc, float bs,
-    int m_base, int r16, int ki)
+    acc_tile& c, const A_row_reg& a, const B_row_reg& b,
+    const float* __restrict__ sv, float bs)
 {
-    // Preload all 16 combined scale values; global loads issue immediately,
-    // complete during the first few MFMA calls (L1 ~20 cycles).
-    float sv[16];
-    #pragma unroll
-    for (int i = 0; i < 4; ++i)
-        #pragma unroll
-        for (int d = 0; d < 4; ++d)
-            sv[i*4+d] = asc[coord<>(ki, m_base + i*16 + r16 + d)] * bs;
+    float2 pb[3][2] = {};
 
-    float2 pb[2][2] = {};
-    int buf = 0, pn = 0, pm = 0;
-    #pragma unroll
-    for (int n = 0; n < 4; ++n) {
-        #pragma unroll
-        for (int m = 0; m < 2; ++m) {
-            mfma1616128(pb[buf], a.tiles[n][0].data, b.tiles[m][0].data, pb[buf]);
-            if (n > 0 || m > 0) {
-                float* pf = reinterpret_cast<float*>(pb[buf^1]);
-                float* cf = reinterpret_cast<float*>(c.tiles[pn][pm].data);
-                #pragma unroll
-                for (int d = 0; d < 4; ++d) { cf[d] += pf[d] * sv[pn*4+d]; pf[d] = 0.f; }
-            }
-            pn = n; pm = m; buf ^= 1;
-        }
-    }
-    { float* pf = reinterpret_cast<float*>(pb[buf^1]);
-      float* cf = reinterpret_cast<float*>(c.tiles[pn][pm].data);
-      #pragma unroll
-      for (int d = 0; d < 4; ++d) { cf[d] += pf[d] * sv[pn*4+d]; pf[d] = 0.f; }
-    }
+#define SFZ(N,M,B) do { \
+    float *pf=reinterpret_cast<float*>(pb[B]), \
+          *cf=reinterpret_cast<float*>(c.tiles[N][M].data); \
+    cf[0]+=pf[0]*(sv[(N)*4]*bs);   cf[1]+=pf[1]*(sv[(N)*4+1]*bs); \
+    cf[2]+=pf[2]*(sv[(N)*4+2]*bs); cf[3]+=pf[3]*(sv[(N)*4+3]*bs); \
+    pf[0]=pf[1]=pf[2]=pf[3]=0.f; } while(0)
+
+    // 8 MFMAs: (n,m) = (0,0)(0,1)(1,0)(1,1)(2,0)(2,1)(3,0)(3,1)
+    // Pipeline: MFMA[i] → pb[i%3]; SFZ for MFMA[i-2] after MFMA[i] (2-gap = ~64 cy)
+    mfma1616128(pb[0], a.tiles[0][0].data, b.tiles[0][0].data, pb[0]); // 0
+    mfma1616128(pb[1], a.tiles[0][0].data, b.tiles[1][0].data, pb[1]); // 1
+    mfma1616128(pb[2], a.tiles[1][0].data, b.tiles[0][0].data, pb[2]); // 2
+    SFZ(0,0, 0);
+    mfma1616128(pb[0], a.tiles[1][0].data, b.tiles[1][0].data, pb[0]); // 3
+    SFZ(0,1, 1);
+    mfma1616128(pb[1], a.tiles[2][0].data, b.tiles[0][0].data, pb[1]); // 4
+    SFZ(1,0, 2);
+    mfma1616128(pb[2], a.tiles[2][0].data, b.tiles[1][0].data, pb[2]); // 5
+    SFZ(1,1, 0);
+    mfma1616128(pb[0], a.tiles[3][0].data, b.tiles[0][0].data, pb[0]); // 6
+    SFZ(2,0, 1);
+    mfma1616128(pb[1], a.tiles[3][0].data, b.tiles[1][0].data, pb[1]); // 7
+    SFZ(2,1, 2);
+    SFZ(3,0, 0); // drain
+    SFZ(3,1, 1); // drain
+
+#undef SFZ
 }
 
 struct bw_rcr_globals {
@@ -133,27 +114,37 @@ void gemm_rcr_blockwise_mfma(const bw_rcr_globals g) {
         const float bl = g.b_scale[coord<>(k, bc*2)];
         const float br2 = g.b_scale[coord<>(k, bc*2+1)];
 
+        // Preload a_scale for top-M and bottom-M (shared across left/right N sub-tiles)
+        float svt[16], svb[16];
+        #pragma unroll
+        for (int i = 0; i < 4; ++i)
+            #pragma unroll
+            for (int d = 0; d < 4; ++d) {
+                svt[i*4+d] = g.a_scale[coord<>(k, mt  + i*16 + r16 + d)];
+                svb[i*4+d] = g.a_scale[coord<>(k, mb_ + i*16 + r16 + d)];
+            }
+
         lb(b0_reg, Bs[tic][0], wn);
         la(a_reg,  As[tic][0], wm);
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
-        mma_ABt_bscale(cA, a_reg, b0_reg, g.a_scale, bl, mt, r16, k);
+        mma_ABt_bscale(cA, a_reg, b0_reg, svt, bl);
         __builtin_amdgcn_s_setprio(0);
 
         lb(b1_reg, Bs[tic][1], wn);
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
-        mma_ABt_bscale(cB, a_reg, b1_reg, g.a_scale, br2, mt, r16, k);
+        mma_ABt_bscale(cB, a_reg, b1_reg, svt, br2);
         __builtin_amdgcn_s_setprio(0);
 
         la(a_reg, As[tic][1], wm);
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
-        mma_ABt_bscale(cC, a_reg, b0_reg, g.a_scale, bl, mb_, r16, k);
+        mma_ABt_bscale(cC, a_reg, b0_reg, svb, bl);
         __builtin_amdgcn_s_setprio(0);
 
         __builtin_amdgcn_s_setprio(1);
-        mma_ABt_bscale(cD, a_reg, b1_reg, g.a_scale, br2, mb_, r16, k);
+        mma_ABt_bscale(cD, a_reg, b1_reg, svb, br2);
         __builtin_amdgcn_s_setprio(0);
 
         asm volatile("s_waitcnt vmcnt(0)");
