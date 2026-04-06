@@ -1,6 +1,5 @@
 // FP8 blockwise GEMM — MFMA (RCR/NT), scalar reference (RRR/CRR).
-// MFMA-instruction-level double-buffered partial (CK-style):
-//   2 × rt_base partial (~4 VGPR), scale_fma interleaved between MFMA calls.
+// CK-style MFMA-level double-buffered partial + global-load scales.
 // Scale layout: a_scale [Kb, M], b_scale [Kb, Nb] (pre-transposed).
 
 #include "kittens.cuh"
@@ -22,12 +21,11 @@ using A_row_reg = rt_fp8e4m3<RBM, BK, row_l, rt_16x128_s>;
 using B_row_reg = rt_fp8e4m3<RBN, BK, row_l, rt_16x128_s>;
 using acc_tile = rt_fl<RBM, RBN, col_l, rt_16x16_s>;
 
-using base_acc = rt_base<float, ducks::rt_layout::col, ducks::rt_shape::rt_16x16>;
-using base_a   = rt_base<fp8e4m3, ducks::rt_layout::row, ducks::rt_shape::rt_16x128>;
-using base_b   = rt_base<fp8e4m3, ducks::rt_layout::row, ducks::rt_shape::rt_16x128>;
+#ifndef BW_DIAG_CONST_SCALE
+#define BW_DIAG_CONST_SCALE 0
+#endif
 
-// Scale one base-tile partial → FMA into main → zero partial
-__device__ __forceinline__ void base_scale_fma_zero(
+__device__ __forceinline__ void base_sfz(
     float2 (&c)[2], float2 (&p)[2],
     const _gl_f32& asc, float bs, int ki, int m_base, int r16)
 {
@@ -35,50 +33,52 @@ __device__ __forceinline__ void base_scale_fma_zero(
     float* cf = reinterpret_cast<float*>(c);
     #pragma unroll
     for (int d = 0; d < 4; ++d) {
+#if BW_DIAG_CONST_SCALE
+        float s = 1.0f;
+#else
         float s = asc[coord<>(ki, m_base + r16 + d)] * bs;
+#endif
         cf[d] += pf[d] * s;
         pf[d] = 0.f;
     }
 }
 
-// mma_ABt with per-ki blockscale fused at MFMA-instruction level.
-// Double-buffered partial: p[2][2] (2 slots × 2 float2 each = 4 VGPR).
-// For each MFMA call, accumulate into p[buf]; scale p[buf^1] from previous call.
-__device__ __forceinline__ void mma_ABt_blockscale(
+__device__ __forceinline__ void mma_ABt_bscale(
     acc_tile& c,
     const A_row_reg& a, const B_row_reg& b,
     const _gl_f32& asc, float bs,
-    int ki, int m_base, int r16)
+    int m_base, int r16, int ki)
 {
-    float2 pbuf[2][2] = {};  // double-buffered partial, zeroed
-
-    constexpr int H = acc_tile::height;  // 4
-    constexpr int W = acc_tile::width;   // 2
-    int buf = 0;
-    int prev_n = 0, prev_m = 0;
-
+    // Preload all 16 combined scale values; global loads issue immediately,
+    // complete during the first few MFMA calls (L1 ~20 cycles).
+    float sv[16];
     #pragma unroll
-    for (int n = 0; n < H; ++n) {
+    for (int i = 0; i < 4; ++i)
         #pragma unroll
-        for (int m = 0; m < W; ++m) {
-            // MFMA into pbuf[buf]
-            mfma1616128(pbuf[buf], a.tiles[n][0].data, b.tiles[m][0].data, pbuf[buf]);
+        for (int d = 0; d < 4; ++d)
+            sv[i*4+d] = asc[coord<>(ki, m_base + i*16 + r16 + d)] * bs;
 
-            // Scale pbuf[buf^1] from PREVIOUS MFMA (has had ≥1 MFMA gap)
+    float2 pb[2][2] = {};
+    int buf = 0, pn = 0, pm = 0;
+    #pragma unroll
+    for (int n = 0; n < 4; ++n) {
+        #pragma unroll
+        for (int m = 0; m < 2; ++m) {
+            mfma1616128(pb[buf], a.tiles[n][0].data, b.tiles[m][0].data, pb[buf]);
             if (n > 0 || m > 0) {
-                base_scale_fma_zero(
-                    c.tiles[prev_n][prev_m].data, pbuf[buf ^ 1],
-                    asc, bs, ki, m_base + prev_n * 16, r16);
+                float* pf = reinterpret_cast<float*>(pb[buf^1]);
+                float* cf = reinterpret_cast<float*>(c.tiles[pn][pm].data);
+                #pragma unroll
+                for (int d = 0; d < 4; ++d) { cf[d] += pf[d] * sv[pn*4+d]; pf[d] = 0.f; }
             }
-            prev_n = n;
-            prev_m = m;
-            buf ^= 1;
+            pn = n; pm = m; buf ^= 1;
         }
     }
-    // Scale the last MFMA's partial
-    base_scale_fma_zero(
-        c.tiles[prev_n][prev_m].data, pbuf[buf ^ 1],
-        asc, bs, ki, m_base + prev_n * 16, r16);
+    { float* pf = reinterpret_cast<float*>(pb[buf^1]);
+      float* cf = reinterpret_cast<float*>(c.tiles[pn][pm].data);
+      #pragma unroll
+      for (int d = 0; d < 4; ++d) { cf[d] += pf[d] * sv[pn*4+d]; pf[d] = 0.f; }
+    }
 }
 
 struct bw_rcr_globals {
@@ -137,23 +137,23 @@ void gemm_rcr_blockwise_mfma(const bw_rcr_globals g) {
         la(a_reg,  As[tic][0], wm);
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
-        mma_ABt_blockscale(cA, a_reg, b0_reg, g.a_scale, bl, k, mt, r16);
+        mma_ABt_bscale(cA, a_reg, b0_reg, g.a_scale, bl, mt, r16, k);
         __builtin_amdgcn_s_setprio(0);
 
         lb(b1_reg, Bs[tic][1], wn);
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
-        mma_ABt_blockscale(cB, a_reg, b1_reg, g.a_scale, br2, k, mt, r16);
+        mma_ABt_bscale(cB, a_reg, b1_reg, g.a_scale, br2, mt, r16, k);
         __builtin_amdgcn_s_setprio(0);
 
         la(a_reg, As[tic][1], wm);
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
-        mma_ABt_blockscale(cC, a_reg, b0_reg, g.a_scale, bl, k, mb_, r16);
+        mma_ABt_bscale(cC, a_reg, b0_reg, g.a_scale, bl, mb_, r16, k);
         __builtin_amdgcn_s_setprio(0);
 
         __builtin_amdgcn_s_setprio(1);
-        mma_ABt_blockscale(cD, a_reg, b1_reg, g.a_scale, br2, k, mb_, r16);
+        mma_ABt_bscale(cD, a_reg, b1_reg, g.a_scale, br2, mb_, r16, k);
         __builtin_amdgcn_s_setprio(0);
 
         asm volatile("s_waitcnt vmcnt(0)");
@@ -212,7 +212,7 @@ __global__ void gemm_crr_bw_s(bw_crr_globals g,int M,int N,int K){
 void dispatch_gemm_crr_blockwise(bw_crr_globals g){int M=g.c.rows(),N=g.c.cols(),K=g.a.rows();gemm_crr_bw_s<<<((M*N)+255)/256,256,0,g.stream>>>(g,M,N,K);}
 
 PYBIND11_MODULE(tk_fp8_blockwise_layouts, m) {
-    m.doc()="FP8 blockwise GEMM: MFMA RCR (CK-style double-buffered scale), scalar RRR/CRR";
+    m.doc()="FP8 blockwise GEMM: MFMA RCR, scalar RRR/CRR";
     py::bind_function<dispatch_gemm_rcr_blockwise>(m,"gemm_rcr_blockwise",
         &bw_rcr_globals::a,&bw_rcr_globals::b,&bw_rcr_globals::c,&bw_rcr_globals::a_scale,&bw_rcr_globals::b_scale);
     py::bind_function<dispatch_gemm_rrr_blockwise>(m,"gemm_rrr_blockwise",
