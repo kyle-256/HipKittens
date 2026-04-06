@@ -314,13 +314,17 @@ void mxfp4_rcr_pq_kernel(const layout_globals g) {
         fp8e8m0_4 b0p_lo  = remap_phase(b0_raw[0], 0);
         fp8e8m0_4 b1p_lo  = remap_phase(b1_raw[0], 0);
 
-        // Phase 0: M-half 0
+        // Phase 0: M-half 0, cA
         fp4_mma_all_subtiles<false>(cA, A0, A1, A2, A3, B0_0, B0_1, a0p0_lo, a0p1_lo, b0p_lo);
-        fp4_mma_all_subtiles<false>(cB, A0, A1, A2, A3, B1_0, B1_1, a0p0_lo, a0p1_lo, b1p_lo);
 
-        // Phase 0: M-half 1
+        // Fire A1 (M-half 1) reload — overlaps with cB MMA
         auto as1 = kittens::subtile_inplace<RBM, BK>(As[1], {wm, 0});
         fp4_load_st_to_rt(a_rt, as1);
+
+        // Phase 0: M-half 0, cB — A1 loads in background
+        fp4_mma_all_subtiles<false>(cB, A0, A1, A2, A3, B1_0, B1_1, a0p0_lo, a0p1_lo, b1p_lo);
+
+        // Collect A1 data
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_sched_barrier(0);
 
@@ -342,18 +346,10 @@ void mxfp4_rcr_pq_kernel(const layout_globals g) {
         fp8e8m0_4 b1p_hi  = remap_phase(b1_raw[0], 1);
 
         fp4_mma_all_subtiles<true>(cC, A1_0, A1_1, A1_2, A1_3, B0_0, B0_1, a1p0_hi, a1p1_hi, b0p_hi);
+
         fp4_mma_all_subtiles<true>(cD, A1_0, A1_1, A1_2, A1_3, B1_0, B1_1, a1p0_hi, a1p1_hi, b1p_hi);
 
-        // Phase 1: M-half 0
-        fp4_load_st_to_rt(a_rt, as0);
-        asm volatile("s_waitcnt lgkmcnt(0)");
-        __builtin_amdgcn_sched_barrier(0);
-
-        A0 = fp4_extract_tile(a_rt, 0);
-        A1 = fp4_extract_tile(a_rt, 1);
-        A2 = fp4_extract_tile(a_rt, 2);
-        A3 = fp4_extract_tile(a_rt, 3);
-
+        // Phase 1: M-half 0 — reuse A0-A3 from initial extraction (still live)
         fp8e8m0_4 a0p0_hi = remap_phase(a0_raw[0], 1);
         fp8e8m0_4 a0p1_hi = remap_phase(a0_raw[1], 1);
 
