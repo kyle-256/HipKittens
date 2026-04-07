@@ -160,6 +160,43 @@ __device__ static inline void accvgpr_read(T0 &dst, const T1 &src) {
     }(std::make_index_sequence<T0::height>{});
 }
 
+// Reverse of accvgpr_read: copies from VGPR art tile to AGPR art tile
+template<ducks::art::all T0, ducks::art::all T1>
+__device__ static inline void accvgpr_write(T0 &dst, const T1 &src) {
+
+    static_assert(T0::width == T1::width);
+    static_assert(T0::height == T1::height);
+
+    auto perform_accvgpr_write_at = [&]<int N, int M>() {
+        using range_type_T0 = ducks::art::get_nth_range_t<typename T0::register_ranges, N * T0::width + M>;
+        using registers_T0 = ducks::art::split_many_t<ducks::art::type_list<range_type_T0>, 1>;
+
+        using range_type_T1 = ducks::art::get_nth_range_t<typename T1::register_ranges, N * T1::width + M>;
+        using registers_T1 = ducks::art::split_many_t<ducks::art::type_list<range_type_T1>, 1>;
+
+        static_assert(registers_T0::size == registers_T1::size);
+        static_assert(range_type_T0::lo >= 256 && range_type_T1::hi < 256);
+
+        [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+            ([&]<std::size_t I>() {
+                constexpr int agpr_dst = ducks::art::get_nth_range_t<registers_T0, I>::lo;
+                constexpr int vgpr_src = ducks::art::get_nth_range_t<registers_T1, I>::lo;
+                macros::v_accvgpr_write_b32<agpr_dst, vgpr_src>();
+            }.template operator()<Is>(), ...);
+        }(std::make_index_sequence<registers_T0::size>{});
+    };
+
+    [&]<std::size_t... Ns>(std::index_sequence<Ns...>) {
+        ([&]<std::size_t N>() {
+            [&]<std::size_t... Ms>(std::index_sequence<Ms...>) {
+                ([&]<std::size_t M>() {
+                    perform_accvgpr_write_at.template operator()<N, M>();
+                }.template operator()<Ms>(), ...);
+            }(std::make_index_sequence<T0::width>{});
+        }.template operator()<Ns>(), ...);
+    }(std::make_index_sequence<T0::height>{});
+}
+
 template<int N, int M, int GPR, ducks::art::all T0, ducks::art::all T1>
 __device__ static inline void make_causal(T0 &dst, const T1 &src) {
     static_assert(std::is_same_v<typename T0::T, float> && std::is_same_v<typename T1::T, float>, "Only float to float causal mask is supported");

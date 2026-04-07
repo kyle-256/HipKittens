@@ -278,16 +278,30 @@ __device__ __forceinline__ T ds_read_b128(const uint32_t smem_ptr, const int i_o
   return result;
 }
 
+template<int AGPR_DST, int _dummy=0>
+__device__ __forceinline__ void v_accvgpr_write_b32(uint32_t val) {
+  asm volatile("v_accvgpr_write_b32 a[%0], %1"
+    :
+    : "n"(AGPR_DST - 256), "v"(val)
+    : "memory");
+}
+
 template<int GPR_START>
 __device__ __forceinline__ void ds_read_b128(const uint32_t smem_ptr, const int i_offset) {
   constexpr int GPR_END = GPR_START + 3;
-  // AGPRS
   if constexpr (GPR_START >= 256) {
-    asm volatile("ds_read_b128 a[%0:%1], %2 offset:%3"
-      :
-      : "n"(GPR_START - 256), "n"(GPR_END - 256), "v"(smem_ptr), "i"(i_offset)
+    // LDS reads can only target VGPRs. For AGPR: read to temp VGPR, then accvgpr_write.
+    float4 tmp;
+    asm volatile("ds_read_b128 %0, %1 offset:%2"
+      : "=v"(tmp)
+      : "v"(smem_ptr), "i"(i_offset)
       : "memory");
-  // VGPRS
+    asm volatile("s_waitcnt lgkmcnt(0)" ::: "memory");
+    uint32_t* v = reinterpret_cast<uint32_t*>(&tmp);
+    v_accvgpr_write_b32<GPR_START,   0>(v[0]);
+    v_accvgpr_write_b32<GPR_START+1, 0>(v[1]);
+    v_accvgpr_write_b32<GPR_START+2, 0>(v[2]);
+    v_accvgpr_write_b32<GPR_START+3, 0>(v[3]);
   } else {
     asm volatile("ds_read_b128 v[%0:%1], %2 offset:%3"
       :
@@ -932,8 +946,18 @@ template<int GPR0, int GPR1>
 __device__ __forceinline__ void v_accvgpr_read_b32() {
   asm volatile("v_accvgpr_read_b32 v[%0], a[%1]"
     : 
-    : "n"(GPR0), "n"(GPR1 - 256));
+    : "n"(GPR0), "n"(GPR1 - 256)
+    : "memory");
 }
+
+template<int AGPR_DST, int VGPR_SRC>
+__device__ __forceinline__ void v_accvgpr_write_b32() {
+  asm volatile("v_accvgpr_write_b32 a[%0], v[%1]"
+    :
+    : "n"(AGPR_DST - 256), "n"(VGPR_SRC)
+    : "memory");
+}
+
 
 template<int GPR, typename T>
 __device__ __forceinline__ void v_mov_b32_up2p(const T value) {
