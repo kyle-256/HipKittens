@@ -295,7 +295,8 @@ void mxfp4_rcr_v2_kernel(const v2_globals g) {
         }
     }
 
-    // ══════════════════ Main loop ══════════════════
+    // ══════════════════ Main loop (unrolled by 2) ══════════════════
+    #pragma unroll 2
     for (int bt = 0; bt < k_byte_iters; ++bt) {
         const int cur = bt & 1;
 
