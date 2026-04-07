@@ -41,6 +41,7 @@ template<int D, bool SBHD=false> struct attn_bwd_combined_globals {
   gl<bf16, -1, -1, -1, -1> Q, K, V;
   gl<bf16, -1, -1, -1, -1> dOg, dQg, dKg, dVg;
   gl<float, -1, -1, -1, -1> L_vec, delta_vec;
+  gl<bf16, -1, -1, -1, -1> dbg;
   hipStream_t stream;
   dim3 grid() { return dim3(ATTN_H_KV, (ATTN_N / BLOCK_SIZE_KV), ATTN_B); }
   dim3 block() { return dim3(NUM_THREADS); }
@@ -166,6 +167,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
 
   // Load V_j from HBM to registers
   load<1, 0>(V_j, g.V, BS(batch_idx, 0, kv_head_idx, 0), BS(0, j, 0, 0));
+  store<1>(g.dbg, V_j, BS(batch_idx, 0, kv_head_idx, 0), BS(0, j, 0, 0));
 
   // Load Q, dO, L, delta for this specific query head
   load(L_smem[tic], g.L_vec, {batch_idx, first_q_head, 0, first_step});
@@ -3374,7 +3376,8 @@ PYBIND11_MODULE(tk_kernel_bkwd, m) {
       &attn_bwd_combined_globals<ATTN_D, false>::dKg,
       &attn_bwd_combined_globals<ATTN_D, false>::dVg,
       &attn_bwd_combined_globals<ATTN_D, false>::L_vec, 
-      &attn_bwd_combined_globals<ATTN_D, false>::delta_vec
+      &attn_bwd_combined_globals<ATTN_D, false>::delta_vec,
+      &attn_bwd_combined_globals<ATTN_D, false>::dbg
   );
 
   py::bind_function<dispatch_bwd_combined<ATTN_D, true>>(m, "dispatch_bwd_combined_sbhd", 
@@ -3386,7 +3389,8 @@ PYBIND11_MODULE(tk_kernel_bkwd, m) {
       &attn_bwd_combined_globals<ATTN_D, true>::dKg,
       &attn_bwd_combined_globals<ATTN_D, true>::dVg,
       &attn_bwd_combined_globals<ATTN_D, true>::L_vec, 
-      &attn_bwd_combined_globals<ATTN_D, true>::delta_vec
+      &attn_bwd_combined_globals<ATTN_D, true>::delta_vec,
+      &attn_bwd_combined_globals<ATTN_D, true>::dbg
   );
 }
 
