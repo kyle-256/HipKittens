@@ -64,6 +64,7 @@ class MHA(nn.Module):
         fused_bias_fc=False,
         use_aiter_attn=False,
         use_hip_attn=False,
+        input_layout='bshd',
         device=None,
         dtype=None,
         **kwargs,
@@ -81,6 +82,7 @@ class MHA(nn.Module):
         self.layer_idx = layer_idx
         self.rotary_emb_dim = rotary_emb_dim
 
+        self.input_layout = input_layout
         self.num_heads = num_heads
         self.num_heads_kv = num_heads_kv if num_heads_kv is not None else num_heads
         assert (
@@ -130,11 +132,13 @@ class MHA(nn.Module):
             causal=causal,
             softmax_scale=softmax_scale,
             attention_dropout=dropout,
+            input_layout=input_layout,
         )
         self.inner_cross_attn = inner_cross_attn_cls(
             causal=causal, 
             softmax_scale=softmax_scale, 
-            attention_dropout=dropout
+            attention_dropout=dropout,
+            input_layout=input_layout,
         )
         self.out_proj = nn.Linear(
             embed_dim, 

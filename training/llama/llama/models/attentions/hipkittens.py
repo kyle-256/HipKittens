@@ -6,129 +6,98 @@ import llama.models.attentions.tk_kernel_fwd as tk_kernel_fwd
 import llama.models.attentions.tk_kernel_bkwd as tk_kernel_bkwd
 import llama.models.attentions.tk_kernel_bkwd_prep as tk_kernel_bkwd_prep
 
+_VALID_LAYOUTS = ('bshd', 'sbhd')
+
+
 class HipAttnFunction(Function):
     """
-    Inputs/outputs are BNHD (batch, seq, heads, dim), like your harness.
-    Forward:  O, L  via tk_kernel_fwd.dispatch_fwd
-    Backward: dQ,dK,dV via tk_kernel_bkwd.{dispatch_prep,dispatch_bwd_combined,dispatch_dq_shuffle}
-    Compute in bf16, save L and O for backward, return O in input dtype.
+    Supports both BSHD (batch, seq, heads, dim) and SBHD (seq, batch, heads, dim)
+    layouts natively — the TK kernels handle the coordinate mapping internally,
+    so no transpose or data copy is needed.
+
+    Pass sbhd=True as the last positional arg when calling .apply() for SBHD tensors.
     """
 
     @staticmethod
-    def forward(ctx, q_bnhd: torch.Tensor, k_bnhd: torch.Tensor, v_bnhd: torch.Tensor):
-        B, N, H, D = q_bnhd.shape
-        HKV = k_bnhd.shape[2]
-        dev = q_bnhd.device
-        out_dtype = q_bnhd.dtype  
+    def forward(ctx, q, k, v, sbhd=False):
+        if sbhd:
+            S, B, H, D = q.shape
+            HKV = k.shape[2]
+        else:
+            B, S, H, D = q.shape
+            HKV = k.shape[2]
 
-        # Validate input tensor shapes
-        assert q_bnhd.shape == (B, N, H, D), f"Q shape mismatch: expected ({B}, {N}, {H}, {D}), got {q_bnhd.shape}"
-        assert k_bnhd.shape == (B, N, HKV, D), f"K shape mismatch: expected ({B}, {N}, {HKV}, {D}), got {k_bnhd.shape}"
-        assert v_bnhd.shape == (B, N, HKV, D), f"V shape mismatch: expected ({B}, {N}, {HKV}, {D}), got {v_bnhd.shape}"
-        
-        # Validate tensor properties
-        assert q_bnhd.is_cuda and k_bnhd.is_cuda and v_bnhd.is_cuda, "All tensors must be on CUDA device"
-        assert q_bnhd.device == k_bnhd.device == v_bnhd.device, "All tensors must be on same device"
-        
-        # Validate GQA constraints
-        assert H % HKV == 0, f"H ({H}) must be divisible by HKV ({HKV}) for GQA"
-        assert HKV <= H, f"HKV ({HKV}) cannot exceed H ({H})"
+        dev = q.device
+        out_dtype = q.dtype
 
-        q = q_bnhd.to(torch.bfloat16).contiguous()
-        k = k_bnhd.to(torch.bfloat16).contiguous()
-        v = v_bnhd.to(torch.bfloat16).contiguous()
+        assert q.is_cuda and k.is_cuda and v.is_cuda
+        assert q.device == k.device == v.device
+        assert H % HKV == 0
 
-        assert q.is_contiguous() and k.is_contiguous() and v.is_contiguous(), "Tensors must be contiguous after dtype conversion"
+        q = q.to(torch.bfloat16).contiguous()
+        k = k.to(torch.bfloat16).contiguous()
+        v = v.to(torch.bfloat16).contiguous()
 
-        O = torch.empty((B, N, H, D), dtype=torch.bfloat16, device=dev).contiguous()  
-        L = torch.empty((B, H, 1, N), dtype=torch.float32,  device=dev).contiguous()    
+        if sbhd:
+            O = torch.empty((S, B, H, D), dtype=torch.bfloat16, device=dev).contiguous()
+        else:
+            O = torch.empty((B, S, H, D), dtype=torch.bfloat16, device=dev).contiguous()
+        L = torch.empty((B, H, 1, S), dtype=torch.float32, device=dev).contiguous()
 
-        # Validate output tensor allocation
-        assert O.is_contiguous() and L.is_contiguous(), "Output tensors must be contiguous"
-        assert O.dtype == torch.bfloat16 and L.dtype == torch.float32, "Output tensor dtypes incorrect"
-
-        # Safely dispatch forward kernel with error handling
-        tk_kernel_fwd.dispatch_fwd(q, k, v, O, L)
-
-        if O.isnan().any():
-            print("O is nan")
-            breakpoint()
-        if L.isnan().any():
-            print("L is nan")
-            breakpoint()
+        if sbhd:
+            tk_kernel_fwd.dispatch_fwd_sbhd(q, k, v, O, L)
+        else:
+            tk_kernel_fwd.dispatch_fwd(q, k, v, O, L)
 
         ctx.save_for_backward(q, k, v, O, L)
+        ctx.sbhd = sbhd
         return O.to(out_dtype)
 
-
     @staticmethod
-    def backward(ctx, dO_bnhd: torch.Tensor):
+    def backward(ctx, dO_in):
         q, k, v, O, L = ctx.saved_tensors
-        # print(f"DEBUG backward - O.shape: {O.shape}, L.shape: {L.shape}")
-        # print(f"DEBUG backward - q.shape: {q.shape}, k.shape: {k.shape}, v.shape: {v.shape}")
-        B, N, H, D = O.shape
-        HKV = k.shape[2]
-        dev = dO_bnhd.device
+        sbhd = ctx.sbhd
 
+        if sbhd:
+            S, B, H, D = O.shape
+            HKV = k.shape[2]
+        else:
+            B, S, H, D = O.shape
+            HKV = k.shape[2]
 
-        # Validate saved tensors
-        assert q.shape == (B, N, H, D), f"Saved Q shape mismatch: expected ({B}, {N}, {H}, {D}), got {q.shape}"
-        assert k.shape == (B, N, HKV, D), f"Saved K shape mismatch: expected ({B}, {N}, {HKV}, {D}), got {k.shape}"
-        assert v.shape == (B, N, HKV, D), f"Saved V shape mismatch: expected ({B}, {N}, {HKV}, {D}), got {v.shape}"
-        assert O.shape == (B, N, H, D), f"Saved O shape mismatch: expected ({B}, {N}, {H}, {D}), got {O.shape}"
-        assert L.shape == (B, H, 1, N), f"Saved L shape mismatch: expected ({B}, {H}, 1, {N}), got {L.shape}"
-        
-        # Validate gradient input
-        assert dO_bnhd.shape == (B, N, H, D), f"dO shape mismatch: expected ({B}, {N}, {H}, {D}), got {dO_bnhd.shape}"
-        assert dO_bnhd.is_cuda and dO_bnhd.device == dev, "dO must be on correct CUDA device"
-        
-        # Validate GQA constraints
-        assert H % HKV == 0, f"H ({H}) must be divisible by HKV ({HKV}) for GQA"
+        dev = dO_in.device
+        assert H % HKV == 0
 
-        # Cast grad to bf16 for kernels
-        dO = dO_bnhd.to(torch.bfloat16).contiguous()
-        assert dO.is_contiguous(), "dO must be contiguous after conversion"
+        dO = dO_in.to(torch.bfloat16).contiguous()
 
-        # Allocate grads and workspaces
-        dQ_in = torch.zeros((B, H, N, D), dtype=torch.bfloat16, device=dev).contiguous()  # BHND (pre-shuffle)
-        dQ    = torch.empty((B, N, H, D), dtype=torch.bfloat16, device=dev).contiguous()  # BNHD
-        dK    = torch.empty((B, N, HKV, D), dtype=torch.bfloat16, device=dev).contiguous()  # BNHKVD
-        dV    = torch.empty((B, N, HKV, D), dtype=torch.bfloat16, device=dev).contiguous()  # BNHKVD
-        delta = torch.empty((B, H, 1, N), dtype=torch.float32,  device=dev).contiguous() 
+        dQ_in = torch.zeros((B, H, S, D), dtype=torch.bfloat16, device=dev).contiguous()
+        if sbhd:
+            dQ = torch.empty((S, B, H, D), dtype=torch.bfloat16, device=dev).contiguous()
+            dK = torch.empty((S, B, HKV, D), dtype=torch.bfloat16, device=dev).contiguous()
+            dV = torch.empty((S, B, HKV, D), dtype=torch.bfloat16, device=dev).contiguous()
+        else:
+            dQ = torch.empty((B, S, H, D), dtype=torch.bfloat16, device=dev).contiguous()
+            dK = torch.empty((B, S, HKV, D), dtype=torch.bfloat16, device=dev).contiguous()
+            dV = torch.empty((B, S, HKV, D), dtype=torch.bfloat16, device=dev).contiguous()
+        delta = torch.empty((B, H, 1, S), dtype=torch.float32, device=dev).contiguous()
 
-        # Validate gradient tensor allocation
-        assert all(t.is_contiguous() for t in [dQ_in, dQ, dK, dV, delta]), "All gradient tensors must be contiguous"
-        assert dQ_in.dtype == torch.bfloat16 and dQ.dtype == torch.bfloat16, "dQ tensors must be bfloat16"
-        assert dK.dtype == torch.bfloat16 and dV.dtype == torch.bfloat16, "dK, dV tensors must be bfloat16"
-        assert delta.dtype == torch.float32, "delta tensor must be float32"
+        if sbhd:
+            tk_kernel_bkwd_prep.dispatch_prep_sbhd(O, dO, delta)
+            tk_kernel_bkwd.dispatch_bwd_combined_sbhd(q, k, v, dO, dQ_in, dK, dV, L, delta)
+            tk_kernel_bkwd_prep.dispatch_dq_shuffle_sbhd(dQ_in, dQ)
+        else:
+            tk_kernel_bkwd_prep.dispatch_prep(O, dO, delta)
+            tk_kernel_bkwd.dispatch_bwd_combined(q, k, v, dO, dQ_in, dK, dV, L, delta)
+            tk_kernel_bkwd_prep.dispatch_dq_shuffle(dQ_in, dQ)
 
-        if dO.isnan().any():
-            print("dO is nan")
-            breakpoint()
-
-        # Backward kernels
-        tk_kernel_bkwd_prep.dispatch_prep(O, dO, delta)
-        tk_kernel_bkwd.dispatch_bwd_combined(q, k, v, dO, dQ_in, dK, dV, L, delta)
-        tk_kernel_bkwd_prep.dispatch_dq_shuffle(dQ_in, dQ)
-
-        # Final validation before returning
-        assert dQ.shape == (B, N, H, D), f"Final dQ shape mismatch: expected ({B}, {N}, {H}, {D}), got {dQ.shape}"
-        assert dK.shape == (B, N, HKV, D), f"Final dK shape mismatch: expected ({B}, {N}, {HKV}, {D}), got {dK.shape}"
-        assert dV.shape == (B, N, HKV, D), f"Final dV shape mismatch: expected ({B}, {N}, {HKV}, {D}), got {dV.shape}"
-
-        return dQ.to(dO_bnhd.dtype), dK.to(dO_bnhd.dtype), dV.to(dO_bnhd.dtype)
-
+        return dQ.to(dO_in.dtype), dK.to(dO_in.dtype), dV.to(dO_in.dtype), None
 
 
 class HipSelfAttention(nn.Module):
-    """Implement the scaled dot product attention with softmax.
-    Arguments
-    ---------
-        softmax_scale: The temperature to use for the softmax attention.
-                      (default: 1/sqrt(d_keys) where d_keys is computed at
-                      runtime)
-        attention_dropout: The dropout rate to apply to the attention
-                           (default: 0.0)
+    """Scaled dot product attention via HipKittens TK kernels.
+
+    Supports both bshd (batch, seq, head, dim) and sbhd (seq, batch, head, dim)
+    input layouts natively — zero data copy for either layout.
     """
 
     def __init__(
@@ -137,66 +106,47 @@ class HipSelfAttention(nn.Module):
         softmax_scale=None,
         attention_dropout=0.0,
         deterministic=False,
+        input_layout='bshd',
     ):
         super().__init__()
+        assert input_layout in _VALID_LAYOUTS
         self.causal = causal
         self.softmax_scale = softmax_scale
         self.drop = nn.Dropout(attention_dropout)
         self.deterministic = deterministic
+        self.sbhd = (input_layout == 'sbhd')
 
     def forward(self, qkv, causal=None, key_padding_mask=None):
-        """Implements the multihead softmax attention.
-        Arguments
-        ---------
-            qkv: The tensor containing the query, key, and value. (B, S, 3, H, D)
-            causal: if passed, will override self.causal
-            key_padding_mask: boolean mask to apply to the attention weights. True means to keep,
-                False means to mask out. (B, S)
+        """
+        qkv: (B, S, 3, H, D) if bshd, (S, B, 3, H, D) if sbhd.
         """
         assert qkv.dtype in [torch.float16, torch.bfloat16]
         assert qkv.is_cuda
         causal = self.causal if causal is None else causal
         q, k, v = qkv.unbind(dim=2)
-        out_bnhd = HipAttnFunction.apply(q, k, v)  
-        ctx = out_bnhd.to(q.dtype).contiguous()
-        return ctx
-        
+        out = HipAttnFunction.apply(q, k, v, self.sbhd)
+        return out.to(q.dtype).contiguous()
+
 
 class HipCrossAttention(nn.Module):
-    """Implement the scaled dot product attention with softmax.
-    Arguments
-    ---------
-        softmax_scale: The temperature to use for the softmax attention.
-                      (default: 1/sqrt(d_keys) where d_keys is computed at
-                      runtime)
-        attention_dropout: The dropout rate to apply to the attention
-                           (default: 0.0)
-    """
+    """Cross-attention via HipKittens TK kernels.  Supports bshd / sbhd layouts."""
 
-    def __init__(self, causal=False, softmax_scale=None, attention_dropout=0.0, deterministic=False):
+    def __init__(self, causal=False, softmax_scale=None, attention_dropout=0.0,
+                 deterministic=False, input_layout='bshd'):
         super().__init__()
+        assert input_layout in _VALID_LAYOUTS
         self.causal = causal
         self.softmax_scale = softmax_scale
         self.drop = nn.Dropout(attention_dropout)
         self.deterministic = deterministic
+        self.sbhd = (input_layout == 'sbhd')
 
     def forward(self, q, kv, causal=None, key_padding_mask=None):
-        """Implements the multihead softmax attention.
-        Arguments
-        ---------
-            q: The tensor containing the query. (B, Sq, H, D)
-            kv: The tensor containing the key and value. (B, Sk, 2, H_k, D)
-            causal: if passed, will override self.causal
-            key_padding_mask: boolean mask to apply to the attention weights. True means to keep,
-                False means to mask out. (B, Sk)
         """
-
-        batch_size, seqlen_q = q.shape[0], q.shape[1]
+        q:  (B, Sq, H, D) if bshd, (Sq, B, H, D) if sbhd.
+        kv: (B, Sk, 2, H_k, D) if bshd, (Sk, B, 2, H_k, D) if sbhd.
+        """
         causal = self.causal if causal is None else causal
-        seqlen_k = kv.shape[1]
-        assert kv.shape[0] == batch_size and kv.shape[4] == q.shape[3]
         k, v = kv.unbind(dim=2)
-        out_bnhd = HipAttnFunction.apply(q, k, v)  
-        ctx = out_bnhd.to(q.dtype).contiguous()
-        return ctx
-
+        out = HipAttnFunction.apply(q, k, v, self.sbhd)
+        return out.to(q.dtype).contiguous()

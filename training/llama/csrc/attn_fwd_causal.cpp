@@ -36,6 +36,11 @@ using _gl_QKVO = gl<bf16, -1, -1, -1, -1>;
 
 using G = kittens::group<NUM_WARPS>;
 
+// Layout-aware coordinate: swaps batch/seq dims for SBHD.
+// Must be a macro (not a function) so brace-init deduces coord<RT> from context,
+// which is needed for kittens unit_coord() tile scaling.
+#define BS(b, s, h, d)  {SBHD ? (s) : (b), SBHD ? (b) : (s), (h), (d)}
+
 #define SCHED_BARRIER(mask, cnt, group) __builtin_amdgcn_sched_group_barrier(mask, cnt, group)
 
 template<int Pairs, int VALU_CNT, int Group>
@@ -148,7 +153,7 @@ __device__ inline void mask_kv_tile(RT &dst, int q_abs, int k_abs, uint32_t neg_
 
 /**********************************************************/
 
-template<int D> struct attn_globals { 
+template<int D, bool SBHD=false> struct attn_globals { 
     _gl_QKVO Qg, Kg, Vg, Og; 
     gl<float, -1, -1, -1, -1> L_vec;
     hipStream_t stream;
@@ -157,14 +162,16 @@ template<int D> struct attn_globals {
     size_t dynamic_shared_memory() { return MAX_SHARED_MEMORY; }
 };
 
-template<int D> __launch_bounds__(NUM_THREADS, 2)
-__global__ void attend_ker(const attn_globals<D> g) {
+template<int D, bool SBHD=false> __launch_bounds__(NUM_THREADS, 2)
+__global__ void attend_ker(const attn_globals<D, SBHD> g) {
 
     extern __shared__ alignment_dummy __shm[];
     shared_allocator al((int*)&__shm[0]);
     st_bf<KV_BLOCK_SIZE, ATTN_D, st_32x32_s> (&k_smem)[2] = al.allocate<st_bf<KV_BLOCK_SIZE, ATTN_D, st_32x32_s>, 2>();
     st_bf<KV_BLOCK_SIZE, ATTN_D, st_8x32_s> (&v_smem)[2] = al.allocate<st_bf<KV_BLOCK_SIZE, ATTN_D, st_8x32_s>, 2>();
     
+    constexpr int QKVO_AXIS = SBHD ? 0 : 1;
+
     const int head_idx = (blockIdx.x % GROUP_SIZE) * GROUP_SIZE + (blockIdx.x / GROUP_SIZE);
     const int batch_idx = blockIdx.z;
     const int head_idx_kv = head_idx / GROUP_SIZE;
@@ -208,24 +215,24 @@ __global__ void attend_ker(const attn_globals<D> g) {
 
     uint32_t swizzled_offsets_V[memcpy_per_tile];
     uint32_t swizzled_offsets_K[memcpy_per_tile];
-    G::prefill_swizzled_offsets<1, false>(k_smem[0], g.Kg, swizzled_offsets_K);
-    G::prefill_swizzled_offsets<1, false>(v_smem[0], g.Vg, swizzled_offsets_V);
+    G::prefill_swizzled_offsets<QKVO_AXIS, false>(k_smem[0], g.Kg, swizzled_offsets_K);
+    G::prefill_swizzled_offsets<QKVO_AXIS, false>(v_smem[0], g.Vg, swizzled_offsets_V);
 
-    G::load<1, false>(k_smem[0], g.Kg, {batch_idx, 0, head_idx_kv, 0}, swizzled_offsets_K);
+    G::load<QKVO_AXIS, false>(k_smem[0], g.Kg, BS(batch_idx, 0, head_idx_kv, 0), swizzled_offsets_K);
     __builtin_amdgcn_s_waitcnt(0);
     __builtin_amdgcn_sched_barrier(0);
     __builtin_amdgcn_s_barrier();
 
     qo_tile<D, float> q_reg_fl;
-    load<1, qo_tile<D, float>, _gl_QKVO>(q_reg_fl, g.Qg, {batch_idx, tile_idx, head_idx, 0});
+    load<QKVO_AXIS, qo_tile<D, float>, _gl_QKVO>(q_reg_fl, g.Qg, BS(batch_idx, tile_idx, head_idx, 0));
     mul(q_reg_fl, q_reg_fl, TEMPERATURE_SCALE);  // Use sqrtf for clarity
     copy(q_reg, q_reg_fl);
     transpose(q_reg_transposed, q_reg);
 
     // All warps then collaboratively load in the first slice of V (V0) and the second slice of K (K1) into shared memory
-    G::load<1, false>(k_smem[1], g.Kg, {batch_idx, 1, head_idx_kv, 0}, swizzled_offsets_K);
+    G::load<QKVO_AXIS, false>(k_smem[1], g.Kg, BS(batch_idx, 1, head_idx_kv, 0), swizzled_offsets_K);
     // All warps then load in the first slice of K (K0)
-    G::load<1, false>(v_smem[0], g.Vg, {batch_idx, 0, head_idx_kv, 0}, swizzled_offsets_V);
+    G::load<QKVO_AXIS, false>(v_smem[0], g.Vg, BS(batch_idx, 0, head_idx_kv, 0), swizzled_offsets_V);
     load(k_reg, k_smem[0]);
     __builtin_amdgcn_sched_barrier(0);
     asm volatile("s_waitcnt lgkmcnt(0)");
@@ -264,9 +271,9 @@ __global__ void attend_ker(const attn_globals<D> g) {
     // All warps then load in the second slice of K (K1)
     load(k_reg, k_smem[1]);
     // All warps then collaboratively load in the third slice of K (K2) into shared memory
-    G::load<1, false>(k_smem[0], g.Kg, {batch_idx, 2, head_idx_kv, 0}, swizzled_offsets_K);
+    G::load<QKVO_AXIS, false>(k_smem[0], g.Kg, BS(batch_idx, 2, head_idx_kv, 0), swizzled_offsets_K);
     // All warps then collaboratively load in the second slice of V (V1) into shared memory 
-    G::load<1, false>(v_smem[1], g.Vg, {batch_idx, 1, head_idx_kv, 0}, swizzled_offsets_V);
+    G::load<QKVO_AXIS, false>(v_smem[1], g.Vg, BS(batch_idx, 1, head_idx_kv, 0), swizzled_offsets_V);
     asm volatile("s_waitcnt lgkmcnt(0)");
     asm volatile("s_waitcnt vmcnt(4)");
     __builtin_amdgcn_sched_barrier(0);
@@ -293,7 +300,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
 
         // Cluster 1:
         //      Load K3 into shared 
-        G::load<1, false>(k_smem[1], g.Kg, {batch_idx, j, head_idx_kv, 0}, swizzled_offsets_K);
+        G::load<QKVO_AXIS, false>(k_smem[1], g.Kg, BS(batch_idx, j, head_idx_kv, 0), swizzled_offsets_K);
         //      Load V0 into registers
         load(v_reg, v_smem[0]);
         asm volatile("s_waitcnt lgkmcnt(0)");
@@ -324,7 +331,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
 
         // Cluster 3:
         //      Load V2 into shared
-        G::load<1, false>(v_smem[0], g.Vg, {batch_idx, j - 1, head_idx_kv, 0}, swizzled_offsets_V);
+        G::load<QKVO_AXIS, false>(v_smem[0], g.Vg, BS(batch_idx, j - 1, head_idx_kv, 0), swizzled_offsets_V);
         //      Load K2 into registers
         load(k_reg, k_smem[0]);
         asm volatile("s_waitcnt lgkmcnt(0)");
@@ -354,7 +361,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
 
         // Cluster 5:
         //      Load K4 into shared
-        G::load<1, false>(k_smem[0], g.Kg, {batch_idx, j + 1, head_idx_kv, 0}, swizzled_offsets_K);
+        G::load<QKVO_AXIS, false>(k_smem[0], g.Kg, BS(batch_idx, j + 1, head_idx_kv, 0), swizzled_offsets_K);
         //      Load V1 into registers
         load(v_reg, v_smem[1]);
         if constexpr (causal) {
@@ -391,7 +398,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
 
         // Cluster 7:
         //      Load V3 into shared
-        G::load<1, false>(v_smem[1], g.Vg, {batch_idx, j, head_idx_kv, 0}, swizzled_offsets_V);
+        G::load<QKVO_AXIS, false>(v_smem[1], g.Vg, BS(batch_idx, j, head_idx_kv, 0), swizzled_offsets_V);
         //      Load K3 into registers
         load(k_reg, k_smem[1]);
         asm volatile("s_waitcnt lgkmcnt(0)");
@@ -422,7 +429,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
 
     // Cluster 1:
     //      Load K5 into shared
-    G::load<1, false>(k_smem[1], g.Kg, {batch_idx, max_num_tiles - 1, head_idx_kv, 0}, swizzled_offsets_K);
+    G::load<QKVO_AXIS, false>(k_smem[1], g.Kg, BS(batch_idx, max_num_tiles - 1, head_idx_kv, 0), swizzled_offsets_K);
     //      Load V2 into registers
     load(v_reg, v_smem[0]);
     if constexpr (causal) {
@@ -459,7 +466,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
 
     // Cluster 3:
     //      Load V4 into shared
-    G::load<1, false>(v_smem[0], g.Vg, {batch_idx, max_num_tiles - 2, head_idx_kv, 0}, swizzled_offsets_V);
+    G::load<QKVO_AXIS, false>(v_smem[0], g.Vg, BS(batch_idx, max_num_tiles - 2, head_idx_kv, 0), swizzled_offsets_V);
     //      Load K4 into registers
     load(k_reg, k_smem[0]);
     asm volatile("s_waitcnt lgkmcnt(0)");
@@ -521,7 +528,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
 
     // Cluster 7:
     //      Load V5 into shared
-    G::load<1, false>(v_smem[1], g.Vg, {batch_idx, max_num_tiles - 1, head_idx_kv, 0}, swizzled_offsets_V);
+    G::load<QKVO_AXIS, false>(v_smem[1], g.Vg, BS(batch_idx, max_num_tiles - 1, head_idx_kv, 0), swizzled_offsets_V);
     //      Load K5 into registers
     load(k_reg, k_smem[1]);
     asm volatile("s_waitcnt lgkmcnt(0)");
@@ -612,7 +619,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
 
     qo_tile<D, float, row_l, rt_32x32_s> o_reg_transposed;
     transpose(o_reg_transposed, o_reg);
-    store<1>(g.Og, o_reg_transposed, {batch_idx, tile_idx, head_idx, 0});
+    store<QKVO_AXIS>(g.Og, o_reg_transposed, BS(batch_idx, tile_idx, head_idx, 0));
 
     // multiply by ln(2)
     mul(max_vec, max_vec, 0.69314718056f);
@@ -621,21 +628,28 @@ __global__ void attend_ker(const attn_globals<D> g) {
     store(g.L_vec, norm_vec, {batch_idx, head_idx, 0, tile_idx});
 }
 
-template<int D>
-void dispatch_fwd(attn_globals<D> g) {
+template<int D, bool SBHD>
+void dispatch_fwd(attn_globals<D, SBHD> g) {
     unsigned long mem_size = g.dynamic_shared_memory();
-    hipFuncSetAttribute((void*)attend_ker<D>, hipFuncAttributeMaxDynamicSharedMemorySize, mem_size);
-    attend_ker<D><<<g.grid(), g.block(), mem_size, g.stream>>>(g);
+    hipFuncSetAttribute((void*)attend_ker<D, SBHD>, hipFuncAttributeMaxDynamicSharedMemorySize, mem_size);
+    attend_ker<D, SBHD><<<g.grid(), g.block(), mem_size, g.stream>>>(g);
     hipDeviceSynchronize();
 }
 
 PYBIND11_MODULE(tk_kernel_fwd, m) {
     m.doc() = "tk_kernel_fwd python module";
-    py::bind_function<dispatch_fwd<ATTN_D>>(m, "dispatch_fwd", 
-        &attn_globals<ATTN_D>::Qg, 
-        &attn_globals<ATTN_D>::Kg, 
-        &attn_globals<ATTN_D>::Vg, 
-        &attn_globals<ATTN_D>::Og,
-        &attn_globals<ATTN_D>::L_vec
+    py::bind_function<dispatch_fwd<ATTN_D, false>>(m, "dispatch_fwd", 
+        &attn_globals<ATTN_D, false>::Qg, 
+        &attn_globals<ATTN_D, false>::Kg, 
+        &attn_globals<ATTN_D, false>::Vg, 
+        &attn_globals<ATTN_D, false>::Og,
+        &attn_globals<ATTN_D, false>::L_vec
+    );
+    py::bind_function<dispatch_fwd<ATTN_D, true>>(m, "dispatch_fwd_sbhd", 
+        &attn_globals<ATTN_D, true>::Qg, 
+        &attn_globals<ATTN_D, true>::Kg, 
+        &attn_globals<ATTN_D, true>::Vg, 
+        &attn_globals<ATTN_D, true>::Og,
+        &attn_globals<ATTN_D, true>::L_vec
     );
 }

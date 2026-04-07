@@ -38,6 +38,7 @@ def create_mha_cls(config, layer_idx=None, device=None, dtype=None):
     rotary_emb_interleaved = getattr(config, "rotary_emb_interleaved", False)
     use_aiter_attn = getattr(config, "use_aiter_attn", False)
     use_hip_attn = getattr(config, "use_hip_attn", False)
+    input_layout = getattr(config, "input_layout", "bshd")
     fused_bias_fc = getattr(config, "fused_bias_fc", False)
     mha_cls = MHA
     serial_kwargs = (
@@ -61,6 +62,7 @@ def create_mha_cls(config, layer_idx=None, device=None, dtype=None):
         rotary_emb_interleaved=rotary_emb_interleaved,
         use_aiter_attn=use_aiter_attn,
         use_hip_attn=use_hip_attn,
+        input_layout=input_layout,
         **serial_kwargs,
         **factory_kwargs,
     )

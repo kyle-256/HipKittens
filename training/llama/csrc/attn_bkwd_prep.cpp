@@ -33,6 +33,8 @@ using G = kittens::group<NUM_WARPS>;
 
 using namespace kittens;
 
+#define BS(b, s, h, d)  {SBHD ? (s) : (b), SBHD ? (b) : (s), (h), (d)}
+
 template<int D, typename T=bf16, typename L=row_l, typename S=rt_16x32_s> using qo_tile = rt<T, DOT_SLICE_QO, D, L, S>;
 template<int D, typename T=bf16, typename L=row_l, typename S=rt_16x32_s> using kv_tile = rt<T, WARP_SIZE_KV, D, L, S>;
 template<int D, typename T=bf16, typename L=row_l, typename S=rt_16x32_s> using qo_tile_T_dq = rt<T, 32, 16, L, S>;
@@ -151,7 +153,7 @@ __device__ inline static void store_shuffled(const GL &dst, const RT &src, const
     }
 }
 
-template<int D> struct attn_prep_globals { 
+template<int D, bool SBHD=false> struct attn_prep_globals { 
     gl<bf16, -1, -1, -1, -1> Og;
     gl<bf16, -1, -1, -1, -1> dOg; 
     gl<float, -1, -1, -1, -1> delta;
@@ -161,9 +163,11 @@ template<int D> struct attn_prep_globals {
     size_t dynamic_shared_memory() { return MAX_SHARED_MEMORY; }
 };
 
-template<int D> __launch_bounds__(NUM_THREADS, 1)
-__global__ void attend_prep_ker(const attn_prep_globals<D> g) {
+template<int D, bool SBHD=false> __launch_bounds__(NUM_THREADS, 1)
+__global__ void attend_prep_ker(const attn_prep_globals<D, SBHD> g) {
     
+    constexpr int QKVO_AXIS = SBHD ? 0 : 1;
+
     const int batch_idx = blockIdx.x;
     const int head_idx = blockIdx.y;
     const int seq_idx = blockIdx.z;
@@ -174,8 +178,8 @@ __global__ void attend_prep_ker(const attn_prep_globals<D> g) {
     qo_tile<D, float, row_l, rt_16x32_s> dO_float, O_float;
     typename qo_tile<D, float, row_l, rt_16x32_s>::col_vec delta_vec;
 
-    load<1>(dO, g.dOg, {batch_idx, seq_idx * NUM_WARPS + warpid, head_idx, 0});
-    load<1>(O,  g.Og,  {batch_idx, seq_idx * NUM_WARPS + warpid, head_idx, 0});
+    load<QKVO_AXIS>(dO, g.dOg, BS(batch_idx, seq_idx * NUM_WARPS + warpid, head_idx, 0));
+    load<QKVO_AXIS>(O,  g.Og,  BS(batch_idx, seq_idx * NUM_WARPS + warpid, head_idx, 0));
     copy(O_float, O);
     copy(dO_float, dO);
     
@@ -185,15 +189,15 @@ __global__ void attend_prep_ker(const attn_prep_globals<D> g) {
     store(g.delta, delta_vec, {batch_idx, head_idx, 0, seq_idx * NUM_WARPS + warpid});
 }
 
-template<int D>
-void dispatch_prep(attn_prep_globals<D> g) {
+template<int D, bool SBHD>
+void dispatch_prep(attn_prep_globals<D, SBHD> g) {
     unsigned long mem_size = g.dynamic_shared_memory();
-    hipFuncSetAttribute((void*)attend_prep_ker<D>, hipFuncAttributeMaxDynamicSharedMemorySize, mem_size);
-    attend_prep_ker<D><<<g.grid(), g.block(), mem_size, g.stream>>>(g);
+    hipFuncSetAttribute((void*)attend_prep_ker<D, SBHD>, hipFuncAttributeMaxDynamicSharedMemorySize, mem_size);
+    attend_prep_ker<D, SBHD><<<g.grid(), g.block(), mem_size, g.stream>>>(g);
     hipDeviceSynchronize();
 }
 
-template<int D> struct attn_dq_shuffle_globals { 
+template<int D, bool SBHD=false> struct attn_dq_shuffle_globals { 
     gl<bf16, -1, -1, -1, -1> dQg_in, dQg_out;
     hipStream_t stream;
     dim3 grid() { return dim3(ATTN_B, ATTN_H, ATTN_N / (DOT_SLICE_QO * NUM_WARPS)); }
@@ -201,11 +205,13 @@ template<int D> struct attn_dq_shuffle_globals {
     size_t dynamic_shared_memory() { return MAX_SHARED_MEMORY; }
 };
 
-template<int D> __launch_bounds__(NUM_THREADS, 1)
-__global__ void attend_dq_shuffle_ker(const attn_dq_shuffle_globals<D> g) {
+template<int D, bool SBHD=false> __launch_bounds__(NUM_THREADS, 1)
+__global__ void attend_dq_shuffle_ker(const attn_dq_shuffle_globals<D, SBHD> g) {
     
+    constexpr int QKVO_AXIS = SBHD ? 0 : 1;
+
     const int batch_idx = blockIdx.x;
-    const int q_head_idx = blockIdx.y; // Using Q head index for dQ shuffle
+    const int q_head_idx = blockIdx.y;
     const int seq_idx = blockIdx.z;
 
     const int warpid = kittens::warpid();
@@ -213,27 +219,36 @@ __global__ void attend_dq_shuffle_ker(const attn_dq_shuffle_globals<D> g) {
     qo_tile<D, bf16, row_l, rt_16x32_s> dQg;
 
     load_shuffled<2>(dQg, g.dQg_in, {batch_idx, q_head_idx, seq_idx * NUM_WARPS + warpid, 0});
-    store_shuffled<1>(g.dQg_out, dQg, {batch_idx, seq_idx * NUM_WARPS + warpid, q_head_idx, 0});
+    store_shuffled<QKVO_AXIS>(g.dQg_out, dQg, BS(batch_idx, seq_idx * NUM_WARPS + warpid, q_head_idx, 0));
 }
 
-template<int D>
-void dispatch_dq_shuffle(attn_dq_shuffle_globals<D> g) {
+template<int D, bool SBHD>
+void dispatch_dq_shuffle(attn_dq_shuffle_globals<D, SBHD> g) {
     unsigned long mem_size = g.dynamic_shared_memory();
-    hipFuncSetAttribute((void*)attend_dq_shuffle_ker<D>, hipFuncAttributeMaxDynamicSharedMemorySize, mem_size);
-    attend_dq_shuffle_ker<D><<<g.grid(), g.block(), mem_size, g.stream>>>(g);
+    hipFuncSetAttribute((void*)attend_dq_shuffle_ker<D, SBHD>, hipFuncAttributeMaxDynamicSharedMemorySize, mem_size);
+    attend_dq_shuffle_ker<D, SBHD><<<g.grid(), g.block(), mem_size, g.stream>>>(g);
 }
 
 PYBIND11_MODULE(tk_kernel_bkwd_prep, m) {
     m.doc() = "tk_kernel python module";
 
-    py::bind_function<dispatch_prep<ATTN_D>>(m, "dispatch_prep", 
-        &attn_prep_globals<ATTN_D>::Og, 
-        &attn_prep_globals<ATTN_D>::dOg,
-        &attn_prep_globals<ATTN_D>::delta
+    py::bind_function<dispatch_prep<ATTN_D, false>>(m, "dispatch_prep", 
+        &attn_prep_globals<ATTN_D, false>::Og, 
+        &attn_prep_globals<ATTN_D, false>::dOg,
+        &attn_prep_globals<ATTN_D, false>::delta
+    );
+    py::bind_function<dispatch_prep<ATTN_D, true>>(m, "dispatch_prep_sbhd", 
+        &attn_prep_globals<ATTN_D, true>::Og, 
+        &attn_prep_globals<ATTN_D, true>::dOg,
+        &attn_prep_globals<ATTN_D, true>::delta
     );
 
-    py::bind_function<dispatch_dq_shuffle<ATTN_D>>(m, "dispatch_dq_shuffle", 
-        &attn_dq_shuffle_globals<ATTN_D>::dQg_in,
-        &attn_dq_shuffle_globals<ATTN_D>::dQg_out
+    py::bind_function<dispatch_dq_shuffle<ATTN_D, false>>(m, "dispatch_dq_shuffle", 
+        &attn_dq_shuffle_globals<ATTN_D, false>::dQg_in,
+        &attn_dq_shuffle_globals<ATTN_D, false>::dQg_out
+    );
+    py::bind_function<dispatch_dq_shuffle<ATTN_D, true>>(m, "dispatch_dq_shuffle_sbhd", 
+        &attn_dq_shuffle_globals<ATTN_D, true>::dQg_in,
+        &attn_dq_shuffle_globals<ATTN_D, true>::dQg_out
     );
 }
