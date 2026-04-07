@@ -173,6 +173,29 @@ __device__ __forceinline__ fp8e8m0_4 load_pq_scale(
     );
 }
 
+__device__ __forceinline__ i32x4 make_scale_srd(const uint8_t* ptr) {
+    i32x4 srd = std::bit_cast<i32x4>(
+        make_buffer_resource(
+            static_cast<uint64_t>(reinterpret_cast<std::uintptr_t>(ptr)),
+            0xFFFFFFFFu,
+            0x00110000u
+        )
+    );
+    srd[0] = __builtin_amdgcn_readfirstlane(srd[0]);
+    srd[1] = __builtin_amdgcn_readfirstlane(srd[1]);
+    srd[2] = __builtin_amdgcn_readfirstlane(srd[2]);
+    srd[3] = __builtin_amdgcn_readfirstlane(srd[3]);
+    return srd;
+}
+
+__device__ __forceinline__ fp8e8m0_4 load_pq_scale_srd(
+    i32x4 srsrc, uint32_t lane_byte_offset, uint32_t soffset)
+{
+    return std::bit_cast<fp8e8m0_4>(
+        llvm_amdgcn_raw_buffer_load_b32(srsrc, lane_byte_offset, soffset, 0)
+    );
+}
+
 __device__ __forceinline__ fp8e8m0_4 remap_phase(fp8e8m0_4 src, int k_phase)
 {
     return std::bit_cast<fp8e8m0_4>(
@@ -252,21 +275,21 @@ void mxfp4_rcr_pq_kernel(const layout_globals g) {
 
     constexpr int a_packs = RBM / 32;
     constexpr int b_packs = (RBN + 31) / 32;
-    const uint8_t* a0_sb[a_packs], *a1_sb[a_packs];
-    const uint8_t* b0_sb[b_packs], *b1_sb[b_packs];
+    i32x4 a0_srd[a_packs], a1_srd[a_packs];
+    i32x4 b0_srd[b_packs], b1_srd[b_packs];
     #pragma unroll
     for (int p = 0; p < a_packs; ++p) {
-        a0_sb[p] = preshuffled_scale_row_base_ptr(
-            g.a_scale, (br * BLK + 0 * HB + wm * RBM + p * 32) >> 5);
-        a1_sb[p] = preshuffled_scale_row_base_ptr(
-            g.a_scale, (br * BLK + 1 * HB + wm * RBM + p * 32) >> 5);
+        a0_srd[p] = make_scale_srd(preshuffled_scale_row_base_ptr(
+            g.a_scale, (br * BLK + 0 * HB + wm * RBM + p * 32) >> 5));
+        a1_srd[p] = make_scale_srd(preshuffled_scale_row_base_ptr(
+            g.a_scale, (br * BLK + 1 * HB + wm * RBM + p * 32) >> 5));
     }
     #pragma unroll
     for (int p = 0; p < b_packs; ++p) {
-        b0_sb[p] = preshuffled_scale_row_base_ptr(
-            g.b_scale, (bc * BLK + 0 * HB + wn * RBN + p * 32) >> 5);
-        b1_sb[p] = preshuffled_scale_row_base_ptr(
-            g.b_scale, (bc * BLK + 1 * HB + wn * RBN + p * 32) >> 5);
+        b0_srd[p] = make_scale_srd(preshuffled_scale_row_base_ptr(
+            g.b_scale, (bc * BLK + 0 * HB + wn * RBN + p * 32) >> 5));
+        b1_srd[p] = make_scale_srd(preshuffled_scale_row_base_ptr(
+            g.b_scale, (bc * BLK + 1 * HB + wn * RBN + p * 32) >> 5));
     }
 
     for (int bt = 0; bt < k_byte_iters; ++bt) {
@@ -283,15 +306,16 @@ void mxfp4_rcr_pq_kernel(const layout_globals g) {
 
         fp8e8m0_4 a0_raw[a_packs], a1_raw[a_packs];
         fp8e8m0_4 b0_raw[b_packs], b1_raw[b_packs];
+        const uint32_t soff = static_cast<uint32_t>(bt) << 8;
         #pragma unroll
         for (int p = 0; p < a_packs; ++p) {
-            a0_raw[p] = load_pq_scale(a0_sb[p], bt, lane_soff);
-            a1_raw[p] = load_pq_scale(a1_sb[p], bt, lane_soff);
+            a0_raw[p] = load_pq_scale_srd(a0_srd[p], lane_soff, soff);
+            a1_raw[p] = load_pq_scale_srd(a1_srd[p], lane_soff, soff);
         }
         #pragma unroll
         for (int p = 0; p < b_packs; ++p) {
-            b0_raw[p] = load_pq_scale(b0_sb[p], bt, lane_soff);
-            b1_raw[p] = load_pq_scale(b1_sb[p], bt, lane_soff);
+            b0_raw[p] = load_pq_scale_srd(b0_srd[p], lane_soff, soff);
+            b1_raw[p] = load_pq_scale_srd(b1_srd[p], lane_soff, soff);
         }
 
         fp4_load_st_to_rt(a_rt, as0);
