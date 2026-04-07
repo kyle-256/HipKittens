@@ -275,43 +275,67 @@ void mxfp4_rcr_v2_kernel(const v2_globals g) {
     // 16 buffer_load_dwordx4 per prefetch batch (4 tiles × 4 loads/tile/thread)
     constexpr int PREFETCH_VMCNT = 16;
 
-    // ══════════════════ Prologue: load first 2 K-iterations ══════════════════
+    // ══════════════════ Prologue ══════════════════
     load_tiles(0, 0);
     if (k_byte_iters > 1) load_tiles(1, 1);
+
+    // Prefetch scales for iteration 0
+    fp8e8m0_4 pf_a0[a_packs], pf_a1[a_packs], pf_bl[b_packs], pf_br[b_packs];
+    {
+        const uint32_t soff0 = 0;
+        #pragma unroll
+        for (int p = 0; p < a_packs; ++p) {
+            pf_a0[p] = load_pq_scale_srd(a0_srd[p], lane_soff, soff0);
+            pf_a1[p] = load_pq_scale_srd(a1_srd[p], lane_soff, soff0);
+        }
+        #pragma unroll
+        for (int p = 0; p < b_packs; ++p) {
+            pf_bl[p] = load_pq_scale_srd(bl_srd[p], lane_soff, soff0);
+            pf_br[p] = load_pq_scale_srd(br_srd[p], lane_soff, soff0);
+        }
+    }
 
     // ══════════════════ Main loop ══════════════════
     for (int bt = 0; bt < k_byte_iters; ++bt) {
         const int cur = bt & 1;
-        const uint32_t soff = static_cast<uint32_t>(bt) << 8;
 
         asm volatile("s_waitcnt vmcnt(16)");
         __builtin_amdgcn_s_barrier();
 
-        // ── Load A0 scales ──
-        // ── Load ALL tile data from LDS upfront ──
+        // Use prefetched scales (already in VGPRs from prev iteration)
         fp8e8m0_4 a0_raw[a_packs], a1_raw[a_packs];
         fp8e8m0_4 bl_raw[b_packs], br_raw[b_packs];
         #pragma unroll
-        for (int p = 0; p < a_packs; ++p) {
-            a0_raw[p] = load_pq_scale_srd(a0_srd[p], lane_soff, soff);
-            a1_raw[p] = load_pq_scale_srd(a1_srd[p], lane_soff, soff);
-        }
+        for (int p = 0; p < a_packs; ++p) { a0_raw[p] = pf_a0[p]; a1_raw[p] = pf_a1[p]; }
         #pragma unroll
-        for (int p = 0; p < b_packs; ++p) {
-            bl_raw[p] = load_pq_scale_srd(bl_srd[p], lane_soff, soff);
-            br_raw[p] = load_pq_scale_srd(br_srd[p], lane_soff, soff);
-        }
+        for (int p = 0; p < b_packs; ++p) { bl_raw[p] = pf_bl[p]; br_raw[p] = pf_br[p]; }
 
+        // LDS reads for tiles
         A_row_reg a0_rt, a1_rt;
         B_row_reg bl_rt2, br_rt2;
         fp4_load_st_to_rt(a0_rt, kittens::subtile_inplace<RBM, BK>(A0_db[cur], {wm, 0}));
         fp4_load_st_to_rt(a1_rt, kittens::subtile_inplace<RBM, BK>(A1_db[cur], {wm, 0}));
         fp4_load_st_to_rt(bl_rt2, kittens::subtile_inplace<RBN, BK>(Bl_db[cur], {wn, 0}));
         fp4_load_st_to_rt(br_rt2, kittens::subtile_inplace<RBN, BK>(Br_db[cur], {wn, 0}));
-        asm volatile("s_waitcnt lgkmcnt(0) vmcnt(0)");
+
+        // Prefetch scales for bt+1 (overlaps with ds_reads above)
+        {
+            const uint32_t next_soff = static_cast<uint32_t>(bt + 1 < k_byte_iters ? bt + 1 : bt) << 8;
+            #pragma unroll
+            for (int p = 0; p < a_packs; ++p) {
+                pf_a0[p] = load_pq_scale_srd(a0_srd[p], lane_soff, next_soff);
+                pf_a1[p] = load_pq_scale_srd(a1_srd[p], lane_soff, next_soff);
+            }
+            #pragma unroll
+            for (int p = 0; p < b_packs; ++p) {
+                pf_bl[p] = load_pq_scale_srd(bl_srd[p], lane_soff, next_soff);
+                pf_br[p] = load_pq_scale_srd(br_srd[p], lane_soff, next_soff);
+            }
+        }
+
+        asm volatile("s_waitcnt lgkmcnt(0) vmcnt(8)");
         __builtin_amdgcn_sched_barrier(0);
 
-        // Extract into local arrays (decoupled from register tiles)
         fp4_intx8_t tA0[4], tA1[4], tBl[4], tBr[4];
         #pragma unroll
         for (int i = 0; i < 4; i++) {
@@ -321,20 +345,20 @@ void mxfp4_rcr_v2_kernel(const v2_globals g) {
             tBr[i] = fp4_extract_tile(br_rt2, i);
         }
 
-        // ── ALL Phase 0 (64 MFMAs, lower nibble) ──
+        // ── ALL Phase 0 (64 MFMAs) — scales already ready, no vmcnt stall ──
         fp4_mma_v2<false>(acc_A0Bl, tA0, tBl, a0_raw, bl_raw, 0);
         fp4_mma_v2<false>(acc_A0Br, tA0, tBr, a0_raw, br_raw, 0);
         fp4_mma_v2<false>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw, 0);
         fp4_mma_v2<false>(acc_A1Br, tA1, tBr, a1_raw, br_raw, 0);
 
-        // ── Barrier + tile prefetch (overlaps with Phase 1 MFMAs) ──
+        // ── Barrier + tile prefetch ──
         __builtin_amdgcn_s_barrier();
         {
             const int pf_bt = (bt + 2 < k_byte_iters) ? (bt + 2) : (k_byte_iters - 1);
             load_tiles(pf_bt, cur);
         }
 
-        // ── ALL Phase 1 (64 MFMAs, upper nibble — tile loads in flight) ──
+        // ── ALL Phase 1 (64 MFMAs) ──
         fp4_mma_v2<true>(acc_A0Bl, tA0, tBl, a0_raw, bl_raw, 1);
         fp4_mma_v2<true>(acc_A0Br, tA0, tBr, a0_raw, br_raw, 1);
         fp4_mma_v2<true>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw, 1);
