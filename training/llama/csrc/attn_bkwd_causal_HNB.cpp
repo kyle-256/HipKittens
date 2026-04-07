@@ -41,7 +41,6 @@ template<int D, bool SBHD=false> struct attn_bwd_combined_globals {
   gl<bf16, -1, -1, -1, -1> Q, K, V;
   gl<bf16, -1, -1, -1, -1> dOg, dQg, dKg, dVg;
   gl<float, -1, -1, -1, -1> L_vec, delta_vec;
-  gl<bf16, -1, -1, -1, -1> dbg;
   hipStream_t stream;
   dim3 grid() { return dim3(ATTN_H_KV, (ATTN_N / BLOCK_SIZE_KV), ATTN_B); }
   dim3 block() { return dim3(NUM_THREADS); }
@@ -86,6 +85,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
   st_bf<BLOCK_SIZE_KV, DOT_SLICE_QO, st_16x16_swizzled_s> (&attn_i_smem) = al.allocate<st_bf<BLOCK_SIZE_KV, DOT_SLICE_QO, st_16x16_swizzled_s>>();
   sv_fl<STEP_QO> (&L_smem)[2] = al.allocate<sv_fl<STEP_QO>, 2>();
   sv_fl<STEP_QO> (&delta_smem)[2] = al.allocate<sv_fl<STEP_QO>, 2>();
+  st_bf<WARP_SIZE_KV, D, st_16x32_s> (&V_j_smem) = al.allocate<st_bf<WARP_SIZE_KV, D, st_16x32_s>>();
 
   // Register tiles
   using Q_ranges = ducks::art::split_many_t<ducks::art::type_list<ducks::art::range<368, 383>>, 4>; // 16 registers - a[112:127]
@@ -163,11 +163,22 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
   int tic = 0, toc = 1;
 
   // Load K_j from HBM to shared memory
-  G::load<1, false>(K_j_smem, g.K, BS(batch_idx, seq_idx, kv_head_idx, 0));
+  G::load<QKVO_AXIS, false>(K_j_smem, g.K, BS(batch_idx, seq_idx, kv_head_idx, 0));
 
-  // Load V_j from HBM to registers
-  load<1, 0>(V_j, g.V, BS(batch_idx, 0, kv_head_idx, 0), BS(0, j, 0, 0));
-  store<1>(g.dbg, V_j, BS(batch_idx, 0, kv_head_idx, 0), BS(0, j, 0, 0));
+  __builtin_amdgcn_s_waitcnt(0);
+  __builtin_amdgcn_s_barrier();
+
+  // Load V_j via shared memory (art global load can't write to AGPRs directly)
+  // Each warp loads its own 64×128 V block sequentially through V_j_smem
+  for (int w = 0; w < NUM_WARPS; w++) {
+    G::load<QKVO_AXIS, false>(V_j_smem, g.V, BS(batch_idx, seq_idx * NUM_WARPS + w, kv_head_idx, 0));
+    __builtin_amdgcn_s_waitcnt(0);
+    __builtin_amdgcn_s_barrier();
+    if (warpid == w) {
+      load(V_j, V_j_smem);
+    }
+    __builtin_amdgcn_s_barrier();
+  }
 
   // Load Q, dO, L, delta for this specific query head
   load(L_smem[tic], g.L_vec, {batch_idx, first_q_head, 0, first_step});
@@ -3376,8 +3387,7 @@ PYBIND11_MODULE(tk_kernel_bkwd, m) {
       &attn_bwd_combined_globals<ATTN_D, false>::dKg,
       &attn_bwd_combined_globals<ATTN_D, false>::dVg,
       &attn_bwd_combined_globals<ATTN_D, false>::L_vec, 
-      &attn_bwd_combined_globals<ATTN_D, false>::delta_vec,
-      &attn_bwd_combined_globals<ATTN_D, false>::dbg
+      &attn_bwd_combined_globals<ATTN_D, false>::delta_vec
   );
 
   py::bind_function<dispatch_bwd_combined<ATTN_D, true>>(m, "dispatch_bwd_combined_sbhd", 
@@ -3389,8 +3399,7 @@ PYBIND11_MODULE(tk_kernel_bkwd, m) {
       &attn_bwd_combined_globals<ATTN_D, true>::dKg,
       &attn_bwd_combined_globals<ATTN_D, true>::dVg,
       &attn_bwd_combined_globals<ATTN_D, true>::L_vec, 
-      &attn_bwd_combined_globals<ATTN_D, true>::delta_vec,
-      &attn_bwd_combined_globals<ATTN_D, true>::dbg
+      &attn_bwd_combined_globals<ATTN_D, true>::delta_vec
   );
 }
 
