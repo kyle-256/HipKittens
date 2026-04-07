@@ -35,11 +35,7 @@ using G = kittens::group<NUM_WARPS>;
 
 using namespace kittens;
 
-template<bool SBHD>
-__device__ __forceinline__ coord<> bs(int batch, int seq, int head, int dim) {
-    if constexpr (SBHD) return coord<>(seq, batch, head, dim);
-    else                return coord<>(batch, seq, head, dim);
-}
+#define BS(b, s, h, d)  {SBHD ? (s) : (b), SBHD ? (b) : (s), (h), (d)}
 
 template<int D, bool SBHD=false> struct attn_bwd_combined_globals { 
   gl<bf16, -1, -1, -1, -1> Q, K, V;
@@ -55,7 +51,9 @@ template<int D, bool SBHD=false> struct attn_bwd_combined_globals {
 template<int D, bool SBHD=false> __launch_bounds__(NUM_THREADS, 1)
 __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(const attn_bwd_combined_globals<D, SBHD> g) {
 
-  const int kv_head_idx = blockIdx.x;  // This is the KV head index
+  constexpr int QKVO_AXIS = SBHD ? 0 : 1;
+
+  const int kv_head_idx = blockIdx.x;
   const int seq_idx = blockIdx.y;
   const int batch_idx = blockIdx.z;
   const int first_q_head = kv_head_idx * GROUP_SIZE;
@@ -131,7 +129,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
   constexpr int neg_inf_v = 29;
   // Move -inf to VGPR neg_inf_v
   kittens::macros::clobber_gpr<neg_inf_v>();
-  kittens::macros::v_mov_b32<neg_inf_v>(0xff800000);
+  kittens::macros::v_mov_b32_up2p<neg_inf_v>(0xff800000u);
 
   art<float, DOT_SLICE_QO, WARP_SIZE_KV, col_l, rt_16x16_s, P_ranges> P_ij; // 16 registers
   art<float, DOT_SLICE_QO, WARP_SIZE_KV, col_l, rt_16x16_s, dP_ranges> dP_ij; // 16 registers
@@ -164,18 +162,18 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
   int tic = 0, toc = 1;
 
   // Load K_j from HBM to shared memory
-  G::load<1, false>(K_j_smem, g.K, bs<SBHD>(batch_idx, seq_idx, kv_head_idx, 0));
+  G::load<1, false>(K_j_smem, g.K, BS(batch_idx, seq_idx, kv_head_idx, 0));
 
   // Load V_j from HBM to registers
-  load<1>(V_j, g.V, bs<SBHD>(batch_idx, 0, kv_head_idx, 0), bs<SBHD>(0, j, 0, 0));
+  load<1, 0>(V_j, g.V, BS(batch_idx, 0, kv_head_idx, 0), BS(0, j, 0, 0));
 
   // Load Q, dO, L, delta for this specific query head
   load(L_smem[tic], g.L_vec, {batch_idx, first_q_head, 0, first_step});
   load(delta_smem[tic], g.delta_vec, {batch_idx, first_q_head, 0, first_step});
-  G::load<1, false>(Q_i_smem[tic][0],  g.Q,   bs<SBHD>(batch_idx, first_step * 2 + 0, first_q_head, 0), swizzled_offsets_Q_dO);
-  G::load<1, false>(dO_i_smem[tic][0], g.dOg, bs<SBHD>(batch_idx, first_step * 2 + 0, first_q_head, 0), swizzled_offsets_Q_dO);
-  G::load<1, false>(Q_i_smem[tic][1],  g.Q,   bs<SBHD>(batch_idx, first_step * 2 + 1, first_q_head, 0), swizzled_offsets_Q_dO);
-  G::load<1, false>(dO_i_smem[tic][1], g.dOg, bs<SBHD>(batch_idx, first_step * 2 + 1, first_q_head, 0), swizzled_offsets_Q_dO);
+  G::load<1, false>(Q_i_smem[tic][0],  g.Q,   BS(batch_idx, first_step * 2 + 0, first_q_head, 0), swizzled_offsets_Q_dO);
+  G::load<1, false>(dO_i_smem[tic][0], g.dOg, BS(batch_idx, first_step * 2 + 0, first_q_head, 0), swizzled_offsets_Q_dO);
+  G::load<1, false>(Q_i_smem[tic][1],  g.Q,   BS(batch_idx, first_step * 2 + 1, first_q_head, 0), swizzled_offsets_Q_dO);
+  G::load<1, false>(dO_i_smem[tic][1], g.dOg, BS(batch_idx, first_step * 2 + 1, first_q_head, 0), swizzled_offsets_Q_dO);
   __builtin_amdgcn_s_waitcnt(0);
   __builtin_amdgcn_s_barrier();
   __builtin_amdgcn_sched_barrier(0);
@@ -228,7 +226,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       // dot slice 0
       {
         load(L_smem[toc], g.L_vec, {batch_idx, next_q_head_idx, 0, next_q_seq_idx});
-        G::load<1, false>(Q_i_smem[toc][0], g.Q, bs<SBHD>(batch_idx, next_q_seq_idx * 2, next_q_head_idx, 0));
+        G::load<1, false>(Q_i_smem[toc][0], g.Q, BS(batch_idx, next_q_seq_idx * 2, next_q_head_idx, 0));
 
         // Load Q_i from shared memory to registers
         // load(Q_i, subtile_inplace<DOT_SLICE_QO, D>(Q_i_smem[tic][0], {0, 0}));
@@ -460,7 +458,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         load<6, 0>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid}), K_j_col_addr);
         load<6, 1>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid}), K_j_col_addr);
         mma_AtB<0, 0, 1>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
-        G::load<1, false>(dO_i_smem[toc][0], g.dOg, bs<SBHD>(batch_idx, next_q_seq_idx * 2, next_q_head_idx, 0), swizzled_offsets_Q_dO);
+        G::load<1, false>(dO_i_smem[toc][0], g.dOg, BS(batch_idx, next_q_seq_idx * 2, next_q_head_idx, 0), swizzled_offsets_Q_dO);
         mma_AtB<0, 0, 2>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
         load<7, 0>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid}), K_j_col_addr);
         load<7, 1>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid}), K_j_col_addr);
@@ -718,7 +716,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         load<6, 0>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid}), K_j_col_addr);
         load<6, 1>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid}), K_j_col_addr);
         mma_AtB<0, 0, 1>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
-        G::load<1, false>(Q_i_smem[toc][1], g.Q, bs<SBHD>(batch_idx, next_q_seq_idx * 2 + 1, next_q_head_idx, 0), swizzled_offsets_Q_dO);
+        G::load<1, false>(Q_i_smem[toc][1], g.Q, BS(batch_idx, next_q_seq_idx * 2 + 1, next_q_head_idx, 0), swizzled_offsets_Q_dO);
         mma_AtB<0, 0, 2>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
         load<7, 0>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid}), K_j_col_addr);
         load<7, 1>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid}), K_j_col_addr);
@@ -974,7 +972,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         load<6, 0>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid}), K_j_col_addr);
         load<6, 1>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid}), K_j_col_addr);
         mma_AtB<0, 0, 1>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
-        G::load<1, false>(dO_i_smem[toc][1], g.dOg, bs<SBHD>(batch_idx, next_q_seq_idx * 2 + 1, next_q_head_idx, 0), swizzled_offsets_Q_dO);
+        G::load<1, false>(dO_i_smem[toc][1], g.dOg, BS(batch_idx, next_q_seq_idx * 2 + 1, next_q_head_idx, 0), swizzled_offsets_Q_dO);
         mma_AtB<0, 0, 2>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
         load<7, 0>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid}), K_j_col_addr);
         load<7, 1>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid}), K_j_col_addr);
@@ -1293,7 +1291,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         // 13. dP_ij = dO_i @ V_j^T
         // 14. dS_ij = P_ij o (dP_ij - delta_i)
         // mma_ABt(P_ij, Q_i, K_j);
-        G::load<1, false>(Q_i_smem[toc][0], g.Q, bs<SBHD>(batch_idx, next_q_seq_idx * 2, next_q_head_idx, 0), swizzled_offsets_Q_dO);
+        G::load<1, false>(Q_i_smem[toc][0], g.Q, BS(batch_idx, next_q_seq_idx * 2, next_q_head_idx, 0), swizzled_offsets_Q_dO);
         mma_ABt<0, 0, 0>(P_ij, Q_i, K_j);
         load<2, 0>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
         load<2, 1>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
@@ -1502,7 +1500,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         load<6, 0>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid}), K_j_col_addr);
         load<6, 1>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid}), K_j_col_addr);
         mma_AtB<0, 0, 1>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
-        G::load<1, false>(dO_i_smem[toc][0], g.dOg, bs<SBHD>(batch_idx, next_q_seq_idx * 2, next_q_head_idx, 0), swizzled_offsets_Q_dO);
+        G::load<1, false>(dO_i_smem[toc][0], g.dOg, BS(batch_idx, next_q_seq_idx * 2, next_q_head_idx, 0), swizzled_offsets_Q_dO);
         mma_AtB<0, 0, 2>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
         load<7, 0>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid}), K_j_col_addr);
         load<7, 1>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid}), K_j_col_addr);
@@ -1762,7 +1760,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         load<6, 0>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid}), K_j_col_addr);
         load<6, 1>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid}), K_j_col_addr);
         mma_AtB<0, 0, 1>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
-        G::load<1, false>(Q_i_smem[toc][1], g.Q, bs<SBHD>(batch_idx, next_q_seq_idx * 2 + 1, next_q_head_idx, 0), swizzled_offsets_Q_dO);
+        G::load<1, false>(Q_i_smem[toc][1], g.Q, BS(batch_idx, next_q_seq_idx * 2 + 1, next_q_head_idx, 0), swizzled_offsets_Q_dO);
         mma_AtB<0, 0, 2>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
         load<7, 0>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid}), K_j_col_addr);
         load<7, 1>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid}), K_j_col_addr);
@@ -2018,7 +2016,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         load<6, 0>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid}), K_j_col_addr);
         load<6, 1>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid}), K_j_col_addr);
         mma_AtB<0, 0, 1>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
-        G::load<1, false>(dO_i_smem[toc][1], g.dOg, bs<SBHD>(batch_idx, next_q_seq_idx * 2 + 1, next_q_head_idx, 0), swizzled_offsets_Q_dO);
+        G::load<1, false>(dO_i_smem[toc][1], g.dOg, BS(batch_idx, next_q_seq_idx * 2 + 1, next_q_head_idx, 0), swizzled_offsets_Q_dO);
         mma_AtB<0, 0, 2>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
         load<7, 0>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid}), K_j_col_addr);
         load<7, 1>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid}), K_j_col_addr);
@@ -3343,14 +3341,14 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
     }
   }
 
-  store<1>(g.dVg, dV_j, bs<SBHD>(batch_idx, 0, kv_head_idx, 0), bs<SBHD>(0, j, 0, 0));
+  store<QKVO_AXIS>(g.dVg, dV_j, BS(batch_idx, 0, kv_head_idx, 0), BS(0, j, 0, 0));
   __builtin_amdgcn_s_waitcnt(0);
   __builtin_amdgcn_s_barrier();
 
   // We first copy dV_j_T from accumulator GPRs to vector GPRs and then perform the store
   accvgpr_read(dV_j_T, dK_j_T);
   mul(dV_j_T, dV_j_T, dP_SCALE_FACTOR);
-  store<1>(g.dKg, dV_j, bs<SBHD>(batch_idx, 0, kv_head_idx, 0), bs<SBHD>(0, j, 0, 0));
+  store<QKVO_AXIS>(g.dKg, dV_j, BS(batch_idx, 0, kv_head_idx, 0), BS(0, j, 0, 0));
 
   // Write out final dQ_i slice
   mul(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
