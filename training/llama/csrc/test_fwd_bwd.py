@@ -54,7 +54,8 @@ tk_kernel_bkwd.dispatch_bwd_combined(
     Q.contiguous(), K.contiguous(), V.contiguous(), dO.contiguous(),
     dQ_in, dK_hk, dV_hk, L_hk, delta
 )
-tk_kernel_bkwd_prep.dispatch_dq_shuffle(dQ_in, dQ_hk)
+# Skip broken kernel shuffle, use Python permute instead: BHND → BSHD (=BNHD)
+dQ_hk = dQ_in.permute(0, 2, 1, 3).contiguous()
 
 # ── Check ──
 def check(name, ref, hk):
