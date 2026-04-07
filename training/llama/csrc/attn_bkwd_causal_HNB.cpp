@@ -3345,7 +3345,6 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
   __builtin_amdgcn_s_waitcnt(0);
   __builtin_amdgcn_s_barrier();
 
-  // We first copy dV_j_T from accumulator GPRs to vector GPRs and then perform the store
   accvgpr_read(dV_j_T, dK_j_T);
   mul(dV_j_T, dV_j_T, dP_SCALE_FACTOR);
   store<QKVO_AXIS>(g.dKg, dV_j, BS(batch_idx, 0, kv_head_idx, 0), BS(0, j, 0, 0));
