@@ -263,12 +263,6 @@ void gemm_rcr_blockwise_mfma(const bw_rcr_globals g) {
     // === Main loop ===
     int tic = 0, toc = 1;
     for (int k = 0; k < g.ki; ++k, tic ^= 1, toc ^= 1) {
-        if (k + 1 < g.ki) {
-            G::load(As[toc][0], g.a, aco(br*2,   k+1), soA);
-            G::load(As[toc][1], g.a, aco(br*2+1, k+1), soA);
-            G::load(Bs[toc][0], g.b, bco(bc*2,   k+1), soB);
-            G::load(Bs[toc][1], g.b, bco(bc*2+1, k+1), soB);
-        }
         const float bl  = g.b_scale[coord<>(k, bc*2)];
         const float br2 = g.b_scale[coord<>(k, bc*2+1)];
         float svt[16];
@@ -284,6 +278,13 @@ void gemm_rcr_blockwise_mfma(const bw_rcr_globals g) {
             #pragma unroll
             for (int d = 0; d < 4; ++d)
                 svb[i*4+d] = g.a_scale[coord<>(k, mb_ + i*16 + r16 + d)];
+
+        if (k + 1 < g.ki) {
+            G::load(As[toc][0], g.a, aco(br*2,   k+1), soA);
+            G::load(As[toc][1], g.a, aco(br*2+1, k+1), soA);
+            G::load(Bs[toc][0], g.b, bco(bc*2,   k+1), soB);
+            G::load(Bs[toc][1], g.b, bco(bc*2+1, k+1), soB);
+        }
 
         lb(b0_reg, Bs[tic][0], wn);
         la(a_reg,  As[tic][0], wm);
@@ -388,12 +389,6 @@ void gemm_rrr_blockwise_mfma(const bw_rrr_globals g) {
     // === Main loop ===
     int tic = 0, toc = 1;
     for (int k = 0; k < g.ki; ++k, tic ^= 1, toc ^= 1) {
-        if (k + 1 < g.ki) {
-            G::load(As[toc][0], g.a, aco(br*2,   k+1), soA);
-            G::load(As[toc][1], g.a, aco(br*2+1, k+1), soA);
-            G::load(Bs[toc][0], g.b, bco(bc*2,   k+1), soB);
-            G::load(Bs[toc][1], g.b, bco(bc*2+1, k+1), soB);
-        }
         const float bl  = g.b_scale[coord<>(k, bc*2)];
         const float br2 = g.b_scale[coord<>(k, bc*2+1)];
         float svt[16];
@@ -409,6 +404,13 @@ void gemm_rrr_blockwise_mfma(const bw_rrr_globals g) {
             #pragma unroll
             for (int d = 0; d < 4; ++d)
                 svb[i*4+d] = g.a_scale[coord<>(k, mb_ + i*16 + r16 + d)];
+
+        if (k + 1 < g.ki) {
+            G::load(As[toc][0], g.a, aco(br*2,   k+1), soA);
+            G::load(As[toc][1], g.a, aco(br*2+1, k+1), soA);
+            G::load(Bs[toc][0], g.b, bco(bc*2,   k+1), soB);
+            G::load(Bs[toc][1], g.b, bco(bc*2+1, k+1), soB);
+        }
 
         lb(b0_reg, Bs[tic][0], wn);
         la(a_reg,  As[tic][0], wm);
@@ -515,12 +517,12 @@ void gemm_crr_blockwise_mfma(const bw_crr_globals g) {
     // === Main loop ===
     int tic = 0, toc = 1;
     for (int k = 0; k < g.ki; ++k, tic ^= 1, toc ^= 1) {
-        if (k + 1 < g.ki) {
-            G::load(As[toc][0], g.a, aco(br*2,   k+1), soA);
-            G::load(As[toc][1], g.a, aco(br*2+1, k+1), soA);
-            G::load(Bs[toc][0], g.b, bco(bc*2,   k+1), soB);
-            G::load(Bs[toc][1], g.b, bco(bc*2+1, k+1), soB);
-        }
+        float bsvA[2], bsvB[2];
+        bsvA[0] = g.b_scale[coord<>(k, nt  + c16)];
+        bsvA[1] = g.b_scale[coord<>(k, nt  + 16 + c16)];
+        bsvB[0] = g.b_scale[coord<>(k, nb_ + c16)];
+        bsvB[1] = g.b_scale[coord<>(k, nb_ + 16 + c16)];
+
         float svt[16];
         #pragma unroll
         for (int i = 0; i < 4; ++i)
@@ -535,11 +537,12 @@ void gemm_crr_blockwise_mfma(const bw_crr_globals g) {
             for (int d = 0; d < 4; ++d)
                 svb[i*4+d] = g.a_scale[coord<>(k, mb_ + i*16 + r16 + d)];
 
-        float bsvA[2], bsvB[2];
-        bsvA[0] = g.b_scale[coord<>(k, nt  + c16)];
-        bsvA[1] = g.b_scale[coord<>(k, nt  + 16 + c16)];
-        bsvB[0] = g.b_scale[coord<>(k, nb_ + c16)];
-        bsvB[1] = g.b_scale[coord<>(k, nb_ + 16 + c16)];
+        if (k + 1 < g.ki) {
+            G::load(As[toc][0], g.a, aco(br*2,   k+1), soA);
+            G::load(As[toc][1], g.a, aco(br*2+1, k+1), soA);
+            G::load(Bs[toc][0], g.b, bco(bc*2,   k+1), soB);
+            G::load(Bs[toc][1], g.b, bco(bc*2+1, k+1), soB);
+        }
 
         lb(b0_reg, Bs[tic][0], wn);
         la(a_reg,  As[tic][0], wm);
