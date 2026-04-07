@@ -138,6 +138,51 @@ __device__ __forceinline__ void load_col_from_v2_st(
     load_col_from_v2_st_half<RT, 1>(dst, tile, col_start);
 }
 
+// Fused mma_AB + scale-drain for RRR (a is row_l, b is col_l).
+// Same quad-buffered 8-MFMA pattern as MMA_ABT_BSCALE but
+// B tiles indexed as col_l: b.tiles[0][n] instead of b.tiles[n][0].
+#define MMA_AB_BSCALE(c, a, b, sv, bs) do { \
+    float2 _b0[2]={}, _b1[2]={}, _b2[2]={}, _b3[2]={}; \
+    mfma1616128(_b0, (a).tiles[0][0].data, (b).tiles[0][0].data, _b0); \
+    mfma1616128(_b1, (a).tiles[0][0].data, (b).tiles[0][1].data, _b1); \
+    mfma1616128(_b2, (a).tiles[1][0].data, (b).tiles[0][0].data, _b2); \
+    mfma1616128(_b3, (a).tiles[1][0].data, (b).tiles[0][1].data, _b3); \
+    _BW_SFZ(_b0, (c).tiles[0][0], &(sv)[0], bs); \
+    mfma1616128(_b0, (a).tiles[2][0].data, (b).tiles[0][0].data, _b0); \
+    _BW_SFZ(_b1, (c).tiles[0][1], &(sv)[0], bs); \
+    mfma1616128(_b1, (a).tiles[2][0].data, (b).tiles[0][1].data, _b1); \
+    _BW_SFZ(_b2, (c).tiles[1][0], &(sv)[4], bs); \
+    mfma1616128(_b2, (a).tiles[3][0].data, (b).tiles[0][0].data, _b2); \
+    _BW_SFZ(_b3, (c).tiles[1][1], &(sv)[4], bs); \
+    mfma1616128(_b3, (a).tiles[3][0].data, (b).tiles[0][1].data, _b3); \
+    _BW_SFZ(_b0, (c).tiles[2][0], &(sv)[8], bs); \
+    _BW_SFZ(_b1, (c).tiles[2][1], &(sv)[8], bs); \
+    _BW_SFZ(_b2, (c).tiles[3][0], &(sv)[12], bs); \
+    _BW_SFZ(_b3, (c).tiles[3][1], &(sv)[12], bs); \
+} while(0)
+
+// Fused mma_ABt + per-column B scale drain for CRR.
+// Uses aliased col_l→row_l registers. bsv[0] for n=0 subtiles, bsv[1] for n=1.
+#define MMA_ABT_BSCALE_PER_COL(c, a, b, sv, bsv) do { \
+    float2 _b0[2]={}, _b1[2]={}, _b2[2]={}, _b3[2]={}; \
+    mfma1616128(_b0, (a).tiles[0][0].data, (b).tiles[0][0].data, _b0); \
+    mfma1616128(_b1, (a).tiles[0][0].data, (b).tiles[1][0].data, _b1); \
+    mfma1616128(_b2, (a).tiles[1][0].data, (b).tiles[0][0].data, _b2); \
+    mfma1616128(_b3, (a).tiles[1][0].data, (b).tiles[1][0].data, _b3); \
+    _BW_SFZ(_b0, (c).tiles[0][0], &(sv)[0], (bsv)[0]); \
+    mfma1616128(_b0, (a).tiles[2][0].data, (b).tiles[0][0].data, _b0); \
+    _BW_SFZ(_b1, (c).tiles[0][1], &(sv)[0], (bsv)[1]); \
+    mfma1616128(_b1, (a).tiles[2][0].data, (b).tiles[1][0].data, _b1); \
+    _BW_SFZ(_b2, (c).tiles[1][0], &(sv)[4], (bsv)[0]); \
+    mfma1616128(_b2, (a).tiles[3][0].data, (b).tiles[0][0].data, _b2); \
+    _BW_SFZ(_b3, (c).tiles[1][1], &(sv)[4], (bsv)[1]); \
+    mfma1616128(_b3, (a).tiles[3][0].data, (b).tiles[1][0].data, _b3); \
+    _BW_SFZ(_b0, (c).tiles[2][0], &(sv)[8], (bsv)[0]); \
+    _BW_SFZ(_b1, (c).tiles[2][1], &(sv)[8], (bsv)[1]); \
+    _BW_SFZ(_b2, (c).tiles[3][0], &(sv)[12], (bsv)[0]); \
+    _BW_SFZ(_b3, (c).tiles[3][1], &(sv)[12], (bsv)[1]); \
+} while(0)
+
 #define SCALE_ACC_ADD(dst, src, sv, bs) do { \
     _Pragma("unroll") \
     for (int _n = 0; _n < 4; ++_n) { \
@@ -207,6 +252,7 @@ void gemm_rcr_blockwise_mfma(const bw_rcr_globals g) {
     auto lb = [&](B_row_reg& d, ST_rcr& t, int w){ load(d, subtile_inplace<RBN,BK>(t,{w,0})); };
     const int mt = br*BLK + wm*RBM, mb_ = br*BLK + HB + wm*RBM;
 
+    // === Init ===
     G::load(As[0][0], g.a, aco(br*2,0), soA);
     G::load(As[0][1], g.a, aco(br*2+1,0), soA);
     G::load(Bs[0][0], g.b, bco(bc*2,0), soB);
@@ -214,7 +260,9 @@ void gemm_rcr_blockwise_mfma(const bw_rcr_globals g) {
     asm volatile("s_waitcnt vmcnt(0)");
     __builtin_amdgcn_s_barrier();
 
+    // === Main loop ===
     int tic = 0, toc = 1;
+    #pragma unroll 1
     for (int k = 0; k < g.ki; ++k, tic ^= 1, toc ^= 1) {
         if (k + 1 < g.ki) {
             G::load(As[toc][0], g.a, aco(br*2,   k+1), soA);
@@ -224,14 +272,19 @@ void gemm_rcr_blockwise_mfma(const bw_rcr_globals g) {
         }
         const float bl  = g.b_scale[coord<>(k, bc*2)];
         const float br2 = g.b_scale[coord<>(k, bc*2+1)];
-        float svt[16], svb[16];
+        float svt[16];
         #pragma unroll
         for (int i = 0; i < 4; ++i)
             #pragma unroll
-            for (int d = 0; d < 4; ++d) {
-                svt[i*4+d] = g.a_scale[coord<>(k, mt  + i*16 + r16 + d)];
+            for (int d = 0; d < 4; ++d)
+                svt[i*4+d] = g.a_scale[coord<>(k, mt + i*16 + r16 + d)];
+
+        float svb[16];
+        #pragma unroll
+        for (int i = 0; i < 4; ++i)
+            #pragma unroll
+            for (int d = 0; d < 4; ++d)
                 svb[i*4+d] = g.a_scale[coord<>(k, mb_ + i*16 + r16 + d)];
-            }
 
         lb(b0_reg, Bs[tic][0], wn);
         la(a_reg,  As[tic][0], wm);
@@ -311,7 +364,6 @@ void gemm_rrr_blockwise_mfma(const bw_rrr_globals g) {
     acc_tile cA, cB, cC, cD;
     zero(cA); zero(cB); zero(cC); zero(cD);
     A_row_reg a_reg; B_col_reg b0_reg, b1_reg;
-    acc_tile tmp;
 
     __shared__ ST_rcr As[2][2], Bs[2][2];
     constexpr int bpt = ST_rcr::underlying_subtile_bytes_per_thread;
@@ -326,6 +378,7 @@ void gemm_rrr_blockwise_mfma(const bw_rrr_globals g) {
     auto lb = [&](B_col_reg& d, ST_rcr& t, int w){ load_col_from_v2_st(d, t, w * RBN); };
     const int mt = br*BLK + wm*RBM, mb_ = br*BLK + HB + wm*RBM;
 
+    // === Init ===
     G::load(As[0][0], g.a, aco(br*2,0), soA);
     G::load(As[0][1], g.a, aco(br*2+1,0), soA);
     G::load(Bs[0][0], g.b, bco(bc*2,0), soB);
@@ -333,7 +386,9 @@ void gemm_rrr_blockwise_mfma(const bw_rrr_globals g) {
     asm volatile("s_waitcnt vmcnt(0)");
     __builtin_amdgcn_s_barrier();
 
+    // === Main loop ===
     int tic = 0, toc = 1;
+    #pragma unroll 1
     for (int k = 0; k < g.ki; ++k, tic ^= 1, toc ^= 1) {
         if (k + 1 < g.ki) {
             G::load(As[toc][0], g.a, aco(br*2,   k+1), soA);
@@ -343,45 +398,42 @@ void gemm_rrr_blockwise_mfma(const bw_rrr_globals g) {
         }
         const float bl  = g.b_scale[coord<>(k, bc*2)];
         const float br2 = g.b_scale[coord<>(k, bc*2+1)];
-        float svt[16], svb[16];
+        float svt[16];
         #pragma unroll
         for (int i = 0; i < 4; ++i)
             #pragma unroll
-            for (int d = 0; d < 4; ++d) {
-                svt[i*4+d] = g.a_scale[coord<>(k, mt  + i*16 + r16 + d)];
+            for (int d = 0; d < 4; ++d)
+                svt[i*4+d] = g.a_scale[coord<>(k, mt + i*16 + r16 + d)];
+
+        float svb[16];
+        #pragma unroll
+        for (int i = 0; i < 4; ++i)
+            #pragma unroll
+            for (int d = 0; d < 4; ++d)
                 svb[i*4+d] = g.a_scale[coord<>(k, mb_ + i*16 + r16 + d)];
-            }
 
         lb(b0_reg, Bs[tic][0], wn);
         la(a_reg,  As[tic][0], wm);
         asm volatile("s_waitcnt lgkmcnt(0)");
-        zero(tmp);
         __builtin_amdgcn_s_setprio(1);
-        mma_AB(tmp, a_reg, b0_reg, tmp);
+        MMA_AB_BSCALE(cA, a_reg, b0_reg, svt, bl);
         __builtin_amdgcn_s_setprio(0);
-        SCALE_ACC_ADD(cA, tmp, svt, bl);
 
         lb(b1_reg, Bs[tic][1], wn);
         asm volatile("s_waitcnt lgkmcnt(0)");
-        zero(tmp);
         __builtin_amdgcn_s_setprio(1);
-        mma_AB(tmp, a_reg, b1_reg, tmp);
+        MMA_AB_BSCALE(cB, a_reg, b1_reg, svt, br2);
         __builtin_amdgcn_s_setprio(0);
-        SCALE_ACC_ADD(cB, tmp, svt, br2);
 
         la(a_reg, As[tic][1], wm);
         asm volatile("s_waitcnt lgkmcnt(0)");
-        zero(tmp);
         __builtin_amdgcn_s_setprio(1);
-        mma_AB(tmp, a_reg, b0_reg, tmp);
+        MMA_AB_BSCALE(cC, a_reg, b0_reg, svb, bl);
         __builtin_amdgcn_s_setprio(0);
-        SCALE_ACC_ADD(cC, tmp, svb, bl);
 
-        zero(tmp);
         __builtin_amdgcn_s_setprio(1);
-        mma_AB(tmp, a_reg, b1_reg, tmp);
+        MMA_AB_BSCALE(cD, a_reg, b1_reg, svb, br2);
         __builtin_amdgcn_s_setprio(0);
-        SCALE_ACC_ADD(cD, tmp, svb, br2);
 
         asm volatile("s_waitcnt vmcnt(0)");
         __builtin_amdgcn_s_barrier();
@@ -439,7 +491,6 @@ void gemm_crr_blockwise_mfma(const bw_crr_globals g) {
     acc_tile cA, cB, cC, cD;
     zero(cA); zero(cB); zero(cC); zero(cD);
     A_col_reg a_reg; B_col_reg b0_reg, b1_reg;
-    acc_tile tmp;
 
     __shared__ ST_rcr As[2][2], Bs[2][2];
     constexpr int bpt = ST_rcr::underlying_subtile_bytes_per_thread;
@@ -455,6 +506,7 @@ void gemm_crr_blockwise_mfma(const bw_crr_globals g) {
     const int mt = br*BLK + wm*RBM, mb_ = br*BLK + HB + wm*RBM;
     const int nt = bc*BLK + wn*RBN, nb_ = bc*BLK + HB + wn*RBN;
 
+    // === Init ===
     G::load(As[0][0], g.a, aco(br*2,0), soA);
     G::load(As[0][1], g.a, aco(br*2+1,0), soA);
     G::load(Bs[0][0], g.b, bco(bc*2,0), soB);
@@ -462,7 +514,9 @@ void gemm_crr_blockwise_mfma(const bw_crr_globals g) {
     asm volatile("s_waitcnt vmcnt(0)");
     __builtin_amdgcn_s_barrier();
 
+    // === Main loop ===
     int tic = 0, toc = 1;
+    #pragma unroll 1
     for (int k = 0; k < g.ki; ++k, tic ^= 1, toc ^= 1) {
         if (k + 1 < g.ki) {
             G::load(As[toc][0], g.a, aco(br*2,   k+1), soA);
@@ -470,14 +524,20 @@ void gemm_crr_blockwise_mfma(const bw_crr_globals g) {
             G::load(Bs[toc][0], g.b, bco(bc*2,   k+1), soB);
             G::load(Bs[toc][1], g.b, bco(bc*2+1, k+1), soB);
         }
-        float svt[16], svb[16];
+        float svt[16];
         #pragma unroll
         for (int i = 0; i < 4; ++i)
             #pragma unroll
-            for (int d = 0; d < 4; ++d) {
-                svt[i*4+d] = g.a_scale[coord<>(k, mt  + i*16 + r16 + d)];
+            for (int d = 0; d < 4; ++d)
+                svt[i*4+d] = g.a_scale[coord<>(k, mt + i*16 + r16 + d)];
+
+        float svb[16];
+        #pragma unroll
+        for (int i = 0; i < 4; ++i)
+            #pragma unroll
+            for (int d = 0; d < 4; ++d)
                 svb[i*4+d] = g.a_scale[coord<>(k, mb_ + i*16 + r16 + d)];
-            }
+
         float bsvA[2], bsvB[2];
         bsvA[0] = g.b_scale[coord<>(k, nt  + c16)];
         bsvA[1] = g.b_scale[coord<>(k, nt  + 16 + c16)];
@@ -487,33 +547,33 @@ void gemm_crr_blockwise_mfma(const bw_crr_globals g) {
         lb(b0_reg, Bs[tic][0], wn);
         la(a_reg,  As[tic][0], wm);
         asm volatile("s_waitcnt lgkmcnt(0)");
-        zero(tmp);
         __builtin_amdgcn_s_setprio(1);
-        mma_AtB(tmp, a_reg, b0_reg, tmp);
+        { const auto& ar = reinterpret_cast<const A_row_reg&>(a_reg);
+          const auto& br_ = reinterpret_cast<const B_row_reg&>(b0_reg);
+          MMA_ABT_BSCALE_PER_COL(cA, ar, br_, svt, bsvA); }
         __builtin_amdgcn_s_setprio(0);
-        SCALE_ACC_ADD_PER_COL(cA, tmp, svt, bsvA);
 
         lb(b1_reg, Bs[tic][1], wn);
         asm volatile("s_waitcnt lgkmcnt(0)");
-        zero(tmp);
         __builtin_amdgcn_s_setprio(1);
-        mma_AtB(tmp, a_reg, b1_reg, tmp);
+        { const auto& ar = reinterpret_cast<const A_row_reg&>(a_reg);
+          const auto& br_ = reinterpret_cast<const B_row_reg&>(b1_reg);
+          MMA_ABT_BSCALE_PER_COL(cB, ar, br_, svt, bsvB); }
         __builtin_amdgcn_s_setprio(0);
-        SCALE_ACC_ADD_PER_COL(cB, tmp, svt, bsvB);
 
         la(a_reg, As[tic][1], wm);
         asm volatile("s_waitcnt lgkmcnt(0)");
-        zero(tmp);
         __builtin_amdgcn_s_setprio(1);
-        mma_AtB(tmp, a_reg, b0_reg, tmp);
+        { const auto& ar = reinterpret_cast<const A_row_reg&>(a_reg);
+          const auto& br_ = reinterpret_cast<const B_row_reg&>(b0_reg);
+          MMA_ABT_BSCALE_PER_COL(cC, ar, br_, svb, bsvA); }
         __builtin_amdgcn_s_setprio(0);
-        SCALE_ACC_ADD_PER_COL(cC, tmp, svb, bsvA);
 
-        zero(tmp);
         __builtin_amdgcn_s_setprio(1);
-        mma_AtB(tmp, a_reg, b1_reg, tmp);
+        { const auto& ar = reinterpret_cast<const A_row_reg&>(a_reg);
+          const auto& br_ = reinterpret_cast<const B_row_reg&>(b1_reg);
+          MMA_ABT_BSCALE_PER_COL(cD, ar, br_, svb, bsvB); }
         __builtin_amdgcn_s_setprio(0);
-        SCALE_ACC_ADD_PER_COL(cD, tmp, svb, bsvB);
 
         asm volatile("s_waitcnt vmcnt(0)");
         __builtin_amdgcn_s_barrier();

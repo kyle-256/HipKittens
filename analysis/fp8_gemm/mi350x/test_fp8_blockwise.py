@@ -135,7 +135,7 @@ if "rcr" in layouts:
     print()
 
 if "rrr" in layouts:
-    print("--- RRR blockwise (scalar reference) ---")
+    print("--- RRR blockwise (MFMA kernel) ---")
     A = gen_fp8(M, K)
     B = gen_fp8(K, N)
     C = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
@@ -143,7 +143,8 @@ if "rrr" in layouts:
     b_scale_nat = gen_scales(Nb, Kb)
     a_scale = a_scale_nat.T.contiguous()
     b_scale = b_scale_nat.T.contiguous()
-    bw.gemm_rrr_blockwise(A, B, C, a_scale, b_scale)
+    run = lambda: bw.gemm_rrr_blockwise(A, B, C, a_scale, b_scale)
+    run()
     torch.cuda.synchronize()
     if check:
         C_ref = torch.zeros(M, N, dtype=torch.float32, device="cuda")
@@ -156,16 +157,23 @@ if "rrr" in layouts:
             C_ref += partial * a_s * b_s_exp
         snr = snr_db(C[:M, :N], C_ref)
         print(f"  SNR: {snr:.2f} dB  {'PASS' if snr > 48 else 'FAIL'}")
+        if snr <= 48:
+            sys.exit(1)
+    times = benchmark(run, C)
+    avg = sum(times) / len(times)
+    tflops = flops / (avg * 1e9)
+    print(f"  Avg time: {avg:.4f} ms   TFLOPS: {tflops:.2f}")
     print()
 
 if "crr" in layouts:
-    print("--- CRR blockwise (scalar reference) ---")
+    print("--- CRR blockwise (MFMA kernel) ---")
     At = gen_fp8(K, M)
     B = gen_fp8(K, N)
     C = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
     a_scale = gen_scales(Kb, M)
     b_scale = gen_scales(Kb, N)
-    bw.gemm_crr_blockwise(At, B, C, a_scale, b_scale)
+    run = lambda: bw.gemm_crr_blockwise(At, B, C, a_scale, b_scale)
+    run()
     torch.cuda.synchronize()
     if check:
         C_ref = torch.zeros(M, N, dtype=torch.float32, device="cuda")
@@ -177,6 +185,12 @@ if "crr" in layouts:
             C_ref += partial * a_s * b_s
         snr = snr_db(C[:M, :N], C_ref)
         print(f"  SNR: {snr:.2f} dB  {'PASS' if snr > 48 else 'FAIL'}")
+        if snr <= 48:
+            sys.exit(1)
+    times = benchmark(run, C)
+    avg = sum(times) / len(times)
+    tflops = flops / (avg * 1e9)
+    print(f"  Avg time: {avg:.4f} ms   TFLOPS: {tflops:.2f}")
     print()
 
 print("Done.")
