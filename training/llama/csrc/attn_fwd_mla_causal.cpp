@@ -299,7 +299,7 @@ __global__ void attend_ker(const attn_globals<D_QK, D_V, SBHD> g) {
         transpose(k_reg_transposed, k_reg);
         mma_AtB(att_block[1], k_reg_transposed, q_reg_transposed, att_block[1]);
         //      Finish softmax for QK0
-        exp2(att_block[0].tiles[1][0], att_block[0].tiles[1][0]);
+        if constexpr (KV_BLOCK_SIZE > 32) exp2(att_block[0].tiles[1][0], att_block[0].tiles[1][0]);
         mul(norm_vec, norm_vec, scale_vec);
         col_sum(norm_vec, att_block[0], norm_vec);
         copy(att_block_bf16, att_block[0]);
@@ -357,9 +357,9 @@ __global__ void attend_ker(const attn_globals<D_QK, D_V, SBHD> g) {
         __builtin_amdgcn_s_setprio(1);
         zero(att_block[0]);
         transpose(k_reg_transposed, k_reg);
-        mma_AtB(att_block[0], k_reg_transposed, q_reg_transposed, att_block[0]);
+    mma_AtB(att_block[0], k_reg_transposed, q_reg_transposed, att_block[0]);
         //      Finish softmax for QK1
-        exp2(att_block[1].tiles[1][0], att_block[1].tiles[1][0]);
+        if constexpr (KV_BLOCK_SIZE > 32) exp2(att_block[1].tiles[1][0], att_block[1].tiles[1][0]);
         mul(norm_vec, norm_vec, scale_vec);
         col_sum(norm_vec, att_block[1], norm_vec);
         copy(att_block_bf16, att_block[1]);
@@ -427,7 +427,7 @@ __global__ void attend_ker(const attn_globals<D_QK, D_V, SBHD> g) {
     transpose(k_reg_transposed, k_reg);
     mma_AtB(att_block[1], k_reg_transposed, q_reg_transposed, att_block[1]);
     //      Finish softmax for QK2
-    exp2(att_block[0].tiles[1][0], att_block[0].tiles[1][0]);
+    if constexpr (KV_BLOCK_SIZE > 32) exp2(att_block[0].tiles[1][0], att_block[0].tiles[1][0]);
     mul(norm_vec, norm_vec, scale_vec);
 
     col_sum(norm_vec, att_block[0], norm_vec);
@@ -493,7 +493,7 @@ __global__ void attend_ker(const attn_globals<D_QK, D_V, SBHD> g) {
     transpose(k_reg_transposed, k_reg);
     mma_AtB(att_block[0], k_reg_transposed, q_reg_transposed, att_block[0]);
     //      Finish softmax for QK3
-    exp2(att_block[1].tiles[1][0], att_block[1].tiles[1][0]);
+    if constexpr (KV_BLOCK_SIZE > 32) exp2(att_block[1].tiles[1][0], att_block[1].tiles[1][0]);
     mul(norm_vec, norm_vec, scale_vec);
     col_sum(norm_vec, att_block[1], norm_vec);
     copy(att_block_bf16, att_block[1]);
@@ -555,7 +555,7 @@ __global__ void attend_ker(const attn_globals<D_QK, D_V, SBHD> g) {
     transpose(k_reg_transposed, k_reg);
     mma_AtB(att_block[1], k_reg_transposed, q_reg_transposed, att_block[1]);
     //      Finish softmax for QK4
-    exp2(att_block[0].tiles[1][0], att_block[0].tiles[1][0]);
+    if constexpr (KV_BLOCK_SIZE > 32) exp2(att_block[0].tiles[1][0], att_block[0].tiles[1][0]);
     mul(norm_vec, norm_vec, scale_vec);
     col_sum(norm_vec, att_block[0], norm_vec);
     copy(att_block_bf16, att_block[0]);
@@ -596,7 +596,7 @@ __global__ void attend_ker(const attn_globals<D_QK, D_V, SBHD> g) {
     sched_barrier_exp_pairs<6, 3, 10>();
     __builtin_amdgcn_sched_barrier(0);
 
-    exp2(att_block[1].tiles[1][0], att_block[1].tiles[1][0]);
+    if constexpr (KV_BLOCK_SIZE > 32) exp2(att_block[1].tiles[1][0], att_block[1].tiles[1][0]);
     mul(norm_vec, norm_vec, scale_vec);
 
     col_sum(norm_vec, att_block[1], norm_vec);
