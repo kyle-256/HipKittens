@@ -262,7 +262,6 @@ void gemm_rcr_blockwise_mfma(const bw_rcr_globals g) {
 
     // === Main loop ===
     int tic = 0, toc = 1;
-    #pragma unroll 1
     for (int k = 0; k < g.ki; ++k, tic ^= 1, toc ^= 1) {
         if (k + 1 < g.ki) {
             G::load(As[toc][0], g.a, aco(br*2,   k+1), soA);
@@ -388,7 +387,6 @@ void gemm_rrr_blockwise_mfma(const bw_rrr_globals g) {
 
     // === Main loop ===
     int tic = 0, toc = 1;
-    #pragma unroll 1
     for (int k = 0; k < g.ki; ++k, tic ^= 1, toc ^= 1) {
         if (k + 1 < g.ki) {
             G::load(As[toc][0], g.a, aco(br*2,   k+1), soA);
@@ -516,7 +514,6 @@ void gemm_crr_blockwise_mfma(const bw_crr_globals g) {
 
     // === Main loop ===
     int tic = 0, toc = 1;
-    #pragma unroll 1
     for (int k = 0; k < g.ki; ++k, tic ^= 1, toc ^= 1) {
         if (k + 1 < g.ki) {
             G::load(As[toc][0], g.a, aco(br*2,   k+1), soA);
