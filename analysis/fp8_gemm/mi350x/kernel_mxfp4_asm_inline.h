@@ -718,7 +718,7 @@
     "v_add_u32_e32 v58, 0, v54\n" \
     "v_add_u32_e32 v163, 0x20fa0, v58\n" \
     "v_add_u32_e32 v246, 0x1cdc0, v56\n" \
-    "v_add_u32_e32 v248, 0x107e0, v56\n" \
+    "v_add_u32_e32 v53, 0x107e0, v56\n" \
     "s_waitcnt vmcnt(20), lgkmcnt(0)\n" \
     "s_barrier\n" \
     ".Lmx_1:\n" \
@@ -1081,21 +1081,21 @@
     "v_mfma_scale_f32_16x16x128_f8f6f4 a[24:27], v[240:243], v[138:141], a[24:27], v165, v30, op_sel:[1,1,0], op_sel_hi:[1,1,0], cbsz:4, blgp:4\n" \
     "ds_read_b128 v[64:67], v46, offset:17728\n" \
     "v_mfma_scale_f32_16x16x128_f8f6f4 a[28:31], v[166:169], v[148:151], a[28:31], v164, v31, op_sel_hi:[0,0,0], cbsz:4, blgp:4\n" \
-    "ds_read_b128 v[124:127], v248\n" \
+    "ds_read_b128 v[124:127], v53\n" \
     "v_mfma_scale_f32_16x16x128_f8f6f4 a[28:31], v[170:173], v[152:155], a[28:31], v164, v31, op_sel:[1,1,0], op_sel_hi:[0,0,0], cbsz:4, blgp:4\n" \
-    "ds_read_b128 v[132:135], v248, offset:64\n" \
+    "ds_read_b128 v[132:135], v53, offset:64\n" \
     "v_mfma_scale_f32_16x16x128_f8f6f4 a[32:35], v[174:177], v[148:151], a[32:35], v164, v31, op_sel_hi:[1,0,0], cbsz:4, blgp:4\n" \
-    "ds_read_b128 v[128:131], v248, offset:256\n" \
+    "ds_read_b128 v[128:131], v53, offset:256\n" \
     "v_mfma_scale_f32_16x16x128_f8f6f4 a[32:35], v[178:181], v[152:155], a[32:35], v164, v31, op_sel:[1,1,0], op_sel_hi:[1,0,0], cbsz:4, blgp:4\n" \
-    "ds_read_b128 v[136:139], v248, offset:320\n" \
+    "ds_read_b128 v[136:139], v53, offset:320\n" \
     "v_mfma_scale_f32_16x16x128_f8f6f4 a[36:39], v[182:185], v[148:151], a[36:39], v165, v31, op_sel_hi:[0,0,0], cbsz:4, blgp:4\n" \
-    "ds_read_b128 v[140:143], v248, offset:512\n" \
+    "ds_read_b128 v[140:143], v53, offset:512\n" \
     "v_mfma_scale_f32_16x16x128_f8f6f4 a[36:39], v[186:189], v[152:155], a[36:39], v165, v31, op_sel:[1,1,0], op_sel_hi:[0,0,0], cbsz:4, blgp:4\n" \
-    "ds_read_b128 v[144:147], v248, offset:576\n" \
+    "ds_read_b128 v[144:147], v53, offset:576\n" \
     "v_mfma_scale_f32_16x16x128_f8f6f4 a[44:47], v[190:193], v[148:151], a[44:47], v165, v31, op_sel_hi:[1,0,0], cbsz:4, blgp:4\n" \
-    "ds_read_b128 v[148:151], v248, offset:768\n" \
+    "ds_read_b128 v[148:151], v53, offset:768\n" \
     "v_mfma_scale_f32_16x16x128_f8f6f4 a[44:47], v[240:243], v[152:155], a[44:47], v165, v31, op_sel:[1,1,0], op_sel_hi:[1,0,0], cbsz:4, blgp:4\n" \
-    "ds_read_b128 v[152:155], v248, offset:832\n" \
+    "ds_read_b128 v[152:155], v53, offset:832\n" \
     "v_mfma_scale_f32_16x16x128_f8f6f4 a[52:55], v[166:169], v[196:199], a[52:55], v164, v31, op_sel_hi:[0,1,0], cbsz:4, blgp:4\n" \
     "s_waitcnt vmcnt(20)\n" \
     "ds_write_b64 v163, v[158:159]\n" \
