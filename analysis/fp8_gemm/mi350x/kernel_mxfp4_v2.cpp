@@ -96,11 +96,11 @@ __device__ __forceinline__ void fp4_load_st_to_rt(RT &dst, const ST &src) {
     const uint32_t src_ptr = reinterpret_cast<uintptr_t>(&src.data[0]);
     constexpr int reg_sub_row = ST::underlying_subtile_cols / RT::base_tile_cols;
     constexpr int reg_sub_col = ST::underlying_subtile_rows / RT::base_tile_rows;
-    #pragma unroll
+    #pragma unroll 8
     for (int k = 0; k < RT::base_tile_num_strides; k++) {
-        #pragma unroll
+        #pragma unroll 8
         for (int i = 0; i < reg_sub_col; i++) {
-            #pragma unroll
+            #pragma unroll 8
             for (int j = 0; j < reg_sub_row; j++) {
                 const int row = i * RT::base_tile_rows + row_offset;
                 const int col = j * RT::base_tile_cols + col_offset +
@@ -108,9 +108,9 @@ __device__ __forceinline__ void fp4_load_st_to_rt(RT &dst, const ST &src) {
                 const uint32_t offset = sizeof(U) * (src_ptr + row * ST::underlying_subtile_cols + col);
                 const uint32_t addr = offset ^ (((offset % (16 * 128)) >> 8) << 4);
                 const int idx = k * RT::base_tile_stride / packing;
-                #pragma unroll
+                #pragma unroll 8
                 for (int ii = 0; ii < ST::subtiles_per_col; ii++) {
-                    #pragma unroll
+                    #pragma unroll 8
                     for (int jj = 0; jj < ST::subtiles_per_row; jj++) {
                         const int sid = ii * ST::underlying_subtiles_per_row + jj;
                         const int soff = sid * ST::underlying_subtile_bytes;
@@ -242,14 +242,14 @@ void mxfp4_rcr_v2_kernel(const v2_globals g) {
 
     i32x4 a0_srd[a_packs], a1_srd[a_packs];
     i32x4 bl_srd[b_packs], br_srd[b_packs];
-    #pragma unroll
+    #pragma unroll 8
     for (int p = 0; p < a_packs; ++p) {
         a0_srd[p] = make_scale_srd(preshuffled_scale_row_base_ptr(
             g.a_scale, (br * BLK + 0 * HB + wm * RBM + p * 32) >> 5));
         a1_srd[p] = make_scale_srd(preshuffled_scale_row_base_ptr(
             g.a_scale, (br * BLK + 1 * HB + wm * RBM + p * 32) >> 5));
     }
-    #pragma unroll
+    #pragma unroll 8
     for (int p = 0; p < b_packs; ++p) {
         bl_srd[p] = make_scale_srd(preshuffled_scale_row_base_ptr(
             g.b_scale, (bc * BLK + 0 * HB + wn * RBN + p * 32) >> 5));
@@ -283,12 +283,12 @@ void mxfp4_rcr_v2_kernel(const v2_globals g) {
     fp8e8m0_4 pf_a0[a_packs], pf_a1[a_packs], pf_bl[b_packs], pf_br[b_packs];
     {
         const uint32_t soff0 = 0;
-        #pragma unroll
+        #pragma unroll 8
         for (int p = 0; p < a_packs; ++p) {
             pf_a0[p] = load_pq_scale_srd(a0_srd[p], lane_soff, soff0);
             pf_a1[p] = load_pq_scale_srd(a1_srd[p], lane_soff, soff0);
         }
-        #pragma unroll
+        #pragma unroll 8
         for (int p = 0; p < b_packs; ++p) {
             pf_bl[p] = load_pq_scale_srd(bl_srd[p], lane_soff, soff0);
             pf_br[p] = load_pq_scale_srd(br_srd[p], lane_soff, soff0);
@@ -296,7 +296,7 @@ void mxfp4_rcr_v2_kernel(const v2_globals g) {
     }
 
     // ══════════════════ Main loop (unrolled by 2) ══════════════════
-    #pragma unroll 2
+    #pragma unroll 8
     for (int bt = 0; bt < k_byte_iters; ++bt) {
         const int cur = bt & 1;
 
@@ -306,9 +306,9 @@ void mxfp4_rcr_v2_kernel(const v2_globals g) {
         // Use prefetched scales (already in VGPRs from prev iteration)
         fp8e8m0_4 a0_raw[a_packs], a1_raw[a_packs];
         fp8e8m0_4 bl_raw[b_packs], br_raw[b_packs];
-        #pragma unroll
+        #pragma unroll 8
         for (int p = 0; p < a_packs; ++p) { a0_raw[p] = pf_a0[p]; a1_raw[p] = pf_a1[p]; }
-        #pragma unroll
+        #pragma unroll 8
         for (int p = 0; p < b_packs; ++p) { bl_raw[p] = pf_bl[p]; br_raw[p] = pf_br[p]; }
 
         // LDS reads for tiles
@@ -322,12 +322,12 @@ void mxfp4_rcr_v2_kernel(const v2_globals g) {
         // Prefetch scales for bt+1 (overlaps with ds_reads above)
         {
             const uint32_t next_soff = static_cast<uint32_t>(bt + 1 < k_byte_iters ? bt + 1 : bt) << 8;
-            #pragma unroll
+            #pragma unroll 8
             for (int p = 0; p < a_packs; ++p) {
                 pf_a0[p] = load_pq_scale_srd(a0_srd[p], lane_soff, next_soff);
                 pf_a1[p] = load_pq_scale_srd(a1_srd[p], lane_soff, next_soff);
             }
-            #pragma unroll
+            #pragma unroll 8
             for (int p = 0; p < b_packs; ++p) {
                 pf_bl[p] = load_pq_scale_srd(bl_srd[p], lane_soff, next_soff);
                 pf_br[p] = load_pq_scale_srd(br_srd[p], lane_soff, next_soff);
@@ -338,7 +338,7 @@ void mxfp4_rcr_v2_kernel(const v2_globals g) {
         __builtin_amdgcn_sched_barrier(0);
 
         fp4_intx8_t tA0[4], tA1[4], tBl[4], tBr[4];
-        #pragma unroll
+        #pragma unroll 8
         for (int i = 0; i < 4; i++) {
             tA0[i] = fp4_extract_tile(a0_rt, i);
             tA1[i] = fp4_extract_tile(a1_rt, i);
@@ -369,9 +369,9 @@ void mxfp4_rcr_v2_kernel(const v2_globals g) {
     // ══════════════════ Epilogue: store C ══════════════════
     auto store_acc = [&](const fp4_acc_v2& acc, int m_half, int n_half) {
         RT_C c_store;
-        #pragma unroll
+        #pragma unroll 8
         for (int r = 0; r < (RBM / 16); ++r)
-            #pragma unroll
+            #pragma unroll 8
             for (int c = 0; c < (RBN / 16); ++c)
                 *reinterpret_cast<fp4_floatx4_t*>(&c_store.tiles[r][c].data[0]) =
                     acc.regs[r * (RBN / 16) + c] * g.scale;
