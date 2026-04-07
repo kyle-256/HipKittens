@@ -55,6 +55,7 @@ struct v2_globals {
 };
 
 using fp4_intx8_t   = int __attribute__((__vector_size__(8 * sizeof(int))));
+using fp4_intx4_t   = int __attribute__((__vector_size__(4 * sizeof(int))));
 using fp4_floatx4_t = float __attribute__((__vector_size__(4 * sizeof(float))));
 
 // ── MFMA helpers (same as V1) ──
@@ -173,6 +174,34 @@ struct alignas(16) fp4_acc_v2 {
     fp4_floatx4_t regs[(RBM / 16) * (RBN / 16)]; // 4×4 = 16 tiles
 };
 
+__device__ __forceinline__ fp4_intx4_t fp4_lo4(const fp4_intx8_t& x) {
+    return __builtin_shufflevector(x, x, 0, 1, 2, 3);
+}
+__device__ __forceinline__ fp4_intx4_t fp4_hi4(const fp4_intx8_t& x) {
+    return __builtin_shufflevector(x, x, 4, 5, 6, 7);
+}
+
+// Single MFMA via inline asm — no sched_barrier, no remap_phase overhead
+template<int OPSEL_A, int OPSEL_B>
+__device__ __forceinline__ void mfma_asm(
+    fp4_floatx4_t& acc, fp4_intx4_t a, fp4_intx4_t b,
+    unsigned sa, unsigned sb)
+{
+    if constexpr (OPSEL_A == 0 && OPSEL_B == 0) {
+        asm volatile("v_mfma_scale_f32_16x16x128_f8f6f4 %0, %1, %2, %0, %3, %4"
+            " op_sel_hi:[0,0,0] cbsz:4 blgp:4" : "+a"(acc) : "v"(a),"v"(b),"v"(sa),"v"(sb));
+    } else if constexpr (OPSEL_A == 0 && OPSEL_B == 1) {
+        asm volatile("v_mfma_scale_f32_16x16x128_f8f6f4 %0, %1, %2, %0, %3, %4"
+            " op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4" : "+a"(acc) : "v"(a),"v"(b),"v"(sa),"v"(sb));
+    } else if constexpr (OPSEL_A == 1 && OPSEL_B == 0) {
+        asm volatile("v_mfma_scale_f32_16x16x128_f8f6f4 %0, %1, %2, %0, %3, %4"
+            " op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4" : "+a"(acc) : "v"(a),"v"(b),"v"(sa),"v"(sb));
+    } else {
+        asm volatile("v_mfma_scale_f32_16x16x128_f8f6f4 %0, %1, %2, %0, %3, %4"
+            " op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4" : "+a"(acc) : "v"(a),"v"(b),"v"(sa),"v"(sb));
+    }
+}
+
 template<bool UPPER>
 __device__ __forceinline__ void fp4_mma_v2(
     fp4_acc_v2& acc,
@@ -180,29 +209,40 @@ __device__ __forceinline__ void fp4_mma_v2(
     const fp8e8m0_4 a_scales[], const fp8e8m0_4 b_scales[],
     int k_phase)
 {
-    constexpr int B_COLS = RBN / 16; // 4
+    constexpr int BC = RBN / 16;
 
-    auto do_mfma = [&]<int AR, int BC>() {
-        fp4_intx8_t a_data = A[AR], b_data = B[BC];
-        if constexpr (UPPER) { a_data = fp4_upper_half(a_data); b_data = fp4_upper_half(b_data); }
-        fp8e8m0_4 a_sc = remap_phase(a_scales[AR / 2], k_phase);
-        fp8e8m0_4 b_sc = remap_phase(b_scales[BC / 2], k_phase);
-        acc.regs[AR * B_COLS + BC] = __builtin_amdgcn_mfma_scale_f32_16x16x128_f8f6f4(
-            a_data, b_data, acc.regs[AR * B_COLS + BC], 4, 4,
-            AR & 1, a_sc, BC & 1, b_sc);
-    };
-    do_mfma.template operator()<0,0>(); do_mfma.template operator()<0,1>();
-    do_mfma.template operator()<0,2>(); do_mfma.template operator()<0,3>();
-    __builtin_amdgcn_sched_barrier(0);
-    do_mfma.template operator()<1,0>(); do_mfma.template operator()<1,1>();
-    do_mfma.template operator()<1,2>(); do_mfma.template operator()<1,3>();
-    __builtin_amdgcn_sched_barrier(0);
-    do_mfma.template operator()<2,0>(); do_mfma.template operator()<2,1>();
-    do_mfma.template operator()<2,2>(); do_mfma.template operator()<2,3>();
-    __builtin_amdgcn_sched_barrier(0);
-    do_mfma.template operator()<3,0>(); do_mfma.template operator()<3,1>();
-    do_mfma.template operator()<3,2>(); do_mfma.template operator()<3,3>();
-    __builtin_amdgcn_sched_barrier(0);
+    // Extract 4-VGPR halves (lower for Phase 0, upper for Phase 1)
+    fp4_intx4_t a0, a1, a2, a3, b0, b1, b2, b3;
+    if constexpr (!UPPER) {
+        a0=fp4_lo4(A[0]); a1=fp4_lo4(A[1]); a2=fp4_lo4(A[2]); a3=fp4_lo4(A[3]);
+        b0=fp4_lo4(B[0]); b1=fp4_lo4(B[1]); b2=fp4_lo4(B[2]); b3=fp4_lo4(B[3]);
+    } else {
+        a0=fp4_hi4(A[0]); a1=fp4_hi4(A[1]); a2=fp4_hi4(A[2]); a3=fp4_hi4(A[3]);
+        b0=fp4_hi4(B[0]); b1=fp4_hi4(B[1]); b2=fp4_hi4(B[2]); b3=fp4_hi4(B[3]);
+    }
+
+    unsigned sa0 = std::bit_cast<unsigned>(remap_phase(a_scales[0], k_phase));
+    unsigned sa1 = std::bit_cast<unsigned>(remap_phase(a_scales[1], k_phase));
+    unsigned sb0 = std::bit_cast<unsigned>(remap_phase(b_scales[0], k_phase));
+    unsigned sb1 = std::bit_cast<unsigned>(remap_phase(b_scales[1], k_phase));
+
+    // 16 MFMAs — straight through, no sched_barriers
+    mfma_asm<0,0>(acc.regs[0*BC+0], a0, b0, sa0, sb0);
+    mfma_asm<0,1>(acc.regs[0*BC+1], a0, b1, sa0, sb0);
+    mfma_asm<0,0>(acc.regs[0*BC+2], a0, b2, sa0, sb1);
+    mfma_asm<0,1>(acc.regs[0*BC+3], a0, b3, sa0, sb1);
+    mfma_asm<1,0>(acc.regs[1*BC+0], a1, b0, sa0, sb0);
+    mfma_asm<1,1>(acc.regs[1*BC+1], a1, b1, sa0, sb0);
+    mfma_asm<1,0>(acc.regs[1*BC+2], a1, b2, sa0, sb1);
+    mfma_asm<1,1>(acc.regs[1*BC+3], a1, b3, sa0, sb1);
+    mfma_asm<0,0>(acc.regs[2*BC+0], a2, b0, sa1, sb0);
+    mfma_asm<0,1>(acc.regs[2*BC+1], a2, b1, sa1, sb0);
+    mfma_asm<0,0>(acc.regs[2*BC+2], a2, b2, sa1, sb1);
+    mfma_asm<0,1>(acc.regs[2*BC+3], a2, b3, sa1, sb1);
+    mfma_asm<1,0>(acc.regs[3*BC+0], a3, b0, sa1, sb0);
+    mfma_asm<1,1>(acc.regs[3*BC+1], a3, b1, sa1, sb0);
+    mfma_asm<1,0>(acc.regs[3*BC+2], a3, b2, sa1, sb1);
+    mfma_asm<1,1>(acc.regs[3*BC+3], a3, b3, sa1, sb1);
 }
 
 // ── Main kernel ──
