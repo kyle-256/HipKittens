@@ -177,7 +177,7 @@ if "rcr" in requested_layouts:
     Bt_rcr = generate_fp8_matrix(build_N, build_K, N, K)
     C_rcr = torch.zeros(build_M, build_N, dtype=torch.bfloat16, device="cuda")
 
-    run_rcr = lambda: tk_fp8_layouts.gemm_rcr(A_rcr, Bt_rcr, C_rcr, 1.0)
+    run_rcr = lambda: tk_fp8_layouts.gemm_rcr(A_rcr, Bt_rcr, C_rcr, 1.0, 1.0)
     timings_rcr = benchmark_kernel(run_rcr, C_rcr)
     avg_rcr = sum(timings_rcr) / len(timings_rcr)
     tflops_rcr = flops_ref / (avg_rcr * 1e9)
@@ -208,7 +208,7 @@ if "rrr" in requested_layouts:
     B_rrr = generate_fp8_matrix(build_K, build_N, K, N)
     C_rrr = torch.zeros(build_M, build_N, dtype=torch.bfloat16, device="cuda")
 
-    run_rrr = lambda: tk_fp8_layouts.gemm_rrr(A_rrr, B_rrr, C_rrr, 1.0)
+    run_rrr = lambda: tk_fp8_layouts.gemm_rrr(A_rrr, B_rrr, C_rrr, 1.0, 1.0)
     timings_rrr = benchmark_kernel(run_rrr, C_rrr)
     avg_rrr = sum(timings_rrr) / len(timings_rrr)
     tflops_rrr = flops_ref / (avg_rrr * 1e9)
@@ -239,7 +239,7 @@ if "crr" in requested_layouts:
     B_crr = generate_fp8_matrix(build_K, build_N, K, N)
     C_crr = torch.zeros(build_M, build_N, dtype=torch.bfloat16, device="cuda")
 
-    run_crr = lambda: tk_fp8_layouts.gemm_crr(At_crr, B_crr, C_crr, 1.0)
+    run_crr = lambda: tk_fp8_layouts.gemm_crr(At_crr, B_crr, C_crr, 1.0, 1.0)
     timings_crr = benchmark_kernel(run_crr, C_crr)
     avg_crr = sum(timings_crr) / len(timings_crr)
     tflops_crr = flops_ref / (avg_crr * 1e9)

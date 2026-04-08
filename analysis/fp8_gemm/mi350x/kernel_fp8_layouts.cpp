@@ -751,11 +751,12 @@ __device__ __forceinline__ void load_transpose(
 struct layout_globals {
     _gl_fp8 a, b;
     _gl_bf16 c;
-    float scale;
+    float scale_a, scale_b;
     hipStream_t stream;
     int m, n, k;
     int bpr, bpc, ki;
     int fast_m, fast_n, fast_k;
+    int group_m;
     dim3 grid()  { return dim3(bpr * bpc); }
     dim3 block() { return dim3(_NUM_THREADS); }
     size_t dynamic_shared_memory() { return 0; }
@@ -775,15 +776,15 @@ __device__ __forceinline__ int gemm_chiplet_swizzle_bid(int bid, int num_wgs) {
 }
 
 __device__ __forceinline__ void gemm_compute_block_coords(
-    int bid, int bpr, int bpc, int &br, int &bc) {
+    int bid, int bpr, int bpc, int group_m, int &br, int &bc) {
 #if GEMM_BLOCK_SWIZZLE
     bid = gemm_chiplet_swizzle_bid(bid, gridDim.x);
-    const int num_wgid_in_group = GEMM_BLOCK_SWIZZLE_GROUP_M * bpc;
+    const int num_wgid_in_group = group_m * bpc;
     const int group_id = bid / num_wgid_in_group;
-    const int first_pid_m = group_id * GEMM_BLOCK_SWIZZLE_GROUP_M;
+    const int first_pid_m = group_id * group_m;
     const int group_size_m =
-        (first_pid_m + GEMM_BLOCK_SWIZZLE_GROUP_M <= bpr)
-            ? GEMM_BLOCK_SWIZZLE_GROUP_M
+        (first_pid_m + group_m <= bpr)
+            ? group_m
             : (bpr - first_pid_m);
     if (group_size_m <= 0) {
         br = bpr;
@@ -810,7 +811,7 @@ __global__ __launch_bounds__(_NUM_THREADS, GEMM_MIN_BLOCKS_PER_CU)
 void gemm_kernel(const layout_globals g) {
     int bid = blockIdx.x;
     int br, bc;
-    gemm_compute_block_coords(bid, g.bpr, g.bpc, br, bc);
+    gemm_compute_block_coords(bid, g.bpr, g.bpc, g.group_m, br, bc);
     if (br >= g.bpr || bc >= g.bpc || g.ki <= 0) {
         return;
     }
@@ -2174,10 +2175,11 @@ void gemm_kernel(const layout_globals g) {
         #endif
         }    }
 
-    mul(cA, cA, g.scale);
-    mul(cB, cB, g.scale);
-    mul(cC, cC, g.scale);
-    mul(cD, cD, g.scale);
+    const float combined_scale = g.scale_a * g.scale_b;
+    mul(cA, cA, combined_scale);
+    mul(cB, cB, combined_scale);
+    mul(cC, cC, combined_scale);
+    mul(cD, cD, combined_scale);
 
     // Store Output
     if (wm == 0) __builtin_amdgcn_s_barrier();
@@ -2221,7 +2223,7 @@ __global__ void gemm_tail_kernel(const layout_globals g) {
         }
     }
 
-    const float scaled = acc * g.scale;
+    const float scaled = acc * g.scale_a * g.scale_b;
     if (fast_covers_cell && needs_k_tail) {
         store_bf16_scalar(g.c, row, col, load_bf16_scalar(g.c, row, col) + scaled);
     } else {
@@ -2321,12 +2323,48 @@ void dispatch(layout_globals g) {
     }
 }
 
+static float to_float(pybind11::object obj) {
+    if (pybind11::hasattr(obj, "item"))
+        return obj.attr("item")().cast<float>();
+    return obj.cast<float>();
+}
+
+constexpr int DEFAULT_GROUP_M = 4;
+
+template<Layout L>
+static void gemm_wrapper(pybind11::object a, pybind11::object b, pybind11::object c,
+                          pybind11::object scale_a_obj, pybind11::object scale_b_obj,
+                          int group_m) {
+    layout_globals g{
+        py::from_object<_gl_fp8>::make(a),
+        py::from_object<_gl_fp8>::make(b),
+        py::from_object<_gl_bf16>::make(c),
+        to_float(scale_a_obj),
+        to_float(scale_b_obj),
+        {}, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        group_m,
+    };
+    dispatch<L>(g);
+}
+
 PYBIND11_MODULE(tk_fp8_layouts, m) {
-    m.doc() = "FP8 GEMM: RCR(mma_ABt), RRR(col_l+mma_AB), CRR(col_l+mma_AtB)";
-    py::bind_function<dispatch<Layout::RCR>>(m, "gemm_rcr",
-        &layout_globals::a, &layout_globals::b, &layout_globals::c, &layout_globals::scale);
-    py::bind_function<dispatch<Layout::RRR>>(m, "gemm_rrr",
-        &layout_globals::a, &layout_globals::b, &layout_globals::c, &layout_globals::scale);
-    py::bind_function<dispatch<Layout::CRR>>(m, "gemm_crr",
-        &layout_globals::a, &layout_globals::b, &layout_globals::c, &layout_globals::scale);
+    m.doc() = "FP8 per-tensor GEMM: C = A op B * scale_a * scale_b";
+    m.def("gemm_rcr", &gemm_wrapper<Layout::RCR>,
+          pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("c"),
+          pybind11::arg("scale_a"), pybind11::arg("scale_b"),
+          pybind11::arg("group_m") = DEFAULT_GROUP_M);
+    m.def("gemm_rrr", &gemm_wrapper<Layout::RRR>,
+          pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("c"),
+          pybind11::arg("scale_a"), pybind11::arg("scale_b"),
+          pybind11::arg("group_m") = DEFAULT_GROUP_M);
+    m.def("gemm_crr", &gemm_wrapper<Layout::CRR>,
+          pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("c"),
+          pybind11::arg("scale_a"), pybind11::arg("scale_b"),
+          pybind11::arg("group_m") = DEFAULT_GROUP_M);
+    m.def("supports_shape", [](int m, int n, int k) -> bool {
+        return m > 0 && n > 0 && k > 0;
+    });
+    m.attr("DEFAULT_GROUP_M") = DEFAULT_GROUP_M;
+    m.attr("BLOCK_SIZE") = BLK;
+    m.attr("K_BLOCK") = BK;
 }

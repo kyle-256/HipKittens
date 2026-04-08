@@ -299,7 +299,7 @@ void rcr_exact_8wave_kernel(const rcr_exact_8wave_globals g) {
 }
 
 __host__ inline bool rcr_can_use_exact_8wave(const layout_globals& g) {
-    return g.m == M_DIM && g.n == N_DIM && g.k == K_DIM && g.scale == 1.0f;
+    return g.m == M_DIM && g.n == N_DIM && g.k == K_DIM && g.scale_a * g.scale_b == 1.0f;
 }
 
 __host__ inline void dispatch_rcr_exact_8wave(const layout_globals& g) {

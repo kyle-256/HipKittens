@@ -287,7 +287,7 @@ void kernel(const globals g) {
 } // namespace crr_exact_4wave
 
 __host__ inline bool crr_can_use_exact_4wave(const layout_globals& g) {
-    return g.m == M_DIM && g.n == N_DIM && g.k == K_DIM && g.scale == 1.0f;
+    return g.m == M_DIM && g.n == N_DIM && g.k == K_DIM && g.scale_a * g.scale_b == 1.0f;
 }
 
 __host__ inline void dispatch_crr_exact_4wave(const layout_globals& g) {
