@@ -100,8 +100,8 @@ void rcr_exact_8wave_kernel(const rcr_exact_8wave_globals g) {
     constexpr int half_block_size_row = BLK / 2;
     constexpr int half_block_size_col = BLK / 2;
 
-    using ST_A = st_fp8e4m3<half_block_size_row, BK, st_16x128_s>;
-    using ST_B = st_fp8e4m3<half_block_size_col, BK, st_16x128_s>;
+    using ST_A = st_fp8e4m3<half_block_size_row, BK, st_16x128_v2_s>;
+    using ST_B = st_fp8e4m3<half_block_size_col, BK, st_16x128_v2_s>;
     __shared__ ST_A As[2][2];
     __shared__ ST_B Bs[2][2];
 
@@ -156,9 +156,9 @@ void rcr_exact_8wave_kernel(const rcr_exact_8wave_globals g) {
     #pragma unroll 2
     for (int k = 0; k < k_iters - 2; k++, tic ^= 1, toc ^= 1) {
         auto bs_subtile0 = kittens::subtile_inplace<RBN, BK>(Bs[tic][0], {wn, 0});
-        rcr_exact_load_st_to_rt<RT_B, decltype(bs_subtile0)>(b0, bs_subtile0);
+        load(b0, bs_subtile0);
         auto as_subtile0 = kittens::subtile_inplace<RBM, BK>(As[tic][0], {wm, 0});
-        rcr_exact_load_st_to_rt<RT_A, decltype(as_subtile0)>(a, as_subtile0);
+        load(a, as_subtile0);
         G::load(As[toc][1], g.a, {0, 0, br * 2 + 1, k + 1}, swizzled_offsets_a);
         TK_WAIT_LGKM(8);
         __builtin_amdgcn_s_barrier();
@@ -171,7 +171,7 @@ void rcr_exact_8wave_kernel(const rcr_exact_8wave_globals g) {
         __builtin_amdgcn_sched_barrier(0);
 
         auto bs_subtile1 = kittens::subtile_inplace<RBN, BK>(Bs[tic][1], {wn, 0});
-        rcr_exact_load_st_to_rt<RT_B, decltype(bs_subtile1)>(b1, bs_subtile1);
+        load(b1, bs_subtile1);
         G::load(Bs[tic][0], g.b, {0, 0, bc * 2, k + 2}, swizzled_offsets_b);
         __builtin_amdgcn_s_barrier();
 
@@ -182,7 +182,7 @@ void rcr_exact_8wave_kernel(const rcr_exact_8wave_globals g) {
         __builtin_amdgcn_s_barrier();
 
         auto as_subtile1 = kittens::subtile_inplace<RBM, BK>(As[tic][1], {wm, 0});
-        rcr_exact_load_st_to_rt<RT_A, decltype(as_subtile1)>(a, as_subtile1);
+        load(a, as_subtile1);
         G::load(As[tic][0], g.a, {0, 0, br * 2, k + 2}, swizzled_offsets_a);
         __builtin_amdgcn_s_barrier();
 
@@ -207,9 +207,9 @@ void rcr_exact_8wave_kernel(const rcr_exact_8wave_globals g) {
         constexpr int k = k_iters - 2;
 
         auto bs_subtile0 = kittens::subtile_inplace<RBN, BK>(Bs[tic][0], {wn, 0});
-        rcr_exact_load_st_to_rt<RT_B, decltype(bs_subtile0)>(b0, bs_subtile0);
+        load(b0, bs_subtile0);
         auto as_subtile0 = kittens::subtile_inplace<RBM, BK>(As[tic][0], {wm, 0});
-        rcr_exact_load_st_to_rt<RT_A, decltype(as_subtile0)>(a, as_subtile0);
+        load(a, as_subtile0);
         G::load(As[toc][1], g.a, {0, 0, br * 2 + 1, k + 1}, swizzled_offsets_a);
         __builtin_amdgcn_s_barrier();
 
@@ -221,7 +221,7 @@ void rcr_exact_8wave_kernel(const rcr_exact_8wave_globals g) {
         __builtin_amdgcn_sched_barrier(0);
 
         auto bs_subtile1 = kittens::subtile_inplace<RBN, BK>(Bs[tic][1], {wn, 0});
-        rcr_exact_load_st_to_rt<RT_B, decltype(bs_subtile1)>(b1, bs_subtile1);
+        load(b1, bs_subtile1);
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
@@ -231,7 +231,7 @@ void rcr_exact_8wave_kernel(const rcr_exact_8wave_globals g) {
         __builtin_amdgcn_s_barrier();
 
         auto as_subtile1 = kittens::subtile_inplace<RBM, BK>(As[tic][1], {wm, 0});
-        rcr_exact_load_st_to_rt<RT_A, decltype(as_subtile1)>(a, as_subtile1);
+        load(a, as_subtile1);
         TK_WAIT_VMCNT(4);
         __builtin_amdgcn_s_barrier();
 
@@ -242,7 +242,7 @@ void rcr_exact_8wave_kernel(const rcr_exact_8wave_globals g) {
         __builtin_amdgcn_s_barrier();
 
         bs_subtile0 = kittens::subtile_inplace<RBN, BK>(Bs[toc][0], {wn, 0});
-        rcr_exact_load_st_to_rt<RT_B, decltype(bs_subtile0)>(b0, bs_subtile0);
+        load(b0, bs_subtile0);
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
@@ -258,7 +258,7 @@ void rcr_exact_8wave_kernel(const rcr_exact_8wave_globals g) {
 
     {
         auto as_subtile0 = kittens::subtile_inplace<RBM, BK>(As[tic][0], {wm, 0});
-        rcr_exact_load_st_to_rt<RT_A, decltype(as_subtile0)>(a, as_subtile0);
+        load(a, as_subtile0);
         TK_WAIT_VMCNT(0);
         __builtin_amdgcn_s_barrier();
 
@@ -269,7 +269,7 @@ void rcr_exact_8wave_kernel(const rcr_exact_8wave_globals g) {
         __builtin_amdgcn_s_barrier();
 
         auto bs_subtile1 = kittens::subtile_inplace<RBN, BK>(Bs[tic][1], {wn, 0});
-        rcr_exact_load_st_to_rt<RT_B, decltype(bs_subtile1)>(b1, bs_subtile1);
+        load(b1, bs_subtile1);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
@@ -280,7 +280,7 @@ void rcr_exact_8wave_kernel(const rcr_exact_8wave_globals g) {
         __builtin_amdgcn_s_barrier();
 
         auto as_subtile1 = kittens::subtile_inplace<RBM, BK>(As[tic][1], {wm, 0});
-        rcr_exact_load_st_to_rt<RT_A, decltype(as_subtile1)>(a, as_subtile1);
+        load(a, as_subtile1);
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");

@@ -35,8 +35,8 @@ def _can_use_4wave(M: int, N: int, K: int) -> bool:
     return M % 256 == 0 and N % 256 == 0 and K % 128 == 0 and M > 0 and N > 0 and K >= 256
 
 
-_JIT_SRC = "kernel_jit_all.cpp"
-_LAYOUT_IDS = {"rcr": 1, "rrr": 2, "crr": 3}
+_JIT_SRC_RCR = "kernel_jit_rcr.cpp"
+_JIT_SRC_FULL = "kernel_fp8_layouts.cpp"
 _HIPCXX = "/opt/rocm/bin/hipcc"
 _PY_INCLUDES = None
 _PY_LDFLAGS = None
@@ -84,19 +84,19 @@ def compile_for_shape(M: int, N: int, K: int, variant: str = VARIANT_BOTH,
 
     py_inc, py_ld = _get_py_flags()
     vflags = _VARIANT_FLAGS.get(variant, _VARIANT_FLAGS[VARIANT_BOTH])
-    layout_id = _LAYOUT_IDS.get(layout, 0)
-    extra = []
-    if layout == "rrr":
-        unroll = 2 if K > 8192 else 4
-        extra = [f"-DRRR_MAIN_UNROLL={unroll}"]
+    if layout == "rcr":
+        src = os.path.join(_DIR, _JIT_SRC_RCR)
+        extra = [f"-DM_DIM={M}", f"-DN_DIM={N}", f"-DK_DIM={K}", *vflags.split()]
+    else:
+        src = os.path.join(_DIR, _JIT_SRC_FULL)
+        extra = ["-DGEMM_BLOCK_SWIZZLE=1", "-DGEMM_BLOCK_SWIZZLE_NUM_XCDS=8"]
+
     cmd = [
-        _HIPCXX, os.path.join(_DIR, _JIT_SRC),
+        _HIPCXX, src,
         "-DKITTENS_CDNA4", "--offload-arch=gfx950",
         "-DHIP_ENABLE_WARP_SYNC_BUILTINS", "-ffast-math",
         "-I/opt/rocm/include/rocrand",
-        f"-DM_DIM={M}", f"-DN_DIM={N}", f"-DK_DIM={K}",
-        f"-DJIT_LAYOUT={layout_id}",
-        "-DRCR_STEADY_VMCNT=8", *vflags.split(), *extra,
+        "-DRCR_STEADY_VMCNT=8", *extra,
         "-std=c++20", "-w", "-shared", "-fPIC",
         f"-I{_TK_ROOT}/include", f"-I{_TK_ROOT}/prototype",
         "-I/opt/rocm/include/hip",
