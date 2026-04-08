@@ -55,6 +55,9 @@ using namespace kittens;
 #ifndef RCR_MAIN_UNROLL
 #define RCR_MAIN_UNROLL 2
 #endif
+#ifndef RCR_BATCHED_READS
+#define RCR_BATCHED_READS 0
+#endif
 #ifndef RCR_BATCHED_PAIR_MMA
 #define RCR_BATCHED_PAIR_MMA 0
 #endif
@@ -1292,6 +1295,31 @@ void gemm_kernel(const layout_globals g) {
 #if RCR_PAIR_LATE_B1_PREFETCH
             G::load(b_tile(tic, 1), g.b, b_co(bc*2+1, k+2), soB);
 #endif
+#elif RCR_BATCHED_READS
+            A_row_reg a1;
+            load_b(b0, b_tile(tic, 0), wn);
+            load_b(b1, b_tile(tic, 1), wn);
+            load_a(a, As[tic][0], wm);
+            load_a(a1, As[tic][1], wm);
+            G::load(As[toc][1], g.a, a_co(br*2+1, k+1), soA);
+            TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_barrier();
+
+            G::load(b_tile(tic, 0), g.b, b_co(bc*2, k+2), soB);
+            G::load(As[tic][0], g.a, a_co(br*2, k+2), soA);
+            G::load(b_tile(tic, 1), g.b, b_co(bc*2+1, k+2), soB);
+
+            __builtin_amdgcn_s_setprio(1);
+            rcr_mma(cA, a, b0);
+            RCR_SCHED_BARRIER();
+            RCR_RHS_MMA(cB, a, b1);
+            rcr_mma(cC, a1, b0);
+            RCR_SCHED_BARRIER();
+            RCR_RHS_MMA(cD, a1, b1);
+            __builtin_amdgcn_s_setprio(0);
+
+            TK_WAIT_VMCNT(RCR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
 #else
             load_b(b0, b_tile(tic, 0), wn);
             load_a(a, As[tic][0], wm);
@@ -1324,7 +1352,28 @@ void gemm_kernel(const layout_globals g) {
         }
 
         {
-#if RCR_BATCHED_EPILOGUE_MMA
+#if RCR_BATCHED_READS
+            A_row_reg a1_epi;
+            load_b(b0, b_tile(tic, 0), wn);
+            load_b(b1, b_tile(tic, 1), wn);
+            load_a(a, As[tic][0], wm);
+            load_a(a1_epi, As[tic][1], wm);
+            G::load(As[toc][1], g.a, a_co(br*2+1, g.ki-1), soA);
+            TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+
+            __builtin_amdgcn_s_setprio(1);
+            rcr_mma(cA, a, b0);
+            RCR_SCHED_BARRIER();
+            RCR_RHS_MMA(cB, a, b1);
+            rcr_mma(cC, a1_epi, b0);
+            RCR_SCHED_BARRIER();
+            RCR_RHS_MMA(cD, a1_epi, b1);
+            __builtin_amdgcn_s_setprio(0);
+
+            TK_WAIT_VMCNT(RCR_EPILOGUE_VMCNT); __builtin_amdgcn_s_barrier();
+            tic ^= 1; toc ^= 1;
+#elif RCR_BATCHED_EPILOGUE_MMA
             load_b(b0, b_tile(tic, 0), wn);
             load_b(b1, b_tile(tic, 1), wn);
             load_a(a, As[tic][0], wm);
@@ -1379,7 +1428,25 @@ void gemm_kernel(const layout_globals g) {
         }
 
         {
-#if RCR_BATCHED_EPILOGUE_MMA
+#if RCR_BATCHED_READS
+            A_row_reg a1_last;
+            load_b(b0, b_tile(tic, 0), wn);
+            load_b(b1, b_tile(tic, 1), wn);
+            load_a(a, As[tic][0], wm);
+            load_a(a1_last, As[tic][1], wm);
+            asm volatile("s_waitcnt vmcnt(0)"); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+
+            __builtin_amdgcn_s_setprio(1);
+            rcr_mma(cA, a, b0);
+            RCR_SCHED_BARRIER();
+            RCR_RHS_MMA(cB, a, b1);
+            rcr_mma(cC, a1_last, b0);
+            RCR_SCHED_BARRIER();
+            RCR_RHS_MMA(cD, a1_last, b1);
+            __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+#elif RCR_BATCHED_EPILOGUE_MMA
             load_a(a, As[tic][0], wm);
             load_b(b1, b_tile(tic, 1), wn);
             asm volatile("s_waitcnt vmcnt(0)"); __builtin_amdgcn_s_barrier();
