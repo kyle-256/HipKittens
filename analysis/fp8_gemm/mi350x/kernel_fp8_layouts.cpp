@@ -28,7 +28,7 @@ using namespace kittens;
 #define RCR_INIT1_VMCNT 6
 #endif
 #ifndef RCR_STEADY_VMCNT
-#define RCR_STEADY_VMCNT 4
+#define RCR_STEADY_VMCNT 8
 #endif
 #ifndef RCR_EPILOGUE_VMCNT
 #define RCR_EPILOGUE_VMCNT 4
@@ -54,6 +54,9 @@ using namespace kittens;
 
 #ifndef RCR_MAIN_UNROLL
 #define RCR_MAIN_UNROLL 2
+#endif
+#ifndef RCR_REDUCED_BARRIERS
+#define RCR_REDUCED_BARRIERS 0
 #endif
 #ifndef RCR_BATCHED_READS
 #define RCR_BATCHED_READS 0
@@ -135,6 +138,9 @@ using namespace kittens;
 #endif
 #ifndef RCR_PAIR_SPLIT_CB
 #define RCR_PAIR_SPLIT_CB 0
+#endif
+#ifndef RCR_PAIR_PRE_A1_VMCNT
+#define RCR_PAIR_PRE_A1_VMCNT -1
 #endif
 #ifndef RCR_PAIR_CB_RELOAD_LAST_WN
 #define RCR_PAIR_CB_RELOAD_LAST_WN 0
@@ -804,6 +810,7 @@ __device__ __forceinline__ void gemm_compute_block_coords(
 
 #include "rcr_exact_4wave_fastpath.inc"
 #include "rcr_exact_8wave_fastpath.inc"
+#include "rcr_4wave_dynamic.inc"
 #include "rrr_exact_8wave_fastpath.inc"
 #include "crr_exact_4wave_fastpath.inc"
 #include "crr_exact_8wave_double_pump_fastpath.inc"
@@ -1234,6 +1241,9 @@ void gemm_kernel(const layout_globals g) {
             G::load(b_tile(tic, 1), g.b, b_co(bc*2+1, k+2), soB);
         #endif
         #endif
+#endif
+#if RCR_PAIR_PRE_A1_VMCNT >= 0
+            TK_WAIT_VMCNT(RCR_PAIR_PRE_A1_VMCNT); __builtin_amdgcn_s_barrier();
 #endif
             load_a(a, As[tic][1], wm);
             G::load(As[tic][0], g.a, a_co(br*2, k+2), soA);
@@ -2374,7 +2384,16 @@ void dispatch(layout_globals g) {
     g.ki = g.fast_k / BK;
 
     if (g.bpr > 0 && g.bpc > 0 && g.ki >= 2) {
-        gemm_kernel<L><<<g.grid(), g.block(), 0, g.stream>>>(g);
+#if RCR_USE_4WAVE_DYNAMIC
+        if constexpr (L == Layout::RCR) {
+            dim3 grid4(g.bpr * g.bpc);
+            dim3 block4(rcr_4w::NT);
+            rcr_4w::kernel<<<grid4, block4, 0, g.stream>>>(g);
+        } else
+#endif
+        {
+            gemm_kernel<L><<<g.grid(), g.block(), 0, g.stream>>>(g);
+        }
     } else {
         g.fast_k = 0;
         g.ki = 0;

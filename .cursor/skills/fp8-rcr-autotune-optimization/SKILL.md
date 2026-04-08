@@ -71,58 +71,144 @@ tk_fp8_layouts.BLOCK_SIZE       # 256
 tk_fp8_layouts.K_BLOCK          # 128
 ```
 
-## 未完成 / 需要 GPU 测试
+## Clean Benchmark 结果 (2026-04-08, GPU4)
 
-### A. Clean Benchmark（最高优先）
+文件: `bench_vs_hipblaslt_clean_gpu4.json`
 
-上次 benchmark 时所有 8 张 GPU 被其他进程占满 (~287 GiB/卡)，导致：
-- hipBLASLt TFLOPS 暴跌 40%（缺少 workspace 内存）
-- TK 也下降 ~10%
-- 对比结果不可信（TK 55/56 胜但绝对值偏低）
+| Layout | Geo-mean | Wins |
+|---|---|---|
+| **RCR** | **0.949x** | **8/56** |
+| RRR | 1.508x | 56/56 |
+| CRR | 1.951x | 56/56 |
 
-**需要在干净 GPU 上重新跑:**
+**RCR 弱项 shapes (按 speedup 排序):**
+- (16384,6144,4096): 0.848x — 最差
+- (8192,28672,4096): 0.883x
+- K=4096 + 大 N 系列: 0.85-0.89x
+- 大 shape (K≥8192): 0.93-0.96x
+- hipBLASLt 在大 shape 上稳定达到 ~3260-3330 TFLOPS，TK 峰值 ~3150
+
+## 已尝试的优化（2026-04-08）
+
+### 1. RCR_BATCHED_PAIR_MMA=1（正确性 FAIL）
+
+减少 barrier 从 8→4 per k-iter。编译 220 VGPRs, occupancy=2。
+**正确性 FAIL**: 非 fastpath shapes SNR 降至 30-38dB。
+可能原因: init 阶段 `vmcnt(4)` + `vmcnt(6)` 不够保证 As[0][0]、Bs[0][1] 的 G::load 完成。
+
+### 2. VMCNT/PREFETCH_LGKM 参数扫描
+
+| Config | 4096,28672,4096 | 8192,16384,16384 | 8192,57344,8192 |
+|---|---|---|---|
+| baseline (vm4,lgkm4) | 2577 | 3172 | — |
+| vm8 | **2628** | **3184** | — |
+| vm6_lgkm6 | 2626 | 3180 | — |
+| vm2 | 2450 | 3008 | — |
+
+**结论**: vm8 最佳但仅 ~1-2% 改善，远不够闭合差距。
+
+### 3. Barrier 移除实验（RCR_REDUCED_BARRIERS）
+
+移除 BARRIER3/BARRIER5（保护不同 LDS tile，理论上可移除）。
+**结果**: 正确性 PASS 但性能反降 5-8%。在 CDNA4 上，barrier 起调度栅栏作用，移除导致指令排序变差。
+
+### 4. 4-wave Fastpath 对比测试（关键发现）
+
+编译多个 shape-specific 4-wave 和 8-wave fastpath 内核，在 GPU4 上测试。
+
+| Shape | 8-wave dynamic | 8-wave exact | **4-wave exact** | hipBLASLt |
+|---|---|---|---|---|
+| 8192×16384×16384 | 3143 | 3079 | **3361** | 3312 |
+| 16384×16384×16384 | 3152 | 3064 | **3367** | 3309 |
+| 8192×57344×8192 | 3023 | 2330 | **3263** | 3290 |
+| 4096×57344×8192 | 2931 | 2265 | **3205** | 3149 |
+| 16384×106496×16384 | 3052 | 2323 | **3168** | 3287 |
+| 8192×16384×53248 | 3105 | 3205 | **3369** | 3324 |
+
+**4-wave exact 已在多个 shape 上超越 hipBLASLt！** 但仅限编译期固定维度。
+8-wave exact 在大 N shape 上比 dynamic 更差，因为缺少 XCD swizzle。
+
+### 5. 4-wave Dynamic 版本
+
+创建了 `rcr_4wave_dynamic.inc` — 运行时维度的 4-wave 内核。
+**结果**: 正确性 PASS，但性能比 8-wave dynamic 更差（~5-10%）。
+**原因**: 运行时开销（地址计算、无循环展开）抵消了 4-warp 架构的优势。编译期优化是 4-wave 性能的关键。
+
+## 新文件
+
+| 文件 | 说明 |
+|---|---|
+| `rcr_4wave_dynamic.inc` | 4-wave 动态版本（`-DRCR_USE_4WAVE_DYNAMIC=1`），正确但性能不及 8-wave |
+| `bench_vs_hipblaslt_clean_gpu4.json` | 干净 GPU 上的完整 benchmark |
+| `sweep_vmcnt.py` | VMCNT 参数扫描脚本 |
+| `bench_fastpath.py` | 4-wave/8-wave/dynamic 对比脚本 |
+
+## 下一步方向（优先级排序）
+
+### A. K-specialized 4-wave（最有前景，预估 5-10%）
+
+4-wave exact 的优势来自编译期 K 优化。策略：
+- 为常见 K 值（4096, 8192, 16384, 28672, 53248）编译特化内核
+- M/N 使用运行时参数（网格和存储），K 使用编译期常量（内循环）
+- 运行时根据 K 值 dispatch 到对应内核
+
+```cpp
+// 伪代码
+switch (g.k) {
+    case 4096:  dispatch_4wave<4096>(g); break;
+    case 8192:  dispatch_4wave<8192>(g); break;
+    case 16384: dispatch_4wave<16384>(g); break;
+    default:    dispatch_8wave(g); break;
+}
+```
+
+### B. 修复 8-wave exact fastpath 的 XCD swizzle
+
+当前 8-wave exact fastpath 使用简单的 `br = bid / bpc` 导致大 N shape 上 L2 局部性差。
+添加 XCD swizzle + group_m 可能恢复性能到 dynamic 水平或更好。
+
+### C. RCR_BATCHED_PAIR_MMA 正确性修复
+
+根因: init 阶段 VMCNT 不够保证所有 4 个 tic 缓冲区就绪。
+修复: 将 `RCR_INIT0_VMCNT=0`（等所有 VMEM 完成）。需验证这是否修复正确性且不影响性能。
+
+### D. JIT 编译（已实现，效果显著）
+
+`jit_gemm.py` + `bench_jit.py` 实现了 shape-specific 4-wave 内核的 JIT 编译。
+
+**JIT 4-wave 结果（vs hipBLASLt, GPU4 clean）:**
+
+| Shape | JIT-4w | hipBLASLt | Ratio |
+|---|---|---|---|
+| (8192,16384,16384) | **3379** | 3312 | **1.020x** |
+| (16384,16384,16384) | **3362** | 3309 | **1.016x** |
+| (4096,57344,8192) | **3219** | 3149 | **1.022x** |
+| (8192,16384,53248) | **3361** | 3324 | **1.011x** |
+| (4096,4096,4096) | **2391** | 2318 | **1.032x** |
+| (8192,57344,8192) | 3261 | 3290 | 0.991x |
+| (8192,28672,4096) | 2957 | 3067 | 0.964x |
+| **Geo-mean** | | | **0.997x** |
+
+**使用方式:**
 ```bash
 cd /shared_nfs/kyle/HipKittens2/analysis/fp8_gemm/mi350x
-rm -f .autotune_cache.json
-HIP_VISIBLE_DEVICES=<clean_gpu> python3 bench_vs_hipblaslt.py \
-    --mode full --warmup 30 --iters 50 --mbs 1,2 \
-    -o bench_vs_hipblaslt_clean.json
+HIP_VISIBLE_DEVICES=4 python3 bench_jit.py
 ```
 
-**上次（GPU 被占前）的干净基线数据:**
-- `bench_vs_hipblaslt_swizzle.json` — block swizzle 启用后 group_m=4 固定值
-- RCR geo-mean: **0.958x**（距离超越 hipBLASLt 还差 ~4-5%）
+**注意:** 由于动态链接器限制，JIT 编译的 .so 不能和默认 tk_fp8_layouts 在同一进程中共存。`bench_jit.py` 用子进程绕过此限制。
 
-### B. RCR_BATCHED_READS 实验（需要调试）
+**编译时间:** 每 shape 7-32s（首次），缓存后直接使用。
 
-**思路:** 将主循环中的 LDS 读取从交错式（每次1-2个，中间穿插 barrier）改为批量式（一次读4个 tile），减少 barrier 从 8→2 个/K迭代。
+**限制:** M%256==0, N%256==0, K%128==0（不满足的 shape 回退到 8-wave dynamic）。
 
-**状态:** 编译通过（242 VGPRs, 0 spills, occupancy=2），但正确性 FAIL。
-- 所有非 fastpath shapes 的 SNR 降至 -2~4 dB
-- 8192³ "通过"是因为命中了 fastpath kernel（完全不走新代码）
+### E. 剩余差距分析
 
-**启用方式（仅供调试）:**
-```makefile
-# 在 Makefile HIPFLAGS 中加:
--DRCR_BATCHED_READS=1
-```
+JIT 4-wave 在 K=4096 的 shape 上仍落后（0.91-0.96x）。可能原因：
+- K=4096 时 ki=32，循环次数少，overhead 占比高
+- 这些 shape 的 arithmetic intensity 较低
+- hipBLASLt 可能对 K=4096 有特殊优化
 
-**疑似问题:** G::load 向 tic 缓冲区发起的异步 LDS store 与后续迭代的 LDS read 之间存在竞态。当前代码在 lgkm(0) 后加了一个额外 barrier 但仍然不够。需要更仔细分析 CDNA4 的 LGKMCNT 语义（ds_write 依赖 VMEM 数据时是否计入 LGKMCNT）。
-
-**调试建议:**
-1. 在 `lgkm(0)` 前加 `vmcnt(0)` 强制等所有 VMEM 完成
-2. 用 `(256,256,256)` 这种小到不需要 tail kernel 的 shape 单步调试
-3. 比较 BATCHED_READS=0 和 =1 的输出 tensor diff，定位出错的 block/warp
-
-### C. 其他可尝试的优化方向
-
-| 方向 | 预估收益 | 风险 |
-|---|---|---|
-| VMCNT 参数调优（编译多 variant） | 2-3% | 编译时间 ×N |
-| RCR_BATCHED_EPILOGUE_MMA=1 | 1-2% | 上次单独测试未验证 |
-| 增大 PREFETCH_LGKM（4→6） | 1-2% | 可能增加 stall |
-| 减少 barrier（逐个移除验证） | 3-5% | 需要非常仔细的正确性验证 |
-| Triple buffering | 5-10% | 大改，LDS 可能不够 |
+可尝试方向：为 K=4096 shapes 调优 4-wave group_m、prefetch 参数。
 
 ## 编译 & 测试流程
 

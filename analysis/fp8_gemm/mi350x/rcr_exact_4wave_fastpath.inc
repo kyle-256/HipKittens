@@ -312,6 +312,7 @@ struct globals {
     exact_a_gl a;
     exact_b_gl b;
     exact_c_gl c;
+    float scale_a, scale_b;
     hipStream_t stream;
 
     dim3 grid() { return dim3((M_DIM / BLK) * (N_DIM / BLK)); }
@@ -540,6 +541,12 @@ void kernel(const globals g) {
         __builtin_amdgcn_sched_barrier(0);
     }
 
+    const float sc = g.scale_a * g.scale_b;
+    mul(c[0][0], c[0][0], sc);
+    mul(c[0][1], c[0][1], sc);
+    mul(c[1][0], c[1][0], sc);
+    mul(c[1][1], c[1][1], sc);
+
     store(g.c, c[0][0], {0, 0, br * WARPS_ROW * 2 + warp_m, bc * WARPS_COL * 2 + warp_n});
     store(g.c, c[0][1], {0, 0, br * WARPS_ROW * 2 + warp_m, bc * WARPS_COL * 2 + WARPS_COL + warp_n});
     store(g.c, c[1][0], {0, 0, br * WARPS_ROW * 2 + WARPS_ROW + warp_m, bc * WARPS_COL * 2 + warp_n});
@@ -549,7 +556,7 @@ void kernel(const globals g) {
 } // namespace rcr_exact_4wave
 
 __host__ inline bool rcr_can_use_exact_4wave(const layout_globals& g) {
-    return g.m == M_DIM && g.n == N_DIM && g.k == K_DIM && g.scale_a * g.scale_b == 1.0f;
+    return g.m == M_DIM && g.n == N_DIM && g.k == K_DIM;
 }
 
 __host__ inline void dispatch_rcr_exact_4wave(const layout_globals& g) {
@@ -560,6 +567,7 @@ __host__ inline void dispatch_rcr_exact_4wave(const layout_globals& g) {
             reinterpret_cast<uint64_t>(g.b.raw_ptr), 1, 1, g.n, g.k),
         make_gl<rcr_exact_4wave::exact_c_gl>(
             reinterpret_cast<uint64_t>(g.c.raw_ptr), 1, 1, g.m, g.n),
+        g.scale_a, g.scale_b,
         g.stream,
     };
     rcr_exact_4wave::kernel<<<eg.grid(), eg.block(), 0, eg.stream>>>(eg);
