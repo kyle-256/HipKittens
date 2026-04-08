@@ -423,23 +423,48 @@ void kernel(const layout_globals g) {
         }
     }
 
-    int cached_k_pair = -1;
-    auto ensure_scale_packs = [&](int k_pair) {
-        if (k_pair == cached_k_pair) return;
+    // SRD-based scale loading (buffer_load_dword via SGPR SRD, no waterfall)
+    auto make_scale_srd = [](const void* ptr) -> i32x4 {
+        i32x4 srd = std::bit_cast<i32x4>(make_buffer_resource(
+            static_cast<uint64_t>(reinterpret_cast<std::uintptr_t>(ptr)),
+            0xFFFFFFFFu, 0x00110000u));
+        srd[0] = __builtin_amdgcn_readfirstlane(srd[0]);
+        srd[1] = __builtin_amdgcn_readfirstlane(srd[1]);
+        srd[2] = __builtin_amdgcn_readfirstlane(srd[2]);
+        srd[3] = __builtin_amdgcn_readfirstlane(srd[3]);
+        return srd;
+    };
+    i32x4 a0_srd[a_pack_count], a1_srd[a_pack_count];
+    i32x4 b0_srd[b_pack_count], b1_srd[b_pack_count];
+    if constexpr (PRESHUFFLED_QUANT) {
+        #pragma unroll
+        for (int p = 0; p < a_pack_count; ++p) {
+            a0_srd[p] = make_scale_srd(a0_scale_row_bases[p]);
+            a1_srd[p] = make_scale_srd(a1_scale_row_bases[p]);
+        }
+        #pragma unroll
+        for (int p = 0; p < b_pack_count; ++p) {
+            b0_srd[p] = make_scale_srd(b0_scale_row_bases[p]);
+            b1_srd[p] = make_scale_srd(b1_scale_row_bases[p]);
+        }
+    }
+
+    auto load_scale_buffer_srd = [&](int k_pair) __attribute__((always_inline)) {
         if constexpr (PRESHUFFLED_QUANT) {
+            const uint32_t soff = static_cast<uint32_t>(k_pair) << 8;
             #pragma unroll
-            for (int pack_idx = 0; pack_idx < a_pack_count; ++pack_idx) {
-                a0_scale_packs[pack_idx] = load_scale_pair_pack_16x128_preshuffled_from_row_base(
-                    a0_scale_row_bases[pack_idx], k_pair, lane_scale_byte_offset);
-                a1_scale_packs[pack_idx] = load_scale_pair_pack_16x128_preshuffled_from_row_base(
-                    a1_scale_row_bases[pack_idx], k_pair, lane_scale_byte_offset);
+            for (int p = 0; p < a_pack_count; ++p) {
+                a0_scale_packs[p] = std::bit_cast<fp8e8m0_4>(
+                    llvm_amdgcn_raw_buffer_load_b32(a0_srd[p], lane_scale_byte_offset, soff, 0));
+                a1_scale_packs[p] = std::bit_cast<fp8e8m0_4>(
+                    llvm_amdgcn_raw_buffer_load_b32(a1_srd[p], lane_scale_byte_offset, soff, 0));
             }
             #pragma unroll
-            for (int pack_idx = 0; pack_idx < b_pack_count; ++pack_idx) {
-                b0_scale_packs[pack_idx] = load_scale_pair_pack_16x128_preshuffled_from_row_base(
-                    b0_scale_row_bases[pack_idx], k_pair, lane_scale_byte_offset);
-                b1_scale_packs[pack_idx] = load_scale_pair_pack_16x128_preshuffled_from_row_base(
-                    b1_scale_row_bases[pack_idx], k_pair, lane_scale_byte_offset);
+            for (int p = 0; p < b_pack_count; ++p) {
+                b0_scale_packs[p] = std::bit_cast<fp8e8m0_4>(
+                    llvm_amdgcn_raw_buffer_load_b32(b0_srd[p], lane_scale_byte_offset, soff, 0));
+                b1_scale_packs[p] = std::bit_cast<fp8e8m0_4>(
+                    llvm_amdgcn_raw_buffer_load_b32(b1_srd[p], lane_scale_byte_offset, soff, 0));
             }
         } else {
             load_scale_packs_16x128<false>(
@@ -451,6 +476,13 @@ void kernel(const layout_globals g) {
             load_scale_packs_16x128<false>(
                 b1_scale_packs, g.b_scale, scale_b_base(1), k_pair, lane_nonk, lane_kblk);
         }
+    };
+
+    // Legacy fallback for non-KPAIR paths
+    int cached_k_pair = -1;
+    auto ensure_scale_packs = [&](int k_pair) {
+        if (k_pair == cached_k_pair) return;
+        load_scale_buffer_srd(k_pair);
         cached_k_pair = k_pair;
     };
 
@@ -489,11 +521,13 @@ void kernel(const layout_globals g) {
         kittens::subtile_inplace<BLK / 2 / WARPS_COL, BK>(Bs[curr][0], {warp_n, 0});
     load_st_to_rt(b[0], b_subtile_0);
 
+    // Scale prefetch pipeline with SRD loads
+    load_scale_buffer_srd(0);
+
     #pragma unroll
     for (int k = 0; k < k_iters - 2; ++k, curr ^= 1, next ^= 1) {
         const int k_pair = k >> 1;
         const int k_phase = k & 1;
-        ensure_scale_packs(k_pair);
 
         __builtin_amdgcn_sched_barrier(0);
         asm volatile("s_waitcnt vmcnt(16)");
@@ -557,6 +591,14 @@ void kernel(const layout_globals g) {
             do_interleaved_cluster_scaled<1>(
                 As[curr][1], g.a, {0, 0, br * WARPS_ROW + 1, k + 2},
                 b[0], b_subtile_0, a[1], b[1], c[1][1], a1_scale_packs, b1_scale_packs);
+        }
+
+        // Prefetch scales for next k_pair (overlaps with barriers + tile loads)
+        {
+            const int next_k_pair = (k + 1) >> 1;
+            if (next_k_pair != k_pair) {
+                load_scale_buffer_srd(next_k_pair);
+            }
         }
     }
 
