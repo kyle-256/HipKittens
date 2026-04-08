@@ -219,6 +219,22 @@ __device__ __forceinline__ void load_one_s2r(
     );
 }
 
+using mfp8_intx8_t = int __attribute__((__vector_size__(8 * sizeof(int))));
+using mfp8_f4_t = float __attribute__((__vector_size__(4 * sizeof(float))));
+
+// Fixed 16 "+a" outputs: tiles[0][0]=%0 through tiles[3][3]=%15. Inputs start at %16.
+#define TR(r,c) "+a"(*(mfp8_f4_t*)&acc.tiles[r][c].data[0])
+#define ACC16 TR(0,0),TR(0,1),TR(0,2),TR(0,3),TR(1,0),TR(1,1),TR(1,2),TR(1,3),\
+              TR(2,0),TR(2,1),TR(2,2),TR(2,3),TR(3,0),TR(3,1),TR(3,2),TR(3,3)
+#define MMA_INPUTS "v"(av), "v"(bv), "v"(sa), "v"(sb)
+
+// Active tile index = N*4+M, resolved at compile time via if constexpr chain
+#define MMA8_STR(IDX, OPSEL, HI) \
+    "v_mfma_scale_f32_16x16x128_f8f6f4 %" #IDX ", %16, %17, %" #IDX ", %18, %19 " OPSEL " op_sel_hi:[" HI "] cbsz:0 blgp:0"
+
+#define MFMA8_OP(OPSEL, HI) \
+    "v_mfma_scale_f32_16x16x128_f8f6f4 %0, %17, %18, %0, %19, %20 " OPSEL " op_sel_hi:[" HI "] cbsz:0 blgp:0"
+
 template<int K_PHASE, int N, int M>
 __device__ __forceinline__ void mma_abt_scaled_one(
     RT_C& acc,
@@ -227,19 +243,50 @@ __device__ __forceinline__ void mma_abt_scaled_one(
     const fp8e8m0_4 (&a_scale_packs)[BLK / 2 / WARPS_ROW / 32],
     const fp8e8m0_4 (&b_scale_packs)[(BLK / 2 / WARPS_COL + 31) / 32])
 {
-    constexpr int opsel_a = (K_PHASE << 1) | (N & 1);
-    constexpr int opsel_b = (K_PHASE << 1) | (M & 1);
-    const fp8e8m0_4 a_scale_pack = a_scale_packs[N / 2];
-    const fp8e8m0_4 b_scale_pack = b_scale_packs[M / 2];
-    mma_ABt_base_scaled<opsel_a, opsel_b>(
-        acc.tiles[N][M],
-        a.tiles[N][0],
-        b.tiles[M][0],
-        acc.tiles[N][M],
-        a_scale_pack,
-        b_scale_pack
-    );
+    mfp8_intx8_t av = *(const mfp8_intx8_t*)&a.tiles[N][0].data[0];
+    mfp8_intx8_t bv = *(const mfp8_intx8_t*)&b.tiles[M][0].data[0];
+    unsigned sa = std::bit_cast<unsigned>(a_scale_packs[N / 2]);
+    unsigned sb = std::bit_cast<unsigned>(b_scale_packs[M / 2]);
+
+    constexpr int T = N * 4 + M;
+    constexpr int lo_a = N & 1, lo_b = M & 1;
+    constexpr const char* os = (lo_a == 0 && lo_b == 0) ? "" :
+                               (lo_a == 0 && lo_b == 1) ? "op_sel:[0,1,0] " :
+                               (lo_a == 1 && lo_b == 0) ? "op_sel:[1,0,0] " : "op_sel:[1,1,0] ";
+
+    // Dispatch to correct %T index via if constexpr (can't compute asm string dynamically)
+#define EMIT(IDX,OPSEL,HI) asm volatile(MMA8_STR(IDX,OPSEL,HI) : ACC16 : MMA_INPUTS)
+#define EMIT_PHASE(IDX) do { \
+    if constexpr (K_PHASE == 0) { \
+        if constexpr (lo_a==0&&lo_b==0) EMIT(IDX,"","0,0,0"); \
+        else if constexpr (lo_a==0&&lo_b==1) EMIT(IDX,"op_sel:[0,1,0]","0,0,0"); \
+        else if constexpr (lo_a==1&&lo_b==0) EMIT(IDX,"op_sel:[1,0,0]","0,0,0"); \
+        else EMIT(IDX,"op_sel:[1,1,0]","0,0,0"); \
+    } else { \
+        if constexpr (lo_a==0&&lo_b==0) EMIT(IDX,"","1,1,0"); \
+        else if constexpr (lo_a==0&&lo_b==1) EMIT(IDX,"op_sel:[0,1,0]","1,1,0"); \
+        else if constexpr (lo_a==1&&lo_b==0) EMIT(IDX,"op_sel:[1,0,0]","1,1,0"); \
+        else EMIT(IDX,"op_sel:[1,1,0]","1,1,0"); \
+    } \
+} while(0)
+
+    if constexpr (T== 0) EMIT_PHASE( 0); else if constexpr (T== 1) EMIT_PHASE( 1);
+    else if constexpr (T== 2) EMIT_PHASE( 2); else if constexpr (T== 3) EMIT_PHASE( 3);
+    else if constexpr (T== 4) EMIT_PHASE( 4); else if constexpr (T== 5) EMIT_PHASE( 5);
+    else if constexpr (T== 6) EMIT_PHASE( 6); else if constexpr (T== 7) EMIT_PHASE( 7);
+    else if constexpr (T== 8) EMIT_PHASE( 8); else if constexpr (T== 9) EMIT_PHASE( 9);
+    else if constexpr (T==10) EMIT_PHASE(10); else if constexpr (T==11) EMIT_PHASE(11);
+    else if constexpr (T==12) EMIT_PHASE(12); else if constexpr (T==13) EMIT_PHASE(13);
+    else if constexpr (T==14) EMIT_PHASE(14); else EMIT_PHASE(15);
+
+#undef EMIT
+#undef EMIT_PHASE
 }
+
+#undef TILE_REF
+#undef ACC16_OUTS
+#undef MMA_INPUTS
+#undef MFMA8_OP
 
 template<int K_PHASE>
 __device__ __forceinline__ void mma_abt_scaled_tile(
