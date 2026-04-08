@@ -87,7 +87,8 @@ def compile_for_shape(M: int, N: int, K: int, variant: str = VARIANT_BOTH,
     layout_id = _LAYOUT_IDS.get(layout, 0)
     extra = []
     if layout == "rrr":
-        extra = ["-DRRR_MAIN_UNROLL=2"]
+        unroll = 2 if K > 8192 else 4
+        extra = [f"-DRRR_MAIN_UNROLL={unroll}"]
     cmd = [
         _HIPCXX, os.path.join(_DIR, _JIT_SRC),
         "-DKITTENS_CDNA4", "--offload-arch=gfx950",
