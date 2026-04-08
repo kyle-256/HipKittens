@@ -35,7 +35,8 @@ def _can_use_4wave(M: int, N: int, K: int) -> bool:
     return M % 256 == 0 and N % 256 == 0 and K % 128 == 0 and M > 0 and N > 0 and K >= 256
 
 
-_JIT_SRC = "kernel_jit_rcr.cpp"
+_JIT_SRC = "kernel_jit_all.cpp"
+_LAYOUT_IDS = {"rcr": 1, "rrr": 2, "crr": 3}
 _HIPCXX = "/opt/rocm/bin/hipcc"
 _PY_INCLUDES = None
 _PY_LDFLAGS = None
@@ -62,14 +63,14 @@ def _get_py_flags():
     return _PY_INCLUDES, _PY_LDFLAGS
 
 
-def _cache_subdir_v(M: int, N: int, K: int, variant: str) -> str:
-    return os.path.join(_CACHE_DIR, f"{M}x{N}x{K}_{variant}")
+def _cache_subdir_v(M: int, N: int, K: int, variant: str, layout: str = "rcr") -> str:
+    return os.path.join(_CACHE_DIR, f"{layout}_{M}x{N}x{K}_{variant}")
 
 
 def compile_for_shape(M: int, N: int, K: int, variant: str = VARIANT_BOTH,
-                      verbose: bool = False) -> str:
+                      layout: str = "rcr", verbose: bool = False) -> str:
     """Compile a shape-specific .so and return its directory."""
-    subdir = _cache_subdir_v(M, N, K, variant)
+    subdir = _cache_subdir_v(M, N, K, variant, layout)
     so_path = os.path.join(subdir, _MODULE_NAME + _EXT_SUFFIX)
 
     if os.path.exists(so_path):
@@ -77,18 +78,24 @@ def compile_for_shape(M: int, N: int, K: int, variant: str = VARIANT_BOTH,
 
     os.makedirs(subdir, exist_ok=True)
     if verbose:
-        print(f"[JIT] Compiling {_shape_key(M, N, K)} ({variant})...", end=" ", flush=True)
+        print(f"[JIT] Compiling {layout.upper()} {_shape_key(M, N, K)} ({variant})...",
+              end=" ", flush=True)
     t0 = time.time()
 
     py_inc, py_ld = _get_py_flags()
     vflags = _VARIANT_FLAGS.get(variant, _VARIANT_FLAGS[VARIANT_BOTH])
+    layout_id = _LAYOUT_IDS.get(layout, 0)
+    extra = []
+    if layout == "rrr":
+        extra = ["-DRRR_MAIN_UNROLL=1"]
     cmd = [
         _HIPCXX, os.path.join(_DIR, _JIT_SRC),
         "-DKITTENS_CDNA4", "--offload-arch=gfx950",
         "-DHIP_ENABLE_WARP_SYNC_BUILTINS", "-ffast-math",
         "-I/opt/rocm/include/rocrand",
         f"-DM_DIM={M}", f"-DN_DIM={N}", f"-DK_DIM={K}",
-        "-DRCR_STEADY_VMCNT=8", *vflags.split(),
+        f"-DJIT_LAYOUT={layout_id}",
+        "-DRCR_STEADY_VMCNT=8", *vflags.split(), *extra,
         "-std=c++20", "-w", "-shared", "-fPIC",
         f"-I{_TK_ROOT}/include", f"-I{_TK_ROOT}/prototype",
         "-I/opt/rocm/include/hip",
@@ -98,7 +105,7 @@ def compile_for_shape(M: int, N: int, K: int, variant: str = VARIANT_BOTH,
 
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     if r.returncode != 0:
-        raise RuntimeError(f"JIT compilation failed for {_shape_key(M, N, K)}:\n{r.stderr[-500:]}")
+        raise RuntimeError(f"JIT compilation failed for {layout} {_shape_key(M, N, K)}:\n{r.stderr[-500:]}")
 
     if verbose:
         print(f"{time.time() - t0:.1f}s")
@@ -106,16 +113,16 @@ def compile_for_shape(M: int, N: int, K: int, variant: str = VARIANT_BOTH,
 
 
 def get_module(M: int, N: int, K: int, variant: str = VARIANT_BOTH,
-               verbose: bool = False):
-    """Get the JIT-compiled module for a given shape."""
-    key = f"{_shape_key(M, N, K)}_{variant}"
+               layout: str = "rcr", verbose: bool = False):
+    """Get the JIT-compiled module for a given shape and layout."""
+    key = f"{layout}_{_shape_key(M, N, K)}_{variant}"
     if key in _loaded_modules:
         return _loaded_modules[key]
 
     if not _can_use_4wave(M, N, K):
         return None
 
-    subdir = compile_for_shape(M, N, K, variant=variant, verbose=verbose)
+    subdir = compile_for_shape(M, N, K, variant=variant, layout=layout, verbose=verbose)
     so_path = os.path.join(subdir, _MODULE_NAME + _EXT_SUFFIX)
 
     saved = sys.modules.pop(_MODULE_NAME, None)
@@ -173,20 +180,24 @@ class JITGemm:
             raise RuntimeError("CRR not supported without fallback")
 
 
-def warmup_shapes(shapes, variants=None, verbose=True, max_workers=8):
-    """Pre-compile all shapes × variants in parallel."""
+def warmup_shapes(shapes, variants=None, layouts=None, verbose=True, max_workers=8):
+    """Pre-compile all shapes × variants × layouts in parallel."""
     import concurrent.futures
     if variants is None:
         variants = [VARIANT_4WAVE, VARIANT_8WAVE]
+    if layouts is None:
+        layouts = ["rcr"]
 
     tasks = []
     for M, N, K in shapes:
         if not _can_use_4wave(M, N, K):
             continue
-        for v in variants:
-            if not os.path.exists(os.path.join(
-                    _cache_subdir_v(M, N, K, v), _MODULE_NAME + _EXT_SUFFIX)):
-                tasks.append((M, N, K, v))
+        for lay in layouts:
+            vlist = variants if lay == "rcr" else [VARIANT_8WAVE]
+            for v in vlist:
+                if not os.path.exists(os.path.join(
+                        _cache_subdir_v(M, N, K, v, lay), _MODULE_NAME + _EXT_SUFFIX)):
+                    tasks.append((M, N, K, v, lay))
 
     if not tasks:
         if verbose:
@@ -201,16 +212,16 @@ def warmup_shapes(shapes, variants=None, verbose=True, max_workers=8):
     t0 = time.time()
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as pool:
-        futs = {pool.submit(compile_for_shape, M, N, K, v, False): (M, N, K, v)
-                for M, N, K, v in tasks}
+        futs = {pool.submit(compile_for_shape, M, N, K, v, lay, False): (M, N, K, v, lay)
+                for M, N, K, v, lay in tasks}
         for fut in concurrent.futures.as_completed(futs):
-            M, N, K, v = futs[fut]
+            M, N, K, v, lay = futs[fut]
             try:
                 fut.result()
                 if verbose:
-                    print(f"  [JIT] {_shape_key(M,N,K)} ({v}) done")
+                    print(f"  [JIT] {lay.upper()} {_shape_key(M,N,K)} ({v}) done")
             except Exception as e:
-                print(f"  [JIT] {_shape_key(M,N,K)} ({v}) FAILED: {e}")
+                print(f"  [JIT] {lay.upper()} {_shape_key(M,N,K)} ({v}) FAILED: {e}")
 
     if verbose:
         print(f"[JIT] All compiled in {time.time()-t0:.1f}s")
