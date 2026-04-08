@@ -5,7 +5,7 @@
 #endif
 
 #ifndef MXFP8_RCR_4WAVE_GROUP_M
-#define MXFP8_RCR_4WAVE_GROUP_M 4
+#define MXFP8_RCR_4WAVE_GROUP_M 2
 #endif
 
 #ifndef MXFP8_RCR_4WAVE_NUM_XCDS
@@ -524,7 +524,7 @@ void kernel(const layout_globals g) {
     // Scale prefetch pipeline with SRD loads
     load_scale_buffer_srd(0);
 
-    #pragma unroll
+    #pragma unroll 2
     for (int k = 0; k < k_iters - 2; ++k, curr ^= 1, next ^= 1) {
         const int k_pair = k >> 1;
         const int k_phase = k & 1;
