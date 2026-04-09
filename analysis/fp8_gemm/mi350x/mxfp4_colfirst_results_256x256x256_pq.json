@@ -1,0 +1,7 @@
+{
+    "avg_ms": 0.05359629988670349,
+    "tflops": 0.6260587404527975,
+    "snr_db": NaN,
+    "deterministic": true,
+    "ok": false
+}
