@@ -1,16 +1,10 @@
 #!/bin/bash
-# End-to-end build pipeline: C++ → .s → Python rewrite → .so
+# End-to-end build pipeline for MXFP4 Gluon C++ kernel: C++ → .s → Python rewrite → .so
 #
 # Usage:
-#   ./build_rewrite.sh                    # Build with Python rewrite
-#   ./build_rewrite.sh --no-rewrite       # Build without Python rewrite (baseline)
-#   ./build_rewrite.sh --rewrite-only     # Only run Python rewrite + assemble (skip C++ compile)
-#
-# Output:
-#   tk_mxfp8_rewrite.cpython-*.so         — Direct hipcc build (baseline)
-#   tk_mxfp8_rewrite_opt.cpython-*.so     — Python-rewritten build
-#   mxfp8_rewrite_device.s                — Raw device assembly
-#   mxfp8_rewrite_opt.s                   — Python-rewritten assembly
+#   ./build_rewrite_gluon.sh                # Build with Python rewrite
+#   ./build_rewrite_gluon.sh --no-rewrite   # Build without Python rewrite (baseline)
+#   ./build_rewrite_gluon.sh --rewrite-only # Only run Python rewrite + assemble (skip C++ compile)
 
 set -euo pipefail
 
@@ -22,8 +16,8 @@ ROCM=/opt/rocm
 CLANG=$ROCM/lib/llvm/bin/clang
 LLD=$ROCM/lib/llvm/bin/ld.lld
 BUNDLER=$ROCM/lib/llvm/bin/clang-offload-bundler
-SRC=kernel_mxfp8_4wave_rewrite.cpp
-REWRITER=rewrite_mxfp8.py
+SRC=kernel_mxfp4_gluon_cpp.cpp
+REWRITER=rewrite_mxfp4_gluon.py
 
 M=${M_DIM:-8192}
 N=${N_DIM:-8192}
@@ -31,10 +25,10 @@ K=${K_DIM:-8192}
 DIMS="-DM_DIM=$M -DN_DIM=$N -DK_DIM=$K"
 
 PY_EXT="$(python3-config --extension-suffix)"
-BASELINE="tk_mxfp8_rewrite${PY_EXT}"
-OPTIMIZED="tk_mxfp8_rewrite_opt${PY_EXT}"
-DEVICE_S="mxfp8_rewrite_device.s"
-OPT_S="mxfp8_rewrite_opt.s"
+BASELINE="tk_mxfp4_gluon_cpp${PY_EXT}"
+OPTIMIZED="tk_mxfp4_gluon_cpp_opt${PY_EXT}"
+DEVICE_S="mxfp4_gluon_cpp_device.s"
+OPT_S="mxfp4_gluon_cpp_opt.s"
 
 COMMON_FLAGS="-DKITTENS_CDNA4 --offload-arch=gfx950 -DHIP_ENABLE_WARP_SYNC_BUILTINS -ffast-math"
 INCLUDE_FLAGS="-I${THUNDERKITTENS_ROOT}/include -I${THUNDERKITTENS_ROOT}/prototype \
@@ -45,13 +39,13 @@ MODE="${1:-}"
 if [[ "$MODE" != "--rewrite-only" ]]; then
     echo "=== Step 1: hipcc baseline build ==="
     THUNDERKITTENS_ROOT="$THUNDERKITTENS_ROOT" ROCM_PATH=$ROCM \
-      CPPFLAGS="$DIMS" make -B TARGET=tk_mxfp8_rewrite SRC=$SRC 2>&1 | grep -E 'remark:|error'
+      CPPFLAGS="$DIMS" make -B TARGET=tk_mxfp4_gluon_cpp SRC=$SRC 2>&1 | grep -E 'remark:|error' || true
 
     echo "=== Step 2: Generate device .s ==="
     $ROCM/bin/hipcc --offload-device-only -S $SRC $COMMON_FLAGS \
       -std=c++20 -w $INCLUDE_FLAGS $DIMS \
       -Rpass-analysis=kernel-resource-usage \
-      -o "$DEVICE_S" 2>&1 | grep -E 'remark:'
+      -o "$DEVICE_S" 2>&1 | grep -E 'remark:' || true
 fi
 
 if [[ "$MODE" == "--no-rewrite" ]]; then
@@ -61,6 +55,13 @@ fi
 
 echo "=== Step 3: Python rewrite ==="
 python3 "$REWRITER" "$DEVICE_S" "$OPT_S"
+
+CUID=$(grep -oP '__hip_cuid_\K[0-9a-f]+' "$DEVICE_S" | head -1)
+if [[ -z "$CUID" ]]; then
+    echo "ERROR: cannot extract cuid from $DEVICE_S" >&2
+    exit 1
+fi
+echo "  Device cuid: $CUID"
 
 echo "=== Step 4: Assemble → link → bundle → .so ==="
 TMP=$(mktemp -d)
@@ -105,7 +106,7 @@ $CLANG -cc1 -triple x86_64-unknown-linux-gnu -aux-triple amdgcn-amd-amdhsa \
   -fhip-new-launch-api -fgnuc-version=4.2.1 -fno-implicit-modules \
   -fskip-odr-check-in-gmf -fcxx-exceptions -fexceptions \
   -fcuda-include-gpubinary "$TMP/kernel.hipfb" \
-  -cuid=6513de728da1fc65 -fgpu-approx-transcendentals -fcuda-allow-variadic-functions \
+  -cuid=$CUID -fgpu-approx-transcendentals -fcuda-allow-variadic-functions \
   -faddrsig -D__GCC_HAVE_DWARF2_CFI_ASM=1 \
   -o "$TMP/host.o" -x hip $SRC
 

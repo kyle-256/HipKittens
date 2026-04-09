@@ -14,6 +14,7 @@
 
 #include "kittens.cuh"
 #include "pyutils/pyutils.cuh"
+#include <type_traits>
 using namespace kittens;
 
 #ifndef M_DIM
@@ -771,7 +772,6 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         const int cur = bt & 1;
         const int nxt = 1 - cur;
 
-        // Pre-select ALL LDS addresses up front (compiles to v_cndmask, overlaps with MFMAs)
         const uint32_t sel_br_p0 = cur ? br_1_p0 : br_0_p0;
         const uint32_t sel_br_p1 = cur ? br_1_p1 : br_0_p1;
         const uint32_t sel_a1_p0 = cur ? a1_1_p0 : a1_0_p0;
@@ -781,21 +781,18 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         const uint32_t sel_bl_p0 = nxt ? bl_1_p0 : bl_0_p0;
         const uint32_t sel_bl_p1 = nxt ? bl_1_p1 : bl_0_p1;
 
-        // Pre-compute pf params (SALU work overlaps with Step 1-2 MFMAs)
         const int pf_bt = (bt + 2 < k_byte_iters) ? (bt + 2) : (k_byte_iters - 1);
         tile_pf_params pf_a0_p = make_pf_params(A0_db[cur], g.a, coord<ST_tile>(0,0,br*2,     pf_bt), so_a, srd_a, base_a, lb_a0[cur]);
         tile_pf_params pf_a1_p = make_pf_params(A1_db[cur], g.a, coord<ST_tile>(0,0,br*2+1,   pf_bt), so_a, srd_a, base_a, lb_a1[cur]);
         tile_pf_params pf_bl_p = make_pf_params(Bl_db[cur], g.b, coord<ST_tile>(0,0,bc*2,     pf_bt), so_b, srd_b, base_b, lb_bl[cur]);
         tile_pf_params pf_br_p = make_pf_params(Br_db[cur], g.b, coord<ST_tile>(0,0,bc*2+1,   pf_bt), so_b, srd_b, base_b, lb_br[cur]);
 
-        // Capture scales (loaded in previous iteration or prologue)
         fp8e8m0_4 a0_raw[a_packs], a1_raw[a_packs], bl_raw[b_packs], br_raw[b_packs];
         #pragma unroll
         for (int p = 0; p < a_packs; ++p) { a0_raw[p] = pf_a0[p]; a1_raw[p] = pf_a1[p]; }
         #pragma unroll
         for (int p = 0; p < b_packs; ++p) { bl_raw[p] = pf_bl[p]; br_raw[p] = pf_br[p]; }
 
-        // Issue scale loads for next iteration (early to overlap with Steps 1-2)
         {
             const uint32_t nxt_scale = static_cast<uint32_t>(bt + 1 < k_byte_iters ? bt + 1 : bt) << 8;
             #pragma unroll
@@ -835,8 +832,6 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         asm volatile("s_waitcnt vmcnt(8)");
         __builtin_amdgcn_s_barrier();
 
-        // Issue ALL tile prefetches right after barrier (before MFMAs)
-        // PFs use VMEM pipe, concurrent with MFMA pipe in Steps 3-4
         #pragma unroll
         for (int i = 0; i < PF_MPT; ++i) emit_one_pf(pf_a0_p, i);
         #pragma unroll
