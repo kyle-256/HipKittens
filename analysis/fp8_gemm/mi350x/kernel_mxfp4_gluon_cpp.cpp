@@ -214,7 +214,6 @@ __device__ __forceinline__ tile_pf_params make_pf_params(
     T* gptr = (T*)&src[uc];
     uint32_t soff = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(
         reinterpret_cast<const char*>(gptr) - reinterpret_cast<const char*>(base_ptr)));
-    asm volatile("" : "+s"(soff));
     const uint32_t lds_tile_base = __builtin_amdgcn_readfirstlane(
         static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&dst.data[0])));
     const uint32_t warp_off = lds_base - lds_tile_base;
@@ -227,17 +226,14 @@ __device__ __forceinline__ tile_pf_params make_pf_params(
         const uint32_t lin = warp_off + i * BPM;
         const uint32_t sid = lin / ST::underlying_subtile_bytes;
         p.lds_addrs[i] = lds_tile_base + lin + sid * ST::subtile_padding;
-        asm volatile("" : "+s"(p.lds_addrs[i]));
     }
     return p;
 }
 
 __device__ __forceinline__ void emit_one_pf(const tile_pf_params& p, int idx) {
-    uint32_t lds_b = p.lds_addrs[idx];
-    asm volatile("" : "+s"(lds_b));
     llvm_amdgcn_raw_buffer_load_lds(
         std::bit_cast<int32x4_t>(p.srd),
-        (as3_uint32_ptr)(uintptr_t)lds_b,
+        (as3_uint32_ptr)(uintptr_t)p.lds_addrs[idx],
         16, p.voffs[idx], p.soff, 0,
         static_cast<int>(coherency::cache_all));
 }
@@ -553,14 +549,6 @@ __device__ __forceinline__ void kpair_32mfma_with_16lds_and_pf(
 
 // ── 32 KPAIR MFMAs + 8 ds_reads + 8 pf (split into 4 row blocks) ──
 // Each row: 8 MFMAs + 2 ds_reads (in asm) + 2 pf (C++ builtin).
-// Operands per row block: %0..15=acc(+a), %16..17=ds_out(=v),
-//   %18..21=a_lo, %22..25=a_hi, %26..29=b_lo, %30..33=b_hi,
-//   %34=sa0, %35=sa1, %36=sb0, %37=sb1, %38=lds_addr.
-
-#define KPAIR_ROW_ACC_DS \
-    KPAIR_ACC_CLOBBER, "=v"(d_lo), "=v"(d_hi)
-#define KPAIR_INPUTS_LDS \
-    KPAIR_INPUTS, "v"(lds_addr)
 
 template<int PF_N = 8>
 __device__ __forceinline__ void kpair_32mfma_with_lds_and_pf(
@@ -575,7 +563,6 @@ __device__ __forceinline__ void kpair_32mfma_with_lds_and_pf(
     KPAIR_SETUP();
     // Row 0: 8 MFMAs + ALL 8 ds_reads front-loaded (1:1 interleave)
     asm volatile(
-        // Phase 0 (sa0, sb0/sb1) + 4 ds_reads from lds_a0
         "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %24, %32, %0,  %40, %42 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "ds_read_b128 %16, %44 offset:0\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %24, %33, %1,  %40, %42 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
@@ -584,7 +571,6 @@ __device__ __forceinline__ void kpair_32mfma_with_lds_and_pf(
         "ds_read_b128 %18, %44 offset:4096\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %24, %35, %3,  %40, %43 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "ds_read_b128 %19, %44 offset:6144\n"
-        // Phase 1 (hi) + 4 ds_reads from lds_a1
         "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %28, %36, %0,  %40, %42 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "ds_read_b128 %20, %45 offset:0\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %28, %37, %1,  %40, %42 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
@@ -846,27 +832,34 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         fp4_intx8_t tA1[4];
         extract_tile(a1_d, tA1);
 
-        // Barrier between Steps 2-3: hidden behind Step 2's MFMA pipeline drain
         asm volatile("s_waitcnt vmcnt(8)");
         __builtin_amdgcn_s_barrier();
 
-        // Step 3: A1×Bl (32 MFMAs) + 8 pf + ds_read A0[nxt]
+        // Issue ALL tile prefetches right after barrier (before MFMAs)
+        // PFs use VMEM pipe, concurrent with MFMA pipe in Steps 3-4
+        #pragma unroll
+        for (int i = 0; i < PF_MPT; ++i) emit_one_pf(pf_a0_p, i);
+        #pragma unroll
+        for (int i = 0; i < PF_MPT; ++i) emit_one_pf(pf_a1_p, i);
+        #pragma unroll
+        for (int i = 0; i < PF_MPT; ++i) emit_one_pf(pf_bl_p, i);
+        #pragma unroll
+        for (int i = 0; i < PF_MPT; ++i) emit_one_pf(pf_br_p, i);
+
+        // Step 3: A1×Bl (32 MFMAs) + ds_read A0[nxt] — single asm block
         float4 nxt_a0_d[8];
-        kpair_32mfma_with_lds_and_pf(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
+        kpair_32mfma_with_lds(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
             nxt_a0_d[0], nxt_a0_d[1], nxt_a0_d[2], nxt_a0_d[3],
             nxt_a0_d[4], nxt_a0_d[5], nxt_a0_d[6], nxt_a0_d[7],
-            sel_a0_p0, sel_a0_p1,
-            pf_a0_p, pf_a1_p);
+            sel_a0_p0, sel_a0_p1);
 
-        // Step 4: A1×Br (32 MFMAs) + 8 pf + ds_read Bl[nxt]
+        // Step 4: A1×Br (32 MFMAs) + ds_read Bl[nxt] — single asm block
         float4 nxt_bl_d[8];
-        kpair_32mfma_with_lds_and_pf(acc_A1Br, tA1, tBr, a1_raw, br_raw,
+        kpair_32mfma_with_lds(acc_A1Br, tA1, tBr, a1_raw, br_raw,
             nxt_bl_d[0], nxt_bl_d[1], nxt_bl_d[2], nxt_bl_d[3],
             nxt_bl_d[4], nxt_bl_d[5], nxt_bl_d[6], nxt_bl_d[7],
-            sel_bl_p0, sel_bl_p1,
-            pf_bl_p, pf_br_p);
+            sel_bl_p0, sel_bl_p1);
 
-        // Extract next A0 + Bl (software pipeline)
         asm volatile("s_waitcnt lgkmcnt(0)");
         extract_tile(nxt_a0_d, tA0);
         extract_tile(nxt_bl_d, tBl);

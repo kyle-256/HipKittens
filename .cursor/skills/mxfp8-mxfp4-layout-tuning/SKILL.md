@@ -28,7 +28,7 @@ description: Tune HipKittens MXFP8 and MXFP4 microscaling GEMM kernels on gfx950
 - `analysis/fp8_gemm/mi350x/rcr_mxfp8_4wave_fastpath.inc` — 4-wave MXFP8 RCR kernel (inline ASM)
 - `analysis/fp8_gemm/mi350x/kernel_mxfp8_4wave_rewrite.cpp` — 4-wave MXFP8 pure builtin (2853 TFLOPS)
 - `analysis/fp8_gemm/mi350x/kernel_mxfp4_colwise.cpp` — MXFP4 colwise KPAIR kernel (4-wave, 4241 TFLOPS)
-- `analysis/fp8_gemm/mi350x/kernel_mxfp4_gluon_cpp.cpp` — MXFP4 Gluon-arch C++ reimplementation (4-wave, 4412 TFLOPS)
+- `analysis/fp8_gemm/mi350x/kernel_mxfp4_gluon_cpp.cpp` — MXFP4 Gluon-arch C++ reimplementation (4-wave, 4524 TFLOPS)
 - `analysis/fp8_gemm/mi350x/kernel_mxfp4_hybrid.cpp` — MXFP4 hybrid kernel (4-wave, 4166 TFLOPS)
 - `analysis/fp8_gemm/mi350x/kernel_mxfp4_asm.s` — gluon reference MXFP4 .s (5109 TFLOPS)
 - `analysis/fp8_gemm/mi350x/test_mxfp4_gluon_cpp.py` — Gluon C++ benchmark/correctness harness
@@ -92,7 +92,7 @@ MXFP4_PRESHUFFLE_QUANT=1 MXFP4_WARMUP=100 MXFP4_ITERS=200 MXFP4_CHECK=1 MXFP4_DE
 | --- | ---: | ---: | ---: | --- | --- |
 | Gluon reference (.s) | 5109 | ~5300 | 0 | 55.62 dB | 100% |
 | aiter asm (128×256) | — | — | 0 | — | ~100% |
-| **MXFP4 Gluon C++** | **4412** | ~4650 | **0** | ~25 dB* | **86.4%** |
+| **MXFP4 Gluon C++** | **4524** | ~4750 | **0** | ~25 dB* | **88.6%** |
 | MXFP4 colwise KPAIR | 4241 | ~4510 | 0 | 49.62 dB | 83.0% |
 | MXFP4 hybrid (4-wave) | 4166 | ~4440 | 0 | 49.62 dB | 81.5% |
 | MXFP4 builtin (4-wave) | 4299 | 4575 | 0* | 49.62 dB | 84.1% |
@@ -203,18 +203,22 @@ Expected outcome: close to or exceeding 8-wave's 3011 TFLOPS, with potential for
 - MXFP4 Gluon C++ scale loads after Step 2: 4073 TFLOPS (-340 from baseline). Moving 8 buffer_load_dword between Step 2 and barrier increases vmcnt(8) stall before the barrier.
 - MXFP8/MXFP4 Python .s rewriter scheduling optimizations (AGPR redistribution, cross-barrier MFMA split, ds_read early issue): all yield 0% improvement. Compiler scheduling is already near-optimal.
 - MXFP4 colwise KPAIR with BK=128 upfront loading: eliminates remap_phase VALU (+1.8% over hybrid) but BK=128 means 32 K-iterations with 2 barriers each. Cannot match Gluon's BK=256 (16 iterations) without column-first incremental B loading, which requires per-column LDS reads and single-buffer architecture.
+- MXFP4 Gluon C++ embedded PFs in asm (s_mov m0 + buffer_load_dwordx4 ... lds inside MFMA asm blocks): 4308 TFLOPS (WORSE than 4436 baseline). Each PF pair adds 2 issue cycles inside the MFMA instruction stream; with 4 synchronized waves, creates 8-cycle MFMA gaps per PF. Net non-MFMA cycles INCREASE vs distributed-gap approach.
+- MXFP4 Gluon C++ 2× loop unrolling: 4162 TFLOPS (WORSE). 96 SGPRs + icache pressure from doubled loop body.
+- MXFP4 Gluon C++ explicit vmcnt(0) after barrier: 4398 TFLOPS, no improvement over baseline.
 
 ## MXFP4 Column-First KPAIR Kernel (kernel_mxfp4_colwise.cpp)
 
-### Gluon C++ reimplementation: 4412 TFLOPS (86.4% of Gluon .s)
+### Gluon C++ reimplementation: 4524 TFLOPS (88.6% of Gluon .s)
 - Reimplemented Gluon Python kernel architecture in C++ with ThunderKittens framework
-- 0 spills, 256 VGPRs + 256 AGPRs, 0 scratch
+- 0 spills, 89 SGPRs, 256 VGPRs + 256 AGPRs, 0 scratch
 - **SNR ~25 dB** (speed prioritized over correctness per user directive; scale vmcnt issue suspected)
 - Key scheduling optimizations applied:
   - **ds_read_b128 front-loading**: all 8 LDS reads interleaved 1:1 with first 8 MFMAs in each kpair block
   - **Named LDS variables + v_cndmask**: eliminated compiler-generated ds_read_b64 stalls from runtime-indexed arrays. 16 static named variables with ternary selection (8 v_cndmask per iteration, 0 ds_read_b64)
   - **Hoisted pf_params**: make_pf_params computation moved before Steps 1-2, overlapping with MFMAs. Reduced Step2→Step3 gap from ~80 ASM instructions to 5 (lgkmcnt + vmcnt + barrier)
-- **Remaining 13.6% gap root cause**: algorithmic, not scheduling. Our 4-step × 32-iteration loop vs Gluon's column-first BK=256 × 16-iteration structure. Gluon achieves better MFMA utilization through fewer loop iterations, finer-grained barrier placement, and tighter prefetch scheduling.
+  - **Front-loaded tile PFs + single-block Steps 3-4**: all 16 tile prefetches (emit_one_pf) issued immediately after the barrier, before MFMA Steps 3-4. Steps 3-4 now use `kpair_32mfma_with_lds` (single asm block, 32 MFMAs + 8 ds_reads, zero inter-row gaps). This eliminates the 7 × 6 = 42 non-MFMA instructions that were distributed inside Steps 3-4 as inter-row PF gaps, replacing them with a single concentrated PF block at the barrier sync point. **+88 TFLOPS (+2.0%) from 4436 baseline**.
+- **Remaining 11.3% gap root cause**: algorithmic, not scheduling. Our 4-step × 32-iteration loop vs Gluon's column-first BK=256 × 16-iteration structure. Gluon achieves better MFMA utilization through fewer loop iterations, finer-grained barrier placement, and tighter prefetch scheduling.
 
 ### MXFP4 colwise KPAIR: 4240 TFLOPS (+1.8% over hybrid 4166)
 - SNR 49.62 dB, determinism PASS (5 runs), 0 spills, 256 VGPRs + 256 AGPRs
