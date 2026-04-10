@@ -43,6 +43,7 @@ def _can_use_4wave(M: int, N: int, K: int) -> bool:
 
 
 _JIT_SRC_RCR = "kernel_jit_rcr.cpp"
+_JIT_SRC_CRR = "kernel_jit_crr.cpp"
 _JIT_SRC_FULL = "kernel_fp8_layouts.cpp"
 _HIPCXX = "/opt/rocm/bin/hipcc"
 _PY_INCLUDES = None
@@ -56,6 +57,10 @@ _VARIANT_FLAGS = {
     VARIANT_4WAVE: "-DRCR_USE_EXACT_4WAVE_FASTPATH=1 -DRCR_USE_EXACT_8WAVE_FASTPATH=0",
     VARIANT_8WAVE: "-DRCR_USE_EXACT_4WAVE_FASTPATH=0 -DRCR_USE_EXACT_8WAVE_FASTPATH=1",
     VARIANT_BOTH:  "-DRCR_USE_EXACT_4WAVE_FASTPATH=1 -DRCR_USE_EXACT_8WAVE_FASTPATH=1",
+}
+
+_CRR_VARIANT_FLAGS = {
+    VARIANT_4WAVE: "-DCRR_USE_EXACT_4WAVE_FASTPATH=1",
 }
 
 
@@ -90,9 +95,14 @@ def compile_for_shape(M: int, N: int, K: int, variant: str = VARIANT_BOTH,
     t0 = time.time()
 
     py_inc, py_ld = _get_py_flags()
-    vflags = _VARIANT_FLAGS.get(variant, _VARIANT_FLAGS[VARIANT_BOTH])
     if layout == "rcr":
+        vflags = _VARIANT_FLAGS.get(variant, _VARIANT_FLAGS[VARIANT_BOTH])
         src = os.path.join(_DIR, _JIT_SRC_RCR)
+        extra = [f"-DM_DIM={M}", f"-DN_DIM={N}", f"-DK_DIM={K}", *vflags.split(),
+                 "-DRCR_STEADY_VMCNT=8"]
+    elif layout == "crr":
+        vflags = _CRR_VARIANT_FLAGS.get(variant, _CRR_VARIANT_FLAGS[VARIANT_4WAVE])
+        src = os.path.join(_DIR, _JIT_SRC_CRR)
         extra = [f"-DM_DIM={M}", f"-DN_DIM={N}", f"-DK_DIM={K}", *vflags.split()]
     else:
         src = os.path.join(_DIR, _JIT_SRC_FULL)
@@ -103,7 +113,8 @@ def compile_for_shape(M: int, N: int, K: int, variant: str = VARIANT_BOTH,
         "-DKITTENS_CDNA4", "--offload-arch=gfx950",
         "-DHIP_ENABLE_WARP_SYNC_BUILTINS", "-ffast-math",
         "-I/opt/rocm/include/rocrand",
-        "-DRCR_STEADY_VMCNT=8", *extra,
+        "-DGEMM_BLOCK_SWIZZLE=1", "-DGEMM_BLOCK_SWIZZLE_NUM_XCDS=8",
+        *extra,
         "-std=c++20", "-w", "-shared", "-fPIC",
         f"-I{_TK_ROOT}/include", f"-I{_TK_ROOT}/prototype",
         "-I/opt/rocm/include/hip",

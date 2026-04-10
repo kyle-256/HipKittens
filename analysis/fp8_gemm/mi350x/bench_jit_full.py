@@ -59,17 +59,56 @@ shapes = sorted(all_shapes)
 layouts = ["rcr", "rrr", "crr"]
 
 
+def _grid_size(M, N):
+    return (M // 256) * (N // 256)
+
+
+def _can_use_4wave_jit(M, N, K):
+    """True iff shape meets 4-wave JIT criteria (alignment + grid threshold)."""
+    return (M % 256 == 0 and N % 256 == 0 and K % 128 == 0
+            and K >= 256 and _grid_size(M, N) >= 640)
+
+
 def get_rcr_dir(M, N, K):
-    """RCR: use per-shape 4-wave JIT cache if available, else fall back to shared dynamic."""
-    jit_dir = os.path.join(CACHE, f"rcr_{M}x{N}x{K}_4wave")
-    so = os.path.join(jit_dir, f"tk_fp8_layouts{EXT}")
-    if os.path.exists(so):
-        return jit_dir
+    """RCR: per-shape 4-wave JIT if available and eligible, else 8-wave shared."""
+    if _can_use_4wave_jit(M, N, K):
+        jit_dir = os.path.join(CACHE, f"rcr_{M}x{N}x{K}_4wave")
+        so = os.path.join(jit_dir, f"tk_fp8_layouts{EXT}")
+        if os.path.exists(so):
+            return jit_dir
     return compile_shared("rcr")
 
 
+def get_crr_dir(M, N, K):
+    """CRR: per-shape 4-wave JIT if eligible and cached, else 8-wave shared."""
+    if _can_use_4wave_jit(M, N, K):
+        jit_dir = os.path.join(CACHE, f"crr_{M}x{N}x{K}_4wave")
+        so = os.path.join(jit_dir, f"tk_fp8_layouts{EXT}")
+        if os.path.exists(so):
+            return jit_dir
+    return compile_shared("crr")
+
+
+def compile_crr_jit(M, N, K):
+    """Compile per-shape 4-wave CRR JIT kernel."""
+    outdir = os.path.join(CACHE, f"crr_{M}x{N}x{K}_4wave")
+    so = os.path.join(outdir, f"tk_fp8_layouts{EXT}")
+    if os.path.exists(so):
+        return outdir
+    os.makedirs(outdir, exist_ok=True)
+    cmd = [HIPCXX, os.path.join(DIR, "kernel_jit_crr.cpp"),
+           *BASE_FLAGS,
+           f"-DM_DIM={M}", f"-DN_DIM={N}", f"-DK_DIM={K}",
+           "-DCRR_USE_EXACT_4WAVE_FASTPATH=1",
+           *PY_INC.split(), *PY_LD.split(), "-o", so]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    if r.returncode != 0:
+        raise RuntimeError(f"CRR JIT compile failed {M}x{N}x{K}:\n{r.stderr[-300:]}")
+    return outdir
+
+
 def compile_shared(lay):
-    """RRR/CRR: single compile of full kernel_fp8_layouts.cpp."""
+    """RRR (and CRR fallback): single compile of full kernel_fp8_layouts.cpp."""
     outdir = os.path.join(CACHE, f"{lay}_shared")
     so = os.path.join(outdir, f"tk_fp8_layouts{EXT}")
     if os.path.exists(so):
@@ -103,7 +142,7 @@ def bench_one(M, N, K, lay, so_dir):
 print(f"[Phase 1] Compiling RCR × {len(shapes)} shapes + RRR/CRR shared...")
 t0 = time.time()
 
-# RRR and CRR: one compile each
+# RRR and CRR: one compile each (8-wave shared)
 shared_dirs = {}
 for lay in ["rrr", "crr"]:
     shared_dirs[lay] = compile_shared(lay)
@@ -118,7 +157,10 @@ results = {lay: {} for lay in layouts}
 for lay in layouts:
     for i, (M, N, K) in enumerate(shapes):
         key = f"{M}_{N}_{K}"
-        so_dir = get_rcr_dir(M, N, K) if lay == "rcr" else shared_dirs.get(lay)
+        if lay == "rcr":
+            so_dir = get_rcr_dir(M, N, K)
+        else:
+            so_dir = shared_dirs.get(lay)
         if not so_dir:
             continue
         tf = bench_one(M, N, K, lay, so_dir)
