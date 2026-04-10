@@ -59,8 +59,12 @@ shapes = sorted(all_shapes)
 layouts = ["rcr", "rrr", "crr"]
 
 
-def compile_rcr(M, N, K):
-    """RCR: uses full dynamic kernel (same as RRR/CRR)."""
+def get_rcr_dir(M, N, K):
+    """RCR: use per-shape 4-wave JIT cache if available, else fall back to shared dynamic."""
+    jit_dir = os.path.join(CACHE, f"rcr_{M}x{N}x{K}_4wave")
+    so = os.path.join(jit_dir, f"tk_fp8_layouts{EXT}")
+    if os.path.exists(so):
+        return jit_dir
     return compile_shared("rcr")
 
 
@@ -105,13 +109,7 @@ for lay in ["rrr", "crr"]:
     shared_dirs[lay] = compile_shared(lay)
     print(f"  {lay.upper()} shared kernel ready")
 
-# RCR: same shared compilation
-shared_dirs["rcr"] = compile_shared("rcr")
-print(f"  RCR shared kernel ready")
-
-ok = 3
-total = 3
-print(f"[Phase 1] Done in {time.time()-t0:.1f}s ({ok}/{total} ok)")
+print(f"[Phase 1] Done in {time.time()-t0:.1f}s (RRR/CRR shared ready, RCR uses per-shape JIT cache)")
 
 # ---- Phase 2: Benchmark ----
 print(f"\n[Phase 2] Benchmarking {len(shapes)} shapes × {len(layouts)} layouts on GPU{GPU}...")
@@ -120,7 +118,7 @@ results = {lay: {} for lay in layouts}
 for lay in layouts:
     for i, (M, N, K) in enumerate(shapes):
         key = f"{M}_{N}_{K}"
-        so_dir = shared_dirs.get(lay)
+        so_dir = get_rcr_dir(M, N, K) if lay == "rcr" else shared_dirs.get(lay)
         if not so_dir:
             continue
         tf = bench_one(M, N, K, lay, so_dir)

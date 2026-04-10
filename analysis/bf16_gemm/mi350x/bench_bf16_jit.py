@@ -30,9 +30,10 @@ bench_jit = '''import torch,sys,os,math
 sys.path.insert(0,'{sodir}')
 import tk_bf16_layouts as m
 M,N,K={M},{N},{K}
-A=torch.randn(M,K,dtype=torch.bfloat16,device='cuda')
+bM,bN={bM},{bN}
+A=torch.randn({a_shape},dtype=torch.bfloat16,device='cuda')
 B_{lay}=torch.randn({b_shape},dtype=torch.bfloat16,device='cuda')
-C=torch.zeros(M,N,dtype=torch.bfloat16,device='cuda')
+C=torch.zeros(bM,bN,dtype=torch.bfloat16,device='cuda')
 best_gm,best_tf=4,0
 for gm in [1,2,4,8,16]:
     fn=lambda:m.gemm_{lay}(A,B_{lay},C,gm)
@@ -89,14 +90,19 @@ def run_script(script, cwd=DIR):
         pass
     return None
 
-B_SHAPE = {"rcr": "N,K", "rrr": "K,N", "crr": "K,N"}
 TORCH_TPL = {"rcr": bench_torch_rcr, "rrr": bench_torch_rrr, "crr": bench_torch_crr}
 
 # Phase 1: compile
-print(f"[Phase 1] Pre-compiling {len(k_values)} K-specialized kernels...")
+print(f"[Phase 1] Pre-compiling {len(shapes)} exact-dim kernels...")
 sys.path.insert(0, DIR)
-from jit_bf16_gemm import warmup_k_values, compile_for_k, _cache_subdir, _MODULE_NAME
-warmup_k_values(k_values, verbose=True)
+from jit_bf16_gemm import warmup_shapes, _exact_cache_dir, _MODULE_NAME, _can_jit
+warmup_shapes(shapes, verbose=True)
+
+# Also compile swap(M↔N) shapes for N > M cases
+swap_shapes = [(N, M, K) for M, N, K in shapes if N > M and _can_jit(N, M, K)]
+if swap_shapes:
+    print(f"[Phase 1] Pre-compiling {len(swap_shapes)} swap(N↔M) kernels...")
+    warmup_shapes(swap_shapes, verbose=True)
 
 # Phase 2: benchmark
 layouts = ["rcr", "rrr", "crr"]
@@ -111,14 +117,28 @@ results = {lay: [] for lay in layouts}
 all_data = []
 
 for M, N, K in shapes:
-    sodir = _cache_subdir(K)
     row_data = {"M": M, "N": N, "K": K}
     line = f"{M:>5} {N:>6} {K:>5}"
 
     for lay in layouts:
-        b_shape = B_SHAPE[lay]
-        script = bench_jit.format(sodir=sodir, M=M, N=N, K=K, lay=lay,
-                                  b_shape=b_shape, w=WARMUP, it=ITERS)
+        # Swap M↔N when N > M: compute C^T = B^T@A^T instead of C = A@B^T
+        # This avoids tall-N grid which is inefficient for our 256×256 tile.
+        use_swap = N > M and _can_jit(N, M, K)
+        bM, bN, bK = (N, M, K) if use_swap else (M, N, K)
+        sodir = _exact_cache_dir(bM, bN, bK)
+
+        if lay == "rcr":
+            a_shape = f"{bM},{bK}"  # A=(bM,K)
+            b_shape = f"{bN},{bK}"  # B=(bN,K) [transposed at MMA]
+        elif lay == "rrr":
+            a_shape = f"{bM},{bK}"  # A=(bM,K)
+            b_shape = f"{bK},{bN}"  # B=(K,bN)
+        else:  # crr
+            a_shape = f"{bK},{bM}"  # A=(K,bM) stored transposed
+            b_shape = f"{bK},{bN}"  # B=(K,bN)
+
+        script = bench_jit.format(sodir=sodir, M=M, N=N, K=K, bM=bM, bN=bN, lay=lay,
+                                  a_shape=a_shape, b_shape=b_shape, w=WARMUP, it=ITERS)
         out = run_script(script)
         if out:
             parts = out.split()
