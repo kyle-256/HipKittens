@@ -34,11 +34,49 @@ bench_tpl = '''import torch,tk_fp8_layouts as m
 M,N,K={M},{N},{K}
 {make_ab}
 C=torch.zeros(M,N,dtype=torch.bfloat16,device='cuda')
-fn=lambda:m.gemm_{lay}(A,B,C,1.0,1.0,4)
+fn=lambda:m.gemm_{lay}(A,B,C,1.0,1.0,{group_m})
 for _ in range({w}):C.zero_();fn()
 se=torch.cuda.Event(enable_timing=True);ee=torch.cuda.Event(enable_timing=True);ts=[]
 for _ in range({it}):(torch.cuda.synchronize(),se.record(),fn(),ee.record(),torch.cuda.synchronize(),ts.append(se.elapsed_time(ee)))
 print(f"{{2.0*M*N*K/(sum(ts)/len(ts)*1e9):.1f}}")'''
+
+# Per-shape tuned group_m for RCR (from sweep: best of gm=4,8,16)
+# Default is 4 for shapes not listed.
+RCR_GROUP_M = {
+    # shapes where gm > 4 helps
+    (4096,  4096,  4096): 16,
+    (4096,  4096, 11008):  4,
+    (4096, 22016,  4096): 16,
+    (4096,  8192,  8192): 16,
+    (4096, 10240,  8192): 16,
+    (8192,  3584,  3584): 16,
+    (8192,  4096,  4096):  8,
+    (8192,  4608,  3584):  8,
+    (8192,  6144,  4096): 16,
+    (8192,  8192,  8192):  8,
+    (8192, 10240,  8192):  4,
+    (8192, 12288,  4096):  8,
+    (8192, 16384, 16384):  8,
+    (8192, 16384, 53248): 16,
+    (8192, 18432, 16384): 16,
+    (8192, 22016,  4096):  8,
+    (8192, 28672,  4096):  8,
+    (8192, 37888,  3584): 16,
+    (8192, 57344,  8192):  8,
+    (8192,  8192, 28672): 16,
+    (8192, 106496,16384): 16,
+    (16384, 3584,  3584): 16,
+    (16384, 3584, 18944): 16,
+    (16384, 4096,  4096): 16,
+    (16384, 4608,  3584):  4,
+    (16384, 8192,  8192):  8,
+    (16384,10240,  8192):  8,
+    (16384,16384, 16384):  8,
+    (16384,16384, 53248): 16,
+    (16384,18432, 16384):  8,
+    (16384,28672,  4096):  4,
+    (16384,37888,  3584):  4,
+}
 
 MAKE_AB = {
     "rcr": "A=(torch.randn(M,K,device='cuda')*0.1).to(torch.float8_e4m3fn);B=(torch.randn(N,K,device='cuda')*0.1).to(torch.float8_e4m3fn)",
@@ -128,8 +166,9 @@ def compile_shared(lay):
 
 def bench_one(M, N, K, lay, so_dir):
     """Run one benchmark point in a subprocess. Returns TFLOPS or 0."""
+    gm = RCR_GROUP_M.get((M, N, K), 4) if lay == "rcr" else 4
     script = bench_tpl.format(M=M, N=N, K=K, lay=lay, make_ab=MAKE_AB[lay],
-                              w=WARMUP, it=ITERS)
+                              group_m=gm, w=WARMUP, it=ITERS)
     env = {**os.environ, "HIP_VISIBLE_DEVICES": GPU, "PYTHONPATH": so_dir}
     try:
         r = subprocess.run(["python3", "-c", script], capture_output=True, text=True,
