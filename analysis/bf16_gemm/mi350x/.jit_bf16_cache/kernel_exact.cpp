@@ -281,6 +281,7 @@ void gemm_kernel(const layout_globals g) {
     };
 
     if constexpr (L == Layout::CRR) {
+        #pragma unroll 2
         for (int tile = 0; tile < num_tiles - 2; tile += 2) main_loop_iter(tile);
     } else {
         #pragma unroll
