@@ -4,14 +4,32 @@
         "build_N": 4096,
         "build_K": 4096,
         "rcr": {
-            "avg_ms": 0.3904635161161423,
-            "tflops": 351.9892327945927,
-            "snr_db": 43.128286063175395,
-            "deterministic": false,
+            "avg_ms": 0.06618429981172085,
+            "tflops": 2076.6096168272884,
+            "snr_db": 49.606555143999486,
+            "deterministic": true,
             "determinism_max_abs_diff": 0.0,
-            "quality_ok": false
+            "quality_ok": true
         },
-        "target_met": false,
-        "success_gate": false
+        "rrr": {
+            "avg_ms": 0.06596840023994446,
+            "tflops": 2083.405887850824,
+            "snr_db": 49.60811370507247,
+            "deterministic": true,
+            "determinism_max_abs_diff": 0.0,
+            "quality_ok": true,
+            "pct_of_rcr": 100.32727725849209
+        },
+        "crr": {
+            "avg_ms": 0.06359239928424358,
+            "tflops": 2161.2481211422623,
+            "snr_db": 49.605681349354626,
+            "deterministic": true,
+            "determinism_max_abs_diff": 0.0,
+            "quality_ok": true,
+            "pct_of_rcr": 104.07580238621294
+        },
+        "target_met": true,
+        "success_gate": true
     }
 }

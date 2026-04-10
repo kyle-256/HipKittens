@@ -9,7 +9,7 @@ import tk_bf16_layouts
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../fp8_gemm/mi350x"))
 from bench_vs_hipblaslt import DenseModelConfigs, gen_gemm_test_cases
 
-WARMUP, ITERS = 30, 50
+WARMUP, ITERS = 15, 30
 BLK = tk_bf16_layouts.BLOCK_SIZE
 K_STEP = tk_bf16_layouts.K_STEP
 
@@ -73,11 +73,12 @@ for config in DenseModelConfigs.values():
                 all_shapes.add((M, n, k))
 shapes = sorted(all_shapes)
 
-print(f"BF16 GEMM benchmark: {len(shapes)} shapes, RCR layout")
-print(f"{'Model':>16} {'Op':>12} {'MBS':>3} {'M':>5} {'N':>6} {'K':>5} {'TK':>8} {'torch':>8} {'ratio':>7}")
-print("-" * 85)
+LAYOUTS = ["rcr", "rrr", "crr"]
+print(f"BF16 GEMM benchmark: {len(shapes)} shapes × {len(LAYOUTS)} layouts vs torch.mm (hipBLASLt)")
+print(f"{'Model':>16} {'Op':>12} {'MBS':>3} {'M':>5} {'N':>6} {'K':>5} {'Lay':>4} {'TK':>8} {'torch':>8} {'ratio':>7}")
+print("-" * 93)
 
-stats = []
+stats_by_layout = {l: [] for l in LAYOUTS}
 for model_name in DenseModelConfigs:
     config = DenseModelConfigs[model_name]
     for mbs in [1, 2]:
@@ -85,15 +86,18 @@ for model_name in DenseModelConfigs:
             M = seq * mbs
             if M % BLK != 0 or n % BLK != 0 or k % K_STEP != 0:
                 continue
-            tk_tf = bench_tk(M, n, k, "rcr")
-            torch_tf = bench_torch(M, n, k, "rcr")
-            ratio = tk_tf / torch_tf if torch_tf > 0 else 0
-            stats.append(ratio)
-            win = "*" if ratio >= 1.0 else " "
-            print(f"{model_name:>16} {op_name:>12} {mbs:>3} {M:>5} {n:>6} {k:>5} {tk_tf:>8.1f} {torch_tf:>8.1f} {ratio:>6.3f}x{win}")
+            for layout in LAYOUTS:
+                tk_tf = bench_tk(M, n, k, layout)
+                torch_tf = bench_torch(M, n, k, layout)
+                ratio = tk_tf / torch_tf if torch_tf > 0 else 0
+                stats_by_layout[layout].append(ratio)
+                win = "*" if ratio >= 1.0 else " "
+                print(f"{model_name:>16} {op_name:>12} {mbs:>3} {M:>5} {n:>6} {k:>5} {layout:>4} {tk_tf:>8.1f} {torch_tf:>8.1f} {ratio:>6.3f}x{win}")
 
 print()
-if stats:
-    geo = math.exp(sum(math.log(v) for v in stats) / len(stats))
-    wins = sum(1 for v in stats if v >= 1.0)
-    print(f"Geo-mean vs torch.mm: {geo:.4f}x  ({wins}/{len(stats)} wins)")
+for layout in LAYOUTS:
+    s = stats_by_layout[layout]
+    if s:
+        geo = math.exp(sum(math.log(v) for v in s) / len(s))
+        wins = sum(1 for v in s if v >= 1.0)
+        print(f"{layout.upper()} geo-mean vs torch.mm: {geo:.4f}x  ({wins}/{len(s)} wins)")
