@@ -70,40 +70,43 @@ def _can_use_4wave_jit(M, N, K):
 
 
 def get_rcr_dir(M, N, K):
-    """RCR: per-shape 4-wave JIT if available and eligible, else 8-wave shared."""
-    if _can_use_4wave_jit(M, N, K):
-        jit_dir = os.path.join(CACHE, f"rcr_{M}x{N}x{K}_4wave")
-        so = os.path.join(jit_dir, f"tk_fp8_layouts{EXT}")
-        if os.path.exists(so):
-            return jit_dir
+    """RCR: per-shape 4-wave JIT if cached (any grid size), else 8-wave shared.
+
+    Note: 4-wave JIT outperforms shared even for small grids (< 640), so we always
+    prefer cached 4-wave JIT over the shared dynamic kernel.
+    """
+    jit_dir = os.path.join(CACHE, f"rcr_{M}x{N}x{K}_4wave")
+    so = os.path.join(jit_dir, f"tk_fp8_layouts{EXT}")
+    if os.path.exists(so):
+        return jit_dir
     return compile_shared("rcr")
 
 
 def get_crr_dir(M, N, K):
-    """CRR: per-shape 4-wave JIT if eligible and cached, else 8-wave shared."""
-    if _can_use_4wave_jit(M, N, K):
-        jit_dir = os.path.join(CACHE, f"crr_{M}x{N}x{K}_4wave")
-        so = os.path.join(jit_dir, f"tk_fp8_layouts{EXT}")
-        if os.path.exists(so):
-            return jit_dir
+    """CRR: per-shape 8-wave JIT if cached, else 8-wave shared."""
+    jit_dir = os.path.join(CACHE, f"crr_{M}x{N}x{K}_8wave")
+    so = os.path.join(jit_dir, f"tk_fp8_layouts{EXT}")
+    if os.path.exists(so):
+        return jit_dir
     return compile_shared("crr")
 
 
-def compile_crr_jit(M, N, K):
-    """Compile per-shape 4-wave CRR JIT kernel."""
-    outdir = os.path.join(CACHE, f"crr_{M}x{N}x{K}_4wave")
+def compile_crr_8wave_jit(M, N, K):
+    """CRR: per-shape 8-wave JIT via kernel_jit_all.cpp (XCD swizzle + compile-time k_iters)."""
+    outdir = os.path.join(CACHE, f"crr_{M}x{N}x{K}_8wave")
     so = os.path.join(outdir, f"tk_fp8_layouts{EXT}")
     if os.path.exists(so):
         return outdir
     os.makedirs(outdir, exist_ok=True)
-    cmd = [HIPCXX, os.path.join(DIR, "kernel_jit_crr.cpp"),
+    cmd = [HIPCXX, os.path.join(DIR, "kernel_jit_all.cpp"),
            *BASE_FLAGS,
            f"-DM_DIM={M}", f"-DN_DIM={N}", f"-DK_DIM={K}",
-           "-DCRR_USE_EXACT_4WAVE_FASTPATH=1",
+           "-DJIT_LAYOUT=3",
+           # CRR_MAIN_UNROLL=1 (default): unroll=2 regresses due to epilogue mismatch
            *PY_INC.split(), *PY_LD.split(), "-o", so]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     if r.returncode != 0:
-        raise RuntimeError(f"CRR JIT compile failed {M}x{N}x{K}:\n{r.stderr[-300:]}")
+        raise RuntimeError(f"CRR 8wave JIT failed {M}x{N}x{K}:\n{r.stderr[-300:]}")
     return outdir
 
 
@@ -139,16 +142,29 @@ def bench_one(M, N, K, lay, so_dir):
 
 
 # ---- Phase 1: Compile ----
-print(f"[Phase 1] Compiling RCR × {len(shapes)} shapes + RRR/CRR shared...")
+print(f"[Phase 1] Compiling: RCR {len(shapes)} 4wave JIT + CRR {len(shapes)} 8wave JIT + RRR shared...")
 t0 = time.time()
 
-# RRR and CRR: one compile each (8-wave shared)
+# RRR: shared 8-wave; CRR fallback: shared 8-wave
 shared_dirs = {}
-for lay in ["rrr", "crr"]:
-    shared_dirs[lay] = compile_shared(lay)
-    print(f"  {lay.upper()} shared kernel ready")
+shared_dirs["rrr"] = compile_shared("rrr")
+print(f"  RRR shared kernel ready")
+shared_dirs["crr"] = compile_shared("crr")
+print(f"  CRR shared fallback ready")
 
-print(f"[Phase 1] Done in {time.time()-t0:.1f}s (RRR/CRR shared ready, RCR uses per-shape JIT cache)")
+# Compile CRR 8-wave JIT for all shapes in parallel (compile-time k_iters + XCD swizzle)
+print(f"  Compiling CRR 8-wave JIT for {len(shapes)} shapes...")
+with ThreadPoolExecutor(max_workers=8) as pool:
+    futs = {pool.submit(compile_crr_8wave_jit, M, N, K): (M, N, K) for M, N, K in shapes}
+    for fut in futs:
+        try:
+            fut.result()
+        except Exception as e:
+            M, N, K = futs[fut]
+            print(f"  CRR 8wave JIT FAILED {M}x{N}x{K}: {e}")
+print(f"  CRR 8wave JIT compilation done")
+
+print(f"[Phase 1] Done in {time.time()-t0:.1f}s")
 
 # ---- Phase 2: Benchmark ----
 print(f"\n[Phase 2] Benchmarking {len(shapes)} shapes × {len(layouts)} layouts on GPU{GPU}...")
@@ -159,6 +175,8 @@ for lay in layouts:
         key = f"{M}_{N}_{K}"
         if lay == "rcr":
             so_dir = get_rcr_dir(M, N, K)
+        elif lay == "crr":
+            so_dir = get_crr_dir(M, N, K)
         else:
             so_dir = shared_dirs.get(lay)
         if not so_dir:
