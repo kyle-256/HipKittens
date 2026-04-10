@@ -107,16 +107,42 @@ def _can_use_4wave_jit(M, N, K):
             and K >= 256 and _grid_size(M, N) >= 640)
 
 
-def get_rcr_dir(M, N, K):
-    """RCR: per-shape 4-wave JIT if cached (any grid size), else 8-wave shared.
-
-    Note: 4-wave JIT outperforms shared even for small grids (< 640), so we always
-    prefer cached 4-wave JIT over the shared dynamic kernel.
-    """
-    jit_dir = os.path.join(CACHE, f"rcr_{M}x{N}x{K}_4wave")
-    so = os.path.join(jit_dir, f"tk_fp8_layouts{EXT}")
+def compile_rcr_8wave_jit(M, N, K):
+    """RCR: per-shape 8-wave JIT via kernel_jit_rcr.cpp (compile-time k_iters)."""
+    outdir = os.path.join(CACHE, f"rcr_{M}x{N}x{K}_8wave")
+    so = os.path.join(outdir, f"tk_fp8_layouts{EXT}")
     if os.path.exists(so):
-        return jit_dir
+        return outdir
+    os.makedirs(outdir, exist_ok=True)
+    cmd = [HIPCXX, os.path.join(DIR, "kernel_jit_rcr.cpp"),
+           *BASE_FLAGS,
+           f"-DM_DIM={M}", f"-DN_DIM={N}", f"-DK_DIM={K}",
+           "-DRCR_USE_EXACT_4WAVE_FASTPATH=0",
+           "-DRCR_USE_EXACT_8WAVE_FASTPATH=1",
+           *PY_INC.split(), *PY_LD.split(), "-o", so]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    if r.returncode != 0:
+        raise RuntimeError(f"RCR 8wave JIT failed {M}x{N}x{K}:\n{r.stderr[-300:]}")
+    return outdir
+
+
+# Small-grid shapes where 8-wave JIT outperforms 8-wave shared (benchmarked).
+# Pattern: large odd-K values (K=11008, K=18944) where full K-loop unroll provides
+# scheduling benefit that outweighs the reduced occupancy vs generic shared kernel.
+RCR_8WAVE_JIT_SHAPES = {
+    (4096, 4096, 11008), (8192, 4096, 11008), (8192, 3584, 18944),
+}
+
+
+def get_rcr_dir(M, N, K):
+    """RCR: 4-wave JIT (grid≥640) → 8-wave JIT (select small-grid shapes) → 8-wave shared."""
+    jit_4wave = os.path.join(CACHE, f"rcr_{M}x{N}x{K}_4wave")
+    if os.path.exists(os.path.join(jit_4wave, f"tk_fp8_layouts{EXT}")):
+        return jit_4wave
+    if (M, N, K) in RCR_8WAVE_JIT_SHAPES:
+        jit_8wave = os.path.join(CACHE, f"rcr_{M}x{N}x{K}_8wave")
+        if os.path.exists(os.path.join(jit_8wave, f"tk_fp8_layouts{EXT}")):
+            return jit_8wave
     return compile_shared("rcr")
 
 
@@ -181,7 +207,7 @@ def bench_one(M, N, K, lay, so_dir):
 
 
 # ---- Phase 1: Compile ----
-print(f"[Phase 1] Compiling: RCR {len(shapes)} 4wave JIT + CRR {len(shapes)} 8wave JIT + RRR shared...")
+print(f"[Phase 1] Compiling: RCR 4wave JIT + RCR 8wave JIT (select) + CRR {len(shapes)} 8wave JIT + RRR shared...")
 t0 = time.time()
 
 # RRR: shared 8-wave; CRR fallback: shared 8-wave
@@ -190,6 +216,19 @@ shared_dirs["rrr"] = compile_shared("rrr")
 print(f"  RRR shared kernel ready")
 shared_dirs["crr"] = compile_shared("crr")
 print(f"  CRR shared fallback ready")
+
+# RCR 8-wave JIT for select small-grid shapes (outperforms shared for K=11008, K=18944)
+rcr_8wave_needed = [(M, N, K) for M, N, K in RCR_8WAVE_JIT_SHAPES if (M, N, K) in set(shapes)]
+if rcr_8wave_needed:
+    print(f"  Compiling RCR 8-wave JIT for {len(rcr_8wave_needed)} select shapes...")
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futs = {pool.submit(compile_rcr_8wave_jit, M, N, K): (M, N, K) for M, N, K in rcr_8wave_needed}
+        for fut in futs:
+            try: fut.result()
+            except Exception as e:
+                M, N, K = futs[fut]
+                print(f"  RCR 8wave JIT FAILED {M}x{N}x{K}: {e}")
+    print(f"  RCR 8-wave JIT done")
 
 # Compile CRR 8-wave JIT for all shapes in parallel (compile-time k_iters + XCD swizzle)
 print(f"  Compiling CRR 8-wave JIT for {len(shapes)} shapes...")
