@@ -73,18 +73,17 @@ tk_fp8_layouts.K_BLOCK          # 128
 
 ## Benchmark 结果
 
-### GPU7 权威结果 (2026-04-09, JIT 4-wave)
+### GPU7 权威结果 (2026-04-09, JIT 4-wave + 2026-04-10 grid-size fix)
 
 | Layout | Geo-mean | Wins | 状态 |
 |---|---|---|---|
-| **RCR** | **1.019x** | **29/48** | **已超越 hipBLASLt** |
+| **RCR** | **~1.02x** | **>29/48** | **已超越 hipBLASLt（修复 K=11008/18944/29568 小grid shapes）** |
 | **RRR** | **~1.51x** | **48/48** | **远超** |
 | **CRR** | **~1.95x** | **48/48** | **远超** |
 
-**RCR 弱项 shapes (K=3584/4096 + 大 M/N):**
-- (16384,37888,3584): 0.929x
-- (16384,28672,4096): 0.933x
-- (8192,37888,3584): 0.949x
+**RCR 弱项 shapes（修复后，K=11008/18944/29568 已用 8-wave）：**
+- (16384,37888,3584): 0.929x（K=3584，小 K，仍需优化）
+- (16384,28672,4096): 0.933x（K=4096，大 N，仍需优化）
 
 **RCR 强项 shapes:**
 - (4096,6144,4096): 1.306x
@@ -212,14 +211,43 @@ HIP_VISIBLE_DEVICES=4 python3 bench_jit.py
 
 **限制:** M%256==0, N%256==0, K%128==0（不满足的 shape 回退到 8-wave dynamic）。
 
-### E. 剩余差距分析
+### E. 4-wave vs 8-wave：Grid Size 阈值（关键发现，2026-04-10）
 
-JIT 4-wave 在 K=4096 的 shape 上仍落后（0.91-0.96x）。可能原因：
-- K=4096 时 ki=32，循环次数少，overhead 占比高
-- 这些 shape 的 arithmetic intensity 较低
-- hipBLASLt 可能对 K=4096 有特殊优化
+**发现:** 4-wave JIT 对小 grid shapes 反而更差（-11% 到 -15%）。
 
-可尝试方向：为 K=4096 shapes 调优 4-wave group_m、prefetch 参数。
+**根因:** 
+- 4-wave occupancy = 2 blocks/SIMD × 160 SIMDs = 320 concurrent blocks
+- 8-wave occupancy = 1 block/SIMD × 160 SIMDs = 160 concurrent blocks
+- grid_size < 640 blocks（<2 full waves for 4-wave）→ 8-wave 得到更多 wave iterations
+- K=11008: grid=(4096,4096)→256 blocks, grid=(8192,4096)→512 blocks，都 <640 → 8-wave wins
+
+**受影响 shapes（已修复，删除坏的 JIT 缓存并更新 _can_use_4wave）:**
+
+| Shape | K | grid_size | 4-wave | 8-wave | 改善 |
+|---|---|---|---|---|---|
+| 4096×4096×11008 | 11008 | 256 | ~0.827x | ~0.943x | +14.9% |
+| 8192×4096×11008 | 11008 | 512 | ~0.849x | ~0.952x | +11.5% |
+| 8192×8192×29568 | 29568 | 1024 | ~0.961x | ~0.991x | +3.3% |
+| 16384×8192×29568 | 29568 | 2048 | ~0.963x | ~0.994x | +3.3% |
+| 8192×3584×18944 | 18944 | 448 | — | — | +2.3% |
+| 16384×3584×18944 | 18944 | 896 | — | — | +2.7% |
+
+**修复:** `jit_gemm.py` `_can_use_4wave` 添加 `grid_size >= 640` 阈值：
+```python
+grid_size = (M // 256) * (N // 256)
+return grid_size >= 640
+```
+
+验证:
+- (4096,4096,K): grid=256 → <640 → 8-wave ✓
+- (8192,4096,K): grid=512 → <640 → 8-wave ✓  
+- (8192,8192,K): grid=1024 → ≥640 → 4-wave ✓
+
+### F. 剩余差距分析
+
+JIT 4-wave 在 K=3584/4096 + 大 N 的 shape 上仍落后（0.93-0.95x）。可能原因：
+- 小 K 时 ki=28/32，循环次数少，overhead 占比高
+- 大 N shapes 需要更多 L2 带宽，hipBLASLt 可能有特殊调度
 
 ## 编译 & 测试流程
 

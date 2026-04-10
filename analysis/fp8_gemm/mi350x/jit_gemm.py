@@ -32,7 +32,14 @@ def _cache_subdir(M: int, N: int, K: int) -> str:
 
 
 def _can_use_4wave(M: int, N: int, K: int) -> bool:
-    return M % 256 == 0 and N % 256 == 0 and K % 128 == 0 and M > 0 and N > 0 and K >= 256
+    if not (M % 256 == 0 and N % 256 == 0 and K % 128 == 0 and M > 0 and N > 0 and K >= 256):
+        return False
+    # For small grids, 8-wave outperforms 4-wave JIT by 11-15%.
+    # 4-wave occupancy = 2 blocks/SIMD × 160 SIMDs = 320 concurrent blocks.
+    # Below 640 blocks (< 2 full waves), the 8-wave kernel gets more wave
+    # iterations per SIMD → better pipeline utilization.
+    grid_size = (M // 256) * (N // 256)
+    return grid_size >= 640
 
 
 _JIT_SRC_RCR = "kernel_jit_rcr.cpp"
