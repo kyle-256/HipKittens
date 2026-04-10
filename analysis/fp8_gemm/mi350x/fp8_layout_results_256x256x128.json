@@ -1,0 +1,17 @@
+{
+    "256x256x128": {
+        "build_M": 256,
+        "build_N": 256,
+        "build_K": 128,
+        "rcr": {
+            "avg_ms": 0.12633699923753738,
+            "tflops": 0.13279732858349494,
+            "snr_db": 49.63252462186428,
+            "deterministic": true,
+            "determinism_max_abs_diff": 0.0,
+            "quality_ok": true
+        },
+        "target_met": false,
+        "success_gate": true
+    }
+}

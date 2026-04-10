@@ -1,0 +1,35 @@
+{
+    "4096x28672x4096": {
+        "build_M": 4096,
+        "build_N": 28672,
+        "build_K": 4096,
+        "rcr": {
+            "avg_ms": 0.3945629894733429,
+            "tflops": 2438.3246781158086,
+            "snr_db": 49.60642761977387,
+            "deterministic": true,
+            "determinism_max_abs_diff": 0.0,
+            "quality_ok": true
+        },
+        "rrr": {
+            "avg_ms": 0.38960298895835876,
+            "tflops": 2469.3667696857106,
+            "snr_db": 49.606418188962785,
+            "deterministic": true,
+            "determinism_max_abs_diff": 0.0,
+            "quality_ok": true,
+            "pct_of_rcr": 101.27309098121786
+        },
+        "crr": {
+            "avg_ms": 0.38112300634384155,
+            "tflops": 2524.3101526021164,
+            "snr_db": 49.60620727998574,
+            "deterministic": true,
+            "determinism_max_abs_diff": 0.0,
+            "quality_ok": true,
+            "pct_of_rcr": 103.52641611915081
+        },
+        "target_met": true,
+        "success_gate": true
+    }
+}

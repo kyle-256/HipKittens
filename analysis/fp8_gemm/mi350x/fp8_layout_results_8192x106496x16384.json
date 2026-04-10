@@ -1,0 +1,17 @@
+{
+    "8192x106496x16384": {
+        "build_M": 8192,
+        "build_N": 106496,
+        "build_K": 16384,
+        "rcr": {
+            "avg_ms": 9.087804508209228,
+            "tflops": 3145.6775171992767,
+            "snr_db": 49.604581176794554,
+            "deterministic": true,
+            "determinism_max_abs_diff": 0.0,
+            "quality_ok": true
+        },
+        "target_met": false,
+        "success_gate": true
+    }
+}
