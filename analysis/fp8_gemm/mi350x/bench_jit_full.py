@@ -135,14 +135,15 @@ RCR_8WAVE_JIT_SHAPES = {
 
 
 def get_rcr_dir(M, N, K):
-    """RCR: 4-wave JIT (grid≥640) → 8-wave JIT (select small-grid shapes) → 8-wave shared."""
-    jit_4wave = os.path.join(CACHE, f"rcr_{M}x{N}x{K}_4wave")
-    if os.path.exists(os.path.join(jit_4wave, f"tk_fp8_layouts{EXT}")):
-        return jit_4wave
+    """RCR: 8-wave JIT (select small-grid) → 4-wave JIT (grid≥640) → 8-wave shared."""
+    # 8-wave JIT checked FIRST for select small-grid shapes where it outperforms 4-wave
     if (M, N, K) in RCR_8WAVE_JIT_SHAPES:
         jit_8wave = os.path.join(CACHE, f"rcr_{M}x{N}x{K}_8wave")
         if os.path.exists(os.path.join(jit_8wave, f"tk_fp8_layouts{EXT}")):
             return jit_8wave
+    jit_4wave = os.path.join(CACHE, f"rcr_{M}x{N}x{K}_4wave")
+    if os.path.exists(os.path.join(jit_4wave, f"tk_fp8_layouts{EXT}")):
+        return jit_4wave
     return compile_shared("rcr")
 
 
