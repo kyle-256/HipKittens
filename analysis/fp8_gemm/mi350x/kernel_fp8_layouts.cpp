@@ -68,7 +68,10 @@ using namespace kittens;
 #define RCR_BATCHED_EPILOGUE_MMA 0
 #endif
 #ifndef RCR_TWO_TILE_SCHEDULE
-#define RCR_TWO_TILE_SCHEDULE 0
+#define RCR_TWO_TILE_SCHEDULE 1
+#endif
+#ifndef RCR_TWO_TILE_MIN_KI
+#define RCR_TWO_TILE_MIN_KI 64
 #endif
 #ifndef RCR_SINGLE_STAGE
 #define RCR_SINGLE_STAGE 0
@@ -966,7 +969,7 @@ void gemm_kernel(const layout_globals g) {
         __builtin_amdgcn_s_barrier();
 
         #if RCR_TWO_TILE_SCHEDULE
-        if ((g.ki & 1) == 0) {
+        if ((g.ki & 1) == 0 && g.ki >= RCR_TWO_TILE_MIN_KI) {
             auto main_loop_iter = [&](int tile) {
                 load_b(b0, Bs[0][0], wn);
                 load_a(a, As[0][0], wm);
@@ -1035,57 +1038,8 @@ void gemm_kernel(const layout_globals g) {
             for (int tile = 0; tile < g.ki - 2; tile += 2) {
                 main_loop_iter(tile);
             }
-
-            {
-                const int tile = g.ki - 2;
-                load_b(b0, Bs[tic][0], wn);
-                load_a(a, As[tic][0], wm);
-                G::load(As[toc][1], g.a, a_co(br*2+1, tile+1), soA);
-                __builtin_amdgcn_s_barrier();
-                asm volatile("s_waitcnt lgkmcnt(0)");
-                __builtin_amdgcn_s_setprio(1); mma_ABt(cA, a, b0, cA); __builtin_amdgcn_s_setprio(0);
-                __builtin_amdgcn_s_barrier();
-
-                load_b(b1, Bs[tic][1], wn);
-                __builtin_amdgcn_s_barrier();
-                asm volatile("s_waitcnt lgkmcnt(0)");
-                __builtin_amdgcn_s_setprio(1); mma_ABt(cB, a, b1, cB); __builtin_amdgcn_s_setprio(0);
-                __builtin_amdgcn_s_barrier();
-
-                load_a(a, As[tic][1], wm);
-                asm volatile("s_waitcnt vmcnt(4)"); __builtin_amdgcn_s_barrier();
-                asm volatile("s_waitcnt lgkmcnt(0)");
-                __builtin_amdgcn_s_setprio(1);
-                mma_ABt(cC, a, b0, cC);
-                mma_ABt(cD, a, b1, cD);
-                __builtin_amdgcn_s_setprio(0);
-                __builtin_amdgcn_s_barrier();
-                tic ^= 1; toc ^= 1;
-            }
-
-            {
-                load_b(b0, Bs[tic][0], wn);
-                load_a(a, As[tic][0], wm);
-                asm volatile("s_waitcnt vmcnt(2)"); __builtin_amdgcn_s_barrier();
-                asm volatile("s_waitcnt lgkmcnt(0)");
-                __builtin_amdgcn_s_setprio(1); mma_ABt(cA, a, b0, cA); __builtin_amdgcn_s_setprio(0);
-                __builtin_amdgcn_s_barrier();
-
-                load_b(b1, Bs[tic][1], wn);
-                asm volatile("s_waitcnt vmcnt(0)"); __builtin_amdgcn_s_barrier();
-                asm volatile("s_waitcnt lgkmcnt(0)");
-                __builtin_amdgcn_s_setprio(1); mma_ABt(cB, a, b1, cB); __builtin_amdgcn_s_setprio(0);
-                __builtin_amdgcn_s_barrier();
-
-                load_a(a, As[tic][1], wm);
-                __builtin_amdgcn_s_barrier();
-                asm volatile("s_waitcnt lgkmcnt(0)");
-                __builtin_amdgcn_s_setprio(1);
-                mma_ABt(cC, a, b0, cC);
-                mma_ABt(cD, a, b1, cD);
-                __builtin_amdgcn_s_setprio(0);
-                __builtin_amdgcn_s_barrier();
-            }
+            TK_WAIT_VMCNT(0);
+            __builtin_amdgcn_s_barrier();
         } else
         #endif
         {
