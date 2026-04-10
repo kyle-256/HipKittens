@@ -148,16 +148,29 @@ void gemm_kernel(const layout_globals g) {
         }
     };
 
-    // For CRR: transpose A from col_l (K×M/2) → row_l (M/2×K), then mma_AB
-    // This avoids mma_AtB which is less efficient on CDNA4.
-    using A_mma_t = std::conditional_t<L == Layout::CRR,
-        rt_bf<HALF_REG_BLOCK_M, K_STEP, row_l, rt_16x32_s>,
-        A_reg_t>;
+    // For CRR: use mma_AtB directly (A in col_l, B in col_l) — no register transpose needed.
+    // mma_AtB_base uses the same hardware instruction as mma_AB_base (mfma_f32_16x16x32_bf16)
+    // but interprets A as transposed, eliminating the register shuffle overhead.
     #define DO_MMA(D, A, B, C) \
         do { \
             if constexpr (L == Layout::RCR) { mma_ABt(D, A, B, C); } \
             else if constexpr (L == Layout::RRR) { mma_AB(D, A, B, C); } \
-            else { A_mma_t _at; transpose(_at, A); mma_AB(D, _at, B, C); } \
+            else { \
+                constexpr int NH = std::remove_reference_t<decltype(D)>::height; \
+                constexpr int NW = std::remove_reference_t<decltype(D)>::width; \
+                constexpr int KH = std::remove_reference_t<decltype(A)>::height; \
+                _Pragma("unroll") \
+                for (int _n = 0; _n < NH; _n++) { \
+                    _Pragma("unroll") \
+                    for (int _m = 0; _m < NW; _m++) { \
+                        mma_AtB_base(D.tiles[_n][_m], A.tiles[0][_n], B.tiles[0][_m], C.tiles[_n][_m]); \
+                        _Pragma("unroll") \
+                        for (int _k = 1; _k < KH; _k++) { \
+                            mma_AtB_base(D.tiles[_n][_m], A.tiles[_k][_n], B.tiles[_k][_m], D.tiles[_n][_m]); \
+                        } \
+                    } \
+                } \
+            } \
         } while(0)
 
     /********** Prologue: load first two K-tiles **********/
@@ -178,6 +191,7 @@ void gemm_kernel(const layout_globals g) {
     __builtin_amdgcn_s_barrier();
 
     /********** Main loop **********/
+    // CRR uses mma_AtB directly (via DO_MMA) — no register transpose needed.
     auto main_loop_iter = [&](int tile) {
         load_b_subtile(B_tile_0, Bs[0][0], warp_col);
         load_a_subtile(A_tile, As[0][0], warp_row);
