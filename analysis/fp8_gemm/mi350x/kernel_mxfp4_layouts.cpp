@@ -153,11 +153,6 @@ __device__ __forceinline__ void fp4_load_st_to_rt(RT &dst, const ST &src) {
     }
 }
 
-template<ducks::rt::row_layout RT>
-__device__ __forceinline__ fp4_intx8_t fp4_extract_tile(const RT &src, int tile_row) {
-    return *reinterpret_cast<const fp4_intx8_t*>(&src.tiles[tile_row][0].data[0]);
-}
-
 __device__ __forceinline__ const uint8_t* preshuffled_scale_row_base_ptr(
     const _gl_scale& src, int row_group)
 {
@@ -173,29 +168,6 @@ __device__ __forceinline__ fp8e8m0_4 load_pq_scale(
     );
 }
 
-__device__ __forceinline__ i32x4 make_scale_srd(const uint8_t* ptr) {
-    i32x4 srd = std::bit_cast<i32x4>(
-        make_buffer_resource(
-            static_cast<uint64_t>(reinterpret_cast<std::uintptr_t>(ptr)),
-            0xFFFFFFFFu,
-            0x00110000u
-        )
-    );
-    srd[0] = __builtin_amdgcn_readfirstlane(srd[0]);
-    srd[1] = __builtin_amdgcn_readfirstlane(srd[1]);
-    srd[2] = __builtin_amdgcn_readfirstlane(srd[2]);
-    srd[3] = __builtin_amdgcn_readfirstlane(srd[3]);
-    return srd;
-}
-
-__device__ __forceinline__ fp8e8m0_4 load_pq_scale_srd(
-    i32x4 srsrc, uint32_t lane_byte_offset, uint32_t soffset)
-{
-    return std::bit_cast<fp8e8m0_4>(
-        llvm_amdgcn_raw_buffer_load_b32(srsrc, lane_byte_offset, soffset, 0)
-    );
-}
-
 __device__ __forceinline__ fp8e8m0_4 remap_phase(fp8e8m0_4 src, int k_phase)
 {
     return std::bit_cast<fp8e8m0_4>(
@@ -206,31 +178,37 @@ __device__ __forceinline__ fp8e8m0_4 remap_phase(fp8e8m0_4 src, int k_phase)
 template<bool UPPER>
 __device__ __forceinline__ void fp4_mma_all_subtiles(
     fp4_acc& acc,
-    const fp4_intx8_t& A0, const fp4_intx8_t& A1,
-    const fp4_intx8_t& A2, const fp4_intx8_t& A3,
-    const fp4_intx8_t& B0, const fp4_intx8_t& B1,
+    const A_row_reg& a,
+    const B_row_reg& b,
     fp8e8m0_4 a_sp0,
     fp8e8m0_4 a_sp1,
     fp8e8m0_4 b_sp)
 {
-    fp4_intx8_t a0, a1, a2, a3, b0, b1;
+    fp4_intx8_t A0, A1, A2, A3, B0, B1;
     if constexpr (UPPER) {
-        a0 = fp4_upper_half(A0); a1 = fp4_upper_half(A1);
-        a2 = fp4_upper_half(A2); a3 = fp4_upper_half(A3);
-        b0 = fp4_upper_half(B0); b1 = fp4_upper_half(B1);
+        A0 = fp4_upper_half(*reinterpret_cast<const fp4_intx8_t*>(&a.tiles[0][0].data[0]));
+        A1 = fp4_upper_half(*reinterpret_cast<const fp4_intx8_t*>(&a.tiles[1][0].data[0]));
+        A2 = fp4_upper_half(*reinterpret_cast<const fp4_intx8_t*>(&a.tiles[2][0].data[0]));
+        A3 = fp4_upper_half(*reinterpret_cast<const fp4_intx8_t*>(&a.tiles[3][0].data[0]));
+        B0 = fp4_upper_half(*reinterpret_cast<const fp4_intx8_t*>(&b.tiles[0][0].data[0]));
+        B1 = fp4_upper_half(*reinterpret_cast<const fp4_intx8_t*>(&b.tiles[1][0].data[0]));
     } else {
-        a0 = A0; a1 = A1; a2 = A2; a3 = A3;
-        b0 = B0; b1 = B1;
+        A0 = *reinterpret_cast<const fp4_intx8_t*>(&a.tiles[0][0].data[0]);
+        A1 = *reinterpret_cast<const fp4_intx8_t*>(&a.tiles[1][0].data[0]);
+        A2 = *reinterpret_cast<const fp4_intx8_t*>(&a.tiles[2][0].data[0]);
+        A3 = *reinterpret_cast<const fp4_intx8_t*>(&a.tiles[3][0].data[0]);
+        B0 = *reinterpret_cast<const fp4_intx8_t*>(&b.tiles[0][0].data[0]);
+        B1 = *reinterpret_cast<const fp4_intx8_t*>(&b.tiles[1][0].data[0]);
     }
 
-    fp4_mfma_scale_inplace<0, 0>(acc.regs[0], a0, b0, a_sp0, b_sp);
-    fp4_mfma_scale_inplace<0, 1>(acc.regs[1], a0, b1, a_sp0, b_sp);
-    fp4_mfma_scale_inplace<1, 0>(acc.regs[2], a1, b0, a_sp0, b_sp);
-    fp4_mfma_scale_inplace<1, 1>(acc.regs[3], a1, b1, a_sp0, b_sp);
-    fp4_mfma_scale_inplace<0, 0>(acc.regs[4], a2, b0, a_sp1, b_sp);
-    fp4_mfma_scale_inplace<0, 1>(acc.regs[5], a2, b1, a_sp1, b_sp);
-    fp4_mfma_scale_inplace<1, 0>(acc.regs[6], a3, b0, a_sp1, b_sp);
-    fp4_mfma_scale_inplace<1, 1>(acc.regs[7], a3, b1, a_sp1, b_sp);
+    fp4_mfma_scale_inplace<0, 0>(acc.regs[0], A0, B0, a_sp0, b_sp);
+    fp4_mfma_scale_inplace<0, 1>(acc.regs[1], A0, B1, a_sp0, b_sp);
+    fp4_mfma_scale_inplace<1, 0>(acc.regs[2], A1, B0, a_sp0, b_sp);
+    fp4_mfma_scale_inplace<1, 1>(acc.regs[3], A1, B1, a_sp0, b_sp);
+    fp4_mfma_scale_inplace<0, 0>(acc.regs[4], A2, B0, a_sp1, b_sp);
+    fp4_mfma_scale_inplace<0, 1>(acc.regs[5], A2, B1, a_sp1, b_sp);
+    fp4_mfma_scale_inplace<1, 0>(acc.regs[6], A3, B0, a_sp1, b_sp);
+    fp4_mfma_scale_inplace<1, 1>(acc.regs[7], A3, B1, a_sp1, b_sp);
 }
 
 __device__ __forceinline__ void fp4_acc_to_rt(
@@ -252,8 +230,8 @@ void mxfp4_rcr_pq_kernel(const layout_globals g) {
     __shared__ ST_A As[2];
     __shared__ ST_B Bs[2];
 
-    A_row_reg a_rt;
-    B_row_reg b0_rt, b1_rt;
+    A_row_reg a;
+    B_row_reg b0, b1;
     fp4_acc cA{}, cB{}, cC{}, cD{};
 
     const int bid = blockIdx.x;
@@ -275,21 +253,21 @@ void mxfp4_rcr_pq_kernel(const layout_globals g) {
 
     constexpr int a_packs = RBM / 32;
     constexpr int b_packs = (RBN + 31) / 32;
-    i32x4 a0_srd[a_packs], a1_srd[a_packs];
-    i32x4 b0_srd[b_packs], b1_srd[b_packs];
+    const uint8_t* a0_sb[a_packs], *a1_sb[a_packs];
+    const uint8_t* b0_sb[b_packs], *b1_sb[b_packs];
     #pragma unroll
     for (int p = 0; p < a_packs; ++p) {
-        a0_srd[p] = make_scale_srd(preshuffled_scale_row_base_ptr(
-            g.a_scale, (br * BLK + 0 * HB + wm * RBM + p * 32) >> 5));
-        a1_srd[p] = make_scale_srd(preshuffled_scale_row_base_ptr(
-            g.a_scale, (br * BLK + 1 * HB + wm * RBM + p * 32) >> 5));
+        a0_sb[p] = preshuffled_scale_row_base_ptr(
+            g.a_scale, (br * BLK + 0 * HB + wm * RBM + p * 32) >> 5);
+        a1_sb[p] = preshuffled_scale_row_base_ptr(
+            g.a_scale, (br * BLK + 1 * HB + wm * RBM + p * 32) >> 5);
     }
     #pragma unroll
     for (int p = 0; p < b_packs; ++p) {
-        b0_srd[p] = make_scale_srd(preshuffled_scale_row_base_ptr(
-            g.b_scale, (bc * BLK + 0 * HB + wn * RBN + p * 32) >> 5));
-        b1_srd[p] = make_scale_srd(preshuffled_scale_row_base_ptr(
-            g.b_scale, (bc * BLK + 1 * HB + wn * RBN + p * 32) >> 5));
+        b0_sb[p] = preshuffled_scale_row_base_ptr(
+            g.b_scale, (bc * BLK + 0 * HB + wn * RBN + p * 32) >> 5);
+        b1_sb[p] = preshuffled_scale_row_base_ptr(
+            g.b_scale, (bc * BLK + 1 * HB + wn * RBN + p * 32) >> 5);
     }
 
     for (int bt = 0; bt < k_byte_iters; ++bt) {
@@ -301,82 +279,63 @@ void mxfp4_rcr_pq_kernel(const layout_globals g) {
         __builtin_amdgcn_s_barrier();
 
         auto as0 = kittens::subtile_inplace<RBM, BK>(As[0], {wm, 0});
+        fp4_load_st_to_rt(a, as0);
         auto bs0 = kittens::subtile_inplace<RBN, BK>(Bs[0], {wn, 0});
+        fp4_load_st_to_rt(b0, bs0);
         auto bs1 = kittens::subtile_inplace<RBN, BK>(Bs[1], {wn, 0});
+        fp4_load_st_to_rt(b1, bs1);
+        asm volatile("s_waitcnt lgkmcnt(0)");
 
         fp8e8m0_4 a0_raw[a_packs], a1_raw[a_packs];
         fp8e8m0_4 b0_raw[b_packs], b1_raw[b_packs];
-        const uint32_t soff = static_cast<uint32_t>(bt) << 8;
         #pragma unroll
         for (int p = 0; p < a_packs; ++p) {
-            a0_raw[p] = load_pq_scale_srd(a0_srd[p], lane_soff, soff);
-            a1_raw[p] = load_pq_scale_srd(a1_srd[p], lane_soff, soff);
+            a0_raw[p] = load_pq_scale(a0_sb[p], bt, lane_soff);
+            a1_raw[p] = load_pq_scale(a1_sb[p], bt, lane_soff);
         }
         #pragma unroll
         for (int p = 0; p < b_packs; ++p) {
-            b0_raw[p] = load_pq_scale_srd(b0_srd[p], lane_soff, soff);
-            b1_raw[p] = load_pq_scale_srd(b1_srd[p], lane_soff, soff);
+            b0_raw[p] = load_pq_scale(b0_sb[p], bt, lane_soff);
+            b1_raw[p] = load_pq_scale(b1_sb[p], bt, lane_soff);
         }
-
-        fp4_load_st_to_rt(a_rt, as0);
-        fp4_load_st_to_rt(b0_rt, bs0);
-        fp4_load_st_to_rt(b1_rt, bs1);
-        asm volatile("s_waitcnt lgkmcnt(0) vmcnt(0)");
-        __builtin_amdgcn_sched_barrier(0);
-
-        fp4_intx8_t A0 = fp4_extract_tile(a_rt, 0);
-        fp4_intx8_t A1 = fp4_extract_tile(a_rt, 1);
-        fp4_intx8_t A2 = fp4_extract_tile(a_rt, 2);
-        fp4_intx8_t A3 = fp4_extract_tile(a_rt, 3);
-        fp4_intx8_t B0_0 = fp4_extract_tile(b0_rt, 0);
-        fp4_intx8_t B0_1 = fp4_extract_tile(b0_rt, 1);
-        fp4_intx8_t B1_0 = fp4_extract_tile(b1_rt, 0);
-        fp4_intx8_t B1_1 = fp4_extract_tile(b1_rt, 1);
+        asm volatile("s_waitcnt vmcnt(0)");
 
         fp8e8m0_4 a0p0_lo = remap_phase(a0_raw[0], 0);
         fp8e8m0_4 a0p1_lo = remap_phase(a0_raw[1], 0);
         fp8e8m0_4 b0p_lo  = remap_phase(b0_raw[0], 0);
         fp8e8m0_4 b1p_lo  = remap_phase(b1_raw[0], 0);
-
-        // Fire A1 (M-half 1) reload early — overlaps with cA + cB MMA
-        auto as1 = kittens::subtile_inplace<RBM, BK>(As[1], {wm, 0});
-        fp4_load_st_to_rt(a_rt, as1);
-
-        // Phase 0: M-half 0
-        fp4_mma_all_subtiles<false>(cA, A0, A1, A2, A3, B0_0, B0_1, a0p0_lo, a0p1_lo, b0p_lo);
-        fp4_mma_all_subtiles<false>(cB, A0, A1, A2, A3, B1_0, B1_1, a0p0_lo, a0p1_lo, b1p_lo);
-
-        // Collect A1 data
-        asm volatile("s_waitcnt lgkmcnt(0)");
-        __builtin_amdgcn_sched_barrier(0);
-
-        fp4_intx8_t A1_0 = fp4_extract_tile(a_rt, 0);
-        fp4_intx8_t A1_1 = fp4_extract_tile(a_rt, 1);
-        fp4_intx8_t A1_2 = fp4_extract_tile(a_rt, 2);
-        fp4_intx8_t A1_3 = fp4_extract_tile(a_rt, 3);
-
-        fp8e8m0_4 a1p0_lo = remap_phase(a1_raw[0], 0);
-        fp8e8m0_4 a1p1_lo = remap_phase(a1_raw[1], 0);
-
-        fp4_mma_all_subtiles<false>(cC, A1_0, A1_1, A1_2, A1_3, B0_0, B0_1, a1p0_lo, a1p1_lo, b0p_lo);
-        fp4_mma_all_subtiles<false>(cD, A1_0, A1_1, A1_2, A1_3, B1_0, B1_1, a1p0_lo, a1p1_lo, b1p_lo);
-
-        // Phase 1: M-half 1 first — compute hi scales on demand
-        fp8e8m0_4 a1p0_hi = remap_phase(a1_raw[0], 1);
-        fp8e8m0_4 a1p1_hi = remap_phase(a1_raw[1], 1);
+        fp8e8m0_4 a0p0_hi = remap_phase(a0_raw[0], 1);
+        fp8e8m0_4 a0p1_hi = remap_phase(a0_raw[1], 1);
         fp8e8m0_4 b0p_hi  = remap_phase(b0_raw[0], 1);
         fp8e8m0_4 b1p_hi  = remap_phase(b1_raw[0], 1);
 
-        fp4_mma_all_subtiles<true>(cC, A1_0, A1_1, A1_2, A1_3, B0_0, B0_1, a1p0_hi, a1p1_hi, b0p_hi);
+        // Phase 0: M-half 0
+        fp4_mma_all_subtiles<false>(cA, a, b0, a0p0_lo, a0p1_lo, b0p_lo);
+        fp4_mma_all_subtiles<false>(cB, a, b1, a0p0_lo, a0p1_lo, b1p_lo);
 
-        fp4_mma_all_subtiles<true>(cD, A1_0, A1_1, A1_2, A1_3, B1_0, B1_1, a1p0_hi, a1p1_hi, b1p_hi);
+        // Phase 0: M-half 1
+        auto as1 = kittens::subtile_inplace<RBM, BK>(As[1], {wm, 0});
+        fp4_load_st_to_rt(a, as1);
+        asm volatile("s_waitcnt lgkmcnt(0)");
 
-        // Phase 1: M-half 0 — reuse A0-A3 from initial extraction (still live)
-        fp8e8m0_4 a0p0_hi = remap_phase(a0_raw[0], 1);
-        fp8e8m0_4 a0p1_hi = remap_phase(a0_raw[1], 1);
+        fp8e8m0_4 a1p0_lo = remap_phase(a1_raw[0], 0);
+        fp8e8m0_4 a1p1_lo = remap_phase(a1_raw[1], 0);
+        fp8e8m0_4 a1p0_hi = remap_phase(a1_raw[0], 1);
+        fp8e8m0_4 a1p1_hi = remap_phase(a1_raw[1], 1);
 
-        fp4_mma_all_subtiles<true>(cA, A0, A1, A2, A3, B0_0, B0_1, a0p0_hi, a0p1_hi, b0p_hi);
-        fp4_mma_all_subtiles<true>(cB, A0, A1, A2, A3, B1_0, B1_1, a0p0_hi, a0p1_hi, b1p_hi);
+        fp4_mma_all_subtiles<false>(cC, a, b0, a1p0_lo, a1p1_lo, b0p_lo);
+        fp4_mma_all_subtiles<false>(cD, a, b1, a1p0_lo, a1p1_lo, b1p_lo);
+
+        // Phase 1: M-half 1 first (cC/cD gap: 8 MFMAs from Phase 0 cD)
+        fp4_mma_all_subtiles<true>(cC, a, b0, a1p0_hi, a1p1_hi, b0p_hi);
+        fp4_mma_all_subtiles<true>(cD, a, b1, a1p0_hi, a1p1_hi, b1p_hi);
+
+        // Phase 1: M-half 0 (cA/cB gap: >=32 MFMAs from phase 0 end)
+        fp4_load_st_to_rt(a, as0);
+        asm volatile("s_waitcnt lgkmcnt(0)");
+
+        fp4_mma_all_subtiles<true>(cA, a, b0, a0p0_hi, a0p1_hi, b0p_hi);
+        fp4_mma_all_subtiles<true>(cB, a, b1, a0p0_hi, a0p1_hi, b1p_hi);
 
         __builtin_amdgcn_s_barrier();
     }

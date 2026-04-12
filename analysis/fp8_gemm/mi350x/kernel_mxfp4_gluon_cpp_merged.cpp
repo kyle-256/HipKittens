@@ -783,16 +783,18 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     constexpr int GROUP_M = 4;
     const int total_blocks = gridDim.x;
     const int bpr = total_blocks / bpc;
-    const int pids_per_xcd = total_blocks / NUM_XCDS;
 
     // XCD pid remapping: group same-XCD blocks contiguously
-    const int bid = (blockIdx.x % NUM_XCDS) * pids_per_xcd + (blockIdx.x / NUM_XCDS);
+    const int raw_bid = blockIdx.x;
+    const int pids_per_xcd = (total_blocks + NUM_XCDS - 1) / NUM_XCDS;
+    const int bid = (raw_bid % NUM_XCDS) * pids_per_xcd + (raw_bid / NUM_XCDS);
+    if (bid >= total_blocks) return;
 
-    // GROUP_SIZE_M swizzle
+    // GROUP_SIZE_M swizzle within XCD's block range
     const int num_pig = GROUP_M * bpc;
     const int gid = bid / num_pig;
     const int fpm = gid * GROUP_M;
-    const int gsm = min(bpr - fpm, GROUP_M);
+    const int gsm = (bpr - fpm < GROUP_M) ? (bpr - fpm) : GROUP_M;
     const int br = fpm + (bid % gsm);
     const int bc = (bid % num_pig) / gsm;
     const int wm = warpid() / WARPS_N, wn = warpid() % WARPS_N;
