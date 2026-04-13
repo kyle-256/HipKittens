@@ -60,26 +60,45 @@ ICXXFLAGS += -I${THUNDERKITTENS_ROOT}/include -I${THUNDERKITTENS_ROOT}/prototype
 LOGDIR := /workdir/data_logs/$(shell date +%m%d_%H%M%S)_outputs
 LOGFILE := $(LOGDIR)/make_build.log
 
+# Asymmetric head dimensions (for Llama 4 style Q_dim=192, V_dim=128)
+ATTN_D_QK ?= 0
+ATTN_D_V ?= 0
+
 # --------------------------------------------------------------------
-# Default target: build all three kernels
+# Default target: build all three kernels (symmetric D=128)
 # --------------------------------------------------------------------
 all: tk_kernel_bkwd tk_kernel_bkwd_prep tk_kernel_fwd
+
+# Asymmetric target: build D_QK=192 / D_V=128 kernels
+asymmetric: tk_kernel_bkwd_prep tk_kernel_fwd
+	@echo "Asymmetric D_QK=192 D_V=128 kernels built (prep + fwd)"
+	@echo "NOTE: Main backward kernel (tk_kernel_bkwd) needs separate implementation for asymmetric D"
 
 # --------------------------------------------------------------------
 # Explicit rules for each kernel
 # --------------------------------------------------------------------
 
+# Symmetric D=128 kernels
 tk_kernel_bkwd: attn_bkwd_causal.cpp
 	@mkdir -p $(LOGDIR)
 	$(HIPCXX) $< $(HIPFLAGS) $(ICXXFLAGS) $(ICPPFLAGS) $(ILDFLAGS) \
 	    -o $@$(shell python3-config --extension-suffix) 2>&1 | tee $(LOGFILE)
 
-tk_kernel_bkwd_prep: attn_bkwd_prep.cpp
+# Select prep source based on asymmetric flag
+ifneq ($(ATTN_D_QK), 0)
+PREP_SRC=attn_bkwd_prep_d192v128.cpp
+FWD_SRC=attn_fwd_causal_d192v128.cpp
+else
+PREP_SRC=attn_bkwd_prep.cpp
+FWD_SRC=attn_fwd_causal.cpp
+endif
+
+tk_kernel_bkwd_prep: $(PREP_SRC)
 	@mkdir -p $(LOGDIR)
 	$(HIPCXX) $< $(HIPFLAGS) $(ICXXFLAGS) $(ICPPFLAGS) $(ILDFLAGS) \
 	    -o $@$(shell python3-config --extension-suffix) 2>&1 | tee $(LOGFILE)
 
-tk_kernel_fwd: attn_fwd_causal.cpp
+tk_kernel_fwd: $(FWD_SRC)
 	@mkdir -p $(LOGDIR)
 	$(HIPCXX) $< $(HIPFLAGS) $(ICXXFLAGS) $(ICPPFLAGS) $(ILDFLAGS) \
 	    -o $@$(shell python3-config --extension-suffix) 2>&1 | tee $(LOGFILE)
@@ -88,5 +107,5 @@ tk_kernel_fwd: attn_fwd_causal.cpp
 clean:
 	rm -f tk_kernel_bkwd* tk_kernel_bkwd_prep* tk_kernel_fwd*
 
-.PHONY: all clean
+.PHONY: all asymmetric clean
 

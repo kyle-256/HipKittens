@@ -10,17 +10,29 @@ ATTN_H ?= 64
 ATTN_H_KV ?= 8
 ATTN_N ?= 4096
 ATTN_D ?= 128
+# Asymmetric head dimensions (for Llama 4 style Q_dim=192, V_dim=128)
+ATTN_D_QK ?= 0
+ATTN_D_V ?= 0
 
 CPPFLAGS += -DATTN_B=$(ATTN_B)
 CPPFLAGS += -DATTN_H=$(ATTN_H)
 CPPFLAGS += -DATTN_H_KV=$(ATTN_H_KV)
 CPPFLAGS += -DATTN_N=$(ATTN_N)
-CPPFLAGS += -DATTN_D=$(ATTN_D)
 
+# Source selection: asymmetric D takes priority over symmetric D
+ifneq ($(ATTN_D_QK), 0)
+# Asymmetric mode: D_QK != D_V (e.g., D_QK=192, D_V=128)
+CPPFLAGS += -DATTN_D_QK=$(ATTN_D_QK)
+CPPFLAGS += -DATTN_D_V=$(ATTN_D_V)
+SRC=kernel_d192v128.cpp
+else
+# Symmetric mode: single D for Q/K/V
+CPPFLAGS += -DATTN_D=$(ATTN_D)
 ifeq ($(ATTN_D), 64)
 SRC=kernel_d64.cpp
 else ifeq ($(ATTN_D), 128)
 SRC=kernel.cpp
+endif
 endif
 
 # HIP variables

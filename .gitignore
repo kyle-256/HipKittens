@@ -22,11 +22,19 @@ build/
 *.rocprofv3
 *.so
 *.amdgcn
+*.co
+*.bak
+*.bak.*
+*.messy_backup
+core.*
+gpucore.*
+*.hipv4-amdgcn-amd-amdhsa--*
 utils/__pycache__/
 *x86_64-unknown-linux-gnu*
 *amdhsa.hipfb
 *amd-amdhsa-gfx950.hipi
 *amd-amdhsa-gfx950.bc
+kernels/attn/gqa_causal/_bench_inner.py
 
 
 !CMakeLists.txt
