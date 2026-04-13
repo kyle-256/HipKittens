@@ -780,19 +780,24 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 
     // XCD-aware dispatch + GROUP_SIZE_M swizzle for L2 B-tile reuse
     constexpr int NUM_XCDS = 8;
-    constexpr int GROUP_M = 4;
+#ifndef GROUP_SIZE_M
+#define GROUP_SIZE_M 4
+#endif
+    constexpr int GROUP_M = GROUP_SIZE_M;
     const int total_blocks = gridDim.x;
     const int bpr = total_blocks / bpc;
-    const int pids_per_xcd = total_blocks / NUM_XCDS;
 
     // XCD pid remapping: group same-XCD blocks contiguously
-    const int bid = (blockIdx.x % NUM_XCDS) * pids_per_xcd + (blockIdx.x / NUM_XCDS);
+    const int raw_bid = blockIdx.x;
+    const int pids_per_xcd = (total_blocks + NUM_XCDS - 1) / NUM_XCDS;
+    const int bid = (raw_bid % NUM_XCDS) * pids_per_xcd + (raw_bid / NUM_XCDS);
+    if (bid >= total_blocks) return;
 
-    // GROUP_SIZE_M swizzle
+    // GROUP_SIZE_M swizzle within XCD's block range
     const int num_pig = GROUP_M * bpc;
     const int gid = bid / num_pig;
     const int fpm = gid * GROUP_M;
-    const int gsm = min(bpr - fpm, GROUP_M);
+    const int gsm = (bpr - fpm < GROUP_M) ? (bpr - fpm) : GROUP_M;
     const int br = fpm + (bid % gsm);
     const int bc = (bid % num_pig) / gsm;
     const int wm = warpid() / WARPS_N, wn = warpid() % WARPS_N;
@@ -918,7 +923,20 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     }
 
     // ═══════════ Main loop (2-tile pipeline) ═══════════
+    // Unroll: override via -DUNROLL_K=N, else auto by K size
+#ifdef UNROLL_K
+  #if UNROLL_K == 0
+    #pragma unroll
+  #else
+    #pragma unroll UNROLL_K
+  #endif
+#elif (K_DIM / 256) <= 16
+    #pragma unroll
+#elif (K_DIM / 256) <= 32
+    #pragma unroll 16
+#else
     #pragma unroll 8
+#endif
     for (int bt = 0; bt < k_byte_iters; ++bt) {
         const int cur = bt & 1;
         const int nxt = 1 - cur;

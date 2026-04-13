@@ -87,14 +87,14 @@ def module_name_for_nk(n, k):
     return f"tk_mxfp4_gluon_cpp_n{n}_k{k}"
 
 
-def build_for_nk(n_dim, k_dim, build_dir):
+def build_for_nk(n_dim, k_dim, build_dir, extra_cppflags="", suffix=""):
     """Compile kernel with -DK_DIM=k_dim -DN_DIM=n_dim using make."""
-    module_name = module_name_for_nk(n_dim, k_dim)
+    module_name = module_name_for_nk(n_dim, k_dim) + suffix
     out_file = f"{module_name}{EXT_SUFFIX}"
     out_path = os.path.join(build_dir, out_file)
 
     if os.path.exists(out_path):
-        print(f"  [cached] N={n_dim}, K={k_dim}")
+        print(f"  [cached] N={n_dim}, K={k_dim}{suffix}")
         return out_path
 
     # Patch PYBIND11_MODULE name so multiple variants can coexist
@@ -104,11 +104,11 @@ def build_for_nk(n_dim, k_dim, build_dir):
         "PYBIND11_MODULE(tk_mxfp4_gluon_cpp,",
         f"PYBIND11_MODULE({module_name},"
     )
-    wrapper_src = os.path.join(build_dir, f"wrap_n{n_dim}_k{k_dim}.cpp")
+    wrapper_src = os.path.join(build_dir, f"wrap_n{n_dim}_k{k_dim}{suffix}.cpp")
     with open(wrapper_src, "w") as f:
         f.write(patched)
 
-    print(f"  Compiling N={n_dim}, K={k_dim} ...", end=" ", flush=True)
+    print(f"  Compiling N={n_dim}, K={k_dim}{suffix} ...", end=" ", flush=True)
     t0 = time.time()
 
     env = os.environ.copy()
@@ -117,7 +117,7 @@ def build_for_nk(n_dim, k_dim, build_dir):
     cmd = (
         f'make -C {SCRIPT_DIR} TARGET={os.path.join(build_dir, module_name)} '
         f'SRC={wrapper_src} '
-        f'CPPFLAGS="-DK_DIM={k_dim} -DN_DIM={n_dim}"'
+        f'CPPFLAGS="-DK_DIM={k_dim} -DN_DIM={n_dim} {extra_cppflags}"'
     )
     result = subprocess.run(
         cmd, shell=True, capture_output=True, text=True, env=env
@@ -150,8 +150,8 @@ def make_single_shape_script(module_name, so_dir, m, n, k, comp_tflops):
         import {module_name}
 
         M, N, K = {m}, {n}, {k}
-        WARMUP = 100
-        ITERS = 300
+        WARMUP = 200
+        ITERS = 500
         TRIM_FRAC = 0.10  # trim 10% from each end
 
         k_blocks = K // 32
@@ -238,12 +238,12 @@ def make_single_shape_script(module_name, so_dir, m, n, k, comp_tflops):
     return script
 
 
-def run_single_shape(m, n, k, comp_tflops, build_dir, work_dir):
+def run_single_shape(m, n, k, comp_tflops, build_dir, work_dir, module_suffix=""):
     """Run benchmark for a single shape in its own subprocess. Returns result dict."""
-    module_name = module_name_for_nk(n, k)
+    module_name = module_name_for_nk(n, k) + module_suffix
     script_content = make_single_shape_script(module_name, build_dir, m, n, k, comp_tflops)
 
-    runner_path = os.path.join(work_dir, f"_run_{m}_{n}_{k}.py")
+    runner_path = os.path.join(work_dir, f"_run_{m}_{n}_{k}{module_suffix}.py")
     with open(runner_path, "w") as f:
         f.write(script_content)
 
@@ -302,16 +302,26 @@ def main():
     print(f"Unique (N,K) pairs: {len(nk_pairs)}")
     print()
 
-    # --- Build phase ---
+    # --- Build phase: compile variants for auto-tuning ---
+    # Variants: {GROUP_M=4, GROUP_M=2} x {default unroll, UNROLL_K=16}
     print("--- Build Phase ---")
+    variants = [
+        ("", ""),                                          # default (GM4, auto-unroll)
+        ("_gm2", "-DGROUP_SIZE_M=2"),                     # GM2, auto-unroll
+        ("_u16", "-DUNROLL_K=16"),                         # GM4, unroll 16
+        ("_gm2u16", "-DGROUP_SIZE_M=2 -DUNROLL_K=16"),   # GM2, unroll 16
+        ("_gm1", "-DGROUP_SIZE_M=1"),                     # GM1 (no grouping), auto-unroll
+    ]
     for n_val, k_val in nk_pairs:
-        so_path = build_for_nk(n_val, k_val, build_dir)
-        if so_path is None:
-            print(f"FATAL: compile failed for N={n_val}, K={k_val}. Aborting.")
-            sys.exit(1)
+        for suffix, cppflags in variants:
+            so_path = build_for_nk(n_val, k_val, build_dir,
+                                   extra_cppflags=cppflags, suffix=suffix)
+            if so_path is None and suffix == "":
+                print(f"FATAL: compile failed for N={n_val}, K={k_val}. Aborting.")
+                sys.exit(1)
     print()
 
-    # --- Benchmark phase ---
+    # --- Benchmark phase: auto-tune across all variants, pick best ---
     print("--- Benchmark Phase ---")
     all_results = []
 
@@ -319,16 +329,29 @@ def main():
         print(f"[{idx+1:>2}/{len(ALL_SHAPES)}] "
               f"{m:>6} x {n:>6} x {k:>6}  ", end="", flush=True)
 
-        r = run_single_shape(m, n, k, comp, build_dir, work_dir)
-        all_results.append(r)
+        best_r = None
+        best_t = 0
+        best_tag = ""
+        for suffix, _ in variants:
+            r = run_single_shape(m, n, k, comp, build_dir, work_dir,
+                                 module_suffix=suffix)
+            t = r.get("tflops") or 0
+            if t > best_t:
+                best_t = t
+                best_r = r
+                best_tag = suffix or "default"
 
-        if r["status"] == "OK":
-            ratio = r["tflops"] / r["comp"] * 100.0
-            tag = "WIN" if r["tflops"] >= r["comp"] else "LOSE"
-            print(f"{r['tflops']:7.1f} vs {r['comp']:7.1f}  "
-                  f"({ratio:5.1f}%)  {tag}")
+        if best_r is None:
+            best_r = r  # use last result even if failed
+        all_results.append(best_r)
+
+        if best_r["status"] == "OK":
+            ratio = best_r["tflops"] / best_r["comp"] * 100.0
+            tag = "WIN" if best_r["tflops"] >= best_r["comp"] else "LOSE"
+            print(f"{best_r['tflops']:7.1f} vs {best_r['comp']:7.1f}  "
+                  f"({ratio:5.1f}%)  {tag}  [{best_tag}]")
         else:
-            print(f"{r['status']}")
+            print(f"{best_r['status']}")
 
     print()
 

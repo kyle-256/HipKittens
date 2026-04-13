@@ -30,3 +30,16 @@ utils/__pycache__/
 
 
 !CMakeLists.txt
+# MXFP4 build artifacts
+analysis/fp8_gemm/mi350x/build_*/
+analysis/fp8_gemm/mi350x/work_*/
+analysis/fp8_gemm/mi350x/pt-*/
+analysis/fp8_gemm/mi350x/*.out
+analysis/fp8_gemm/mi350x/*.hipfb
+analysis/fp8_gemm/mi350x/*.so
+analysis/fp8_gemm/mi350x/test_mfma32*
+analysis/fp8_gemm/mi350x/test_alignbyte
+analysis/fp8_gemm/mi350x/test_buffer_load_lds
+analysis/fp8_gemm/mi350x/test_opsel_scale
+analysis/fp8_gemm/mi350x/gpucore.*
+analysis/fp8_gemm/mi350x/bench_gluon_a4w4_results.json
