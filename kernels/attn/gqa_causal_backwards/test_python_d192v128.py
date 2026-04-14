@@ -337,19 +337,26 @@ if has_bkwd:
 
     num_warmup_bwd = 5
     num_iters_bwd = 5
+    dQ_throwaway = torch.zeros(B, H, N, D_QK, dtype=dtype, device='cuda')
     for _ in range(num_warmup_bwd):
+        dQ_throwaway.zero_()
         dQ_tk_in.zero_()
         dK_tk.zero_()
         dV_tk.zero_()
         tk_kernel_bkwd.dispatch_bwd_combined(
             Q_tk, K_tk, V_tk, dO_tk,
-            dQ_tk_in, dK_tk, dV_tk,
+            dQ_throwaway, dK_tk, dV_tk,
             L_tk, delta_tk,
+        )
+        tk_kernel_bkwd.dispatch_bwd_dq(
+            Q_tk, K_tk, V_tk, dO_tk,
+            dQ_tk_in, L_tk, delta_tk,
         )
         tk_kernel_bkwd_prep.dispatch_dq_shuffle(dQ_tk_in, dQ_tk)
 
     timings_bwd = []
     for _ in range(num_iters_bwd):
+        dQ_throwaway.zero_()
         dQ_tk_in.zero_()
         dK_tk.zero_()
         dV_tk.zero_()
@@ -357,8 +364,12 @@ if has_bkwd:
         start_event.record()
         tk_kernel_bkwd.dispatch_bwd_combined(
             Q_tk, K_tk, V_tk, dO_tk,
-            dQ_tk_in, dK_tk, dV_tk,
+            dQ_throwaway, dK_tk, dV_tk,
             L_tk, delta_tk,
+        )
+        tk_kernel_bkwd.dispatch_bwd_dq(
+            Q_tk, K_tk, V_tk, dO_tk,
+            dQ_tk_in, L_tk, delta_tk,
         )
         tk_kernel_bkwd_prep.dispatch_dq_shuffle(dQ_tk_in, dQ_tk)
         end_event.record()

@@ -171,34 +171,41 @@ struct attn_bwd_combined_d192v128_globals {
 };
 
 // ---------------------------------------------------------------------------
-// Kernel — Optimized: hoisted K/V reg loads, double-buffered Q/dO, sched barriers
+// Kernel
 // ---------------------------------------------------------------------------
 __launch_bounds__(NUM_THREADS, 1)
 __global__ void attend_bwd_combined_d192v128_ker(
     const attn_bwd_combined_d192v128_globals g)
 {
     constexpr int QKVO_AXIS = 1; // BNHD layout
-    constexpr float P_SCALE  = 0.07216878365f * 1.44269504089f;
-    constexpr float L_SCALE  = 1.44269504089f;
-    constexpr float dP_SCALE = 0.07216878365f;
+    constexpr float P_SCALE  = 0.07216878365f * 1.44269504089f; // softmax_scale * log2(e)
+    constexpr float L_SCALE  = 1.44269504089f;                  // log2(e)
+    constexpr float dP_SCALE = 0.07216878365f;                  // softmax_scale
 
+    // -----------------------------------------------------------------------
+    // Shared memory
+    // -----------------------------------------------------------------------
     extern __shared__ alignment_dummy __shm[];
     shared_allocator al((int*)&__shm[0]);
 
-    // K/V in shared (loaded once)
-    st_bf<BLOCK_KV, D_QK, st_32x32_s> (&K_smem)     = al.allocate<st_bf<BLOCK_KV, D_QK, st_32x32_s>>();
-    st_bf<BLOCK_KV, D_V,  st_32x32_s> (&V_smem)     = al.allocate<st_bf<BLOCK_KV, D_V,  st_32x32_s>>();
-    // Double-buffered Q/dO
-    st_bf<Q_TILE, D_QK, st_32x32_s>   (&Q_smem)[2]  = al.allocate<st_bf<Q_TILE, D_QK, st_32x32_s>, 2>();
-    st_bf<Q_TILE, D_V,  st_32x32_s>   (&dO_smem)[2] = al.allocate<st_bf<Q_TILE, D_V,  st_32x32_s>, 2>();
-    sv_fl<Q_TILE> (&L_smem)[2]     = al.allocate<sv_fl<Q_TILE>, 2>();
-    sv_fl<Q_TILE> (&delta_smem)[2] = al.allocate<sv_fl<Q_TILE>, 2>();
+    st_bf<BLOCK_KV, D_QK, st_32x32_s> (&K_smem)      = al.allocate<st_bf<BLOCK_KV, D_QK, st_32x32_s>>();
+    st_bf<BLOCK_KV, D_V,  st_32x32_s> (&V_smem)      = al.allocate<st_bf<BLOCK_KV, D_V,  st_32x32_s>>();
+    st_bf<Q_TILE, D_QK, st_32x32_s>   (&Q_smem)  = al.allocate<st_bf<Q_TILE, D_QK, st_32x32_s>>();
+    st_bf<Q_TILE, D_V,  st_32x32_s>   (&dO_smem) = al.allocate<st_bf<Q_TILE, D_V,  st_32x32_s>>();
+    sv_fl<Q_TILE> (&L_smem)     = al.allocate<sv_fl<Q_TILE>>();
+    sv_fl<Q_TILE> (&delta_smem) = al.allocate<sv_fl<Q_TILE>>();
 
+    // -----------------------------------------------------------------------
+    // Register accumulators for dK and dV (col_l, one per warp)
+    // -----------------------------------------------------------------------
     rt<float, D_QK, KV_BLOCK, col_l, rt_32x32_s> dK_acc;
     rt<float, D_V,  KV_BLOCK, col_l, rt_32x32_s> dV_acc;
     zero(dK_acc);
     zero(dV_acc);
 
+    // -----------------------------------------------------------------------
+    // Indices
+    // -----------------------------------------------------------------------
     const int kv_head   = blockIdx.x;
     const int seq_block = blockIdx.y;
     const int batch     = blockIdx.z;
@@ -207,79 +214,55 @@ __global__ void attend_bwd_combined_d192v128_ker(
     const int kv_start  = j * KV_BLOCK;
     const int total_q   = ATTN_N / Q_TILE;
     const int first_q   = causal ? max(0, (int)(seq_block * BLOCK_KV / Q_TILE)) : 0;
-    const int lane      = laneid();
 
-    // Load K and V into shared memory
+    // -----------------------------------------------------------------------
+    // Load K and V tiles for this KV block into shared memory
+    // -----------------------------------------------------------------------
     G::load<QKVO_AXIS, false>(K_smem, g.K, {batch, seq_block, kv_head, 0});
     G::load<QKVO_AXIS, false>(V_smem, g.V, {batch, seq_block, kv_head, 0});
     __builtin_amdgcn_s_waitcnt(0);
     __builtin_amdgcn_s_barrier();
 
-    // Hoist K_j and V_j into registers (used for ALL Q iterations)
-    rt<bf16, KV_BLOCK, D_QK, row_l, rt_32x16_4_s> K_j;
-    load(K_j, subtile_inplace<KV_BLOCK, D_QK>(K_smem, {wid, 0}));
-    rt<bf16, KV_BLOCK, D_V, row_l, rt_32x16_4_s> V_j;
-    load(V_j, subtile_inplace<KV_BLOCK, D_V>(V_smem, {wid, 0}));
-
-    // Flatten (qi, qho) into single iteration space
-    const int total_iters = (total_q - first_q) * GROUP_SIZE;
-
-    if (total_iters > 0) {
-        // Prefetch first Q/dO into buffer 0
-        {
-            const int qi0 = first_q;
-            const int qh0 = kv_head * GROUP_SIZE;
-            G::load<QKVO_AXIS, false>(Q_smem[0], g.Q, {batch, qi0, qh0, 0});
-            G::load<QKVO_AXIS, false>(dO_smem[0], g.dOg, {batch, qi0, qh0, 0});
-            load_L_delta_direct(reinterpret_cast<float*>(&L_smem[0]),
-                                g.L_vec, batch, qh0, qi0);
-            load_L_delta_direct(reinterpret_cast<float*>(&delta_smem[0]),
-                                g.delta_vec, batch, qh0, qi0);
-        }
-        __builtin_amdgcn_s_waitcnt(0);
-        __builtin_amdgcn_s_barrier();
-
-        #pragma unroll 1
-        for (int iter = 0; iter < total_iters; iter++) {
-            const int cur = iter & 1;
-            const int nxt = 1 - cur;
-            const int qi   = first_q + (iter / GROUP_SIZE);
-            const int qho  = iter % GROUP_SIZE;
+    // -----------------------------------------------------------------------
+    // Main loop: iterate over Q tiles
+    // -----------------------------------------------------------------------
+    for (int qi = first_q; qi < total_q; qi++) {
+        for (int qho = 0; qho < GROUP_SIZE; qho++) {
             const int q_head = kv_head * GROUP_SIZE + qho;
             const int q_pos  = qi * Q_TILE;
             const bool skip  = causal && (q_pos + Q_TILE <= kv_start);
 
-            // Prefetch next Q/dO (overlap with compute)
-            if (iter + 1 < total_iters) {
-                const int nqi  = first_q + ((iter + 1) / GROUP_SIZE);
-                const int nqho = (iter + 1) % GROUP_SIZE;
-                const int nqh  = kv_head * GROUP_SIZE + nqho;
-                G::load<QKVO_AXIS, false>(Q_smem[nxt], g.Q, {batch, nqi, nqh, 0});
-                G::load<QKVO_AXIS, false>(dO_smem[nxt], g.dOg, {batch, nqi, nqh, 0});
-                load_L_delta_direct(reinterpret_cast<float*>(&L_smem[nxt]),
-                                    g.L_vec, batch, nqh, nqi);
-                load_L_delta_direct(reinterpret_cast<float*>(&delta_smem[nxt]),
-                                    g.delta_vec, batch, nqh, nqi);
+            // Load Q, dO, L, delta in parallel (all to different shared regions)
+            G::load<QKVO_AXIS, false>(Q_smem, g.Q, {batch, qi, q_head, 0});
+            G::load<QKVO_AXIS, false>(dO_smem, g.dOg, {batch, qi, q_head, 0});
+            {
+                float *L_raw = reinterpret_cast<float*>(&L_smem);
+                float *delta_raw = reinterpret_cast<float*>(&delta_smem);
+                load_L_delta_direct(L_raw, g.L_vec, batch, q_head, qi);
+                load_L_delta_direct(delta_raw, g.delta_vec, batch, q_head, qi);
             }
+            __builtin_amdgcn_s_waitcnt(0);
+            __builtin_amdgcn_s_barrier();
 
             if (!skip) {
-                // Phase 1: S = Q @ K^T
+                // Phase 1: S = Q @ K^T * P_SCALE, subtract L, causal mask, exp2
                 rt<bf16, Q_TILE, D_QK, row_l, rt_32x16_4_s> Q_i;
-                load(Q_i, Q_smem[cur]);
+                load(Q_i, Q_smem);
+                rt<bf16, KV_BLOCK, D_QK, row_l, rt_32x16_4_s> K_j;
+                load(K_j, subtile_inplace<KV_BLOCK, D_QK>(K_smem, {wid, 0}));
 
                 rt<float, Q_TILE, KV_BLOCK, col_l, rt_32x32_s> S_ij;
                 zero(S_ij);
                 mma_ABt(S_ij, Q_i, K_j, S_ij);
-                sched_barrier_pairs<12, 2, 0>();
-                __builtin_amdgcn_sched_barrier(0);
-
                 mul(S_ij, S_ij, P_SCALE);
+
                 typename decltype(S_ij)::col_vec L_reg;
-                load(L_reg, L_smem[cur]);
+                load(L_reg, L_smem);
                 mul(L_reg, L_reg, L_SCALE);
                 sub_row(S_ij, S_ij, L_reg);
 
                 if constexpr (causal) {
+                    const int lane = laneid();
                     const int kv_c = lane & 31;
                     const int G_id = lane >> 5;
                     #pragma unroll
@@ -308,20 +291,20 @@ __global__ void attend_bwd_combined_d192v128_ker(
                                 base_ops::exp2::op(S_ij.tiles[ii][jj].data[k]);
                         }
 
-                // Phase 2: dP = dO @ V^T
+                // Phase 2: dP = dO @ V^T, dS = P * (dP - delta)
                 rt<bf16, Q_TILE, D_V, row_l, rt_32x16_4_s> dO_i;
-                load(dO_i, dO_smem[cur]);
+                load(dO_i, dO_smem);
+                rt<bf16, KV_BLOCK, D_V, row_l, rt_32x16_4_s> V_j;
+                load(V_j, subtile_inplace<KV_BLOCK, D_V>(V_smem, {wid, 0}));
 
                 rt<float, Q_TILE, KV_BLOCK, col_l, rt_32x32_s> dP_ij;
                 zero(dP_ij);
                 mma_ABt(dP_ij, dO_i, V_j, dP_ij);
-                sched_barrier_pairs<8, 2, 1>();
-                __builtin_amdgcn_sched_barrier(0);
 
-                // dS = P * (dP - delta) * dP_SCALE
                 {
+                    const int lane = laneid();
                     const int G = lane >> 5;
-                    float *d_raw = reinterpret_cast<float*>(&delta_smem[cur]);
+                    float *d_raw = reinterpret_cast<float*>(&delta_smem);
                     #pragma unroll
                     for (int k = 0; k < dP_ij.tiles[0][0].packed_per_thread; k++) {
                         int ro = ((k >> 1) << 3) + ((k & 1) << 1);
@@ -335,40 +318,36 @@ __global__ void attend_bwd_combined_d192v128_ker(
 
                 // Phase 3: dV += dO^T @ P
                 rt<bf16, Q_TILE, D_V, col_l, rt_16x32_4_s> dO_col;
-                load(dO_col, dO_smem[cur]);
+                load(dO_col, dO_smem);
 
                 rt<bf16, Q_TILE, KV_BLOCK, col_l, rt_32x32_s> P_bf;
                 copy(P_bf, S_ij);
                 auto &Pm = *reinterpret_cast<
                     rt<bf16, Q_TILE, KV_BLOCK, col_l, rt_16x32_4_s>*>(&P_bf);
-                mma_AtB(dV_acc, dO_col, Pm, dV_acc);
-                sched_barrier_pairs<4, 2, 2>();
-                __builtin_amdgcn_sched_barrier(0);
 
-                // Phase 4: dK += Q^T @ dS
+                mma_AtB(dV_acc, dO_col, Pm, dV_acc);
+
+                // Phase 4: dK += Q^T @ (dS * scale)
                 mul(dP_ij, dP_ij, dP_SCALE);
 
                 rt<bf16, Q_TILE, D_QK, col_l, rt_16x32_4_s> Q_col;
-                load(Q_col, Q_smem[cur]);
+                load(Q_col, Q_smem);
 
                 rt<bf16, Q_TILE, KV_BLOCK, col_l, rt_32x32_s> dS_bf;
                 copy(dS_bf, dP_ij);
                 auto &dSm = *reinterpret_cast<
                     rt<bf16, Q_TILE, KV_BLOCK, col_l, rt_16x32_4_s>*>(&dS_bf);
+
                 mma_AtB(dK_acc, Q_col, dSm, dK_acc);
-                sched_barrier_pairs<6, 2, 3>();
-                __builtin_amdgcn_sched_barrier(0);
             }
 
-            // Wait for prefetch and synchronize
-            if (iter + 1 < total_iters) {
-                __builtin_amdgcn_s_waitcnt(0);
-            }
             __builtin_amdgcn_s_barrier();
-        }
-    }
+        } // qho
+    } // qi
 
-    // Epilogue: store dV and dK
+    // -----------------------------------------------------------------------
+    // Epilogue: store dV and dK via direct col_l-to-global
+    // -----------------------------------------------------------------------
     store_col_l_direct<QKVO_AXIS, D_V>(g.dVg, dV_acc, batch, j, kv_head);
     store_col_l_direct<QKVO_AXIS, D_QK>(g.dKg, dK_acc, batch, j, kv_head);
 }
@@ -554,7 +533,6 @@ __global__ void attend_bwd_dq_d192v128_ker(
                     }
                 }
 
-                __builtin_amdgcn_s_waitcnt(0); // ensure P LDS stores complete
                 // Phase 2: dP = dO @ V^T using the SAME accumulator
                 {
                     rt<bf16, Q_TILE, D_V, row_l, rt_32x16_4_s> dO_i;
@@ -568,7 +546,6 @@ __global__ void attend_bwd_dq_d192v128_ker(
 
                 // dS = P * (dP - delta) * softmax_scale
                 // Read P back from LDS scratch
-                __builtin_amdgcn_s_waitcnt(0); // ensure dP MMA and P LDS loads don't conflict
                 {
                     float *d_raw = reinterpret_cast<float*>(&delta_smem);
                     volatile float *P_lds = P_scratch + tid * 16;
