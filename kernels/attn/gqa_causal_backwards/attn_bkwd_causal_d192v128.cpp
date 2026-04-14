@@ -173,10 +173,8 @@ __global__ void attend_bwd_combined_d192v128_ker(
 
     st_bf<BLOCK_KV, D_QK, st_32x32_s> (&K_smem)      = al.allocate<st_bf<BLOCK_KV, D_QK, st_32x32_s>>();
     st_bf<BLOCK_KV, D_V,  st_32x32_s> (&V_smem)      = al.allocate<st_bf<BLOCK_KV, D_V,  st_32x32_s>>();
-    st_bf<Q_TILE, D_QK, st_32x32_s>   (&Q_smem_row)  = al.allocate<st_bf<Q_TILE, D_QK, st_32x32_s>>();
-    st_bf<Q_TILE, D_QK, st_8x32_s>    (&Q_smem_col)  = al.allocate<st_bf<Q_TILE, D_QK, st_8x32_s>>();
-    st_bf<Q_TILE, D_V,  st_32x32_s>   (&dO_smem_row) = al.allocate<st_bf<Q_TILE, D_V,  st_32x32_s>>();
-    st_bf<Q_TILE, D_V,  st_8x32_s>    (&dO_smem_col) = al.allocate<st_bf<Q_TILE, D_V,  st_8x32_s>>();
+    st_bf<Q_TILE, D_QK, st_32x32_s>   (&Q_smem)  = al.allocate<st_bf<Q_TILE, D_QK, st_32x32_s>>();
+    st_bf<Q_TILE, D_V,  st_32x32_s>   (&dO_smem) = al.allocate<st_bf<Q_TILE, D_V,  st_32x32_s>>();
     sv_fl<Q_TILE> (&L_smem)     = al.allocate<sv_fl<Q_TILE>>();
     sv_fl<Q_TILE> (&delta_smem) = al.allocate<sv_fl<Q_TILE>>();
 
@@ -227,7 +225,8 @@ __global__ void attend_bwd_combined_d192v128_ker(
             // =============================================================
             // Phase 1: S = Q @ K^T * P_SCALE, subtract L, causal mask, exp2
             // =============================================================
-            G::load<QKVO_AXIS, false>(Q_smem_row, g.Q, {batch, qi, q_head, 0});
+            G::load<QKVO_AXIS, false>(Q_smem, g.Q, {batch, qi, q_head, 0});
+            G::load<QKVO_AXIS, false>(dO_smem, g.dOg, {batch, qi, q_head, 0});
             __builtin_amdgcn_s_waitcnt(0);
             __builtin_amdgcn_s_barrier();
 
@@ -236,7 +235,7 @@ __global__ void attend_bwd_combined_d192v128_ker(
             if (!skip) {
                 // Load Q and K into row_l stride-4 register tiles for mma_ABt
                 rt<bf16, Q_TILE, D_QK, row_l, rt_32x16_4_s> Q_i;
-                load(Q_i, Q_smem_row);
+                load(Q_i, Q_smem);
                 rt<bf16, KV_BLOCK, D_QK, row_l, rt_32x16_4_s> K_j;
                 load(K_j, subtile_inplace<KV_BLOCK, D_QK>(K_smem, {wid, 0}));
 
@@ -288,15 +287,11 @@ __global__ void attend_bwd_combined_d192v128_ker(
             // =============================================================
             // Phase 2: dP = dO @ V^T, dS = P * (dP - delta)
             // =============================================================
-            G::load<QKVO_AXIS, false>(dO_smem_row, g.dOg, {batch, qi, q_head, 0});
-            __builtin_amdgcn_s_waitcnt(0);
-            __builtin_amdgcn_s_barrier();
-
             rt<float, Q_TILE, KV_BLOCK, col_l, rt_32x32_s> dP_ij;
 
             if (!skip) {
                 rt<bf16, Q_TILE, D_V, row_l, rt_32x16_4_s> dO_i;
-                load(dO_i, dO_smem_row);
+                load(dO_i, dO_smem);
                 rt<bf16, KV_BLOCK, D_V, row_l, rt_32x16_4_s> V_j;
                 load(V_j, subtile_inplace<KV_BLOCK, D_V>(V_smem, {wid, 0}));
 
@@ -326,13 +321,9 @@ __global__ void attend_bwd_combined_d192v128_ker(
             // =============================================================
             // Phase 3: dV += dO^T @ P  (mma_AtB with col_l stride-4 inputs)
             // =============================================================
-            G::load<QKVO_AXIS, false>(dO_smem_col, g.dOg, {batch, qi, q_head, 0});
-            __builtin_amdgcn_s_waitcnt(0);
-            __builtin_amdgcn_s_barrier();
-
             if (!skip) {
                 rt<bf16, Q_TILE, D_V, col_l, rt_16x32_4_s> dO_col;
-                load(dO_col, dO_smem_col);
+                load(dO_col, dO_smem);
 
                 rt<bf16, Q_TILE, KV_BLOCK, col_l, rt_32x32_s> P_bf;
                 copy(P_bf, S_ij);
@@ -343,17 +334,13 @@ __global__ void attend_bwd_combined_d192v128_ker(
             }
 
             // =============================================================
-            // Phase 4: dK += Q^T @ (dS * scale)  (mma_AtB)
+            // Phase 4: dK += Q^T @ (dS * scale) — col_l from same shared tile
             // =============================================================
-            G::load<QKVO_AXIS, false>(Q_smem_col, g.Q, {batch, qi, q_head, 0});
-            __builtin_amdgcn_s_waitcnt(0);
-            __builtin_amdgcn_s_barrier();
-
             if (!skip) {
                 mul(dP_ij, dP_ij, dP_SCALE);
 
                 rt<bf16, Q_TILE, D_QK, col_l, rt_16x32_4_s> Q_col;
-                load(Q_col, Q_smem_col);
+                load(Q_col, Q_smem);
 
                 rt<bf16, Q_TILE, KV_BLOCK, col_l, rt_32x32_s> dS_bf;
                 copy(dS_bf, dP_ij);
