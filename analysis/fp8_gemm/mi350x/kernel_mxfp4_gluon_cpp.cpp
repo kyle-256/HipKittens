@@ -143,6 +143,21 @@ __device__ __forceinline__ fp8e8m0_4 load_pq_scale_srd(
         llvm_amdgcn_raw_buffer_load_b32(srsrc, voffset, soffset, 0));
 }
 
+// Load two consecutive scale dwords via buffer_load_dwordx2 (merged preshuffle format).
+// Non-volatile asm allows compiler scheduling flexibility while preserving dwordx2.
+__device__ __forceinline__ void load_pq_scale_x2_async(
+    i32x4 srsrc, uint32_t voffset, uint32_t soffset,
+    fp8e8m0_4 &out_lo, fp8e8m0_4 &out_hi) {
+    uint64_t pair;
+    asm volatile(
+        "buffer_load_dwordx2 %0, %1, %2, %3 offen"
+        : "=v"(pair)
+        : "v"(voffset), "s"(srsrc), "s"(soffset)
+    );
+    out_lo = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(pair));
+    out_hi = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(pair >> 32));
+}
+
 // ── Tile prefetch ──
 
 static constexpr int PF_MPT = (HB * BK * sizeof(fp8e4m3)) / (16 * _NUM_THREADS);
@@ -815,26 +830,21 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     G::prefill_swizzled_offsets(A0_db[0], g.a, so_a);
     G::prefill_swizzled_offsets(Bl_db[0], g.b, so_b);
 
-    // Scale SRDs
-    const uint32_t lane_soff =
-        (static_cast<uint32_t>(kittens::laneid() / 16) << 6) |
-        (static_cast<uint32_t>(kittens::laneid() % 16) << 2);
+    // Scale SRDs — merged preshuffle format (64-row super-groups, dwordx2 loads)
+    // lane_soff_x2: doubled offsets for merged format where each dword position is 8 bytes
+    const uint32_t lane_soff_x2 =
+        (static_cast<uint32_t>(kittens::laneid() / 16) << 7) |
+        (static_cast<uint32_t>(kittens::laneid() % 16) << 3);
 
-    i32x4 a0_srd[a_packs], a1_srd[a_packs], bl_srd[b_packs], br_srd[b_packs];
-    #pragma unroll
-    for (int p = 0; p < a_packs; ++p) {
-        a0_srd[p] = make_scale_srd(preshuffled_scale_row_base_ptr(
-            g.a_scale, (br * BLK + wm * RBM + p * 32) >> 5));
-        a1_srd[p] = make_scale_srd(preshuffled_scale_row_base_ptr(
-            g.a_scale, (br * BLK + HB + wm * RBM + p * 32) >> 5));
-    }
-    #pragma unroll
-    for (int p = 0; p < b_packs; ++p) {
-        bl_srd[p] = make_scale_srd(preshuffled_scale_row_base_ptr(
-            g.b_scale, (bc * BLK + wn * RBN + p * 32) >> 5));
-        br_srd[p] = make_scale_srd(preshuffled_scale_row_base_ptr(
-            g.b_scale, (bc * BLK + HB + wn * RBN + p * 32) >> 5));
-    }
+    // One SRD per tile-half, pointing to the 64-row super-group base
+    i32x4 a0_srd = make_scale_srd(preshuffled_scale_row_base_ptr(
+        g.a_scale, (br * BLK + wm * RBM) >> 6));
+    i32x4 a1_srd = make_scale_srd(preshuffled_scale_row_base_ptr(
+        g.a_scale, (br * BLK + HB + wm * RBM) >> 6));
+    i32x4 bl_srd = make_scale_srd(preshuffled_scale_row_base_ptr(
+        g.b_scale, (bc * BLK + wn * RBN) >> 6));
+    i32x4 br_srd = make_scale_srd(preshuffled_scale_row_base_ptr(
+        g.b_scale, (bc * BLK + HB + wn * RBN) >> 6));
 
     fp4_floatx4_t acc_A0Bl[16]={}, acc_A0Br[16]={}, acc_A1Bl[16]={}, acc_A1Br[16]={};
 
@@ -904,16 +914,10 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 
     fp8e8m0_4 pf_a0[a_packs], pf_a1[a_packs], pf_bl[b_packs], pf_br[b_packs];
     {
-        #pragma unroll
-        for (int p = 0; p < a_packs; ++p) {
-            pf_a0[p] = load_pq_scale_srd(a0_srd[p], lane_soff, 0);
-            pf_a1[p] = load_pq_scale_srd(a1_srd[p], lane_soff, 0);
-        }
-        #pragma unroll
-        for (int p = 0; p < b_packs; ++p) {
-            pf_bl[p] = load_pq_scale_srd(bl_srd[p], lane_soff, 0);
-            pf_br[p] = load_pq_scale_srd(br_srd[p], lane_soff, 0);
-        }
+        load_pq_scale_x2_async(a0_srd, lane_soff_x2, 0, pf_a0[0], pf_a0[1]);
+        load_pq_scale_x2_async(a1_srd, lane_soff_x2, 0, pf_a1[0], pf_a1[1]);
+        load_pq_scale_x2_async(bl_srd, lane_soff_x2, 0, pf_bl[0], pf_bl[1]);
+        load_pq_scale_x2_async(br_srd, lane_soff_x2, 0, pf_br[0], pf_br[1]);
     }
 
     // Pre-load A0+Bl for iteration 0 from LDS (2-tile software pipeline)
@@ -972,17 +976,11 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         for (int p = 0; p < b_packs; ++p) { bl_raw[p] = pf_bl[p]; br_raw[p] = pf_br[p]; }
 
         {
-            const uint32_t nxt_scale = static_cast<uint32_t>(bt + 1 < k_byte_iters ? bt + 1 : bt) << 8;
-            #pragma unroll
-            for (int p = 0; p < a_packs; ++p) {
-                pf_a0[p] = load_pq_scale_srd(a0_srd[p], lane_soff, nxt_scale);
-                pf_a1[p] = load_pq_scale_srd(a1_srd[p], lane_soff, nxt_scale);
-            }
-            #pragma unroll
-            for (int p = 0; p < b_packs; ++p) {
-                pf_bl[p] = load_pq_scale_srd(bl_srd[p], lane_soff, nxt_scale);
-                pf_br[p] = load_pq_scale_srd(br_srd[p], lane_soff, nxt_scale);
-            }
+            const uint32_t nxt_scale = static_cast<uint32_t>(bt + 1 < k_byte_iters ? bt + 1 : bt) << 9;
+            load_pq_scale_x2_async(a0_srd, lane_soff_x2, nxt_scale, pf_a0[0], pf_a0[1]);
+            load_pq_scale_x2_async(a1_srd, lane_soff_x2, nxt_scale, pf_a1[0], pf_a1[1]);
+            load_pq_scale_x2_async(bl_srd, lane_soff_x2, nxt_scale, pf_bl[0], pf_bl[1]);
+            load_pq_scale_x2_async(br_srd, lane_soff_x2, nxt_scale, pf_br[0], pf_br[1]);
         }
 
         // Steps 1+2 merged: A0×Bl (32 MFMAs) + ds_read Br + A0×Br (32 MFMAs) + ds_read A1

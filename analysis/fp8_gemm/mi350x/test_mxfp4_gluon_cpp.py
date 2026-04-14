@@ -31,23 +31,30 @@ def gen_fp4(rows, K):
     hi = torch.randint(0, 16, (rows, cols), dtype=torch.uint8, device="cuda")
     return (hi << 4) | lo
 
-def preshuffle_mfma16(scale_exp):
+def preshuffle_mfma16_merged(scale_exp):
+    """Merged preshuffle: interleaves adjacent 32-row groups at dword granularity.
+    Output: [pr//64, pk*64] — 64-row super-groups for dwordx2 scale loads."""
     rows, kb = scale_exp.shape
-    pr = math.ceil(rows / 32) * 32
+    pr = math.ceil(rows / 64) * 64  # pad to 64
     pk = math.ceil(kb / 8) * 8
     raw = torch.full((pr, pk), 0x7F, dtype=torch.uint8, device=scale_exp.device)
     raw[:rows, :kb] = (scale_exp.to(torch.int16) + 127).to(torch.uint8)
+    # First do standard preshuffle_mfma16 on all 32-row groups
     sh = raw.view(pr // 32, 2, 16, pk // 8, 2, 4, 1)
     sh = sh.permute(0, 3, 5, 2, 4, 1, 6).contiguous()
-    return sh.view(pr // 32, pk * 32)
+    sh = sh.view(pr // 32, pk * 32)
+    # Now merge adjacent 32-row groups: interleave at 4-byte (dword) granularity
+    sh = sh.view(pr // 64, 2, pk * 32 // 4, 4)
+    sh = sh.permute(0, 2, 1, 3).contiguous()
+    return sh.view(pr // 64, pk * 64)
 
 A = gen_fp4(M, K)
 B = gen_fp4(N, K)
 
 sc_exp_a = torch.randint(-2, 3, (M, k_blocks), dtype=torch.int8, device="cuda")
 sc_exp_b = torch.randint(-2, 3, (N, k_blocks), dtype=torch.int8, device="cuda")
-A_sc = preshuffle_mfma16(sc_exp_a)
-B_sc = preshuffle_mfma16(sc_exp_b)
+A_sc = preshuffle_mfma16_merged(sc_exp_a)
+B_sc = preshuffle_mfma16_merged(sc_exp_b)
 C = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
 
 run = lambda: tk_mxfp4_gluon_cpp.gemm_rcr(A, B, A_sc, B_sc, C)

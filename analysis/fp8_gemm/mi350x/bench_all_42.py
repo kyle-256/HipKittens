@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Benchmark MXFP4 Gluon C++ kernel across all 42 competitor shapes.
 
-Uses preshuffle_mfma16 scale format.
+Uses preshuffle_mfma16_merged scale format.
 hipEvent timing: warmup 50, timing 100, trimmed mean (10% trim).
 Each shape runs in its own subprocess for crash isolation.
 
@@ -136,7 +136,7 @@ def build_for_nk(n_dim, k_dim, build_dir, extra_cppflags="", suffix=""):
 def make_single_shape_script(module_name, so_dir, m, n, k, comp_tflops):
     """Generate a Python script that benchmarks a single (M,N,K) shape.
 
-    Uses preshuffle_mfma16 scale format.
+    Uses preshuffle_mfma16_merged scale format.
     hipEvent timing with trimmed mean.
     Outputs JSON result to stdout.
     """
@@ -162,24 +162,27 @@ def make_single_shape_script(module_name, so_dir, m, n, k, comp_tflops):
             hi = torch.randint(0, 16, (rows, cols), dtype=torch.uint8, device="cuda")
             return (hi << 4) | lo
 
-        def preshuffle_mfma16(scale_exp):
-            """Preshuffled format: [M/32, pk*32]."""
+        def preshuffle_mfma16_merged(scale_exp):
+            """Merged preshuffle: [M/64, pk*64] — dwordx2 scale loads."""
             rows, kb = scale_exp.shape
-            pr = math.ceil(rows / 32) * 32
+            pr = math.ceil(rows / 64) * 64
             pk = math.ceil(kb / 8) * 8
             raw = torch.full((pr, pk), 0x7F, dtype=torch.uint8, device=scale_exp.device)
             raw[:rows, :kb] = (scale_exp.to(torch.int16) + 127).to(torch.uint8)
             sh = raw.view(pr // 32, 2, 16, pk // 8, 2, 4, 1)
             sh = sh.permute(0, 3, 5, 2, 4, 1, 6).contiguous()
-            return sh.view(pr // 32, pk * 32)
+            sh = sh.view(pr // 32, pk * 32)
+            sh = sh.view(pr // 64, 2, pk * 32 // 4, 4)
+            sh = sh.permute(0, 2, 1, 3).contiguous()
+            return sh.view(pr // 64, pk * 64)
 
         try:
             A = gen_fp4(M, K)
             B = gen_fp4(N, K)
             sc_exp_a = torch.randint(-2, 3, (M, k_blocks), dtype=torch.int8, device="cuda")
             sc_exp_b = torch.randint(-2, 3, (N, k_blocks), dtype=torch.int8, device="cuda")
-            A_sc = preshuffle_mfma16(sc_exp_a)
-            B_sc = preshuffle_mfma16(sc_exp_b)
+            A_sc = preshuffle_mfma16_merged(sc_exp_a)
+            B_sc = preshuffle_mfma16_merged(sc_exp_b)
             C = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
 
             run = lambda: {module_name}.gemm_rcr(A, B, A_sc, B_sc, C)
@@ -284,11 +287,11 @@ def run_single_shape(m, n, k, comp_tflops, build_dir, work_dir, module_suffix=""
 
 def main():
     print("=" * 70)
-    print("MXFP4 Gluon C++ - All 42 Shapes (preshuffle_mfma16 scales)")
+    print("MXFP4 Gluon C++ - All 42 Shapes (preshuffle_mfma16_merged scales)")
     print("=" * 70)
     print(f"Total shapes: {len(ALL_SHAPES)}")
     print(f"ThunderKittens: {TK_ROOT}")
-    print(f"Scale format: preshuffle_mfma16")
+    print(f"Scale format: preshuffle_mfma16_merged")
     print(f"Warmup: 50, Iters: 100, Trimmed mean (10% each end)")
     print(f"Each shape runs in its own subprocess for isolation")
     print()
@@ -311,6 +314,10 @@ def main():
         ("_u16", "-DUNROLL_K=16"),                         # GM4, unroll 16
         ("_gm2u16", "-DGROUP_SIZE_M=2 -DUNROLL_K=16"),   # GM2, unroll 16
         ("_gm1", "-DGROUP_SIZE_M=1"),                     # GM1 (no grouping), auto-unroll
+        ("_gm8", "-DGROUP_SIZE_M=8"),                     # GM8, auto-unroll
+        ("_u8", "-DUNROLL_K=8"),                           # GM4, unroll 8
+        ("_u32", "-DUNROLL_K=32"),                         # GM4, unroll 32
+        ("_gm8u16", "-DGROUP_SIZE_M=8 -DUNROLL_K=16"),   # GM8, unroll 16
     ]
     for n_val, k_val in nk_pairs:
         for suffix, cppflags in variants:
@@ -405,7 +412,7 @@ def main():
     with open(results_file, "w") as f:
         json.dump({
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "scale_format": "preshuffle_mfma16",
+            "scale_format": "preshuffle_mfma16_merged",
             "warmup": 50,
             "iters": 100,
             "trim_frac": 0.10,
