@@ -177,7 +177,7 @@ struct attn_bwd_combined_d192v128_globals {
 };
 
 __launch_bounds__(NUM_THREADS, 1)
-__global__ __attribute__((amdgpu_num_vgpr(128))) void attend_bwd_combined_d192v128_ker(const attn_bwd_combined_d192v128_globals g) {
+__global__ __attribute__((amdgpu_num_vgpr(140))) void attend_bwd_combined_d192v128_ker(const attn_bwd_combined_d192v128_globals g) {
 
   const int kv_head_idx = blockIdx.x;
   const int seq_idx = blockIdx.y;
@@ -251,8 +251,80 @@ __global__ __attribute__((amdgpu_num_vgpr(128))) void attend_bwd_combined_d192v1
   __builtin_amdgcn_s_waitcnt(0);
   __builtin_amdgcn_s_barrier();
 
-  for (int i = 0; i < min(num_steps, 1); ++i) { // DEBUG: empty loop body
+  for (int i = 0; i < num_steps; ++i) {
+    const int q_head_idx = i / num_steps_per_head + first_q_head;
+    const int q_seq_idx = (i % num_steps_per_head) + first_step;
+    const int q_pos_base = q_seq_idx * STEP_QO;
     const bool is_last = (i == num_steps - 1);
+
+    #pragma unroll 1
+    for (int ds = 0; ds < 4; ds++) {
+      const int q_pos = q_pos_base + ds * DOT_SLICE_QO;
+      const int smem_half = ds / 2;
+      const int smem_sub  = ds % 2;
+
+      load(Q_i, subtile_inplace<DOT_SLICE_QO, D_QK>(Q_i_smem[tic][smem_half], {smem_sub, 0}));
+      load(K_j, subtile_inplace<WARP_SIZE_KV, D_QK>(K_j_smem, {warpid, 0}));
+      zero(P_ij);
+      mma_ABt(P_ij, Q_i, K_j, P_ij);
+      mul(P_ij, P_ij, P_SCALE_FACTOR);
+      {
+        typename decltype(P_ij)::col_vec L_i_vec;
+        load(L_i_vec, subvec_inplace<DOT_SLICE_QO>(L_smem[tic], ds));
+        mul(L_i_vec, L_i_vec, L_SCALE_FACTOR);
+        sub_row(P_ij, P_ij, L_i_vec);
+      }
+      if constexpr (causal) {
+        if (q_pos + DOT_SLICE_QO <= k_pos) neg_infty(P_ij);
+        else if (q_pos < k_pos + WARP_SIZE_KV) {
+          const uint32_t neg_inf_v = 0xff800000u;
+          mask_causal_bwd(P_ij, q_pos, k_pos, neg_inf_v, kittens::laneid());
+        }
+      }
+      #pragma unroll
+      for (int jj = 0; jj < P_ij.width; jj++)
+        #pragma unroll
+        for (int kk = 0; kk < P_ij.packed_per_base_tile; kk++) {
+          P_ij.tiles[0][jj].data[kk].x = __builtin_fminf(P_ij.tiles[0][jj].data[kk].x, 0.0f);
+          P_ij.tiles[0][jj].data[kk].y = __builtin_fminf(P_ij.tiles[0][jj].data[kk].y, 0.0f);
+        }
+      exp2(P_ij, P_ij);
+
+      load(dO_i, subtile_inplace<DOT_SLICE_QO, D_V>(dO_i_smem[tic][smem_half], {smem_sub, 0}));
+      zero(dP_ij);
+      mma_ABt(dP_ij, dO_i, V_j, dP_ij);
+      {
+        typename decltype(dP_ij)::col_vec delta_vec;
+        load(delta_vec, subvec_inplace<DOT_SLICE_QO>(delta_smem[tic], ds));
+        sub_row(dP_ij, dP_ij, delta_vec);
+      }
+      mul(dP_ij, dP_ij, P_ij);
+
+      rt_bf<DOT_SLICE_QO, WARP_SIZE_KV, col_l, rt_16x16_s> P_ij_bf16;
+      copy(P_ij_bf16, P_ij);
+      rt_fl<DOT_SLICE_QO, WARP_SIZE_KV, col_l, rt_16x16_s> dS_scaled;
+      copy(dS_scaled, dP_ij);
+      mul(dS_scaled, dS_scaled, dP_SCALE_FACTOR);
+      rt_bf<DOT_SLICE_QO, WARP_SIZE_KV, col_l, rt_16x16_s> dS_ij_bf16;
+      copy(dS_ij_bf16, dP_ij);
+      rt_bf<DOT_SLICE_QO, WARP_SIZE_KV, col_l, rt_16x16_s> dS_scaled_bf16;
+      copy(dS_scaled_bf16, dS_scaled);
+
+      load(dO_i_col, subtile_inplace<DOT_SLICE_QO, D_V>(dO_i_smem[tic][smem_half], {smem_sub, 0}));
+      swap_layout(bf16_mma_scratch, P_ij_bf16);
+      { auto &P_col_4s = *reinterpret_cast<rt_bf<DOT_SLICE_QO, WARP_SIZE_KV, col_l, rt_16x32_4_s>*>(&bf16_mma_scratch);
+        mma_AtB(dV_j_T, dO_i_col, P_col_4s, dV_j_T); }
+
+      // dQ skipped for now
+      __builtin_amdgcn_s_barrier();
+      __builtin_amdgcn_s_barrier();
+
+      load(Q_i_col, subtile_inplace<DOT_SLICE_QO, D_QK>(Q_i_smem[tic][smem_half], {smem_sub, 0}));
+      swap_layout(bf16_mma_scratch, dS_scaled_bf16);
+      { auto &dS_col_4s = *reinterpret_cast<rt_bf<DOT_SLICE_QO, WARP_SIZE_KV, col_l, rt_16x32_4_s>*>(&bf16_mma_scratch);
+        mma_AtB(dK_j_T, Q_i_col, dS_col_4s, dK_j_T); }
+      __builtin_amdgcn_s_barrier();
+    }
 
     if (!is_last) {
       const int nn_q_head_idx = (i + 1) / num_steps_per_head + first_q_head;
