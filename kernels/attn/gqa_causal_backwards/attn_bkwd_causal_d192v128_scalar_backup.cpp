@@ -123,7 +123,7 @@ __device__ __forceinline__ void atomic_add_dQ_col_l(
         float f1 = dQ_T.tiles[0][0].data[k].y;
 
         uint32_t pk;
-        asm volatile("v_cvt_pk_bf16_f32 %0, %1, %2" : "=v"(pk) : "v"(f1), "v"(f0));
+        asm volatile("v_cvt_pk_bf16_f32 %0, %1, %2" : "=v"(pk) : "v"(f0), "v"(f1));
 
         uint32_t byte_off = static_cast<uint32_t>((elem_off + d_pos) * sizeof(bf16));
 
@@ -407,8 +407,6 @@ __global__ void attend_bwd_dq_d192v128_ker(
     st_bf<Q_TILE, D_V,  st_32x32_s>   (&dO_smem) = al.allocate<st_bf<Q_TILE, D_V,  st_32x32_s>>();
     sv_fl<Q_TILE> (&L_smem)     = al.allocate<sv_fl<Q_TILE>>();
     sv_fl<Q_TILE> (&delta_smem) = al.allocate<sv_fl<Q_TILE>>();
-    // Per-warp dS^T buffer in LDS: 4 * 32*32 bf16 = 8192 bytes
-    bf16 *dS_T_scratch_base = reinterpret_cast<bf16*>(al.ptr);
 
     const int kv_head   = blockIdx.x;
     const int seq_block = blockIdx.y;
@@ -428,9 +426,6 @@ __global__ void attend_bwd_dq_d192v128_ker(
     //   G = lane >> 5
     const int kv_local = lane & 31;                // position within this warp's KV_BLOCK
     const int G_id     = lane >> 5;
-
-    // Per-warp dS^T buffer
-    bf16 *my_dS_T = dS_T_scratch_base + wid * 32 * 32;
 
     // Set up buffer resource for dQ atomic adds
     bf16 *dQ_base = reinterpret_cast<bf16*>(g.dQg.raw_ptr);
@@ -568,47 +563,61 @@ __global__ void attend_bwd_dq_d192v128_ker(
                 }
                 // acc now holds dS (scaled)
 
-                // Phase 3: dQ via mma_AtB
-                // Transpose dS through LDS: dS[q, kv] -> my_dS_T[kv * 32 + q]
+                // Phase 3: SCALAR dQ accumulation
+                // dQ[q,d] += dS[q,kv] * K[kv,d]
+                // Each thread has 16 dS values (8 packed pairs) in acc.
+                // For each dS element, multiply by K_reg[d] and atomic-add to dQ.
                 #pragma unroll
                 for (int k = 0; k < 8; k++) {
-                    int ro   = ((k >> 1) << 3) + ((k & 1) << 1);
-                    int q_r0 = G_id * 4 + ro;
-                    int q_r1 = q_r0 + 1;
-                    my_dS_T[kv_local * 32 + q_r0] = __float2bfloat16(acc.tiles[0][0].data[k].x);
-                    my_dS_T[kv_local * 32 + q_r1] = __float2bfloat16(acc.tiles[0][0].data[k].y);
-                }
-                __builtin_amdgcn_s_waitcnt(0);
+                    int ro    = ((k >> 1) << 3) + ((k & 1) << 1);
+                    int q_r0  = G_id * 4 + ro;
+                    int q_r1  = q_r0 + 1;
 
-                // Load dS^T [KV x Q, col_l, rt_16x32_4_s] from LDS
-                rt<bf16, KV_BLOCK, Q_TILE, col_l, rt_16x32_4_s> dS_T_reg;
-                {
-                    const int q_lane = lane & 31;
-                    const int G = lane >> 5;
+                    float dS_val0 = acc.tiles[0][0].data[k].x;
+                    float dS_val1 = acc.tiles[0][0].data[k].y;
+
+                    // Base offset for dQ[batch, q_head, q_pos + q_r0/q_r1, :]
+                    int elem_off0 = batch * stride_b + q_head * stride_h
+                                  + (q_pos + q_r0) * stride_n;
+                    int elem_off1 = batch * stride_b + q_head * stride_h
+                                  + (q_pos + q_r1) * stride_n;
+
+                    // Accumulate over D_QK dimension in pairs
                     #pragma unroll
-                    for (int ti = 0; ti < 2; ti++) {
-                        #pragma unroll
-                        for (int k = 0; k < 4; k++) {
-                            int ro = ((k >> 1) << 3) + ((k & 1) << 1);
-                            int kv_r0 = ti * 16 + G * 4 + ro;
-                            int kv_r1 = kv_r0 + 1;
-                            dS_T_reg.tiles[ti][0].data[k].x = my_dS_T[kv_r0 * 32 + q_lane];
-                            dS_T_reg.tiles[ti][0].data[k].y = my_dS_T[kv_r1 * 32 + q_lane];
+                    for (int dp = 0; dp < D_QK; dp += 2) {
+                        float k0_f = __bfloat162float(K_reg[dp]);
+                        float k1_f = __bfloat162float(K_reg[dp + 1]);
+
+                        // dQ[q_r0, dp:dp+2] += dS_val0 * K[kv, dp:dp+2]
+                        {
+                            float f0 = dS_val0 * k0_f;
+                            float f1 = dS_val0 * k1_f;
+                            uint32_t pk;
+                            asm volatile("v_cvt_pk_bf16_f32 %0, %1, %2"
+                                : "=v"(pk) : "v"(f0), "v"(f1));
+                            uint32_t byte_off = static_cast<uint32_t>(
+                                (elem_off0 + dp) * sizeof(bf16));
+                            asm volatile(
+                                "buffer_atomic_pk_add_bf16 %0, %1, %2, 0 offen"
+                                : : "v"(pk), "v"(byte_off),
+                                    "s"(*(const i32x4*)&dq_br) : "memory");
+                        }
+
+                        // dQ[q_r1, dp:dp+2] += dS_val1 * K[kv, dp:dp+2]
+                        {
+                            float f0 = dS_val1 * k0_f;
+                            float f1 = dS_val1 * k1_f;
+                            uint32_t pk;
+                            asm volatile("v_cvt_pk_bf16_f32 %0, %1, %2"
+                                : "=v"(pk) : "v"(f0), "v"(f1));
+                            uint32_t byte_off = static_cast<uint32_t>(
+                                (elem_off1 + dp) * sizeof(bf16));
+                            asm volatile(
+                                "buffer_atomic_pk_add_bf16 %0, %1, %2, 0 offen"
+                                : : "v"(pk), "v"(byte_off),
+                                    "s"(*(const i32x4*)&dq_br) : "memory");
                         }
                     }
-                }
-
-                // For each D chunk: dQ_T[32 x Q] = K_chunk^T @ dS_T
-                #pragma unroll
-                for (int dc = 0; dc < D_QK / 32; dc++) {
-                    rt<bf16, KV_BLOCK, 32, col_l, rt_16x32_4_s> K_chunk;
-                    load(K_chunk, subtile_inplace<KV_BLOCK, 32>(K_smem, {wid, dc}));
-
-                    rt<float, 32, Q_TILE, col_l, rt_32x32_s> dQ_T;
-                    zero(dQ_T);
-                    mma_AtB(dQ_T, K_chunk, dS_T_reg, dQ_T);
-
-                    atomic_add_dQ_col_l(g.dQg, dQ_T, batch, q_head, qi, dc);
                 }
             } // !skip
 

@@ -171,41 +171,34 @@ struct attn_bwd_combined_d192v128_globals {
 };
 
 // ---------------------------------------------------------------------------
-// Kernel
+// Kernel — Optimized: hoisted K/V reg loads, double-buffered Q/dO, sched barriers
 // ---------------------------------------------------------------------------
 __launch_bounds__(NUM_THREADS, 1)
 __global__ void attend_bwd_combined_d192v128_ker(
     const attn_bwd_combined_d192v128_globals g)
 {
     constexpr int QKVO_AXIS = 1; // BNHD layout
-    constexpr float P_SCALE  = 0.07216878365f * 1.44269504089f; // softmax_scale * log2(e)
-    constexpr float L_SCALE  = 1.44269504089f;                  // log2(e)
-    constexpr float dP_SCALE = 0.07216878365f;                  // softmax_scale
+    constexpr float P_SCALE  = 0.07216878365f * 1.44269504089f;
+    constexpr float L_SCALE  = 1.44269504089f;
+    constexpr float dP_SCALE = 0.07216878365f;
 
-    // -----------------------------------------------------------------------
-    // Shared memory
-    // -----------------------------------------------------------------------
     extern __shared__ alignment_dummy __shm[];
     shared_allocator al((int*)&__shm[0]);
 
-    st_bf<BLOCK_KV, D_QK, st_32x32_s> (&K_smem)      = al.allocate<st_bf<BLOCK_KV, D_QK, st_32x32_s>>();
-    st_bf<BLOCK_KV, D_V,  st_32x32_s> (&V_smem)      = al.allocate<st_bf<BLOCK_KV, D_V,  st_32x32_s>>();
-    st_bf<Q_TILE, D_QK, st_32x32_s>   (&Q_smem)  = al.allocate<st_bf<Q_TILE, D_QK, st_32x32_s>>();
-    st_bf<Q_TILE, D_V,  st_32x32_s>   (&dO_smem) = al.allocate<st_bf<Q_TILE, D_V,  st_32x32_s>>();
-    sv_fl<Q_TILE> (&L_smem)     = al.allocate<sv_fl<Q_TILE>>();
-    sv_fl<Q_TILE> (&delta_smem) = al.allocate<sv_fl<Q_TILE>>();
+    // K/V in shared (loaded once)
+    st_bf<BLOCK_KV, D_QK, st_32x32_s> (&K_smem)     = al.allocate<st_bf<BLOCK_KV, D_QK, st_32x32_s>>();
+    st_bf<BLOCK_KV, D_V,  st_32x32_s> (&V_smem)     = al.allocate<st_bf<BLOCK_KV, D_V,  st_32x32_s>>();
+    // Double-buffered Q/dO
+    st_bf<Q_TILE, D_QK, st_32x32_s>   (&Q_smem)[2]  = al.allocate<st_bf<Q_TILE, D_QK, st_32x32_s>, 2>();
+    st_bf<Q_TILE, D_V,  st_32x32_s>   (&dO_smem)[2] = al.allocate<st_bf<Q_TILE, D_V,  st_32x32_s>, 2>();
+    sv_fl<Q_TILE> (&L_smem)[2]     = al.allocate<sv_fl<Q_TILE>, 2>();
+    sv_fl<Q_TILE> (&delta_smem)[2] = al.allocate<sv_fl<Q_TILE>, 2>();
 
-    // -----------------------------------------------------------------------
-    // Register accumulators for dK and dV (col_l, one per warp)
-    // -----------------------------------------------------------------------
     rt<float, D_QK, KV_BLOCK, col_l, rt_32x32_s> dK_acc;
     rt<float, D_V,  KV_BLOCK, col_l, rt_32x32_s> dV_acc;
     zero(dK_acc);
     zero(dV_acc);
 
-    // -----------------------------------------------------------------------
-    // Indices
-    // -----------------------------------------------------------------------
     const int kv_head   = blockIdx.x;
     const int seq_block = blockIdx.y;
     const int batch     = blockIdx.z;
@@ -214,55 +207,79 @@ __global__ void attend_bwd_combined_d192v128_ker(
     const int kv_start  = j * KV_BLOCK;
     const int total_q   = ATTN_N / Q_TILE;
     const int first_q   = causal ? max(0, (int)(seq_block * BLOCK_KV / Q_TILE)) : 0;
+    const int lane      = laneid();
 
-    // -----------------------------------------------------------------------
-    // Load K and V tiles for this KV block into shared memory
-    // -----------------------------------------------------------------------
+    // Load K and V into shared memory
     G::load<QKVO_AXIS, false>(K_smem, g.K, {batch, seq_block, kv_head, 0});
     G::load<QKVO_AXIS, false>(V_smem, g.V, {batch, seq_block, kv_head, 0});
     __builtin_amdgcn_s_waitcnt(0);
     __builtin_amdgcn_s_barrier();
 
-    // -----------------------------------------------------------------------
-    // Main loop: iterate over Q tiles
-    // -----------------------------------------------------------------------
-    for (int qi = first_q; qi < total_q; qi++) {
-        for (int qho = 0; qho < GROUP_SIZE; qho++) {
+    // Hoist K_j and V_j into registers (used for ALL Q iterations)
+    rt<bf16, KV_BLOCK, D_QK, row_l, rt_32x16_4_s> K_j;
+    load(K_j, subtile_inplace<KV_BLOCK, D_QK>(K_smem, {wid, 0}));
+    rt<bf16, KV_BLOCK, D_V, row_l, rt_32x16_4_s> V_j;
+    load(V_j, subtile_inplace<KV_BLOCK, D_V>(V_smem, {wid, 0}));
+
+    // Flatten (qi, qho) into single iteration space
+    const int total_iters = (total_q - first_q) * GROUP_SIZE;
+
+    if (total_iters > 0) {
+        // Prefetch first Q/dO into buffer 0
+        {
+            const int qi0 = first_q;
+            const int qh0 = kv_head * GROUP_SIZE;
+            G::load<QKVO_AXIS, false>(Q_smem[0], g.Q, {batch, qi0, qh0, 0});
+            G::load<QKVO_AXIS, false>(dO_smem[0], g.dOg, {batch, qi0, qh0, 0});
+            load_L_delta_direct(reinterpret_cast<float*>(&L_smem[0]),
+                                g.L_vec, batch, qh0, qi0);
+            load_L_delta_direct(reinterpret_cast<float*>(&delta_smem[0]),
+                                g.delta_vec, batch, qh0, qi0);
+        }
+        __builtin_amdgcn_s_waitcnt(0);
+        __builtin_amdgcn_s_barrier();
+
+        #pragma unroll 1
+        for (int iter = 0; iter < total_iters; iter++) {
+            const int cur = iter & 1;
+            const int nxt = 1 - cur;
+            const int qi   = first_q + (iter / GROUP_SIZE);
+            const int qho  = iter % GROUP_SIZE;
             const int q_head = kv_head * GROUP_SIZE + qho;
             const int q_pos  = qi * Q_TILE;
             const bool skip  = causal && (q_pos + Q_TILE <= kv_start);
 
-            // Load Q, dO, L, delta in parallel (all to different shared regions)
-            G::load<QKVO_AXIS, false>(Q_smem, g.Q, {batch, qi, q_head, 0});
-            G::load<QKVO_AXIS, false>(dO_smem, g.dOg, {batch, qi, q_head, 0});
-            {
-                float *L_raw = reinterpret_cast<float*>(&L_smem);
-                float *delta_raw = reinterpret_cast<float*>(&delta_smem);
-                load_L_delta_direct(L_raw, g.L_vec, batch, q_head, qi);
-                load_L_delta_direct(delta_raw, g.delta_vec, batch, q_head, qi);
+            // Prefetch next Q/dO (overlap with compute)
+            if (iter + 1 < total_iters) {
+                const int nqi  = first_q + ((iter + 1) / GROUP_SIZE);
+                const int nqho = (iter + 1) % GROUP_SIZE;
+                const int nqh  = kv_head * GROUP_SIZE + nqho;
+                G::load<QKVO_AXIS, false>(Q_smem[nxt], g.Q, {batch, nqi, nqh, 0});
+                G::load<QKVO_AXIS, false>(dO_smem[nxt], g.dOg, {batch, nqi, nqh, 0});
+                load_L_delta_direct(reinterpret_cast<float*>(&L_smem[nxt]),
+                                    g.L_vec, batch, nqh, nqi);
+                load_L_delta_direct(reinterpret_cast<float*>(&delta_smem[nxt]),
+                                    g.delta_vec, batch, nqh, nqi);
             }
-            __builtin_amdgcn_s_waitcnt(0);
-            __builtin_amdgcn_s_barrier();
 
             if (!skip) {
-                // Phase 1: S = Q @ K^T * P_SCALE, subtract L, causal mask, exp2
+                // Phase 1: S = Q @ K^T
                 rt<bf16, Q_TILE, D_QK, row_l, rt_32x16_4_s> Q_i;
-                load(Q_i, Q_smem);
-                rt<bf16, KV_BLOCK, D_QK, row_l, rt_32x16_4_s> K_j;
-                load(K_j, subtile_inplace<KV_BLOCK, D_QK>(K_smem, {wid, 0}));
+                load(Q_i, Q_smem[cur]);
 
                 rt<float, Q_TILE, KV_BLOCK, col_l, rt_32x32_s> S_ij;
                 zero(S_ij);
                 mma_ABt(S_ij, Q_i, K_j, S_ij);
-                mul(S_ij, S_ij, P_SCALE);
+                sched_barrier_pairs<12, 2, 0>();
+                __builtin_amdgcn_sched_barrier(0);
 
+                mul(S_ij, S_ij, P_SCALE);
                 typename decltype(S_ij)::col_vec L_reg;
-                load(L_reg, L_smem);
+                load(L_reg, L_smem[cur]);
                 mul(L_reg, L_reg, L_SCALE);
                 sub_row(S_ij, S_ij, L_reg);
 
                 if constexpr (causal) {
-                    const int lane = laneid();
                     const int kv_c = lane & 31;
                     const int G_id = lane >> 5;
                     #pragma unroll
@@ -291,20 +308,20 @@ __global__ void attend_bwd_combined_d192v128_ker(
                                 base_ops::exp2::op(S_ij.tiles[ii][jj].data[k]);
                         }
 
-                // Phase 2: dP = dO @ V^T, dS = P * (dP - delta)
+                // Phase 2: dP = dO @ V^T
                 rt<bf16, Q_TILE, D_V, row_l, rt_32x16_4_s> dO_i;
-                load(dO_i, dO_smem);
-                rt<bf16, KV_BLOCK, D_V, row_l, rt_32x16_4_s> V_j;
-                load(V_j, subtile_inplace<KV_BLOCK, D_V>(V_smem, {wid, 0}));
+                load(dO_i, dO_smem[cur]);
 
                 rt<float, Q_TILE, KV_BLOCK, col_l, rt_32x32_s> dP_ij;
                 zero(dP_ij);
                 mma_ABt(dP_ij, dO_i, V_j, dP_ij);
+                sched_barrier_pairs<8, 2, 1>();
+                __builtin_amdgcn_sched_barrier(0);
 
+                // dS = P * (dP - delta) * dP_SCALE
                 {
-                    const int lane = laneid();
                     const int G = lane >> 5;
-                    float *d_raw = reinterpret_cast<float*>(&delta_smem);
+                    float *d_raw = reinterpret_cast<float*>(&delta_smem[cur]);
                     #pragma unroll
                     for (int k = 0; k < dP_ij.tiles[0][0].packed_per_thread; k++) {
                         int ro = ((k >> 1) << 3) + ((k & 1) << 1);
@@ -318,36 +335,40 @@ __global__ void attend_bwd_combined_d192v128_ker(
 
                 // Phase 3: dV += dO^T @ P
                 rt<bf16, Q_TILE, D_V, col_l, rt_16x32_4_s> dO_col;
-                load(dO_col, dO_smem);
+                load(dO_col, dO_smem[cur]);
 
                 rt<bf16, Q_TILE, KV_BLOCK, col_l, rt_32x32_s> P_bf;
                 copy(P_bf, S_ij);
                 auto &Pm = *reinterpret_cast<
                     rt<bf16, Q_TILE, KV_BLOCK, col_l, rt_16x32_4_s>*>(&P_bf);
-
                 mma_AtB(dV_acc, dO_col, Pm, dV_acc);
+                sched_barrier_pairs<4, 2, 2>();
+                __builtin_amdgcn_sched_barrier(0);
 
-                // Phase 4: dK += Q^T @ (dS * scale)
+                // Phase 4: dK += Q^T @ dS
                 mul(dP_ij, dP_ij, dP_SCALE);
 
                 rt<bf16, Q_TILE, D_QK, col_l, rt_16x32_4_s> Q_col;
-                load(Q_col, Q_smem);
+                load(Q_col, Q_smem[cur]);
 
                 rt<bf16, Q_TILE, KV_BLOCK, col_l, rt_32x32_s> dS_bf;
                 copy(dS_bf, dP_ij);
                 auto &dSm = *reinterpret_cast<
                     rt<bf16, Q_TILE, KV_BLOCK, col_l, rt_16x32_4_s>*>(&dS_bf);
-
                 mma_AtB(dK_acc, Q_col, dSm, dK_acc);
+                sched_barrier_pairs<6, 2, 3>();
+                __builtin_amdgcn_sched_barrier(0);
             }
 
+            // Wait for prefetch and synchronize
+            if (iter + 1 < total_iters) {
+                __builtin_amdgcn_s_waitcnt(0);
+            }
             __builtin_amdgcn_s_barrier();
-        } // qho
-    } // qi
+        }
+    }
 
-    // -----------------------------------------------------------------------
-    // Epilogue: store dV and dK via direct col_l-to-global
-    // -----------------------------------------------------------------------
+    // Epilogue: store dV and dK
     store_col_l_direct<QKVO_AXIS, D_V>(g.dVg, dV_acc, batch, j, kv_head);
     store_col_l_direct<QKVO_AXIS, D_QK>(g.dKg, dK_acc, batch, j, kv_head);
 }
@@ -407,8 +428,8 @@ __global__ void attend_bwd_dq_d192v128_ker(
     st_bf<Q_TILE, D_V,  st_32x32_s>   (&dO_smem) = al.allocate<st_bf<Q_TILE, D_V,  st_32x32_s>>();
     sv_fl<Q_TILE> (&L_smem)     = al.allocate<sv_fl<Q_TILE>>();
     sv_fl<Q_TILE> (&delta_smem) = al.allocate<sv_fl<Q_TILE>>();
-    // Per-warp dS^T buffer in LDS: 4 * 32*32 bf16 = 8192 bytes
-    bf16 *dS_T_scratch_base = reinterpret_cast<bf16*>(al.ptr);
+    // Per-thread P value scratch in LDS (16 floats * 256 threads = 16384 bytes)
+    float *P_scratch = reinterpret_cast<float*>(al.ptr);
 
     const int kv_head   = blockIdx.x;
     const int seq_block = blockIdx.y;
@@ -428,9 +449,6 @@ __global__ void attend_bwd_dq_d192v128_ker(
     //   G = lane >> 5
     const int kv_local = lane & 31;                // position within this warp's KV_BLOCK
     const int G_id     = lane >> 5;
-
-    // Per-warp dS^T buffer
-    bf16 *my_dS_T = dS_T_scratch_base + wid * 32 * 32;
 
     // Set up buffer resource for dQ atomic adds
     bf16 *dQ_base = reinterpret_cast<bf16*>(g.dQg.raw_ptr);
@@ -455,7 +473,6 @@ __global__ void attend_bwd_dq_d192v128_ker(
                          + kv_head * K_stride_h;
 
     bf16 K_reg[D_QK];
-    #pragma unroll
     for (int d = 0; d < D_QK; d++) {
         K_reg[d] = K_ptr[K_base_off + d];
     }
@@ -526,20 +543,18 @@ __global__ void attend_bwd_dq_d192v128_ker(
                         base_ops::exp2::op(acc.tiles[0][0].data[k]);
                 }
 
-                // Save P = exp2(S) into VGPR storage before reusing acc.
-                // Use volatile to prevent the compiler from eliminating the
-                // first MMA (P) when it sees the second MMA (dP) overwrite acc.
-                float P_save_x[8], P_save_y[8];
-                #pragma unroll
-                for (int k = 0; k < 8; k++) {
-                    float px = acc.tiles[0][0].data[k].x;
-                    float py = acc.tiles[0][0].data[k].y;
-                    asm volatile("" : "+v"(px));  // force materialization
-                    asm volatile("" : "+v"(py));
-                    P_save_x[k] = px;
-                    P_save_y[k] = py;
+                // Save P = exp2(S) into LDS scratch to avoid VGPR clobbering
+                // during the second MMA's tile loads. 16 floats per thread.
+                {
+                    volatile float *P_lds = P_scratch + tid * 16;
+                    #pragma unroll
+                    for (int k = 0; k < 8; k++) {
+                        P_lds[k*2]   = acc.tiles[0][0].data[k].x;
+                        P_lds[k*2+1] = acc.tiles[0][0].data[k].y;
+                    }
                 }
 
+                __builtin_amdgcn_s_waitcnt(0); // ensure P LDS stores complete
                 // Phase 2: dP = dO @ V^T using the SAME accumulator
                 {
                     rt<bf16, Q_TILE, D_V, row_l, rt_32x16_4_s> dO_i;
@@ -552,8 +567,11 @@ __global__ void attend_bwd_dq_d192v128_ker(
                 // acc now holds dP
 
                 // dS = P * (dP - delta) * softmax_scale
+                // Read P back from LDS scratch
+                __builtin_amdgcn_s_waitcnt(0); // ensure dP MMA and P LDS loads don't conflict
                 {
                     float *d_raw = reinterpret_cast<float*>(&delta_smem);
+                    volatile float *P_lds = P_scratch + tid * 16;
                     #pragma unroll
                     for (int k = 0; k < acc.tiles[0][0].packed_per_thread; k++) {
                         int ro = ((k >> 1) << 3) + ((k & 1) << 1);
@@ -561,54 +579,69 @@ __global__ void attend_bwd_dq_d192v128_ker(
                         int row1 = row0 + 1;
                         float dP_x = acc.tiles[0][0].data[k].x - d_raw[row0];
                         float dP_y = acc.tiles[0][0].data[k].y - d_raw[row1];
+                        float P_x = P_lds[k*2];
+                        float P_y = P_lds[k*2+1];
                         // dS = P * (dP - delta) * dP_SCALE
-                        acc.tiles[0][0].data[k].x = P_save_x[k] * dP_x * dP_SCALE;
-                        acc.tiles[0][0].data[k].y = P_save_y[k] * dP_y * dP_SCALE;
+                        acc.tiles[0][0].data[k].x = P_x * dP_x * dP_SCALE;
+                        acc.tiles[0][0].data[k].y = P_y * dP_y * dP_SCALE;
                     }
                 }
                 // acc now holds dS (scaled)
 
-                // Phase 3: dQ via mma_AtB
-                // Transpose dS through LDS: dS[q, kv] -> my_dS_T[kv * 32 + q]
+                // Phase 3: SCALAR dQ accumulation
+                // dQ[q,d] += dS[q,kv] * K[kv,d]
+                // Each thread has 16 dS values (8 packed pairs) in acc.
+                // For each dS element, multiply by K_reg[d] and atomic-add to dQ.
                 #pragma unroll
                 for (int k = 0; k < 8; k++) {
-                    int ro   = ((k >> 1) << 3) + ((k & 1) << 1);
-                    int q_r0 = G_id * 4 + ro;
-                    int q_r1 = q_r0 + 1;
-                    my_dS_T[kv_local * 32 + q_r0] = __float2bfloat16(acc.tiles[0][0].data[k].x);
-                    my_dS_T[kv_local * 32 + q_r1] = __float2bfloat16(acc.tiles[0][0].data[k].y);
-                }
-                __builtin_amdgcn_s_waitcnt(0);
+                    int ro    = ((k >> 1) << 3) + ((k & 1) << 1);
+                    int q_r0  = G_id * 4 + ro;
+                    int q_r1  = q_r0 + 1;
 
-                // Load dS^T [KV x Q, col_l, rt_16x32_4_s] from LDS
-                rt<bf16, KV_BLOCK, Q_TILE, col_l, rt_16x32_4_s> dS_T_reg;
-                {
-                    const int q_lane = lane & 31;
-                    const int G = lane >> 5;
-                    #pragma unroll
-                    for (int ti = 0; ti < 2; ti++) {
-                        #pragma unroll
-                        for (int k = 0; k < 4; k++) {
-                            int ro = ((k >> 1) << 3) + ((k & 1) << 1);
-                            int kv_r0 = ti * 16 + G * 4 + ro;
-                            int kv_r1 = kv_r0 + 1;
-                            dS_T_reg.tiles[ti][0].data[k].x = my_dS_T[kv_r0 * 32 + q_lane];
-                            dS_T_reg.tiles[ti][0].data[k].y = my_dS_T[kv_r1 * 32 + q_lane];
+                    float dS_val0 = acc.tiles[0][0].data[k].x;
+                    float dS_val1 = acc.tiles[0][0].data[k].y;
+
+                    // Base offset for dQ[batch, q_head, q_pos + q_r0/q_r1, :]
+                    int elem_off0 = batch * stride_b + q_head * stride_h
+                                  + (q_pos + q_r0) * stride_n;
+                    int elem_off1 = batch * stride_b + q_head * stride_h
+                                  + (q_pos + q_r1) * stride_n;
+
+                    // Accumulate over D_QK dimension in pairs
+                    for (int dp = 0; dp < D_QK; dp += 2) {
+                        float k0_f = __bfloat162float(K_reg[dp]);
+                        float k1_f = __bfloat162float(K_reg[dp + 1]);
+
+                        // dQ[q_r0, dp:dp+2] += dS_val0 * K[kv, dp:dp+2]
+                        {
+                            float f0 = dS_val0 * k0_f;
+                            float f1 = dS_val0 * k1_f;
+                            uint32_t pk;
+                            asm volatile("v_cvt_pk_bf16_f32 %0, %1, %2"
+                                : "=v"(pk) : "v"(f0), "v"(f1));
+                            uint32_t byte_off = static_cast<uint32_t>(
+                                (elem_off0 + dp) * sizeof(bf16));
+                            asm volatile(
+                                "buffer_atomic_pk_add_bf16 %0, %1, %2, 0 offen"
+                                : : "v"(pk), "v"(byte_off),
+                                    "s"(*(const i32x4*)&dq_br) : "memory");
+                        }
+
+                        // dQ[q_r1, dp:dp+2] += dS_val1 * K[kv, dp:dp+2]
+                        {
+                            float f0 = dS_val1 * k0_f;
+                            float f1 = dS_val1 * k1_f;
+                            uint32_t pk;
+                            asm volatile("v_cvt_pk_bf16_f32 %0, %1, %2"
+                                : "=v"(pk) : "v"(f0), "v"(f1));
+                            uint32_t byte_off = static_cast<uint32_t>(
+                                (elem_off1 + dp) * sizeof(bf16));
+                            asm volatile(
+                                "buffer_atomic_pk_add_bf16 %0, %1, %2, 0 offen"
+                                : : "v"(pk), "v"(byte_off),
+                                    "s"(*(const i32x4*)&dq_br) : "memory");
                         }
                     }
-                }
-
-                // For each D chunk: dQ_T[32 x Q] = K_chunk^T @ dS_T
-                #pragma unroll
-                for (int dc = 0; dc < D_QK / 32; dc++) {
-                    rt<bf16, KV_BLOCK, 32, col_l, rt_16x32_4_s> K_chunk;
-                    load(K_chunk, subtile_inplace<KV_BLOCK, 32>(K_smem, {wid, dc}));
-
-                    rt<float, 32, Q_TILE, col_l, rt_32x32_s> dQ_T;
-                    zero(dQ_T);
-                    mma_AtB(dQ_T, K_chunk, dS_T_reg, dQ_T);
-
-                    atomic_add_dQ_col_l(g.dQg, dQ_T, batch, q_head, qi, dc);
                 }
             } // !skip
 

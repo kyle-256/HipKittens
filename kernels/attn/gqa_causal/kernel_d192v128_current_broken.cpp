@@ -331,7 +331,7 @@ __global__ void attend_ker(const attn_globals g) {
 
     int pending_scale = 0;
 
-    #pragma unroll 2
+    #pragma unroll 1
     for (int j = 3; j < max_num_tiles - 1; j += 2) {
         // Cluster 0: QK1 + finish softmax QK0 (register ops only, stagger-safe)
         zero(att_block[1]);
