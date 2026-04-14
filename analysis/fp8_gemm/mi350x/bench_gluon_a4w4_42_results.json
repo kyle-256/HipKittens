@@ -1,0 +1,395 @@
+{
+  "timestamp": "2026-04-14 06:48:52",
+  "env": {
+    "TRITON_ENABLE_LLIR_SCHED": "1",
+    "TRITON_ENABLE_AMDGCN_AS": "1"
+  },
+  "scale_format": "raw_e8m0",
+  "warmup": 30,
+  "iters": 100,
+  "trim_frac": 0.1,
+  "total_shapes": 42,
+  "wins_gluon": 12,
+  "wins_cpp": 28,
+  "errors": 2,
+  "results": [
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 2048,
+      "avg_ms": 0.1038,
+      "tflops": 2647.3,
+      "status": "OK",
+      "cpp_tflops": 2995.0
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 3072,
+      "avg_ms": 0.121,
+      "tflops": 3406.8,
+      "status": "OK",
+      "cpp_tflops": 3492.3
+    },
+    {
+      "M": 16384,
+      "N": 6144,
+      "K": 2048,
+      "avg_ms": 0.1409,
+      "tflops": 2925.8,
+      "status": "OK",
+      "cpp_tflops": 3047.6
+    },
+    {
+      "M": 32768,
+      "N": 4096,
+      "K": 2048,
+      "avg_ms": 0.1854,
+      "tflops": 2965.6,
+      "status": "OK",
+      "cpp_tflops": 3131.8
+    },
+    {
+      "M": 32768,
+      "N": 4096,
+      "K": 3072,
+      "avg_ms": 0.222,
+      "tflops": 3715.1,
+      "status": "OK",
+      "cpp_tflops": 3630.6
+    },
+    {
+      "M": 32768,
+      "N": 6144,
+      "K": 2048,
+      "avg_ms": 0.2657,
+      "tflops": 3103.1,
+      "status": "OK",
+      "cpp_tflops": 3239.9
+    },
+    {
+      "M": 16384,
+      "N": 14336,
+      "K": 2048,
+      "avg_ms": 0.2913,
+      "tflops": 3302.8,
+      "status": "OK",
+      "cpp_tflops": 3301.3
+    },
+    {
+      "M": 16384,
+      "N": 28672,
+      "K": 2048,
+      "avg_ms": 0.5798,
+      "tflops": 3318.7,
+      "status": "OK",
+      "cpp_tflops": 3482.3
+    },
+    {
+      "M": 32768,
+      "N": 14336,
+      "K": 2048,
+      "avg_ms": 0.6025,
+      "tflops": 3193.4,
+      "status": "OK",
+      "cpp_tflops": 3351.4
+    },
+    {
+      "M": 32768,
+      "N": 28672,
+      "K": 2048,
+      "avg_ms": 1.143,
+      "tflops": 3366.7,
+      "status": "OK",
+      "cpp_tflops": 3353.4
+    },
+    {
+      "M": 4096,
+      "N": 4096,
+      "K": 16384,
+      "avg_ms": 0.1226,
+      "tflops": 4485.0,
+      "status": "OK",
+      "cpp_tflops": 4642.1
+    },
+    {
+      "M": 4096,
+      "N": 14336,
+      "K": 16384,
+      "avg_ms": 0.3907,
+      "tflops": 4925.4,
+      "status": "OK",
+      "cpp_tflops": 5013.0
+    },
+    {
+      "M": 6144,
+      "N": 4096,
+      "K": 16384,
+      "avg_ms": 0.1966,
+      "tflops": 4193.7,
+      "status": "OK",
+      "cpp_tflops": 4428.1
+    },
+    {
+      "M": 4096,
+      "N": 4096,
+      "K": 8192,
+      "avg_ms": 0.0761,
+      "tflops": 3611.3,
+      "status": "OK",
+      "cpp_tflops": 3959.9
+    },
+    {
+      "M": 4096,
+      "N": 4096,
+      "K": 32768,
+      "avg_ms": 0.2171,
+      "tflops": 5065.2,
+      "status": "OK",
+      "cpp_tflops": 5152.8
+    },
+    {
+      "M": 4096,
+      "N": 6144,
+      "K": 32768,
+      "avg_ms": 0.3556,
+      "tflops": 4637.7,
+      "status": "OK",
+      "cpp_tflops": 3784.2
+    },
+    {
+      "M": 4096,
+      "N": 14336,
+      "K": 8192,
+      "avg_ms": 0.223,
+      "tflops": 4315.1,
+      "status": "OK",
+      "cpp_tflops": 4345.8
+    },
+    {
+      "M": 4096,
+      "N": 28672,
+      "K": 32768,
+      "avg_ms": 1.3508,
+      "tflops": 5697.9,
+      "status": "OK",
+      "cpp_tflops": 5649.9
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 4096,
+      "avg_ms": 0.2705,
+      "tflops": 4065.1,
+      "status": "OK",
+      "cpp_tflops": 4166.5
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 6144,
+      "avg_ms": 0.3822,
+      "tflops": 4314.9,
+      "status": "OK",
+      "cpp_tflops": 4548.6
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 14336,
+      "avg_ms": 0.7478,
+      "tflops": 5145.9,
+      "status": "OK",
+      "cpp_tflops": 5296.1
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 28672,
+      "avg_ms": 1.3915,
+      "tflops": 5531.1,
+      "status": "OK",
+      "cpp_tflops": 5568.2
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 128256,
+      "avg_ms": null,
+      "tflops": null,
+      "cpp_tflops": 5781.1,
+      "status": "CRASH:Memory access fault by GPU node-3 (Agent handle: 0x565489c15b10) on address 0x7f7a96000000. Reason: Unknown."
+    },
+    {
+      "M": 4096,
+      "N": 128256,
+      "K": 32768,
+      "avg_ms": 6.1968,
+      "tflops": 5555.8,
+      "status": "OK",
+      "cpp_tflops": 3195.3
+    },
+    {
+      "M": 6144,
+      "N": 4096,
+      "K": 8192,
+      "avg_ms": 0.1168,
+      "tflops": 3530.4,
+      "status": "OK",
+      "cpp_tflops": 3822.0
+    },
+    {
+      "M": 6144,
+      "N": 32768,
+      "K": 4096,
+      "avg_ms": 0.3806,
+      "tflops": 4333.7,
+      "status": "OK",
+      "cpp_tflops": 4291.0
+    },
+    {
+      "M": 14336,
+      "N": 4096,
+      "K": 32768,
+      "avg_ms": 0.7715,
+      "tflops": 4987.8,
+      "status": "OK",
+      "cpp_tflops": 5245.4
+    },
+    {
+      "M": 14336,
+      "N": 32768,
+      "K": 4096,
+      "avg_ms": 0.8964,
+      "tflops": 4292.8,
+      "status": "OK",
+      "cpp_tflops": 4462.6
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 4096,
+      "avg_ms": 0.1411,
+      "tflops": 3896.0,
+      "status": "OK",
+      "cpp_tflops": 3951.8
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 6144,
+      "avg_ms": 0.1889,
+      "tflops": 4364.9,
+      "status": "OK",
+      "cpp_tflops": 4259.9
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 7168,
+      "avg_ms": 0.211,
+      "tflops": 4560.4,
+      "status": "OK",
+      "cpp_tflops": 4443.2
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 14336,
+      "avg_ms": 0.3737,
+      "tflops": 5149.6,
+      "status": "OK",
+      "cpp_tflops": 5142.1
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 28672,
+      "avg_ms": 0.7171,
+      "tflops": 5366.3,
+      "status": "OK",
+      "cpp_tflops": 5525.3
+    },
+    {
+      "M": 16384,
+      "N": 6144,
+      "K": 4096,
+      "avg_ms": 0.2005,
+      "tflops": 4112.7,
+      "status": "OK",
+      "cpp_tflops": 4042.5
+    },
+    {
+      "M": 16384,
+      "N": 14336,
+      "K": 4096,
+      "avg_ms": 0.4397,
+      "tflops": 4376.3,
+      "status": "OK",
+      "cpp_tflops": 4255.8
+    },
+    {
+      "M": 16384,
+      "N": 28672,
+      "K": 4096,
+      "avg_ms": 0.894,
+      "tflops": 4304.8,
+      "status": "OK",
+      "cpp_tflops": 4411.7
+    },
+    {
+      "M": 28672,
+      "N": 4096,
+      "K": 8192,
+      "avg_ms": 0.4014,
+      "tflops": 4793.1,
+      "status": "OK",
+      "cpp_tflops": 4810.0
+    },
+    {
+      "M": 28672,
+      "N": 4096,
+      "K": 16384,
+      "avg_ms": 0.7259,
+      "tflops": 5301.6,
+      "status": "OK",
+      "cpp_tflops": 5350.6
+    },
+    {
+      "M": 28672,
+      "N": 32768,
+      "K": 4096,
+      "avg_ms": 1.7688,
+      "tflops": 4351.2,
+      "status": "OK",
+      "cpp_tflops": 4466.6
+    },
+    {
+      "M": 32768,
+      "N": 4096,
+      "K": 7168,
+      "avg_ms": 0.4136,
+      "tflops": 4652.4,
+      "status": "OK",
+      "cpp_tflops": 4666.8
+    },
+    {
+      "M": 32768,
+      "N": 4096,
+      "K": 14336,
+      "avg_ms": 0.7531,
+      "tflops": 5110.0,
+      "status": "OK",
+      "cpp_tflops": 5223.4
+    },
+    {
+      "M": 128256,
+      "N": 32768,
+      "K": 4096,
+      "avg_ms": null,
+      "tflops": null,
+      "cpp_tflops": 4536.4,
+      "status": "CRASH:Memory access fault by GPU node-3 (Agent handle: 0x5621a918d880) on address 0x7fa1950cf000. Reason: Write access to a re"
+    }
+  ]
+}

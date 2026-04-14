@@ -787,10 +787,19 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     const int total_blocks = gridDim.x;
     const int bpr = total_blocks / bpc;
 
-    // XCD pid remapping: group same-XCD blocks contiguously
+    // XCD pid remapping: Gluon-style "tall XCDs" for correct remainder handling
     const int raw_bid = blockIdx.x;
     const int pids_per_xcd = (total_blocks + NUM_XCDS - 1) / NUM_XCDS;
-    const int bid = (raw_bid % NUM_XCDS) * pids_per_xcd + (raw_bid / NUM_XCDS);
+    int tall_xcds = total_blocks % NUM_XCDS;
+    if (tall_xcds == 0) tall_xcds = NUM_XCDS;
+    const int xcd = raw_bid % NUM_XCDS;
+    const int local_pid = raw_bid / NUM_XCDS;
+    int bid;
+    if (xcd < tall_xcds) {
+        bid = xcd * pids_per_xcd + local_pid;
+    } else {
+        bid = tall_xcds * pids_per_xcd + (xcd - tall_xcds) * (pids_per_xcd - 1) + local_pid;
+    }
     if (bid >= total_blocks) return;
 
     // GROUP_SIZE_M swizzle within XCD's block range

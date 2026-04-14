@@ -19,7 +19,7 @@ os.environ["TRITON_ENABLE_AMDGCN_AS"] = "1"
 
 import torch
 
-_GLUON_TUTORIALS_PATH = "/shared_nfs/kyle/gfx9-gluon-tutorials/kernels/gemm/a4w4"
+_GLUON_TUTORIALS_PATH = "/shared_nfs/kyle/test/gfx9-gluon-tutorials/kernels/gemm/a4w4"
 sys.path.insert(0, _GLUON_TUTORIALS_PATH)
 from matmul_kernel import matmul as _gluon_matmul
 
