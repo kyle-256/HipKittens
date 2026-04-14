@@ -1,0 +1,409 @@
+// MLA Backward Kernel (D_QK=192, D_V=128) — causal, dK/dV/dQ
+// BNHD layout (QKVO_AXIS=1), KV_BLOCK=32, Q_TILE=32, BLOCK_KV=128, NUM_WARPS=4
+//
+// gfx950 fixes applied:
+//   1. rt_32x16_4_s (stride 4) for all mma_ABt row_l inputs
+//   2. L/delta loaded directly into rv from global (sv_fl<32> load is broken on 64-lane warps)
+//   3. sub_row on col_l tiles with correctly-loaded align rv
+//   4. store_col_l_direct for dK/dV epilogue
+//   5. dQ via shared-memory col_l→row_l conversion + mma_AB + atomic bf16 add
+#include "kittens.cuh"
+#include "pyutils/pyutils.cuh"
+
+#ifndef ATTN_B
+constexpr int ATTN_B = 16;
+#endif
+#ifndef ATTN_H
+constexpr int ATTN_H = 64;
+#endif
+#ifndef ATTN_H_KV
+constexpr int ATTN_H_KV = 8;
+#endif
+constexpr int GROUP_SIZE = ATTN_H / ATTN_H_KV;
+#ifndef ATTN_N
+constexpr int ATTN_N = 4096;
+#endif
+
+constexpr int D_QK = 192;
+constexpr int D_V  = 128;
+
+constexpr int KV_BLOCK = 32;
+constexpr int BLOCK_KV = KV_BLOCK * 4; // 128
+constexpr int Q_TILE   = 32;
+constexpr bool causal = true;
+
+#define NUM_WARPS  4
+#define NUM_THREADS (kittens::WARP_THREADS * NUM_WARPS)
+
+using namespace kittens;
+using G   = kittens::group<NUM_WARPS>;
+using _gl = gl<bf16, -1, -1, -1, -1>;
+
+// ---------------------------------------------------------------------------
+// store_col_l_direct: bypass broken transpose on gfx950
+// col_l mapping: column = lane & 31 (KV pos), row = rb + ro (D pos)
+// ---------------------------------------------------------------------------
+template<int QKVO_AXIS, int D_DIM>
+__device__ __forceinline__ void store_col_l_direct(
+    const _gl &dst,
+    const rt<float, D_DIM, KV_BLOCK, col_l, rt_32x32_s> &src,
+    int batch, int j, int kv_head)
+{
+    const int lane = laneid();
+    const int kv_col = lane & 31;
+    const int rb = (lane >> 5) << 2;
+
+    bf16 *base = reinterpret_cast<bf16*>(dst.raw_ptr);
+    const int stride_b = dst.template stride<0>();
+    const int stride_s = dst.template stride<QKVO_AXIS>();
+    const int stride_h = dst.template stride<2>();
+    const int base_off = batch * stride_b + (j * KV_BLOCK + kv_col) * stride_s
+                       + kv_head * stride_h;
+
+    #pragma unroll
+    for (int t = 0; t < D_DIM / 32; t++) {
+        #pragma unroll
+        for (int k = 0; k < 8; k++) {
+            int ro = ((k >> 1) << 3) + ((k & 1) << 1);
+            int d0 = t * 32 + rb + ro;
+            base[base_off + d0]     = __float2bfloat16(src.tiles[t][0].data[k].x);
+            base[base_off + d0 + 1] = __float2bfloat16(src.tiles[t][0].data[k].y);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// atomic_add_dQ_col_l: packed bf16 atomic add for dQ
+// dQ_T is [32 x Q_TILE] col_l: column = q pos (lane & 31), row = d pos
+// ---------------------------------------------------------------------------
+__device__ __forceinline__ void atomic_add_dQ_col_l(
+    const _gl &dQg,
+    const rt<float, 32, Q_TILE, col_l, rt_32x32_s> &dQ_T,
+    int batch, int q_head, int qi, int d_chunk)
+{
+    bf16 *base = reinterpret_cast<bf16*>(dQg.raw_ptr);
+    const int stride_b = dQg.template stride<0>();
+    const int stride_h = dQg.template stride<1>();
+    const int stride_n = dQg.template stride<2>();
+
+    const int lane = laneid();
+    const int q_col = lane & 31;
+    const int d_rb  = (lane >> 5) << 2;
+
+    const int elem_off = batch * stride_b + q_head * stride_h
+                       + (qi * Q_TILE + q_col) * stride_n + d_chunk * 32;
+
+    std::uintptr_t as_int = reinterpret_cast<std::uintptr_t>(base);
+    std::uint64_t  as_u64 = static_cast<std::uint64_t>(as_int);
+    buffer_resource br = make_buffer_resource(as_u64, 0x7FFFFFFFu, 0x00020000);
+
+    #pragma unroll
+    for (int k = 0; k < 8; k++) {
+        int ro    = ((k >> 1) << 3) + ((k & 1) << 1);
+        int d_pos = d_rb + ro;
+
+        float f0 = dQ_T.tiles[0][0].data[k].x;
+        float f1 = dQ_T.tiles[0][0].data[k].y;
+
+        uint32_t pk;
+        asm volatile("v_cvt_pk_bf16_f32 %0, %1, %2" : "=v"(pk) : "v"(f1), "v"(f0));
+
+        uint32_t byte_off = static_cast<uint32_t>((elem_off + d_pos) * sizeof(bf16));
+
+        asm volatile("buffer_atomic_pk_add_bf16 %0, %1, %2, 0 offen"
+            : : "v"(pk), "v"(byte_off), "s"(*(const i32x4*)&br) : "memory");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// load_L_delta_direct: load 32 floats from gl<float,...> directly into
+// shared memory, working around the broken sv_fl<32> global_to_shared path
+// (which silently loads nothing when Q_TILE=32 and WARP_THREADS=64).
+//
+// All threads in the warp participate; first 32 lanes each load one float.
+// ---------------------------------------------------------------------------
+__device__ __forceinline__ void load_L_delta_direct(
+    float *smem_dst,
+    const gl<float, -1, -1, -1, -1> &src,
+    int batch, int head, int qi)
+{
+    const int lane = laneid();
+    // src layout: [B, H, 1, N]
+    // We want 32 consecutive floats starting at position qi * Q_TILE
+    float *src_ptr = (float*)src.raw_ptr;
+    const int stride_b = src.template stride<0>();
+    const int stride_h = src.template stride<1>();
+    const int base_idx = batch * stride_b + head * stride_h + qi * Q_TILE;
+
+    if (lane < Q_TILE) {
+        smem_dst[lane] = src_ptr[base_idx + lane];
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Globals
+// ---------------------------------------------------------------------------
+struct attn_bwd_combined_d192v128_globals {
+    _gl Q, K, V;
+    _gl dOg, dQg, dKg, dVg;
+    gl<float, -1, -1, -1, -1> L_vec, delta_vec;
+    hipStream_t stream;
+    dim3 grid()  { return dim3(ATTN_H_KV, (ATTN_N / BLOCK_KV), ATTN_B); }
+    dim3 block() { return dim3(NUM_THREADS); }
+    size_t dynamic_shared_memory() { return MAX_SHARED_MEMORY; }
+};
+
+// ---------------------------------------------------------------------------
+// Kernel
+// ---------------------------------------------------------------------------
+__launch_bounds__(NUM_THREADS, 1)
+__global__ void attend_bwd_combined_d192v128_ker(
+    const attn_bwd_combined_d192v128_globals g)
+{
+    constexpr int QKVO_AXIS = 1; // BNHD layout
+    constexpr float P_SCALE  = 0.07216878365f * 1.44269504089f; // softmax_scale * log2(e)
+    constexpr float L_SCALE  = 1.44269504089f;                  // log2(e)
+    constexpr float dP_SCALE = 0.07216878365f;                  // softmax_scale
+
+    // -----------------------------------------------------------------------
+    // Shared memory
+    // -----------------------------------------------------------------------
+    extern __shared__ alignment_dummy __shm[];
+    shared_allocator al((int*)&__shm[0]);
+
+    st_bf<BLOCK_KV, D_QK, st_32x32_s> (&K_smem)      = al.allocate<st_bf<BLOCK_KV, D_QK, st_32x32_s>>();
+    st_bf<BLOCK_KV, D_V,  st_32x32_s> (&V_smem)      = al.allocate<st_bf<BLOCK_KV, D_V,  st_32x32_s>>();
+    st_bf<Q_TILE, D_QK, st_32x32_s>   (&Q_smem_row)  = al.allocate<st_bf<Q_TILE, D_QK, st_32x32_s>>();
+    st_bf<Q_TILE, D_QK, st_8x32_s>    (&Q_smem_col)  = al.allocate<st_bf<Q_TILE, D_QK, st_8x32_s>>();
+    st_bf<Q_TILE, D_V,  st_32x32_s>   (&dO_smem_row) = al.allocate<st_bf<Q_TILE, D_V,  st_32x32_s>>();
+    st_bf<Q_TILE, D_V,  st_8x32_s>    (&dO_smem_col) = al.allocate<st_bf<Q_TILE, D_V,  st_8x32_s>>();
+    sv_fl<Q_TILE> (&L_smem)     = al.allocate<sv_fl<Q_TILE>>();
+    sv_fl<Q_TILE> (&delta_smem) = al.allocate<sv_fl<Q_TILE>>();
+
+    // -----------------------------------------------------------------------
+    // Register accumulators for dK and dV (col_l, one per warp)
+    // -----------------------------------------------------------------------
+    rt<float, D_QK, KV_BLOCK, col_l, rt_32x32_s> dK_acc;
+    rt<float, D_V,  KV_BLOCK, col_l, rt_32x32_s> dV_acc;
+    zero(dK_acc);
+    zero(dV_acc);
+
+    // -----------------------------------------------------------------------
+    // Indices
+    // -----------------------------------------------------------------------
+    const int kv_head   = blockIdx.x;
+    const int seq_block = blockIdx.y;
+    const int batch     = blockIdx.z;
+    const int wid       = kittens::warpid();
+    const int j         = seq_block * NUM_WARPS + wid;
+    const int kv_start  = j * KV_BLOCK;
+    const int total_q   = ATTN_N / Q_TILE;
+    const int first_q   = causal ? max(0, (int)(seq_block * BLOCK_KV / Q_TILE)) : 0;
+
+    // -----------------------------------------------------------------------
+    // Load K and V tiles for this KV block into shared memory
+    // -----------------------------------------------------------------------
+    G::load<QKVO_AXIS, false>(K_smem, g.K, {batch, seq_block, kv_head, 0});
+    G::load<QKVO_AXIS, false>(V_smem, g.V, {batch, seq_block, kv_head, 0});
+    __builtin_amdgcn_s_waitcnt(0);
+    __builtin_amdgcn_s_barrier();
+
+    // -----------------------------------------------------------------------
+    // Main loop: iterate over Q tiles
+    // -----------------------------------------------------------------------
+    for (int qi = first_q; qi < total_q; qi++) {
+        for (int qho = 0; qho < GROUP_SIZE; qho++) {
+            const int q_head = kv_head * GROUP_SIZE + qho;
+            const int q_pos  = qi * Q_TILE;
+            const bool skip  = causal && (q_pos + Q_TILE <= kv_start);
+
+            // Load L and delta into shared memory (direct load, bypasses
+            // broken sv_fl<32> global_to_shared which loads nothing)
+            float *L_raw     = reinterpret_cast<float*>(&L_smem);
+            float *delta_raw = reinterpret_cast<float*>(&delta_smem);
+            load_L_delta_direct(L_raw, g.L_vec, batch, q_head, qi);
+            load_L_delta_direct(delta_raw, g.delta_vec, batch, q_head, qi);
+
+            // =============================================================
+            // Phase 1: S = Q @ K^T * P_SCALE, subtract L, causal mask, exp2
+            // =============================================================
+            G::load<QKVO_AXIS, false>(Q_smem_row, g.Q, {batch, qi, q_head, 0});
+            __builtin_amdgcn_s_waitcnt(0);
+            __builtin_amdgcn_s_barrier();
+
+            rt<float, Q_TILE, KV_BLOCK, col_l, rt_32x32_s> S_ij;
+
+            if (!skip) {
+                // Load Q and K into row_l stride-4 register tiles for mma_ABt
+                rt<bf16, Q_TILE, D_QK, row_l, rt_32x16_4_s> Q_i;
+                load(Q_i, Q_smem_row);
+                rt<bf16, KV_BLOCK, D_QK, row_l, rt_32x16_4_s> K_j;
+                load(K_j, subtile_inplace<KV_BLOCK, D_QK>(K_smem, {wid, 0}));
+
+                // S = Q @ K^T * P_SCALE
+                zero(S_ij);
+                mma_ABt(S_ij, Q_i, K_j, S_ij);
+                mul(S_ij, S_ij, P_SCALE);
+
+                // Subtract L * L_SCALE using sub_row with rv loaded from shared
+                typename decltype(S_ij)::col_vec L_reg;
+                load(L_reg, L_smem);
+                mul(L_reg, L_reg, L_SCALE);
+                sub_row(S_ij, S_ij, L_reg);
+
+                // Causal mask (col_l mapping: col = lane&31 is KV pos,
+                // row from data[k]: G*4 + ((k>>1)<<3) + ((k&1)<<1) is Q pos)
+                if constexpr (causal) {
+                    const int lane = laneid();
+                    const int kv_c = lane & 31;
+                    const int G_id = lane >> 5;
+                    #pragma unroll
+                    for (int k = 0; k < S_ij.tiles[0][0].packed_per_thread; k++) {
+                        int ro   = ((k >> 1) << 3) + ((k & 1) << 1);
+                        int q_r0 = G_id * 4 + ro;
+                        int q_r1 = q_r0 + 1;
+                        if (q_pos + q_r0 < kv_start + kv_c)
+                            S_ij.tiles[0][0].data[k].x = -__builtin_inff();
+                        if (q_pos + q_r1 < kv_start + kv_c)
+                            S_ij.tiles[0][0].data[k].y = -__builtin_inff();
+                    }
+                }
+
+                // Clamp to <= 0, then exp2 → P
+                #pragma unroll
+                for (int ii = 0; ii < S_ij.height; ii++)
+                    #pragma unroll
+                    for (int jj = 0; jj < S_ij.width; jj++)
+                        #pragma unroll
+                        for (int k = 0; k < S_ij.tiles[ii][jj].packed_per_thread; k++) {
+                            S_ij.tiles[ii][jj].data[k].x =
+                                __builtin_fminf(S_ij.tiles[ii][jj].data[k].x, 0.f);
+                            S_ij.tiles[ii][jj].data[k].y =
+                                __builtin_fminf(S_ij.tiles[ii][jj].data[k].y, 0.f);
+                            S_ij.tiles[ii][jj].data[k] =
+                                base_ops::exp2::op(S_ij.tiles[ii][jj].data[k]);
+                        }
+            }
+
+            // =============================================================
+            // Phase 2: dP = dO @ V^T, dS = P * (dP - delta)
+            // =============================================================
+            G::load<QKVO_AXIS, false>(dO_smem_row, g.dOg, {batch, qi, q_head, 0});
+            __builtin_amdgcn_s_waitcnt(0);
+            __builtin_amdgcn_s_barrier();
+
+            rt<float, Q_TILE, KV_BLOCK, col_l, rt_32x32_s> dP_ij;
+
+            if (!skip) {
+                rt<bf16, Q_TILE, D_V, row_l, rt_32x16_4_s> dO_i;
+                load(dO_i, dO_smem_row);
+                rt<bf16, KV_BLOCK, D_V, row_l, rt_32x16_4_s> V_j;
+                load(V_j, subtile_inplace<KV_BLOCK, D_V>(V_smem, {wid, 0}));
+
+                // dP = dO @ V^T
+                zero(dP_ij);
+                mma_ABt(dP_ij, dO_i, V_j, dP_ij);
+
+                // Manual delta subtraction (col_l mapping)
+                {
+                    const int lane = laneid();
+                    const int G = lane >> 5;
+                    float *d_raw = reinterpret_cast<float*>(&delta_smem);
+                    #pragma unroll
+                    for (int k = 0; k < dP_ij.tiles[0][0].packed_per_thread; k++) {
+                        int ro = ((k >> 1) << 3) + ((k & 1) << 1);
+                        int row0 = G * 4 + ro;
+                        int row1 = row0 + 1;
+                        dP_ij.tiles[0][0].data[k].x -= d_raw[row0];
+                        dP_ij.tiles[0][0].data[k].y -= d_raw[row1];
+                    }
+                }
+
+                // dS = P * (dP - delta)
+                mul(dP_ij, dP_ij, S_ij);
+            }
+
+            // =============================================================
+            // Phase 3: dV += dO^T @ P  (mma_AtB with col_l stride-4 inputs)
+            // =============================================================
+            G::load<QKVO_AXIS, false>(dO_smem_col, g.dOg, {batch, qi, q_head, 0});
+            __builtin_amdgcn_s_waitcnt(0);
+            __builtin_amdgcn_s_barrier();
+
+            if (!skip) {
+                rt<bf16, Q_TILE, D_V, col_l, rt_16x32_4_s> dO_col;
+                load(dO_col, dO_smem_col);
+
+                rt<bf16, Q_TILE, KV_BLOCK, col_l, rt_32x32_s> P_bf;
+                copy(P_bf, S_ij);
+                auto &Pm = *reinterpret_cast<
+                    rt<bf16, Q_TILE, KV_BLOCK, col_l, rt_16x32_4_s>*>(&P_bf);
+
+                mma_AtB(dV_acc, dO_col, Pm, dV_acc);
+            }
+
+            // =============================================================
+            // Phase 4: dK += Q^T @ (dS * scale)  (mma_AtB)
+            // =============================================================
+            G::load<QKVO_AXIS, false>(Q_smem_col, g.Q, {batch, qi, q_head, 0});
+            __builtin_amdgcn_s_waitcnt(0);
+            __builtin_amdgcn_s_barrier();
+
+            if (!skip) {
+                mul(dP_ij, dP_ij, dP_SCALE);
+
+                rt<bf16, Q_TILE, D_QK, col_l, rt_16x32_4_s> Q_col;
+                load(Q_col, Q_smem_col);
+
+                rt<bf16, Q_TILE, KV_BLOCK, col_l, rt_32x32_s> dS_bf;
+                copy(dS_bf, dP_ij);
+                auto &dSm = *reinterpret_cast<
+                    rt<bf16, Q_TILE, KV_BLOCK, col_l, rt_16x32_4_s>*>(&dS_bf);
+
+                mma_AtB(dK_acc, Q_col, dSm, dK_acc);
+            }
+
+            // Phase 5: dQ — must be computed in a separate kernel pass
+            // because mma_AB's accumulator clobbers dK_acc/dV_acc AGPRs on gfx950
+
+            __builtin_amdgcn_s_barrier();
+        } // qho
+    } // qi
+
+    // -----------------------------------------------------------------------
+    // Epilogue: store dV and dK via direct col_l-to-global
+    // -----------------------------------------------------------------------
+    store_col_l_direct<QKVO_AXIS, D_V>(g.dVg, dV_acc, batch, j, kv_head);
+    store_col_l_direct<QKVO_AXIS, D_QK>(g.dKg, dK_acc, batch, j, kv_head);
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch
+// ---------------------------------------------------------------------------
+void dispatch_bwd_combined_d192v128(attn_bwd_combined_d192v128_globals g) {
+    unsigned long mem_size = g.dynamic_shared_memory();
+    hipFuncSetAttribute(
+        (void*)attend_bwd_combined_d192v128_ker,
+        hipFuncAttributeMaxDynamicSharedMemorySize, mem_size);
+    attend_bwd_combined_d192v128_ker<<<
+        g.grid(), g.block(), mem_size, g.stream>>>(g);
+    hipDeviceSynchronize();
+}
+
+// ---------------------------------------------------------------------------
+// Python bindings
+// ---------------------------------------------------------------------------
+PYBIND11_MODULE(tk_kernel_bkwd, m) {
+    m.doc() = "tk_kernel python module - asymmetric backward D_QK=192 D_V=128";
+    py::bind_function<dispatch_bwd_combined_d192v128>(m, "dispatch_bwd_combined",
+        &attn_bwd_combined_d192v128_globals::Q,
+        &attn_bwd_combined_d192v128_globals::K,
+        &attn_bwd_combined_d192v128_globals::V,
+        &attn_bwd_combined_d192v128_globals::dOg,
+        &attn_bwd_combined_d192v128_globals::dQg,
+        &attn_bwd_combined_d192v128_globals::dKg,
+        &attn_bwd_combined_d192v128_globals::dVg,
+        &attn_bwd_combined_d192v128_globals::L_vec,
+        &attn_bwd_combined_d192v128_globals::delta_vec
+    );
+}
