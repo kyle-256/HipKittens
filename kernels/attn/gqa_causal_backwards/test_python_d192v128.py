@@ -180,14 +180,15 @@ def reference_fwd_bwd(Q, K, V, dO, causal):
 
 
 # ---------------------------------------------------------------
-# AITER forward + backward
+# AITER forward + backward (skip if env SKIP_AITER=1 or backward faults)
 # ---------------------------------------------------------------
-use_aiter = True
-try:
-    import aiter
-except ImportError:
-    print("WARNING: aiter not available, skipping AITER comparison")
-    use_aiter = False
+use_aiter = os.environ.get("SKIP_AITER", "1") != "1"
+if use_aiter:
+    try:
+        import aiter
+    except ImportError:
+        print("WARNING: aiter not available, skipping AITER comparison")
+        use_aiter = False
 
 if use_aiter:
     timings = []
@@ -227,12 +228,11 @@ if use_aiter:
     print(f"AITER backward perf: {eff_aiter:.2f} TFLOPS  "
           f"({B=} {H=} {H_KV=} {N=} {D_QK=} {D_V=} {causal=})")
 
-    # Save AITER gradients (BNHD)
     dQ_aiter_bnhd = Q_a.grad
     dK_aiter_bnhd = K_a.grad
     dV_aiter_bnhd = V_a.grad
     O_aiter_bnhd  = out_a
-    lse_aiter     = lse_a   # [B, H, N]
+    lse_aiter     = lse_a
 
 
 # ---------------------------------------------------------------
@@ -294,123 +294,115 @@ has_bkwd = False
 try:
     import tk_kernel_bkwd
     has_bkwd = True
-    print("\nMain backward kernel (tk_kernel_bkwd) loaded -- symmetric D=128 version.")
-    print("NOTE: This kernel does NOT support asymmetric D_QK=192/D_V=128.")
-    print("      Gradient tests below use AITER as reference only.\n")
+    print("\nMain backward kernel (tk_kernel_bkwd) loaded (asymmetric build: D_QK=192, D_V=128).\n")
 except ImportError:
-    print("\nMain backward kernel (tk_kernel_bkwd) not available for asymmetric D.")
-    print("Only forward + prep kernels are tested.\n")
+    print("\nMain backward kernel (tk_kernel_bkwd) not available — build with "
+          "`make asymmetric ATTN_D_QK=192`.\n")
 
 
 # ---------------------------------------------------------------
-# Correctness checks
+# Correctness checks: HK forward vs PyTorch float64 reference
 # ---------------------------------------------------------------
+print("\nComputing PyTorch float64 reference ...")
+O_ref, L_ref, dQ_ref, dK_ref, dV_ref = reference_fwd_bwd(
+    Q_bhnd, K_bhnd, V_bhnd, dO_bhnd, causal
+)
+
 print("=" * 90)
-print("Correctness: HK forward vs AITER forward")
+print("Correctness: HK forward vs float64 reference")
+print("=" * 90)
+O_ref_bnhd = O_ref.transpose(1, 2).to(dtype)
+o_diff, o_err, o_tot, o_rel, o_l2, o_cos, _ = robustness_check(O_tk, O_ref_bnhd, "O")
+print(f"O:   max_abs={o_diff.max().item():.6f}  rel_err={o_rel:.4f}  "
+      f"l2={o_l2:.6f}  cos={o_cos:.6f}  "
+      f"errors={o_err}/{o_tot} ({100*o_err/o_tot:.4f}%)")
+
+
+# ---------------------------------------------------------------
+# Gradient comparison: HK backward vs float64 reference
+# ---------------------------------------------------------------
+print()
+print("=" * 90)
+print("Gradient comparison: HK backward vs float64 reference")
 print("=" * 90)
 
-if use_aiter:
-    o_diff, o_err, o_tot, o_rel, o_l2, o_cos, _ = robustness_check(
-        O_tk, O_aiter_bnhd, "O"
-    )
-    print(f"O:   max_abs={o_diff.max().item():.6f}  rel_err={o_rel:.4f}  "
-          f"l2={o_l2:.6f}  cos={o_cos:.6f}  "
-          f"errors={o_err}/{o_tot} ({100*o_err/o_tot:.4f}%)")
+avg_hk_bwd = None
+eff_hk_bwd = None
+if has_bkwd:
+    # dQ atomic accumulation layout: BHND (axis=2 stores along N rows)
+    dQ_tk_in = torch.zeros(B, H, N, D_QK, dtype=dtype, device='cuda')
+    dQ_tk = torch.zeros(B, N, H, D_QK, dtype=dtype, device='cuda')
+    dK_tk = torch.zeros(B, N, H_KV, D_QK, dtype=dtype, device='cuda')
+    dV_tk = torch.zeros(B, N, H_KV, D_V, dtype=dtype, device='cuda')
 
-    # LSE comparison
-    # HK LSE shape: [B, H, 1, N], AITER LSE shape: [B, H, N]
-    lse_hk = L_tk.squeeze(2)  # [B, H, N]
-    l_diff, l_err, l_tot, l_rel, l_l2, l_cos, _ = robustness_check(
-        lse_hk, lse_aiter, "LSE"
-    )
-    print(f"LSE: max_abs={l_diff.max().item():.6f}  rel_err={l_rel:.4f}  "
-          f"l2={l_l2:.6f}  cos={l_cos:.6f}  "
-          f"errors={l_err}/{l_tot} ({100*l_err/l_tot:.4f}%)")
+    num_warmup_bwd = 5
+    num_iters_bwd = 5
+    for _ in range(num_warmup_bwd):
+        dQ_tk_in.zero_()
+        dK_tk.zero_()
+        dV_tk.zero_()
+        tk_kernel_bkwd.dispatch_bwd_combined(
+            Q_tk, K_tk, V_tk, dO_tk,
+            dQ_tk_in, dK_tk, dV_tk,
+            L_tk, delta_tk,
+        )
+        tk_kernel_bkwd_prep.dispatch_dq_shuffle(dQ_tk_in, dQ_tk)
 
-    # Delta comparison
-    # delta_i = rowsum(dO * O)
-    # Compute reference delta from AITER outputs
-    delta_ref = (dO_tk.float() * O_aiter_bnhd.float()).sum(dim=-1)  # [B,N,H]
-    delta_ref_bhnd = delta_ref.transpose(1, 2).contiguous()  # [B,H,N]
-    delta_hk = delta_tk.squeeze(2)  # [B,H,N]
-    d_diff, d_err, d_tot, d_rel, d_l2, d_cos, _ = robustness_check(
-        delta_hk, delta_ref_bhnd, "Delta"
-    )
-    print(f"Delta: max_abs={d_diff.max().item():.6f}  rel_err={d_rel:.4f}  "
-          f"l2={d_l2:.6f}  cos={d_cos:.6f}  "
-          f"errors={d_err}/{d_tot} ({100*d_err/d_tot:.4f}%)")
+    timings_bwd = []
+    for _ in range(num_iters_bwd):
+        dQ_tk_in.zero_()
+        dK_tk.zero_()
+        dV_tk.zero_()
+        torch.cuda.synchronize()
+        start_event.record()
+        tk_kernel_bkwd.dispatch_bwd_combined(
+            Q_tk, K_tk, V_tk, dO_tk,
+            dQ_tk_in, dK_tk, dV_tk,
+            L_tk, delta_tk,
+        )
+        tk_kernel_bkwd_prep.dispatch_dq_shuffle(dQ_tk_in, dQ_tk)
+        end_event.record()
+        torch.cuda.synchronize()
+        timings_bwd.append(start_event.elapsed_time(end_event))
+
+    avg_hk_bwd = sum(timings_bwd) / len(timings_bwd)
+    eff_hk_bwd = efficiency(flops_bwd, avg_hk_bwd)
+    print(f"HK backward avg time: {avg_hk_bwd:.4f} ms")
+    print(f"HK backward perf: {eff_hk_bwd:.2f} TFLOPS\n")
+
+    # Reference gradients in BNHD for comparison
+    dQ_r = dQ_ref.transpose(1, 2).contiguous().to(dtype)   # BHND → BNHD
+    dK_r = dK_ref.transpose(1, 2).contiguous().to(dtype)
+    dV_r = dV_ref.transpose(1, 2).contiguous().to(dtype)
+
+    dq_diff, dq_err, dq_tot, dq_rel, dq_l2, dq_cos, _ = robustness_check(dQ_r, dQ_tk, "dQ")
+    dk_diff, dk_err, dk_tot, dk_rel, dk_l2, dk_cos, _ = robustness_check(dK_r, dK_tk, "dK")
+    dv_diff, dv_err, dv_tot, dv_rel, dv_l2, dv_cos, _ = robustness_check(dV_r, dV_tk, "dV")
+
+    print(f"dQ: max_abs={dq_diff.max().item():.6f}  rel_err={dq_rel:.4f}  "
+          f"l2={dq_l2:.6f}  cos={dq_cos:.6f}  "
+          f"errors={dq_err}/{dq_tot} ({100*dq_err/dq_tot:.4f}%)")
+    print(f"dK: max_abs={dk_diff.max().item():.6f}  rel_err={dk_rel:.4f}  "
+          f"l2={dk_l2:.6f}  cos={dk_cos:.6f}  "
+          f"errors={dk_err}/{dk_tot} ({100*dk_err/dk_tot:.4f}%)")
+    print(f"dV: max_abs={dv_diff.max().item():.6f}  rel_err={dv_rel:.4f}  "
+          f"l2={dv_l2:.6f}  cos={dv_cos:.6f}  "
+          f"errors={dv_err}/{dv_tot} ({100*dv_err/dv_tot:.4f}%)")
 else:
-    # Compare against PyTorch reference
-    print("Computing PyTorch float64 reference ...")
-    O_ref, L_ref, dQ_ref, dK_ref, dV_ref = reference_fwd_bwd(
-        Q_bhnd, K_bhnd, V_bhnd, dO_bhnd, causal
-    )
-    O_ref_bnhd = O_ref.transpose(1, 2).to(dtype)
-    o_diff, o_err, o_tot, o_rel, o_l2, o_cos, _ = robustness_check(
-        O_tk, O_ref_bnhd, "O"
-    )
-    print(f"O:   max_abs={o_diff.max().item():.6f}  rel_err={o_rel:.4f}  "
-          f"l2={o_l2:.6f}  cos={o_cos:.6f}  "
-          f"errors={o_err}/{o_tot} ({100*o_err/o_tot:.4f}%)")
-
+    print("Build tk_kernel_bkwd with `make asymmetric ATTN_D_QK=192` to run gradient checks.\n")
 
 # ---------------------------------------------------------------
-# Gradient comparison (if AITER available)
+# Performance summary
 # ---------------------------------------------------------------
+print()
+print("=" * 90)
+print("Performance Summary")
+print("=" * 90)
+print(f"HK  forward:  {avg_fwd:.4f} ms  ({eff_fwd:.2f} TFLOPS)")
+if has_bkwd and avg_hk_bwd is not None:
+    print(f"HK  backward: {avg_hk_bwd:.4f} ms  ({eff_hk_bwd:.2f} TFLOPS)")
 if use_aiter:
-    print()
-    print("=" * 90)
-    print("Gradient comparison: HK vs AITER  (backward pass)")
-    print("=" * 90)
-    print("NOTE: The main backward kernel (tk_kernel_bkwd) for asymmetric D")
-    print("      is not yet implemented.  Only forward + prep results are shown.")
-    print("      When tk_kernel_bkwd is available for D_QK=192/D_V=128,")
-    print("      uncomment the gradient dispatch section below.\n")
-
-    # ------- Placeholder for future backward kernel testing -------
-    # When attn_bkwd_causal_d192v128.cpp is implemented, uncomment:
-    #
-    # if has_bkwd:
-    #     # dQ input for atomic accumulation: [B,H,N,D_QK] transposed
-    #     dQ_tk_in = torch.zeros(B, H, N, D_QK, dtype=dtype, device='cuda').transpose(1, 2).contiguous()
-    #     dQ_tk    = torch.zeros(B, N, H, D_QK, dtype=dtype, device='cuda')
-    #     dK_tk    = torch.zeros(B, N, H_KV, D_QK, dtype=dtype, device='cuda')
-    #     dV_tk    = torch.zeros(B, N, H_KV, D_V, dtype=dtype, device='cuda')
-    #
-    #     tk_kernel_bkwd.dispatch_bwd_combined(
-    #         Q_tk, K_tk, V_tk, dO_tk,
-    #         dQ_tk_in, dK_tk, dV_tk,
-    #         L_tk, delta_tk
-    #     )
-    #
-    #     tk_kernel_bkwd_prep.dispatch_dq_shuffle(dQ_tk_in, dQ_tk)
-    #     torch.cuda.synchronize()
-    #
-    #     # Robustness checks
-    #     dq_diff, dq_err, dq_tot, dq_rel, dq_l2, dq_cos, _ = robustness_check(
-    #         dQ_aiter_bnhd, dQ_tk, "dQ")
-    #     dk_diff, dk_err, dk_tot, dk_rel, dk_l2, dk_cos, _ = robustness_check(
-    #         dK_aiter_bnhd, dK_tk, "dK")
-    #     dv_diff, dv_err, dv_tot, dv_rel, dv_l2, dv_cos, _ = robustness_check(
-    #         dV_aiter_bnhd, dV_tk, "dV")
-    #
-    #     print(f"dQ: max_abs={dq_diff.max().item():.6f}  rel_err={dq_rel:.4f}  "
-    #           f"l2={dq_l2:.6f}  cos={dq_cos:.6f}  "
-    #           f"errors={dq_err}/{dq_tot} ({100*dq_err/dq_tot:.4f}%)")
-    #     print(f"dK: max_abs={dk_diff.max().item():.6f}  rel_err={dk_rel:.4f}  "
-    #           f"l2={dk_l2:.6f}  cos={dk_cos:.6f}  "
-    #           f"errors={dk_err}/{dk_tot} ({100*dk_err/dk_tot:.4f}%)")
-    #     print(f"dV: max_abs={dv_diff.max().item():.6f}  rel_err={dv_rel:.4f}  "
-    #           f"l2={dv_l2:.6f}  cos={dv_cos:.6f}  "
-    #           f"errors={dv_err}/{dv_tot} ({100*dv_err/dv_tot:.4f}%)")
-
-    # ------- AITER backward performance summary -------
-    print()
-    print("=" * 90)
-    print("Performance Summary")
-    print("=" * 90)
-    print(f"HK  forward:  {avg_fwd:.4f} ms  ({eff_fwd:.2f} TFLOPS)")
     print(f"AITER backward: {avg_aiter:.4f} ms  ({eff_aiter:.2f} TFLOPS)")
-    print(f"  Config: {B=} {H=} {H_KV=} {N=} {D_QK=} {D_V=} {causal=}")
+print(f"  Config: {B=} {H=} {H_KV=} {N=} {D_QK=} {D_V=} {causal=}")
 
 print("\nDone.")

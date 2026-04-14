@@ -315,6 +315,32 @@ __device__ __forceinline__ void load(ST& dst, const GL& src, const COORD& idx,
             static_cast<int>(coherency::cache_all)
         );
     }
+
+    constexpr int total_tile_bytes = ST::rows * ST::cols * sizeof(T);
+    if constexpr (memcpy_per_tile * bytes_per_memcpy != total_tile_bytes) {
+        constexpr int bytes_per_warp = bytes_per_thread * kittens::WARP_THREADS;
+        constexpr int leftover_bytes = total_tile_bytes - memcpy_per_tile * bytes_per_memcpy;
+        constexpr int leftover_warps = leftover_bytes / bytes_per_warp;
+        constexpr int num_warps = N_THREADS / kittens::WARP_THREADS;
+        const int wid = kittens::warpid() % num_warps;
+
+        if (wid < leftover_warps) {
+            const uint32_t linear_offset = warp_offset + memcpy_per_tile * bytes_per_memcpy;
+            const uint32_t subtile_id_lds = linear_offset / ST::underlying_subtile_bytes;
+            int32_t lds_byte = lds_tile_base3 + linear_offset + subtile_id_lds * ST::subtile_padding;
+            asm volatile("" : "+s"(lds_byte));
+
+            llvm_amdgcn_raw_buffer_load_lds(
+                SRD,
+                (as3_uint32_ptr)(uintptr_t)lds_byte,
+                16,
+                swizzled_offsets[memcpy_per_tile],
+                SOFF,
+                0,
+                static_cast<int>(coherency::cache_all)
+            );
+        }
+    }
 }
 template<ducks::st::all ST, ducks::gl::all GL, ducks::coord::tile COORD=coord<ST>>
 __device__ static inline void load(ST &dst, const GL &src, const COORD &idx, const uint32_t* __restrict__ swizzled_offsets, i32x4 srd, const void* base_ptr, uint32_t lds_base) {

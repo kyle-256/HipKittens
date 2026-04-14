@@ -69,29 +69,35 @@ ATTN_D_V ?= 0
 # --------------------------------------------------------------------
 all: tk_kernel_bkwd tk_kernel_bkwd_prep tk_kernel_fwd
 
-# Asymmetric target: build D_QK=192 / D_V=128 kernels
-asymmetric: tk_kernel_bkwd_prep tk_kernel_fwd
-	@echo "Asymmetric D_QK=192 D_V=128 kernels built (prep + fwd)"
-	@echo "NOTE: Main backward kernel (tk_kernel_bkwd) needs separate implementation for asymmetric D"
+# Asymmetric target: build D_QK=192 / D_V=128 kernels (prep + fwd + bkwd)
+asymmetric: tk_kernel_bkwd_prep tk_kernel_fwd tk_kernel_bkwd
+	@echo "Asymmetric D_QK=192 D_V=128 kernels built (prep + fwd + bkwd)"
+
+# --------------------------------------------------------------------
+# Select prep / fwd / bkwd source based on asymmetric flag (must precede rules
+# that use PREP_SRC / FWD_SRC / BKWD_SRC in prerequisites)
+# --------------------------------------------------------------------
+# Asymmetric MLA (D_QK=192, D_V=128): you MUST pass e.g. ATTN_D_QK=192 so BKWD_SRC
+# selects attn_bkwd_causal_d192v128.cpp. If ATTN_D_QK is unset, this block is skipped
+# and the symmetric attn_bkwd_causal.cpp is used instead.
+ifneq ($(ATTN_D_QK), 0)
+PREP_SRC=attn_bkwd_prep_d192v128.cpp
+FWD_SRC=attn_fwd_causal_d192v128.cpp
+BKWD_SRC=attn_bkwd_causal_d192v128.cpp
+else
+PREP_SRC=attn_bkwd_prep.cpp
+FWD_SRC=attn_fwd_causal.cpp
+BKWD_SRC=attn_bkwd_causal.cpp
+endif
 
 # --------------------------------------------------------------------
 # Explicit rules for each kernel
 # --------------------------------------------------------------------
 
-# Symmetric D=128 kernels
-tk_kernel_bkwd: attn_bkwd_causal.cpp
+tk_kernel_bkwd: $(BKWD_SRC)
 	@mkdir -p $(LOGDIR)
 	$(HIPCXX) $< $(HIPFLAGS) $(ICXXFLAGS) $(ICPPFLAGS) $(ILDFLAGS) \
 	    -o $@$(shell python3-config --extension-suffix) 2>&1 | tee $(LOGFILE)
-
-# Select prep source based on asymmetric flag
-ifneq ($(ATTN_D_QK), 0)
-PREP_SRC=attn_bkwd_prep_d192v128.cpp
-FWD_SRC=attn_fwd_causal_d192v128.cpp
-else
-PREP_SRC=attn_bkwd_prep.cpp
-FWD_SRC=attn_fwd_causal.cpp
-endif
 
 tk_kernel_bkwd_prep: $(PREP_SRC)
 	@mkdir -p $(LOGDIR)

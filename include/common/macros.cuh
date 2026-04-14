@@ -1081,7 +1081,9 @@ struct zero {
         : 
         : "n"(GPR0));
     } else {
-      static_assert(false, "Invalid operand for instruction: zero");
+      asm volatile("v_accvgpr_write_b32 a[%0], 0"
+        :
+        : "n"(GPR0 - 256));
     }
   }
 };

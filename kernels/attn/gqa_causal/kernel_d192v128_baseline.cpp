@@ -349,7 +349,7 @@ __global__ void attend_ker(const attn_globals g) {
         col_sum(norm_vec, att_block[0], norm_vec);
         copy(att_block_bf16, att_block[0]);
         att_block_bf16_in = *reinterpret_cast<attn_tile<D_V, bf16, col_l, rt_16x32_4_s>*>(&att_block_bf16);
-        sched_barrier_pairs<12, 2, 1>();
+        
         __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
@@ -365,7 +365,6 @@ __global__ void attend_ker(const attn_globals g) {
 
         // Cluster 2:
         //      A0V0 (split into 2 subtiles, interleave softmax)
-        __builtin_amdgcn_s_setprio(1);
         mma_AtB(o_reg, subtile_inplace<16>(v_reg, 0), subtile_inplace<16>(att_block_bf16_in, 0), o_reg);
         //      Partial softmax for QK1
         col_max(max_vec, att_block[1], max_vec_prev);
@@ -386,7 +385,6 @@ __global__ void attend_ker(const attn_globals g) {
         mma_AtB(o_reg, subtile_inplace<16>(v_reg, 1), subtile_inplace<16>(att_block_bf16_in, 1), o_reg);
         sub_col(att_block[1], att_block[1], max_vec);
         exp2(att_block[1].tiles[0][0], att_block[1].tiles[0][0]);
-        __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
@@ -412,7 +410,7 @@ __global__ void attend_ker(const attn_globals g) {
         col_sum(norm_vec, att_block[1], norm_vec);
         copy(att_block_bf16, att_block[1]);
         att_block_bf16_in = *reinterpret_cast<attn_tile<D_V, bf16, col_l, rt_16x32_4_s>*>(&att_block_bf16);
-        sched_barrier_pairs<12, 2, 3>();
+        
         __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
@@ -434,7 +432,6 @@ __global__ void attend_ker(const attn_globals g) {
 
         // Cluster 6:
         //      A1V1 (split into 2 subtiles, interleave softmax)
-        __builtin_amdgcn_s_setprio(1);
         mma_AtB(o_reg, subtile_inplace<16>(v_reg, 0), subtile_inplace<16>(att_block_bf16_in, 0), o_reg);
         //      Partial softmax for QK2
         col_max(max_vec, att_block[0], max_vec_prev);
@@ -455,7 +452,6 @@ __global__ void attend_ker(const attn_globals g) {
         mma_AtB(o_reg, subtile_inplace<16>(v_reg, 1), subtile_inplace<16>(att_block_bf16_in, 1), o_reg);
         sub_col(att_block[0], att_block[0], max_vec);
         exp2(att_block[0].tiles[0][0], att_block[0].tiles[0][0]);
-        __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
