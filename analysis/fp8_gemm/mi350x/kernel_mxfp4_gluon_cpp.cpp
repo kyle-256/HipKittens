@@ -1020,6 +1020,8 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     }
 
     // ═══════════ Store C ═══════════
+    // Custom store for large tensors: uses 64-bit offset to avoid int32 overflow
+    // when M * N > 2^31 (e.g., 128256 x 32768 in bf16).
     auto store_block = [&](const fp4_floatx4_t acc[16], int mh, int nh) {
         RT_C c;
         #pragma unroll
@@ -1028,9 +1030,32 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
             for (int cc = 0; cc < (RBN/16); ++cc)
                 *reinterpret_cast<fp4_floatx4_t*>(&c.tiles[r][cc].data[0]) =
                     acc[r*(RBN/16)+cc] * g.scale;
-        store(g.c, c, {0, 0,
-            br * WARPS_M * 2 + WARPS_M * mh + wm,
-            bc * WARPS_N * 2 + WARPS_N * nh + wn});
+        const int tile_r = br * WARPS_M * 2 + WARPS_M * mh + wm;
+        const int tile_c = bc * WARPS_N * 2 + WARPS_N * nh + wn;
+        // Use size_t for the row offset to prevent int32 overflow
+        bf16 *dst_ptr = g.c.raw_ptr + static_cast<size_t>(tile_r * RT_C::rows) * g.c.cols()
+                        + static_cast<size_t>(tile_c * RT_C::cols);
+        const int row_stride = g.c.cols();
+        const int laneid = kittens::laneid();
+        const int row_offset = c.base_tile_stride * (laneid / c.base_tile_cols);
+        const int col_offset = laneid % c.base_tile_cols;
+        #pragma unroll
+        for (int i = 0; i < c.height; i++) {
+            #pragma unroll
+            for (int j = 0; j < c.width; j++) {
+                const int col = j * c.base_tile_cols + col_offset;
+                #pragma unroll
+                for (int k = 0; k < c.base_tile_num_strides; k++) {
+                    int row = i * c.base_tile_rows + row_offset + k * c.base_tile_elements_per_stride_group;
+                    #pragma unroll
+                    for (int l = 0; l < c.base_tile_stride / 2; l++) {
+                        int didx = l + k * c.base_tile_stride / 2;
+                        dst_ptr[(row+l*2)*row_stride + col]   = base_types::convertor<bf16, float>::convert(c.tiles[i][j].data[didx].x);
+                        dst_ptr[(row+l*2+1)*row_stride + col] = base_types::convertor<bf16, float>::convert(c.tiles[i][j].data[didx].y);
+                    }
+                }
+            }
+        }
     };
 
     store_block(acc_A0Bl, 0, 0);
