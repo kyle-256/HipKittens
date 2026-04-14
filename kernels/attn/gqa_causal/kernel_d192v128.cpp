@@ -484,7 +484,8 @@ __global__ void attend_ker(const attn_globals g) {
     col_sum(norm_vec, att_block[0], norm_vec);
     copy(att_block_bf16, att_block[0]);
     att_block_bf16_in = *reinterpret_cast<attn_tile<D_V, bf16, col_l, rt_16x32_4_s>*>(&att_block_bf16);
-    
+    sched_barrier_exp_pairs<4, 3, 5>();
+    sched_barrier_pairs<8, 5, 5>();
     __builtin_amdgcn_sched_barrier(0);
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
@@ -508,6 +509,7 @@ __global__ void attend_ker(const attn_globals g) {
 
     // Cluster 2:
     //      A2V2
+    __builtin_amdgcn_s_setprio(1);
     mma_AtB(o_reg, v_reg, att_block_bf16_in, o_reg);
     //      Partial softmax for QK3
     col_max(max_vec, att_block[1], max_vec_prev);
@@ -516,8 +518,11 @@ __global__ void attend_ker(const attn_globals g) {
     exp2(scale_vec, scale_vec);
     sub_col(att_block[1], att_block[1], max_vec);
     exp2(att_block[1].tiles[0][0], att_block[1].tiles[0][0]);
+    sched_barrier_pairs<8, 5, 6>();
+    sched_barrier_exp_pairs<4, 3, 6>();
     __builtin_amdgcn_sched_barrier(0);
     mul_col(o_reg, o_reg, scale_vec);
+    __builtin_amdgcn_s_setprio(0);
     __builtin_amdgcn_sched_barrier(0);
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
@@ -544,7 +549,8 @@ __global__ void attend_ker(const attn_globals g) {
     col_sum(norm_vec, att_block[1], norm_vec);
     copy(att_block_bf16, att_block[1]);
     att_block_bf16_in = *reinterpret_cast<attn_tile<D_V, bf16, col_l, rt_16x32_4_s>*>(&att_block_bf16);
-    
+    sched_barrier_exp_pairs<4, 3, 7>();
+    sched_barrier_pairs<8, 5, 7>();
     __builtin_amdgcn_sched_barrier(0);
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
@@ -566,6 +572,7 @@ __global__ void attend_ker(const attn_globals g) {
 
     // Cluster 6:
     //      A3V3
+    __builtin_amdgcn_s_setprio(1);
     mma_AtB(o_reg, v_reg, att_block_bf16_in, o_reg);
     //      Partial softmax for QK4
     col_max(max_vec, att_block[0], max_vec_prev);
@@ -574,8 +581,11 @@ __global__ void attend_ker(const attn_globals g) {
     exp2(scale_vec, scale_vec);
     sub_col(att_block[0], att_block[0], max_vec);
     exp2(att_block[0].tiles[0][0], att_block[0].tiles[0][0]);
+    sched_barrier_pairs<8, 5, 8>();
+    sched_barrier_exp_pairs<4, 3, 8>();
     __builtin_amdgcn_sched_barrier(0);
     mul_col(o_reg, o_reg, scale_vec);
+    __builtin_amdgcn_s_setprio(0);
     __builtin_amdgcn_sched_barrier(0);
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
@@ -602,7 +612,8 @@ __global__ void attend_ker(const attn_globals g) {
     col_sum(norm_vec, att_block[0], norm_vec);
     copy(att_block_bf16, att_block[0]);
     att_block_bf16_in = *reinterpret_cast<attn_tile<D_V, bf16, col_l, rt_16x32_4_s>*>(&att_block_bf16);
-    
+    sched_barrier_exp_pairs<4, 3, 9>();
+    sched_barrier_pairs<8, 5, 9>();
     __builtin_amdgcn_sched_barrier(0);
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
@@ -633,6 +644,8 @@ __global__ void attend_ker(const attn_globals g) {
 
     sub_col(att_block[1], att_block[1], max_vec);
     exp2(att_block[1].tiles[0][0], att_block[1].tiles[0][0]);
+    sched_barrier_pairs<8, 5, 10>();
+    sched_barrier_exp_pairs<4, 3, 10>();
     __builtin_amdgcn_sched_barrier(0);
 
     if constexpr (KV_BLOCK_SIZE > 32) exp2(att_block[1].tiles[1][0], att_block[1].tiles[1][0]);

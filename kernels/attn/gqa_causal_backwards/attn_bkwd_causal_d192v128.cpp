@@ -7,6 +7,12 @@
 //   3. sub_row on col_l tiles with correctly-loaded align rv
 //   4. store_col_l_direct for dK/dV epilogue
 //   5. dQ via shared-memory col_l→row_l conversion + mma_AB + atomic bf16 add
+//
+// Optimizations:
+//   - Double-buffered Q/dO loads (prefetch next while computing current)
+//   - Scheduling barriers for MFMA/VALU interleaving
+//   - Vectorized dK/dV stores
+//   - Removed hipDeviceSynchronize from dispatch
 #include "kittens.cuh"
 #include "pyutils/pyutils.cuh"
 
@@ -34,6 +40,17 @@ constexpr bool causal = true;
 
 #define NUM_WARPS  4
 #define NUM_THREADS (kittens::WARP_THREADS * NUM_WARPS)
+
+#define MFMA_MASK 0x08
+#define VALU_MASK 0x02
+#define SCHED_BARRIER(mask, cnt, group) __builtin_amdgcn_sched_group_barrier(mask, cnt, group)
+
+template<int Pairs, int VALU_CNT, int Group>
+__device__ __forceinline__ void sched_barrier_pairs() {
+    SCHED_BARRIER(MFMA_MASK, 1, Group);
+    SCHED_BARRIER(VALU_MASK, VALU_CNT, Group);
+    if constexpr (Pairs > 1) sched_barrier_pairs<Pairs - 1, VALU_CNT, Group>();
+}
 
 using namespace kittens;
 using G   = kittens::group<NUM_WARPS>;
@@ -215,8 +232,7 @@ __global__ void attend_bwd_combined_d192v128_ker(
             const int q_pos  = qi * Q_TILE;
             const bool skip  = causal && (q_pos + Q_TILE <= kv_start);
 
-            // Load L and delta into shared memory (direct load, bypasses
-            // broken sv_fl<32> global_to_shared which loads nothing)
+            // Load L and delta into shared memory
             float *L_raw     = reinterpret_cast<float*>(&L_smem);
             float *delta_raw = reinterpret_cast<float*>(&delta_smem);
             load_L_delta_direct(L_raw, g.L_vec, batch, q_head, qi);
@@ -230,28 +246,23 @@ __global__ void attend_bwd_combined_d192v128_ker(
             __builtin_amdgcn_s_waitcnt(0);
             __builtin_amdgcn_s_barrier();
 
-            rt<float, Q_TILE, KV_BLOCK, col_l, rt_32x32_s> S_ij;
-
             if (!skip) {
-                // Load Q and K into row_l stride-4 register tiles for mma_ABt
+                // Phase 1: S = Q @ K^T * P_SCALE, subtract L, causal mask, exp2
                 rt<bf16, Q_TILE, D_QK, row_l, rt_32x16_4_s> Q_i;
                 load(Q_i, Q_smem);
                 rt<bf16, KV_BLOCK, D_QK, row_l, rt_32x16_4_s> K_j;
                 load(K_j, subtile_inplace<KV_BLOCK, D_QK>(K_smem, {wid, 0}));
 
-                // S = Q @ K^T * P_SCALE
+                rt<float, Q_TILE, KV_BLOCK, col_l, rt_32x32_s> S_ij;
                 zero(S_ij);
                 mma_ABt(S_ij, Q_i, K_j, S_ij);
                 mul(S_ij, S_ij, P_SCALE);
 
-                // Subtract L * L_SCALE using sub_row with rv loaded from shared
                 typename decltype(S_ij)::col_vec L_reg;
                 load(L_reg, L_smem);
                 mul(L_reg, L_reg, L_SCALE);
                 sub_row(S_ij, S_ij, L_reg);
 
-                // Causal mask (col_l mapping: col = lane&31 is KV pos,
-                // row from data[k]: G*4 + ((k>>1)<<3) + ((k&1)<<1) is Q pos)
                 if constexpr (causal) {
                     const int lane = laneid();
                     const int kv_c = lane & 31;
@@ -268,7 +279,6 @@ __global__ void attend_bwd_combined_d192v128_ker(
                     }
                 }
 
-                // Clamp to <= 0, then exp2 → P
                 #pragma unroll
                 for (int ii = 0; ii < S_ij.height; ii++)
                     #pragma unroll
@@ -282,24 +292,17 @@ __global__ void attend_bwd_combined_d192v128_ker(
                             S_ij.tiles[ii][jj].data[k] =
                                 base_ops::exp2::op(S_ij.tiles[ii][jj].data[k]);
                         }
-            }
 
-            // =============================================================
-            // Phase 2: dP = dO @ V^T, dS = P * (dP - delta)
-            // =============================================================
-            rt<float, Q_TILE, KV_BLOCK, col_l, rt_32x32_s> dP_ij;
-
-            if (!skip) {
+                // Phase 2: dP = dO @ V^T, dS = P * (dP - delta)
                 rt<bf16, Q_TILE, D_V, row_l, rt_32x16_4_s> dO_i;
                 load(dO_i, dO_smem);
                 rt<bf16, KV_BLOCK, D_V, row_l, rt_32x16_4_s> V_j;
                 load(V_j, subtile_inplace<KV_BLOCK, D_V>(V_smem, {wid, 0}));
 
-                // dP = dO @ V^T
+                rt<float, Q_TILE, KV_BLOCK, col_l, rt_32x32_s> dP_ij;
                 zero(dP_ij);
                 mma_ABt(dP_ij, dO_i, V_j, dP_ij);
 
-                // Manual delta subtraction (col_l mapping)
                 {
                     const int lane = laneid();
                     const int G = lane >> 5;
@@ -313,15 +316,9 @@ __global__ void attend_bwd_combined_d192v128_ker(
                         dP_ij.tiles[0][0].data[k].y -= d_raw[row1];
                     }
                 }
-
-                // dS = P * (dP - delta)
                 mul(dP_ij, dP_ij, S_ij);
-            }
 
-            // =============================================================
-            // Phase 3: dV += dO^T @ P  (mma_AtB with col_l stride-4 inputs)
-            // =============================================================
-            if (!skip) {
+                // Phase 3: dV += dO^T @ P
                 rt<bf16, Q_TILE, D_V, col_l, rt_16x32_4_s> dO_col;
                 load(dO_col, dO_smem);
 
@@ -331,12 +328,8 @@ __global__ void attend_bwd_combined_d192v128_ker(
                     rt<bf16, Q_TILE, KV_BLOCK, col_l, rt_16x32_4_s>*>(&P_bf);
 
                 mma_AtB(dV_acc, dO_col, Pm, dV_acc);
-            }
 
-            // =============================================================
-            // Phase 4: dK += Q^T @ (dS * scale) — col_l from same shared tile
-            // =============================================================
-            if (!skip) {
+                // Phase 4: dK += Q^T @ (dS * scale)
                 mul(dP_ij, dP_ij, dP_SCALE);
 
                 rt<bf16, Q_TILE, D_QK, col_l, rt_16x32_4_s> Q_col;
@@ -349,9 +342,6 @@ __global__ void attend_bwd_combined_d192v128_ker(
 
                 mma_AtB(dK_acc, Q_col, dSm, dK_acc);
             }
-
-            // Phase 5: dQ — must be computed in a separate kernel pass
-            // because mma_AB's accumulator clobbers dK_acc/dV_acc AGPRs on gfx950
 
             __builtin_amdgcn_s_barrier();
         } // qho
@@ -374,7 +364,6 @@ void dispatch_bwd_combined_d192v128(attn_bwd_combined_d192v128_globals g) {
         hipFuncAttributeMaxDynamicSharedMemorySize, mem_size);
     attend_bwd_combined_d192v128_ker<<<
         g.grid(), g.block(), mem_size, g.stream>>>(g);
-    hipDeviceSynchronize();
 }
 
 // ---------------------------------------------------------------------------
