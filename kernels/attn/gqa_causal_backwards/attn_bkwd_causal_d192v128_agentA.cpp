@@ -31,6 +31,7 @@ constexpr bool causal = true;
 using G = kittens::group<NUM_WARPS>;
 using namespace kittens;
 
+// ============ Causal mask helpers ============
 template<int THR_X, int THR_Y>
 __device__ inline void mask_vec2_imm(uint32_t rel_vgpr, uint32_t neg_inf_vgpr,
                                      uint32_t& x_ref, uint32_t& y_ref) {
@@ -47,125 +48,64 @@ __device__ inline void mask_vec2_imm(uint32_t rel_vgpr, uint32_t neg_inf_vgpr,
     );
 }
 
-// col_l rt_16x16_s: query = lane & 15, key_base = (lane >> 4) * 4
 template<ducks::rt::col_layout RT>
 __device__ inline void mask_causal_bwd(RT &dst, int q_pos, int k_pos, uint32_t neg_inf_v, int lane) {
-    const int q_row      = lane & 15;
-    const int k_row_base = (lane >> 4) << 2;
+    const int q_row_base = (lane >> 4) << 2;
+    const int k_col      = lane & 15;
     #pragma unroll
     for (int jj = 0; jj < dst.width; jj++) {
-        const int rel0 = (q_pos + q_row) - (k_pos + k_row_base + jj * 16);
+        const int rel0 = (q_pos + q_row_base + 3) - (k_pos + jj * 16 + k_col);
         const uint32_t rel = static_cast<uint32_t>(rel0);
         auto& d0x = *reinterpret_cast<uint32_t*>(&dst.tiles[0][jj].data[0].x);
         auto& d0y = *reinterpret_cast<uint32_t*>(&dst.tiles[0][jj].data[0].y);
         auto& d1x = *reinterpret_cast<uint32_t*>(&dst.tiles[0][jj].data[1].x);
         auto& d1y = *reinterpret_cast<uint32_t*>(&dst.tiles[0][jj].data[1].y);
-        mask_vec2_imm<0, 1>(rel, neg_inf_v, d0x, d0y);
-        mask_vec2_imm<2, 3>(rel, neg_inf_v, d1x, d1y);
+        mask_vec2_imm<3, 2>(rel, neg_inf_v, d0x, d0y);
+        mask_vec2_imm<1, 0>(rel, neg_inf_v, d1x, d1y);
     }
 }
 
-// Atomic bf16 packed add for dQ.
-// src is row_l rt_16x16_s float tile. For mfma_f32_16x16x32 row_l:
-//   row = laneid % 16, col_base = (laneid / 16) * 4
-//   data[0].x → (row, col_base+0), data[0].y → (row, col_base+1)
-//   data[1].x → (row, col_base+2), data[1].y → (row, col_base+3)
+// ============ Non-ART atomic bf16 packed add for dQ ============
 template<int axis, ducks::rt::row_layout RT, ducks::gl::all GL, ducks::coord::tile COORD=coord<RT>>
 __device__ inline static void atomic_add_bf16_tile(const GL &dst, const RT &src, const COORD &idx, int warp_col_offset) {
     using U = typename GL::dtype;
     static_assert(std::is_same_v<U, bf16>, "only bf16 global");
-
+    using T = base_types::packing<typename RT::dtype>::unpacked_type;
+    static_assert(std::is_same_v<T, float>, "source must be float");
     U *dst_ptr = (U*)&dst[(idx.template unit_coord<axis, 3>())];
     const int row_stride = dst.template stride<axis>();
-    const int laneid = kittens::laneid();
-    const int lane_row = laneid % 16;
+    int laneid = kittens::laneid();
+    const uint32_t buffer_size = row_stride * RT::rows * sizeof(U);
+    std::uintptr_t as_int = reinterpret_cast<std::uintptr_t>(dst_ptr);
+    std::uint64_t as_u64 = static_cast<std::uint64_t>(as_int);
+    buffer_resource br = make_buffer_resource(as_u64, buffer_size, 0x00020000);
+    const int lane_row      = laneid % 16;
     const int lane_col_base = (laneid / 16) * 4;
     const int warp_col_base = warp_col_offset * src.width * src.base_tile_cols;
-
-    const uint32_t buffer_size = static_cast<uint32_t>(row_stride * RT::rows * sizeof(U));
-    buffer_resource br = make_buffer_resource(
-        static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(dst_ptr)),
-        buffer_size, 0x00020000);
-
     #pragma unroll
-    for (int i = 0; i < src.height; i++) {
+    for(int i = 0; i < src.height; i++) {
         #pragma unroll
-        for (int j = 0; j < src.width; j++) {
+        for(int j = 0; j < src.width; j++) {
             const int row = lane_row + i * src.base_tile_rows;
             const int col = lane_col_base + j * src.base_tile_cols + warp_col_base;
-
             float f0 = src.tiles[i][j].data[0].x;
             float f1 = src.tiles[i][j].data[0].y;
             float f2 = src.tiles[i][j].data[1].x;
             float f3 = src.tiles[i][j].data[1].y;
-
             uint32_t pk0, pk1;
             asm volatile("v_cvt_pk_bf16_f32 %0, %1, %2" : "=v"(pk0) : "v"(f1), "v"(f0));
             asm volatile("v_cvt_pk_bf16_f32 %0, %1, %2" : "=v"(pk1) : "v"(f3), "v"(f2));
-
-            uint32_t off0 = static_cast<uint32_t>((row * row_stride + col) * sizeof(U));
-            uint32_t off1 = static_cast<uint32_t>((row * row_stride + col + 2) * sizeof(U));
-
+            uint32_t byte_offset_0 = static_cast<uint32_t>((row * row_stride + col) * sizeof(U));
+            uint32_t byte_offset_1 = static_cast<uint32_t>((row * row_stride + col + 2) * sizeof(U));
             asm volatile("buffer_atomic_pk_add_bf16 %0, %1, %2, 0 offen"
-                : : "v"(pk0), "v"(off0), "s"(*(const i32x4*)&br) : "memory");
+                : : "v"(pk0), "v"(byte_offset_0), "s"(*(const i32x4*)&br) : "memory");
             asm volatile("buffer_atomic_pk_add_bf16 %0, %1, %2, 0 offen"
-                : : "v"(pk1), "v"(off1), "s"(*(const i32x4*)&br) : "memory");
+                : : "v"(pk1), "v"(byte_offset_1), "s"(*(const i32x4*)&br) : "memory");
         }
     }
 }
 
-// Scalar store of row_l rt_32x32_s tile to bf16 global (bypasses buffer_resource OOB).
-// row_l rt_32x32_s: row = lane & 31, col_base = (lane >> 5) * 4
-template<typename RT>
-__device__ inline void store_row_tile_scalar(bf16 *base, int base_off, int row_stride, const RT &src) {
-    const int lane = kittens::laneid();
-    const int row_lane = lane & 31;
-    const int col_base = (lane >> 5) << 2;
-    #pragma unroll
-    for (int i = 0; i < src.height; i++) {
-        #pragma unroll
-        for (int j = 0; j < src.width; j++) {
-            int row = row_lane + i * 32;
-            int col = col_base + j * 32;
-            #pragma unroll
-            for (int k = 0; k < 8; k++) {
-                int co = col + ((k >> 1) << 3) + ((k & 1) << 1);
-                float v0 = src.tiles[i][j].data[k].x;
-                float v1 = src.tiles[i][j].data[k].y;
-                base[base_off + row * row_stride + co] = __float2bfloat16(v0);
-                base[base_off + row * row_stride + co + 1] = __float2bfloat16(v1);
-            }
-        }
-    }
-}
-
-// Scalar store of col_l rt_32x32_s accumulator to bf16 global (bypasses gfx950 AGPR transpose bug).
-// acc is [first_dim × WARP_SIZE_KV] col_l. Global is [B, N, H_KV, D] BNHD.
-// For col_l rt_32x32_s: col (first dim) = lane & 31, row_base (second dim) = (lane >> 5) * 4
-// data[k].x → row_base + ((k>>1)<<3) + ((k&1)<<1), data[k].y → row_base + ((k>>1)<<3) + ((k&1)<<1) + 1
-template<typename ACC_T>
-__device__ inline void store_col_accum_scalar(
-    bf16 *base, int stride_0, int stride_1, int stride_2,
-    int batch_idx, int kv_seq, int kv_head_idx,
-    ACC_T &acc) {
-    const int base_off = batch_idx * stride_0 + kv_seq * stride_1 + kv_head_idx * stride_2;
-    const int lane = kittens::laneid();
-    const int d_lane = lane & 31;
-    const int row_base = (lane >> 5) << 2;
-    #pragma unroll
-    for (int i = 0; i < acc.height; i++) {
-        const int d_base = i * 32 + d_lane;
-        #pragma unroll
-        for (int k = 0; k < 8; k++) {
-            const int row_off = row_base + ((k >> 1) << 3) + ((k & 1) << 1);
-            float val0 = acc.tiles[i][0].data[k].x;
-            float val1 = acc.tiles[i][0].data[k].y;
-            base[base_off + row_off * stride_1 + d_base] = __float2bfloat16(val0);
-            base[base_off + (row_off + 1) * stride_1 + d_base] = __float2bfloat16(val1);
-        }
-    }
-}
-
+// ============ Globals ============
 struct attn_bwd_combined_d192v128_globals {
   gl<bf16, -1, -1, -1, -1> Q, K, V;
   gl<bf16, -1, -1, -1, -1> dOg, dQg, dKg, dVg;
@@ -176,8 +116,9 @@ struct attn_bwd_combined_d192v128_globals {
   size_t dynamic_shared_memory() { return MAX_SHARED_MEMORY; }
 };
 
+// ============ Kernel ============
 __launch_bounds__(NUM_THREADS, 1)
-__global__ __attribute__((amdgpu_num_vgpr(128))) void attend_bwd_combined_d192v128_ker(const attn_bwd_combined_d192v128_globals g) {
+__global__ void attend_bwd_combined_d192v128_ker(const attn_bwd_combined_d192v128_globals g) {
 
   const int kv_head_idx = blockIdx.x;
   const int seq_idx = blockIdx.y;
@@ -207,23 +148,27 @@ __global__ __attribute__((amdgpu_num_vgpr(128))) void attend_bwd_combined_d192v1
   sv_fl<STEP_QO> (&L_smem)[2] = al.allocate<sv_fl<STEP_QO>, 2>();
   sv_fl<STEP_QO> (&delta_smem)[2] = al.allocate<sv_fl<STEP_QO>, 2>();
 
+  // Row-layout inputs for mma_ABt (16×16 MFMA via rt_16x32_s)
   rt_bf<DOT_SLICE_QO, D_QK, row_l, rt_16x32_s> Q_i;
   rt_bf<WARP_SIZE_KV, D_QK, row_l, rt_16x32_s> K_j;
   rt_bf<WARP_SIZE_KV, D_V, row_l, rt_16x32_s> V_j;
   rt_bf<DOT_SLICE_QO, D_V, row_l, rt_16x32_s> dO_i;
 
-  rt_fl<DOT_SLICE_QO, WARP_SIZE_KV, col_l, rt_16x16_s> P_ij;
-  rt_fl<DOT_SLICE_QO, WARP_SIZE_KV, col_l, rt_16x16_s> dP_ij;
+  // Attention accumulator (16×16 MFMA)
+  rt_fl<DOT_SLICE_QO, WARP_SIZE_KV, col_l, rt_16x16_s> att_acc;
 
+  // Col-layout inputs for mma_AtB (32×32 MFMA)
+  // FIX: use rt_16x32_4_s (stride=4) — the stride=8 col_l load from st_16x32_s is broken on gfx950
   rt_bf<DOT_SLICE_QO, D_V, col_l, rt_16x32_4_s> dO_i_col;
   rt_bf<DOT_SLICE_QO, D_QK, col_l, rt_16x32_4_s> Q_i_col;
-  rt_bf<DOT_SLICE_QO, WARP_SIZE_KV, col_l, rt_16x32_s> bf16_mma_scratch;
 
+  // Gradient accumulators
   rt_fl<D_V, WARP_SIZE_KV, col_l, rt_32x32_s> dV_j_T;
   rt_fl<D_QK, WARP_SIZE_KV, col_l, rt_32x32_s> dK_j_T;
 
+  // For dQ path
   rt_bf<BLOCK_SIZE_KV, 32, col_l, rt_32x16_4_s> K_j_col;
-  rt_bf<BLOCK_SIZE_KV, DOT_SLICE_QO, col_l, rt_32x16_4_s> dS_ij_bf16_col_T;
+  rt_bf<BLOCK_SIZE_KV, DOT_SLICE_QO, col_l, rt_32x16_4_s> dP_ij_bf16_col_T;
   rt_fl<32, DOT_SLICE_QO, col_l, rt_16x16_s> dQ_i_T;
 
   zero(dK_j_T);
@@ -251,8 +196,135 @@ __global__ __attribute__((amdgpu_num_vgpr(128))) void attend_bwd_combined_d192v1
   __builtin_amdgcn_s_waitcnt(0);
   __builtin_amdgcn_s_barrier();
 
-  for (int i = 0; i < min(num_steps, 1); ++i) { // DEBUG: empty loop body
+  for (int i = 0; i < num_steps; ++i) {
+    const int q_head_idx = i / num_steps_per_head + first_q_head;
+    const int q_seq_idx = (i % num_steps_per_head) + first_step;
+    const int q_pos_base = q_seq_idx * STEP_QO;
     const bool is_last = (i == num_steps - 1);
+
+    #pragma unroll 1
+    for (int ds = 0; ds < 4; ds++) {
+      const int q_pos = q_pos_base + ds * DOT_SLICE_QO;
+      const int smem_half = ds / 2;
+      const int smem_sub  = ds % 2;
+
+      // Phase 1: P = softmax(Q @ K^T)
+      load(Q_i, subtile_inplace<DOT_SLICE_QO, D_QK>(Q_i_smem[tic][smem_half], {smem_sub, 0}));
+      load(K_j, subtile_inplace<WARP_SIZE_KV, D_QK>(K_j_smem, {warpid, 0}));
+      zero(att_acc);
+      mma_ABt(att_acc, Q_i, K_j, att_acc);
+      mul(att_acc, att_acc, P_SCALE_FACTOR);
+      {
+        typename decltype(att_acc)::col_vec L_i_vec;
+        load(L_i_vec, subvec_inplace<DOT_SLICE_QO>(L_smem[tic], ds));
+        mul(L_i_vec, L_i_vec, L_SCALE_FACTOR);
+        sub_row(att_acc, att_acc, L_i_vec);
+      }
+      if constexpr (causal) {
+        if (q_pos + DOT_SLICE_QO <= k_pos) {
+          neg_infty(att_acc);
+        } else if (q_pos < k_pos + WARP_SIZE_KV) {
+          const uint32_t neg_inf_v = 0xff800000u;
+          mask_causal_bwd(att_acc, q_pos, k_pos, neg_inf_v, kittens::laneid());
+        }
+      }
+      #pragma unroll
+      for (int jj = 0; jj < att_acc.width; jj++)
+        #pragma unroll
+        for (int kk = 0; kk < att_acc.packed_per_base_tile; kk++) {
+          att_acc.tiles[0][jj].data[kk].x = __builtin_fminf(att_acc.tiles[0][jj].data[kk].x, 0.0f);
+          att_acc.tiles[0][jj].data[kk].y = __builtin_fminf(att_acc.tiles[0][jj].data[kk].y, 0.0f);
+        }
+      exp2(att_acc, att_acc);
+
+      rt_bf<DOT_SLICE_QO, WARP_SIZE_KV, col_l, rt_16x16_s> P_ij_bf16;
+      copy(P_ij_bf16, att_acc);
+
+      // Phase 2: dP = dO @ V^T, dS = P * (dP - delta)
+      load(dO_i, subtile_inplace<DOT_SLICE_QO, D_V>(dO_i_smem[tic][smem_half], {smem_sub, 0}));
+      zero(att_acc);
+      mma_ABt(att_acc, dO_i, V_j, att_acc);
+      {
+        typename decltype(att_acc)::col_vec delta_vec;
+        load(delta_vec, subvec_inplace<DOT_SLICE_QO>(delta_smem[tic], ds));
+        sub_row(att_acc, att_acc, delta_vec);
+      }
+      rt_bf<DOT_SLICE_QO, WARP_SIZE_KV, col_l, rt_16x16_s> dS_ij_bf16;
+      copy(dS_ij_bf16, att_acc);
+      #pragma unroll
+      for (int jj = 0; jj < dS_ij_bf16.width; jj++)
+        #pragma unroll
+        for (int kk = 0; kk < dS_ij_bf16.packed_per_base_tile; kk++) {
+          uint32_t p_raw = reinterpret_cast<uint32_t&>(P_ij_bf16.tiles[0][jj].data[kk]);
+          uint32_t &ds_raw = reinterpret_cast<uint32_t&>(dS_ij_bf16.tiles[0][jj].data[kk]);
+          float p_lo, p_hi, dp_lo, dp_hi;
+          uint32_t p_hi_u, dp_hi_u;
+          asm volatile("v_cvt_f32_bf16_e32 %0, %1" : "=v"(p_lo) : "v"(p_raw));
+          asm volatile("v_cvt_f32_bf16_e32 %0, %1" : "=v"(dp_lo) : "v"(ds_raw));
+          asm volatile("v_lshrrev_b32_e32 %0, 16, %1" : "=v"(p_hi_u) : "v"(p_raw));
+          asm volatile("v_lshrrev_b32_e32 %0, 16, %1" : "=v"(dp_hi_u) : "v"(ds_raw));
+          asm volatile("v_cvt_f32_bf16_e32 %0, %1" : "=v"(p_hi) : "v"(p_hi_u));
+          asm volatile("v_cvt_f32_bf16_e32 %0, %1" : "=v"(dp_hi) : "v"(dp_hi_u));
+          dp_lo *= p_lo;
+          dp_hi *= p_hi;
+          uint32_t result;
+          asm volatile("v_cvt_pk_bf16_f32 %0, %1, %2" : "=v"(result) : "v"(dp_hi), "v"(dp_lo));
+          ds_raw = result;
+        }
+
+      // Phase 3: dV += P^T @ dO
+      // Load dO as col_l with rt_16x32_4_s (stride=4 path works on gfx950)
+      load(dO_i_col, subtile_inplace<DOT_SLICE_QO, D_V>(dO_i_smem[tic][smem_half], {smem_sub, 0}));
+      {
+        // swap_layout: rt_16x16_s → rt_16x32_s, then reinterpret as rt_16x32_4_s
+        rt_bf<DOT_SLICE_QO, WARP_SIZE_KV, col_l, rt_16x32_s> P_ij_col_raw;
+        swap_layout(P_ij_col_raw, P_ij_bf16);
+        auto &P_ij_col = *reinterpret_cast<rt_bf<DOT_SLICE_QO, WARP_SIZE_KV, col_l, rt_16x32_4_s>*>(&P_ij_col_raw);
+        mma_AtB(dV_j_T, dO_i_col, P_ij_col, dV_j_T);
+      }
+
+      // Phase 4: dQ += dS @ K (via shared + atomic add)
+      {
+        rt_bf<WARP_SIZE_KV, DOT_SLICE_QO, row_l, rt_16x16_s> dS_row;
+        transpose(dS_row, dS_ij_bf16);
+        auto attn_sub = subtile_inplace<WARP_SIZE_KV, DOT_SLICE_QO>(attn_i_smem, {warpid, 0});
+        store(attn_sub, dS_row);
+      }
+      __builtin_amdgcn_s_barrier();
+      {
+        load(dP_ij_bf16_col_T, attn_i_smem);
+        load(K_j_col, subtile_inplace<BLOCK_SIZE_KV, 32>(K_j_smem, {0, warpid}));
+        if (i == 0 && ds == 0) zero(dQ_i_T);
+        mma_AtB(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
+        mul(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
+        {
+          rt_fl<DOT_SLICE_QO, 32, row_l, rt_16x16_s> dQ_row;
+          transpose(dQ_row, dQ_i_T);
+          atomic_add_bf16_tile<2>(g.dQg, dQ_row, {batch_idx, q_head_idx, q_seq_idx * 4 + ds, 0}, warpid);
+        }
+        if (warpid < 2) {
+          load(K_j_col, subtile_inplace<BLOCK_SIZE_KV, 32>(K_j_smem, {0, warpid + 4}));
+          zero(dQ_i_T);
+          mma_AtB(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
+          mul(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
+          rt_fl<DOT_SLICE_QO, 32, row_l, rt_16x16_s> dQ_row_2;
+          transpose(dQ_row_2, dQ_i_T);
+          atomic_add_bf16_tile<2>(g.dQg, dQ_row_2, {batch_idx, q_head_idx, q_seq_idx * 4 + ds, 0}, warpid + 4);
+        }
+        zero(dQ_i_T);
+      }
+      __builtin_amdgcn_s_barrier();
+
+      // Phase 5: dK += Q^T @ dS
+      load(Q_i_col, subtile_inplace<DOT_SLICE_QO, D_QK>(Q_i_smem[tic][smem_half], {smem_sub, 0}));
+      {
+        rt_bf<DOT_SLICE_QO, WARP_SIZE_KV, col_l, rt_16x32_s> dS_ij_col_raw;
+        swap_layout(dS_ij_col_raw, dS_ij_bf16);
+        auto &dS_ij_col = *reinterpret_cast<rt_bf<DOT_SLICE_QO, WARP_SIZE_KV, col_l, rt_16x32_4_s>*>(&dS_ij_col_raw);
+        mma_AtB(dK_j_T, Q_i_col, dS_ij_col, dK_j_T);
+      }
+      __builtin_amdgcn_s_barrier();
+    }
 
     if (!is_last) {
       const int nn_q_head_idx = (i + 1) / num_steps_per_head + first_q_head;
@@ -268,25 +340,23 @@ __global__ __attribute__((amdgpu_num_vgpr(128))) void attend_bwd_combined_d192v1
     }
   }
 
-  // Epilogue: store dV and dK via scalar stores (bypasses buffer_resource OOB issue)
+  // Epilogue: store dV and dK (transpose → copy to bf16 → store)
   {
     rt_fl<WARP_SIZE_KV, D_V, row_l, rt_32x32_s> dV_row;
     transpose(dV_row, dV_j_T);
-    bf16 *dV_base = reinterpret_cast<bf16*>(g.dVg.raw_ptr);
-    const int dV_s0 = g.dVg.template stride<0>(), dV_s1 = g.dVg.template stride<1>(), dV_s2 = g.dVg.template stride<2>();
-    const int dV_off = batch_idx * dV_s0 + j * WARP_SIZE_KV * dV_s1 + kv_head_idx * dV_s2;
-    store_row_tile_scalar(dV_base, dV_off, dV_s1, dV_row);
+    rt_bf<WARP_SIZE_KV, D_V, row_l, rt_32x32_s> dV_bf;
+    copy(dV_bf, dV_row);
+    store<1>(g.dVg, dV_bf, {batch_idx, j, kv_head_idx, 0});
   }
   __builtin_amdgcn_s_waitcnt(0);
   __builtin_amdgcn_s_barrier();
-  // dK_j_T already has dP_SCALE_FACTOR baked in (pre-scaled dS)
+  mul(dK_j_T, dK_j_T, dP_SCALE_FACTOR);
   {
     rt_fl<WARP_SIZE_KV, D_QK, row_l, rt_32x32_s> dK_row;
     transpose(dK_row, dK_j_T);
-    bf16 *dK_base = reinterpret_cast<bf16*>(g.dKg.raw_ptr);
-    const int dK_s0 = g.dKg.template stride<0>(), dK_s1 = g.dKg.template stride<1>(), dK_s2 = g.dKg.template stride<2>();
-    const int dK_off = batch_idx * dK_s0 + j * WARP_SIZE_KV * dK_s1 + kv_head_idx * dK_s2;
-    store_row_tile_scalar(dK_base, dK_off, dK_s1, dK_row);
+    rt_bf<WARP_SIZE_KV, D_QK, row_l, rt_32x32_s> dK_bf;
+    copy(dK_bf, dK_row);
+    store<1>(g.dKg, dK_bf, {batch_idx, j, kv_head_idx, 0});
   }
 }
 
