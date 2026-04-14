@@ -352,7 +352,7 @@ if has_bkwd:
             Q_tk, K_tk, V_tk, dO_tk,
             dQ_tk_in, L_tk, delta_tk,
         )
-        tk_kernel_bkwd_prep.dispatch_dq_shuffle(dQ_tk_in, dQ_tk)
+        dQ_tk = dQ_tk_in.transpose(1, 2).contiguous()
 
     timings_bwd = []
     for _ in range(num_iters_bwd):
@@ -371,7 +371,7 @@ if has_bkwd:
             Q_tk, K_tk, V_tk, dO_tk,
             dQ_tk_in, L_tk, delta_tk,
         )
-        tk_kernel_bkwd_prep.dispatch_dq_shuffle(dQ_tk_in, dQ_tk)
+        dQ_tk = dQ_tk_in.transpose(1, 2).contiguous()
         end_event.record()
         torch.cuda.synchronize()
         timings_bwd.append(start_event.elapsed_time(end_event))
