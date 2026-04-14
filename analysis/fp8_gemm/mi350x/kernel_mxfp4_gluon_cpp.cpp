@@ -701,7 +701,7 @@ __device__ __forceinline__ void kpair_32mfma_with_16lds_and_pf(
 // ── 32 KPAIR MFMAs + 8 ds_reads + 8 pf (split into 4 row blocks) ──
 // Each row: 8 MFMAs + 2 ds_reads (in asm) + 2 pf (C++ builtin).
 
-template<int PF_N = 8>
+template<int PF_N = 8, bool EMIT_BARRIER = false>
 __device__ __forceinline__ void kpair_32mfma_with_lds_and_pf(
     fp4_floatx4_t acc[16],
     const fp4_intx8_t A[4], const fp4_intx8_t B[4],
@@ -713,6 +713,10 @@ __device__ __forceinline__ void kpair_32mfma_with_lds_and_pf(
 {
     KPAIR_SETUP();
     // Row 0: 8 MFMAs + ALL 8 ds_reads front-loaded (1:1 interleave)
+    // When EMIT_BARRIER: vmcnt+barrier at top, MFMAs overlap with any stall
+    if constexpr (EMIT_BARRIER) {
+        asm volatile("s_waitcnt vmcnt(8)\ns_barrier\n" ::: "memory");
+    }
     asm volatile(
         "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %24, %32, %0,  %40, %42 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "ds_read_b128 %16, %44 offset:0\n"
@@ -994,13 +998,11 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         extract_tile(br_d, tBr);
         extract_tile(a1_d, tA1);
 
-        asm volatile("s_waitcnt vmcnt(8)");
-        __builtin_amdgcn_s_barrier();
+        // vmcnt+barrier moved into Step3's first asm block via EMIT_BARRIER=true
 
-
-        // Step 3: A1×Bl (32 MFMAs) + ds_read A0[nxt] — single asm block
+        // Step 3: A1×Bl (32 MFMAs) + ds_read A0[nxt] — barrier at entry
         float4 nxt_a0_d[8];
-        kpair_32mfma_with_lds_and_pf<8>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
+        kpair_32mfma_with_lds_and_pf<8, true>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
             nxt_a0_d[0], nxt_a0_d[1], nxt_a0_d[2], nxt_a0_d[3],
             nxt_a0_d[4], nxt_a0_d[5], nxt_a0_d[6], nxt_a0_d[7],
             sel_a0_p0, sel_a0_p1, pf_a0_p, pf_a1_p);
