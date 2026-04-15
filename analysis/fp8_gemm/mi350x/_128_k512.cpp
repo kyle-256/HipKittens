@@ -138,19 +138,6 @@ __device__ __forceinline__ fp8e8m0_4 load_pq_scale_srd(
         llvm_amdgcn_raw_buffer_load_b32(srsrc, voffset, soffset, 0));
 }
 
-__device__ __forceinline__ void load_pq_scale_x2_async(
-    i32x4 srsrc, uint32_t voffset, uint32_t soffset,
-    fp8e8m0_4 &out_lo, fp8e8m0_4 &out_hi) {
-    uint64_t pair;
-    asm volatile(
-        "buffer_load_dwordx2 %0, %1, %2, %3 offen"
-        : "=v"(pair)
-        : "v"(voffset), "s"(srsrc), "s"(soffset)
-    );
-    out_lo = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(pair));
-    out_hi = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(pair >> 32));
-}
-
 // ── Tile prefetch ──
 
 static constexpr int PF_MPT = (HB * BK * sizeof(fp8e4m3)) / (16 * _NUM_THREADS);
@@ -373,22 +360,23 @@ void mxfp4_128tile_kernel(const gluon_globals g) {
     G::prefill_swizzled_offsets(Bl_db[0], g.b, so_b);
 
     // Scale SRDs — with RBM=32, 1 scale group per warp half
-    // Use single dword loads with adjusted voffset to select the correct block.
-    const uint32_t lane_soff_x2 =
+    // In preshuffle_mfma16_merged format, each 64-row super-group interleaves
+    // two 32-row blocks as dword pairs. A single dword load gets one block.
+    // block_within_sg = ((row_base >> 5) & 1) determines which dword to load.
+    const uint32_t lane_soff_base =
         (static_cast<uint32_t>(kittens::laneid() / 16) << 7) |
         (static_cast<uint32_t>(kittens::laneid() % 16) << 3);
 
-    const int a0_row = br * BLK + wm * RBM;
-    const int a1_row = br * BLK + HB + wm * RBM;
-    const int bl_row = bc * BLK + wn * RBN;
-    const int br_row = bc * BLK + HB + wn * RBN;
+    // Compute per-warp voffsets that select the correct 32-row block within super-group
+    const int a0_row = br * BLK + wm * RBM;           // A0 half, warp wm
+    const int a1_row = br * BLK + HB + wm * RBM;      // A1 half, warp wm
+    const int bl_row = bc * BLK + wn * RBN;            // Bl half, warp wn
+    const int br_row = bc * BLK + HB + wn * RBN;       // Br half, warp wn
 
-    // Within a 64-row super-group, dwords alternate: block0, block1, block0, block1...
-    // lane_soff_x2 is 8-byte aligned. Adding 4 selects the second block.
-    const uint32_t a0_voff = lane_soff_x2 + (((a0_row >> 5) & 1) * 4);
-    const uint32_t a1_voff = lane_soff_x2 + (((a1_row >> 5) & 1) * 4);
-    const uint32_t bl_voff = lane_soff_x2 + (((bl_row >> 5) & 1) * 4);
-    const uint32_t br_voff = lane_soff_x2 + (((br_row >> 5) & 1) * 4);
+    const uint32_t a0_soff_adj = lane_soff_base + (((a0_row >> 5) & 1) * 4);
+    const uint32_t a1_soff_adj = lane_soff_base + (((a1_row >> 5) & 1) * 4);
+    const uint32_t bl_soff_adj = lane_soff_base + (((bl_row >> 5) & 1) * 4);
+    const uint32_t br_soff_adj = lane_soff_base + (((br_row >> 5) & 1) * 4);
 
     i32x4 a0_srd = make_scale_srd(preshuffled_scale_row_base_ptr(
         g.a_scale, a0_row >> 6));
@@ -462,13 +450,13 @@ void mxfp4_128tile_kernel(const gluon_globals g) {
     load_tiles(0, 0);
     if (k_byte_iters > 1) load_tiles(1, 1);
 
-    // Prefetch first scales — single dword loads with per-warp voffset
+    // Prefetch first scales (a_packs=1 for 32-row blocks → single buffer_load_b32)
     fp8e8m0_4 pf_a0, pf_a1, pf_bl, pf_br;
     {
-        pf_a0 = load_pq_scale_srd(a0_srd, a0_voff, 0);
-        pf_a1 = load_pq_scale_srd(a1_srd, a1_voff, 0);
-        pf_bl = load_pq_scale_srd(bl_srd, bl_voff, 0);
-        pf_br = load_pq_scale_srd(br_srd, br_voff, 0);
+        pf_a0 = load_pq_scale_srd(a0_srd, a0_soff_adj, 0);
+        pf_a1 = load_pq_scale_srd(a1_srd, a1_soff_adj, 0);
+        pf_bl = load_pq_scale_srd(bl_srd, bl_soff_adj, 0);
+        pf_br = load_pq_scale_srd(br_srd, br_soff_adj, 0);
     }
 
     // Pre-load A0+Bl for iteration 0
@@ -525,10 +513,10 @@ void mxfp4_128tile_kernel(const gluon_globals g) {
         // Prefetch next scales
         {
             const uint32_t nxt_scale = static_cast<uint32_t>(bt + 1 < k_byte_iters ? bt + 1 : bt) << 9;
-            pf_a0 = load_pq_scale_srd(a0_srd, a0_voff, nxt_scale);
-            pf_a1 = load_pq_scale_srd(a1_srd, a1_voff, nxt_scale);
-            pf_bl = load_pq_scale_srd(bl_srd, bl_voff, nxt_scale);
-            pf_br = load_pq_scale_srd(br_srd, br_voff, nxt_scale);
+            pf_a0 = load_pq_scale_srd(a0_srd, a0_soff_adj, nxt_scale);
+            pf_a1 = load_pq_scale_srd(a1_srd, a1_soff_adj, nxt_scale);
+            pf_bl = load_pq_scale_srd(bl_srd, bl_soff_adj, nxt_scale);
+            pf_br = load_pq_scale_srd(br_srd, br_soff_adj, nxt_scale);
         }
 
         // Extract A0/Bl operands for this iteration
@@ -648,7 +636,7 @@ void dispatch_128tile(gluon_globals g) {
     mxfp4_128tile_kernel<<<grid, dim3(_NUM_THREADS), 0>>>(g);
 }
 
-PYBIND11_MODULE(tk_mxfp4_128tile, m) {
+PYBIND11_MODULE(tk_128_k512, m) {
     m.doc() = "MXFP4 128x128 tile kernel for higher occupancy";
     py::bind_function<dispatch_128tile>(m, "gemm_rcr",
         &gluon_globals::a, &gluon_globals::b,
