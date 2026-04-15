@@ -5,7 +5,7 @@
 //   1. rt_32x16_4_s (stride 4) for all mma_ABt row_l inputs
 //   2. L/delta loaded directly into rv from global (sv_fl<32> load is broken on 64-lane warps)
 //   3. sub_row on col_l tiles with correctly-loaded align rv
-//   4. store_col_l_direct for dK/dV epilogue
+//   4. store_col_l_direct for dV; dK: transpose → bf16 → store<1> (agentA-style)
 //   5. dQ via shared-memory col_l→row_l conversion + mma_AB + atomic bf16 add
 //
 // Optimizations:
@@ -350,6 +350,13 @@ __global__ void attend_bwd_combined_d192v128_ker(
 
                 rt<bf16, Q_TILE, D_QK, col_l, rt_16x32_4_s> Q_col;
                 load(Q_col, Q_smem[cur]);
+                // dK Phase 4: st_32x32_s shared→col_l path is wrong for D=32..63 on upper 16 Q rows;
+                // narrow global→register col_l load directly into Q_col.tiles[1][1] (Q[16:32,32:64]).
+                using Q_d32_patch_rt = rt<bf16, 16, 32, col_l, rt_16x32_4_s>;
+                Q_d32_patch_rt &Q_d32_patch = reinterpret_cast<Q_d32_patch_rt &>(Q_col.tiles[1][1]);
+                kittens::load<1>(Q_d32_patch, g.Q,
+                    coord<Q_d32_patch_rt>{batch, qi * 2 + 1, q_head, 1});
+                __builtin_amdgcn_s_waitcnt(0);
 
                 rt<bf16, Q_TILE, KV_BLOCK, col_l, rt_32x32_s> dS_bf;
                 copy(dS_bf, dP_ij);
@@ -368,9 +375,15 @@ __global__ void attend_bwd_combined_d192v128_ker(
         }
     }
 
-    // Epilogue: store dV and dK
+    // Epilogue: dV keeps col_l direct store; dK uses agentA-style transpose → bf16 → store<1>
     store_col_l_direct<QKVO_AXIS, D_V>(g.dVg, dV_acc, batch, j, kv_head);
-    store_col_l_direct<QKVO_AXIS, D_QK>(g.dKg, dK_acc, batch, j, kv_head);
+
+    rt<float, KV_BLOCK, D_QK, row_l, rt_32x32_s> dK_row;
+    transpose(dK_row, dK_acc);
+    rt<bf16, KV_BLOCK, D_QK, row_l, rt_32x32_s> dK_bf;
+    copy(dK_bf, dK_row);
+    __builtin_amdgcn_s_waitcnt(0);
+    store<1>(g.dKg, dK_bf, {batch, j, kv_head, 0});
 }
 
 // ---------------------------------------------------------------------------

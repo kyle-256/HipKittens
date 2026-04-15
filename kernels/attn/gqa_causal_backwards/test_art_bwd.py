@@ -42,9 +42,10 @@ P = torch.softmax(S, dim=-1)
 O = torch.matmul(P, ve)
 L = torch.logsumexp(S, dim=-1)
 O.backward(dO_b.detach().to(torch.float64))
-dQ_ref = q_.grad.to(dtype)  # BHND
-dK_ref = k_.grad.to(dtype)  # BH_KV ND
-dV_ref = v_.grad.to(dtype)  # BH_KV ND
+# Clone so HIP kernels cannot clobber autograd backing storage for reference tensors.
+dQ_ref = q_.grad.to(dtype).clone()  # BHND
+dK_ref = k_.grad.to(dtype).clone()  # BH_KV ND
+dV_ref = v_.grad.to(dtype).clone()  # BH_KV ND
 print(f"Reference computed. dQ range: [{dQ_ref.float().min():.4f}, {dQ_ref.float().max():.4f}]")
 print(f"  dK range: [{dK_ref.float().min():.4f}, {dK_ref.float().max():.4f}]")
 print(f"  dV range: [{dV_ref.float().min():.4f}, {dV_ref.float().max():.4f}]")
