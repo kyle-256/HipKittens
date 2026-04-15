@@ -2,9 +2,11 @@
 
 ## Target
 - **Shape**: 4096×32768×128256 (and all 42 LLaMA shapes)
-- **aiter baseline**: 5653 TFLOPS on MI355X
-- **Target**: 97% of aiter = 5484 TFLOPS
-- **Current best**: 4926 TFLOPS (87.1% of aiter, GM=8)
+- **aiter baseline**: 5653 TFLOPS on MI355X (ASM kernel)
+- **Target**: 97% of aiter on ALL shapes
+- **Current**: 22/42 shapes ≥97%, average 98.5% across all shapes
+- **Peak**: 4926T on hardest shape (87.1% of aiter 5653T)
+- **Best**: 5198T (159.8% of aiter) on 4096×128256×32768
 
 ## What's been tried and results
 
