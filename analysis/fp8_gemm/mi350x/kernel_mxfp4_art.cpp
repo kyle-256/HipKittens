@@ -1310,8 +1310,12 @@ void mxfp4_art_kernel(const gluon_globals g) {
         #pragma unroll
         for (int i = 0; i < PF_MPT; ++i) emit_one_pf(pf_br_p, i);
 
-        // Wait for A0[nxt] buffer_loads + Bl[nxt] ds_reads to complete
-        asm volatile("s_waitcnt vmcnt(0) lgkmcnt(0)" ::: "memory");
+        // Wait for A0[nxt] buffer_loads + Bl[nxt] ds_reads to complete.
+        // B prefetch (8 VMEM ops, most recent) stays in-flight — hidden behind
+        // next iteration's Steps 1+2 (64 MFMAs) before vmcnt(0)+barrier.
+        // Pending VMEM: 8 A0[nxt] (oldest) + 8 B pf (newest) = 16 total.
+        // vmcnt(8) ensures A0[nxt] done while B pf stays in-flight.
+        asm volatile("s_waitcnt vmcnt(8) lgkmcnt(0)" ::: "memory");
     }
 
     // No debug code
