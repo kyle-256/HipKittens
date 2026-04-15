@@ -66,6 +66,12 @@ constexpr int k_byte_iters = K_BYTES / BK;
 #if MAIN_PERMLANE_BF16_STORE_POC && !SWAP_STEP12_MAIN
 #error "MAIN_PERMLANE_BF16_STORE_POC requires SWAP_STEP12_MAIN"
 #endif
+#ifndef MAIN_PERMLANE_BF16_DWORDX2_STORE_POC
+#define MAIN_PERMLANE_BF16_DWORDX2_STORE_POC 0
+#endif
+#if MAIN_PERMLANE_BF16_DWORDX2_STORE_POC && !MAIN_PERMLANE_BF16_STORE_POC
+#error "MAIN_PERMLANE_BF16_DWORDX2_STORE_POC requires MAIN_PERMLANE_BF16_STORE_POC"
+#endif
 
 #define MXFP4_STR_IMPL(x) #x
 #define MXFP4_STR(x) MXFP4_STR_IMPL(x)
@@ -98,6 +104,14 @@ using fp4_intx8_t   = int __attribute__((__vector_size__(8 * sizeof(int))));
 using fp4_intx4_t   = int __attribute__((__vector_size__(4 * sizeof(int))));
 using fp4_floatx4_t = float __attribute__((__vector_size__(4 * sizeof(float))));
 using u32x2_t       = unsigned int __attribute__((ext_vector_type(2)));
+static_assert(sizeof(u32x2_t) == 8);
+
+__device__ __forceinline__ unsigned int pack_bf16x2(float x, float y) {
+    unsigned int out;
+    asm volatile("v_cvt_pk_bf16_f32 %0, %1, %2"
+        : "=v"(out) : "v"(x), "v"(y));
+    return out;
+}
 
 __device__ __forceinline__ fp4_intx4_t fp4_lo4(const fp4_intx8_t& x) {
     return __builtin_shufflevector(x, x, 0, 1, 2, 3);
@@ -836,6 +850,18 @@ __device__ __forceinline__ void store_c_block_inner_permlane_tile(
             if (!write_lane) continue;
             const int row = i * 16 + lane_pos;
             const int col = j * 16 + 8 * (lane_group / 2);
+#if MAIN_PERMLANE_BF16_DWORDX2_STORE_POC
+            u32x2_t pack_lo = {
+                pack_bf16x2(std::bit_cast<float>(sw0[0]), std::bit_cast<float>(sw1[0])),
+                pack_bf16x2(std::bit_cast<float>(sw2[0]), std::bit_cast<float>(sw3[0]))
+            };
+            u32x2_t pack_hi = {
+                pack_bf16x2(std::bit_cast<float>(sw0[1]), std::bit_cast<float>(sw1[1])),
+                pack_bf16x2(std::bit_cast<float>(sw2[1]), std::bit_cast<float>(sw3[1]))
+            };
+            *reinterpret_cast<u32x2_t*>(&dst_ptr[row * row_stride + col]) = pack_lo;
+            *reinterpret_cast<u32x2_t*>(&dst_ptr[row * row_stride + col + 4]) = pack_hi;
+#else
             dst_ptr[row * row_stride + col + 0] = base_types::convertor<bf16, float>::convert(std::bit_cast<float>(sw0[0]));
             dst_ptr[row * row_stride + col + 1] = base_types::convertor<bf16, float>::convert(std::bit_cast<float>(sw1[0]));
             dst_ptr[row * row_stride + col + 2] = base_types::convertor<bf16, float>::convert(std::bit_cast<float>(sw2[0]));
@@ -844,6 +870,7 @@ __device__ __forceinline__ void store_c_block_inner_permlane_tile(
             dst_ptr[row * row_stride + col + 5] = base_types::convertor<bf16, float>::convert(std::bit_cast<float>(sw1[1]));
             dst_ptr[row * row_stride + col + 6] = base_types::convertor<bf16, float>::convert(std::bit_cast<float>(sw2[1]));
             dst_ptr[row * row_stride + col + 7] = base_types::convertor<bf16, float>::convert(std::bit_cast<float>(sw3[1]));
+#endif
         }
     }
 }
