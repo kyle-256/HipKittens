@@ -1,16 +1,7 @@
-// MXFP4 128x128 tile kernel variant for higher occupancy
+// MXFP4 128x128 tile kernel — minimal version for correctness
 //
-// Based on kernel_mxfp4_gluon_cpp.cpp but with:
-//   BLK=128, HB=64, RBM=RBN=32 (register block 32x32 per warp)
-//   4 acc per block (2x2 MFMAs) instead of 16 (4x4)
-//   32 MFMAs per K-step (4 blocks x 4 MFMAs x 2 phases)
-//   Target: occupancy=2 via smaller register footprint
-//
-// Per K-iteration:
-//   Step 1: A0 x Bl (8 MFMAs) + ds_read Br
-//   Step 2: A0 x Br (8 MFMAs) + ds_read A1
-//   Step 3: A1 x Bl (8 MFMAs) + ds_read A0[nxt]
-//   Step 4: A1 x Br (8 MFMAs) + ds_read Bl[nxt]
+// BLK=128, HB=64, RBM=RBN=32, 4 accumulators per block.
+// Simple loop: load all 4 tiles, compute all 4 blocks, repeat.
 
 #include "kittens.cuh"
 #include "pyutils/pyutils.cuh"
@@ -67,7 +58,6 @@ __device__ __forceinline__ fp4_intx4_t fp4_hi4(const fp4_intx8_t& x) {
 }
 
 // ── LDS → register tile load ──
-
 template<ducks::rt::row_layout RT, ducks::st::all ST>
 __device__ __forceinline__ void fp4_load_st_to_rt(RT &dst, const ST &src) {
     static_assert(RT::rows == ST::rows && RT::cols == ST::cols);
@@ -115,7 +105,6 @@ __device__ __forceinline__ fp4_intx8_t fp4_extract_tile(const RT &src, int tile_
 }
 
 // ── Scale helpers ──
-
 __device__ __forceinline__ const uint8_t* preshuffled_scale_row_base_ptr(
     const _gl_scale& src, int row_group) {
     return reinterpret_cast<const uint8_t*>(src.raw_ptr + src.idx(coord<>(row_group, 0)));
@@ -132,12 +121,6 @@ __device__ __forceinline__ i32x4 make_scale_srd(const uint8_t* ptr) {
     return srd;
 }
 
-__device__ __forceinline__ fp8e8m0_4 load_pq_scale_srd(
-    i32x4 srsrc, uint32_t voffset, uint32_t soffset) {
-    return std::bit_cast<fp8e8m0_4>(
-        llvm_amdgcn_raw_buffer_load_b32(srsrc, voffset, soffset, 0));
-}
-
 __device__ __forceinline__ void load_pq_scale_x2_async(
     i32x4 srsrc, uint32_t voffset, uint32_t soffset,
     fp8e8m0_4 &out_lo, fp8e8m0_4 &out_hi) {
@@ -152,7 +135,6 @@ __device__ __forceinline__ void load_pq_scale_x2_async(
 }
 
 // ── Tile prefetch ──
-
 static constexpr int PF_MPT = (HB * BK * sizeof(fp8e4m3)) / (16 * _NUM_THREADS);
 
 __device__ __forceinline__ void emit_tile_pf(
@@ -184,86 +166,7 @@ __device__ __forceinline__ void emit_tile_pf(
     }
 }
 
-// ── LDS address computation ──
-
-template<ducks::rt::row_layout RT, ducks::st::all ST>
-__device__ __forceinline__ void compute_lds_base_addrs(
-    const ST &src, uint32_t &addr_p0, uint32_t &addr_p1)
-{
-    const int laneid = kittens::laneid();
-    const int row_offset = laneid % RT::base_tile_rows;
-    const int col_offset = RT::base_tile_stride * (laneid / RT::base_tile_rows);
-    const uint32_t src_ptr = reinterpret_cast<uintptr_t>(&src.data[0]);
-    using U = typename ST::dtype;
-    constexpr int subcols = ST::underlying_subtile_cols;
-    const uint32_t off0 = sizeof(U) * (src_ptr + row_offset * subcols + col_offset);
-    addr_p0 = off0 ^ (((off0 % (16 * 128)) >> 8) << 4);
-    const int col1 = col_offset + RT::base_tile_elements_per_stride_group;
-    const uint32_t off1 = sizeof(U) * (src_ptr + row_offset * subcols + col1);
-    addr_p1 = off1 ^ (((off1 % (16 * 128)) >> 8) << 4);
-}
-
-// ── Tile prefetch params ──
-
-struct tile_pf_params {
-    int32x4_t srd;
-    uint32_t soff;
-    uint32_t lds_addrs[PF_MPT];
-    uint32_t voffs[PF_MPT];
-};
-
-template<ducks::st::all ST, ducks::gl::all GL, ducks::coord::tile COORD=coord<ST>>
-__device__ __forceinline__ tile_pf_params make_pf_params(
-    ST &dst, const GL &src, const COORD &idx,
-    const uint32_t *so, i32x4 srd_in, const void *base_ptr, uint32_t lds_base)
-{
-    using T = typename ST::dtype;
-    constexpr int BPM = 16 * _NUM_THREADS;
-    coord<> uc = idx.template unit_coord<2, 3>();
-    T* gptr = (T*)&src[uc];
-    uint32_t soff = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(
-        reinterpret_cast<const char*>(gptr) - reinterpret_cast<const char*>(base_ptr)));
-    const uint32_t lds_tile_base = __builtin_amdgcn_readfirstlane(
-        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&dst.data[0])));
-    const uint32_t warp_off = lds_base - lds_tile_base;
-    tile_pf_params p;
-    p.srd = std::bit_cast<int32x4_t>(srd_in);
-    p.soff = soff;
-    #pragma unroll
-    for (int i = 0; i < PF_MPT; ++i) {
-        p.voffs[i] = so[i];
-        const uint32_t lin = warp_off + i * BPM;
-        const uint32_t sid = lin / ST::underlying_subtile_bytes;
-        p.lds_addrs[i] = lds_tile_base + lin + sid * ST::subtile_padding;
-    }
-    return p;
-}
-
-__device__ __forceinline__ void emit_one_pf(const tile_pf_params& p, int idx) {
-    llvm_amdgcn_raw_buffer_load_lds(
-        std::bit_cast<int32x4_t>(p.srd),
-        (as3_uint32_ptr)(uintptr_t)p.lds_addrs[idx],
-        16, p.voffs[idx], p.soff, 0,
-        static_cast<int>(coherency::cache_all));
-}
-
-// ══════════════════════════════════════════════════════════
-// 8-MFMA blocks for 32x32 register tiles (2x2 base tiles)
-// ══════════════════════════════════════════════════════════
-//
-// With RBM=RBN=32: 2 MFMA tile rows x 2 MFMA tile cols = 4 accumulators
-// A has 2 tile rows: A[0], A[1] → lo/hi halves each
-// B has 2 tile rows: B[0], B[1] → lo/hi halves each
-// 1 scale per A half, 1 scale per B half (RBM/32=1)
-//
-// Accumulator mapping:
-//   acc[0] = A[0] x B[0]  op_sel:[0,0,0]
-//   acc[1] = A[0] x B[1]  op_sel:[0,1,0]
-//   acc[2] = A[1] x B[0]  op_sel:[1,0,0]
-//   acc[3] = A[1] x B[1]  op_sel:[1,1,0]
-
-// 8 MFMAs pure (no interleaving)
-// Operands: %0..3=acc, %4..5=a_lo, %6..7=a_hi, %8..9=b_lo, %10..11=b_hi, %12=sa, %13=sb
+// ── 8 MFMAs pure (no interleaving) for 32x32 register block ──
 __device__ __forceinline__ void mfma8_pure(
     fp4_floatx4_t acc[4],
     fp4_intx4_t a0l, fp4_intx4_t a1l,
@@ -288,45 +191,8 @@ __device__ __forceinline__ void mfma8_pure(
     );
 }
 
-// 8 MFMAs + 4 ds_reads interleaved (1:1 during phase 0)
-// Outputs: %0..3=acc(+a), %4..7=ds_out(=&v)
-// Inputs: %8..9=a_lo, %10..11=a_hi, %12..13=b_lo, %14..15=b_hi, %16=sa, %17=sb, %18..19=lds
-__device__ __forceinline__ void mfma8_with_4lds(
-    fp4_floatx4_t acc[4],
-    fp4_intx4_t a0l, fp4_intx4_t a1l,
-    fp4_intx4_t a0h, fp4_intx4_t a1h,
-    fp4_intx4_t b0l, fp4_intx4_t b1l,
-    fp4_intx4_t b0h, fp4_intx4_t b1h,
-    unsigned sa, unsigned sb,
-    float4 &d0, float4 &d1, float4 &d2, float4 &d3,
-    uint32_t lds_p0, uint32_t lds_p1)
-{
-    asm volatile(
-        // Phase 0 + 4 ds_reads
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %0, %8,  %12, %0, %16, %17 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %4, %18 offset:0\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %1, %8,  %13, %1, %16, %17 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %5, %18 offset:2048\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %2, %9,  %12, %2, %16, %17 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %6, %19 offset:0\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %3, %9,  %13, %3, %16, %17 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %7, %19 offset:2048\n"
-        // Phase 1 — pure MFMAs
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %0, %10, %14, %0, %16, %17 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %1, %10, %15, %1, %16, %17 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %2, %11, %14, %2, %16, %17 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %3, %11, %15, %3, %16, %17 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        : "+a"(acc[0]), "+a"(acc[1]), "+a"(acc[2]), "+a"(acc[3]),
-          "=&v"(d0), "=&v"(d1), "=&v"(d2), "=&v"(d3)
-        : "v"(a0l), "v"(a1l), "v"(a0h), "v"(a1h),
-          "v"(b0l), "v"(b1l), "v"(b0h), "v"(b1h),
-          "v"(sa), "v"(sb),
-          "v"(lds_p0), "v"(lds_p1)
-    );
-}
-
 // ══════════════════════════════════════════════════════════
-// Main kernel
+// Main kernel — simple single-buffer version
 // ══════════════════════════════════════════════════════════
 
 __global__ __launch_bounds__(_NUM_THREADS, 2)
@@ -335,7 +201,8 @@ void mxfp4_128tile_kernel(const gluon_globals g) {
 
     constexpr int bpc = N_DIM / BLK;
 
-    __shared__ ST_tile A0_db[2], A1_db[2], Bl_db[2], Br_db[2];
+    // Single-buffered LDS (no double-buffer for simplicity)
+    __shared__ ST_tile A0_sh, A1_sh, Bl_sh, Br_sh;
 
     // XCD-aware dispatch
     constexpr int NUM_XCDS = 8;
@@ -345,7 +212,6 @@ void mxfp4_128tile_kernel(const gluon_globals g) {
     constexpr int GROUP_M = GROUP_SIZE_M;
     const int total_blocks = gridDim.x;
     const int bpr = total_blocks / bpc;
-
     const int raw_bid = blockIdx.x;
     const int pids_per_xcd = (total_blocks + NUM_XCDS - 1) / NUM_XCDS;
     int tall_xcds = total_blocks % NUM_XCDS;
@@ -353,11 +219,8 @@ void mxfp4_128tile_kernel(const gluon_globals g) {
     const int xcd = raw_bid % NUM_XCDS;
     const int local_pid = raw_bid / NUM_XCDS;
     int bid;
-    if (xcd < tall_xcds) {
-        bid = xcd * pids_per_xcd + local_pid;
-    } else {
-        bid = tall_xcds * pids_per_xcd + (xcd - tall_xcds) * (pids_per_xcd - 1) + local_pid;
-    }
+    if (xcd < tall_xcds) bid = xcd * pids_per_xcd + local_pid;
+    else bid = tall_xcds * pids_per_xcd + (xcd - tall_xcds) * (pids_per_xcd - 1) + local_pid;
     if (bid >= total_blocks) return;
 
     const int num_pig = GROUP_M * bpc;
@@ -369,11 +232,10 @@ void mxfp4_128tile_kernel(const gluon_globals g) {
     const int wm = warpid() / WARPS_N, wn = warpid() % WARPS_N;
 
     uint32_t so_a[PF_MPT], so_b[PF_MPT];
-    G::prefill_swizzled_offsets(A0_db[0], g.a, so_a);
-    G::prefill_swizzled_offsets(Bl_db[0], g.b, so_b);
+    G::prefill_swizzled_offsets(A0_sh, g.a, so_a);
+    G::prefill_swizzled_offsets(Bl_sh, g.b, so_b);
 
-    // Scale SRDs — with RBM=32, 1 scale group per warp half
-    // Use single dword loads with adjusted voffset to select the correct block.
+    // Scale setup — use dwordx2 like the original kernel
     const uint32_t lane_soff_x2 =
         (static_cast<uint32_t>(kittens::laneid() / 16) << 7) |
         (static_cast<uint32_t>(kittens::laneid() % 16) << 3);
@@ -383,21 +245,16 @@ void mxfp4_128tile_kernel(const gluon_globals g) {
     const int bl_row = bc * BLK + wn * RBN;
     const int br_row = bc * BLK + HB + wn * RBN;
 
-    // Within a 64-row super-group, dwords alternate: block0, block1, block0, block1...
-    // lane_soff_x2 is 8-byte aligned. Adding 4 selects the second block.
-    const uint32_t a0_voff = lane_soff_x2 + (((a0_row >> 5) & 1) * 4);
-    const uint32_t a1_voff = lane_soff_x2 + (((a1_row >> 5) & 1) * 4);
-    const uint32_t bl_voff = lane_soff_x2 + (((bl_row >> 5) & 1) * 4);
-    const uint32_t br_voff = lane_soff_x2 + (((br_row >> 5) & 1) * 4);
+    // block_sel: which dword within the dwordx2 pair (0=lo, 1=hi)
+    const int a0_bsel = (a0_row >> 5) & 1;
+    const int a1_bsel = (a1_row >> 5) & 1;
+    const int bl_bsel = (bl_row >> 5) & 1;
+    const int br_bsel = (br_row >> 5) & 1;
 
-    i32x4 a0_srd = make_scale_srd(preshuffled_scale_row_base_ptr(
-        g.a_scale, a0_row >> 6));
-    i32x4 a1_srd = make_scale_srd(preshuffled_scale_row_base_ptr(
-        g.a_scale, a1_row >> 6));
-    i32x4 bl_srd = make_scale_srd(preshuffled_scale_row_base_ptr(
-        g.b_scale, bl_row >> 6));
-    i32x4 br_srd = make_scale_srd(preshuffled_scale_row_base_ptr(
-        g.b_scale, br_row >> 6));
+    i32x4 a0_srd = make_scale_srd(preshuffled_scale_row_base_ptr(g.a_scale, a0_row >> 6));
+    i32x4 a1_srd = make_scale_srd(preshuffled_scale_row_base_ptr(g.a_scale, a1_row >> 6));
+    i32x4 bl_srd = make_scale_srd(preshuffled_scale_row_base_ptr(g.b_scale, bl_row >> 6));
+    i32x4 br_srd = make_scale_srd(preshuffled_scale_row_base_ptr(g.b_scale, br_row >> 6));
 
     fp4_floatx4_t acc_A0Bl[4]={}, acc_A0Br[4]={}, acc_A1Bl[4]={}, acc_A1Br[4]={};
 
@@ -420,196 +277,66 @@ void mxfp4_128tile_kernel(const gluon_globals g) {
         return __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(
             reinterpret_cast<uintptr_t>(&t.data[0]) + wlo));
     };
-    uint32_t lb_a0[2], lb_a1[2], lb_bl[2], lb_br[2];
-    for (int d = 0; d < 2; ++d) {
-        lb_a0[d]=lb(A0_db[d]); lb_a1[d]=lb(A1_db[d]);
-        lb_bl[d]=lb(Bl_db[d]); lb_br[d]=lb(Br_db[d]);
-    }
+    uint32_t lb_a0 = lb(A0_sh), lb_a1 = lb(A1_sh), lb_bl = lb(Bl_sh), lb_br = lb(Br_sh);
 
-    auto load_tiles = [&](int bt, int db) {
-        emit_tile_pf(A0_db[db], g.a, coord<ST_tile>(0,0,br*2,    bt), so_a, srd_a, base_a, lb_a0[db]);
-        emit_tile_pf(A1_db[db], g.a, coord<ST_tile>(0,0,br*2+1,  bt), so_a, srd_a, base_a, lb_a1[db]);
-        emit_tile_pf(Bl_db[db], g.b, coord<ST_tile>(0,0,bc*2,    bt), so_b, srd_b, base_b, lb_bl[db]);
-        emit_tile_pf(Br_db[db], g.b, coord<ST_tile>(0,0,bc*2+1,  bt), so_b, srd_b, base_b, lb_br[db]);
-    };
-
-    // Pre-compute LDS addresses (static named vars)
-    uint32_t a0_0_p0, a0_0_p1, a0_1_p0, a0_1_p1;
-    uint32_t bl_0_p0, bl_0_p1, bl_1_p0, bl_1_p1;
-    uint32_t br_0_p0, br_0_p1, br_1_p0, br_1_p1;
-    uint32_t a1_0_p0, a1_0_p1, a1_1_p0, a1_1_p1;
-    compute_lds_base_addrs<A_row_reg>(kittens::subtile_inplace<RBM, BK>(A0_db[0], {wm, 0}), a0_0_p0, a0_0_p1);
-    compute_lds_base_addrs<A_row_reg>(kittens::subtile_inplace<RBM, BK>(A0_db[1], {wm, 0}), a0_1_p0, a0_1_p1);
-    compute_lds_base_addrs<B_row_reg>(kittens::subtile_inplace<RBN, BK>(Bl_db[0], {wn, 0}), bl_0_p0, bl_0_p1);
-    compute_lds_base_addrs<B_row_reg>(kittens::subtile_inplace<RBN, BK>(Bl_db[1], {wn, 0}), bl_1_p0, bl_1_p1);
-    compute_lds_base_addrs<B_row_reg>(kittens::subtile_inplace<RBN, BK>(Br_db[0], {wn, 0}), br_0_p0, br_0_p1);
-    compute_lds_base_addrs<B_row_reg>(kittens::subtile_inplace<RBN, BK>(Br_db[1], {wn, 0}), br_1_p0, br_1_p1);
-    compute_lds_base_addrs<A_row_reg>(kittens::subtile_inplace<RBM, BK>(A1_db[0], {wm, 0}), a1_0_p0, a1_0_p1);
-    compute_lds_base_addrs<A_row_reg>(kittens::subtile_inplace<RBM, BK>(A1_db[1], {wm, 0}), a1_1_p0, a1_1_p1);
-
-    // Tile extraction: ds_read float4[4] → fp4_intx8_t[2]
-    auto extract_tile_small = [](const float4 d[4], fp4_intx8_t t[2]) __attribute__((always_inline)) {
-        #pragma unroll
-        for (int i = 0; i < 2; i++) {
-            auto lo = *reinterpret_cast<const fp4_intx4_t*>(&d[i]);
-            auto hi = *reinterpret_cast<const fp4_intx4_t*>(&d[i + 2]);
-            t[i][0]=lo[0]; t[i][1]=lo[1]; t[i][2]=lo[2]; t[i][3]=lo[3];
-            t[i][4]=hi[0]; t[i][5]=hi[1]; t[i][6]=hi[2]; t[i][7]=hi[3];
-        }
-    };
-
-    // ═══════════ Prologue ═══════════
-    load_tiles(0, 0);
-    if (k_byte_iters > 1) load_tiles(1, 1);
-
-    // Prefetch first scales — single dword loads with per-warp voffset
-    fp8e8m0_4 pf_a0, pf_a1, pf_bl, pf_br;
-    {
-        pf_a0 = load_pq_scale_srd(a0_srd, a0_voff, 0);
-        pf_a1 = load_pq_scale_srd(a1_srd, a1_voff, 0);
-        pf_bl = load_pq_scale_srd(bl_srd, bl_voff, 0);
-        pf_br = load_pq_scale_srd(br_srd, br_voff, 0);
-    }
-
-    // Pre-load A0+Bl for iteration 0
-    asm volatile("s_waitcnt vmcnt(0)");
-    __builtin_amdgcn_s_barrier();
-    A_row_reg a0_rt;
-    B_row_reg bl_rt;
-    fp4_load_st_to_rt(a0_rt, kittens::subtile_inplace<RBM, BK>(A0_db[0], {wm, 0}));
-    fp4_load_st_to_rt(bl_rt, kittens::subtile_inplace<RBN, BK>(Bl_db[0], {wn, 0}));
-    asm volatile("s_waitcnt lgkmcnt(0)");
-    fp4_intx8_t tA0[2], tBl[2];
-    #pragma unroll
-    for (int i = 0; i < 2; i++) {
-        tA0[i] = fp4_extract_tile(a0_rt, i);
-        tBl[i] = fp4_extract_tile(bl_rt, i);
-    }
-
-    // ═══════════ Main loop ═══════════
-#ifdef UNROLL_K
-  #if UNROLL_K == 0
-    #pragma unroll
-  #else
-    #pragma unroll UNROLL_K
-  #endif
-#elif (K_DIM / 256) <= 16
-    #pragma unroll
-#elif (K_DIM / 256) <= 32
-    #pragma unroll 16
-#else
-    #pragma unroll 8
-#endif
+    // ═══════════ Main loop — simple single-buffer ═══════════
     for (int bt = 0; bt < k_byte_iters; ++bt) {
-        const int cur = bt & 1;
-        const int nxt = 1 - cur;
+        // Load all 4 tiles into LDS
+        emit_tile_pf(A0_sh, g.a, coord<ST_tile>(0,0,br*2,    bt), so_a, srd_a, base_a, lb_a0);
+        emit_tile_pf(A1_sh, g.a, coord<ST_tile>(0,0,br*2+1,  bt), so_a, srd_a, base_a, lb_a1);
+        emit_tile_pf(Bl_sh, g.b, coord<ST_tile>(0,0,bc*2,    bt), so_b, srd_b, base_b, lb_bl);
+        emit_tile_pf(Br_sh, g.b, coord<ST_tile>(0,0,bc*2+1,  bt), so_b, srd_b, base_b, lb_br);
 
-        const uint32_t sel_br_p0 = cur ? br_1_p0 : br_0_p0;
-        const uint32_t sel_br_p1 = cur ? br_1_p1 : br_0_p1;
-        const uint32_t sel_a1_p0 = cur ? a1_1_p0 : a1_0_p0;
-        const uint32_t sel_a1_p1 = cur ? a1_1_p1 : a1_0_p1;
-        const uint32_t sel_a0_p0 = nxt ? a0_1_p0 : a0_0_p0;
-        const uint32_t sel_a0_p1 = nxt ? a0_1_p1 : a0_0_p1;
-        const uint32_t sel_bl_p0 = nxt ? bl_1_p0 : bl_0_p0;
-        const uint32_t sel_bl_p1 = nxt ? bl_1_p1 : bl_0_p1;
+        // Load scales for this K step
+        fp8e8m0_4 sa0_lo, sa0_hi, sa1_lo, sa1_hi, sbl_lo, sbl_hi, sbr_lo, sbr_hi;
+        const uint32_t soff = static_cast<uint32_t>(bt) << 9;
+        load_pq_scale_x2_async(a0_srd, lane_soff_x2, soff, sa0_lo, sa0_hi);
+        load_pq_scale_x2_async(a1_srd, lane_soff_x2, soff, sa1_lo, sa1_hi);
+        load_pq_scale_x2_async(bl_srd, lane_soff_x2, soff, sbl_lo, sbl_hi);
+        load_pq_scale_x2_async(br_srd, lane_soff_x2, soff, sbr_lo, sbr_hi);
 
-        const int pf_bt = (bt + 2 < k_byte_iters) ? (bt + 2) : (k_byte_iters - 1);
-        tile_pf_params pf_a0_p = make_pf_params(A0_db[cur], g.a, coord<ST_tile>(0,0,br*2,     pf_bt), so_a, srd_a, base_a, lb_a0[cur]);
-        tile_pf_params pf_a1_p = make_pf_params(A1_db[cur], g.a, coord<ST_tile>(0,0,br*2+1,   pf_bt), so_a, srd_a, base_a, lb_a1[cur]);
-        tile_pf_params pf_bl_p = make_pf_params(Bl_db[cur], g.b, coord<ST_tile>(0,0,bc*2,     pf_bt), so_b, srd_b, base_b, lb_bl[cur]);
-        tile_pf_params pf_br_p = make_pf_params(Br_db[cur], g.b, coord<ST_tile>(0,0,bc*2+1,   pf_bt), so_b, srd_b, base_b, lb_br[cur]);
+        // Wait for everything
+        asm volatile("s_waitcnt vmcnt(0)");
+        __builtin_amdgcn_s_barrier();
 
-        // Snapshot current scales
-        fp8e8m0_4 a0_raw = pf_a0, a1_raw = pf_a1, bl_raw = pf_bl, br_raw = pf_br;
+        // Select correct scale dword
+        unsigned sa0_v = std::bit_cast<unsigned>(a0_bsel ? sa0_hi : sa0_lo);
+        unsigned sa1_v = std::bit_cast<unsigned>(a1_bsel ? sa1_hi : sa1_lo);
+        unsigned sbl_v = std::bit_cast<unsigned>(bl_bsel ? sbl_hi : sbl_lo);
+        unsigned sbr_v = std::bit_cast<unsigned>(br_bsel ? sbr_hi : sbr_lo);
 
-        // Prefetch next scales
-        {
-            const uint32_t nxt_scale = static_cast<uint32_t>(bt + 1 < k_byte_iters ? bt + 1 : bt) << 9;
-            pf_a0 = load_pq_scale_srd(a0_srd, a0_voff, nxt_scale);
-            pf_a1 = load_pq_scale_srd(a1_srd, a1_voff, nxt_scale);
-            pf_bl = load_pq_scale_srd(bl_srd, bl_voff, nxt_scale);
-            pf_br = load_pq_scale_srd(br_srd, br_voff, nxt_scale);
+        // Load all tiles from LDS into registers
+        A_row_reg a0_rt, a1_rt;
+        B_row_reg bl_rt, br_rt;
+        fp4_load_st_to_rt(a0_rt, kittens::subtile_inplace<RBM, BK>(A0_sh, {wm, 0}));
+        fp4_load_st_to_rt(a1_rt, kittens::subtile_inplace<RBM, BK>(A1_sh, {wm, 0}));
+        fp4_load_st_to_rt(bl_rt, kittens::subtile_inplace<RBN, BK>(Bl_sh, {wn, 0}));
+        fp4_load_st_to_rt(br_rt, kittens::subtile_inplace<RBN, BK>(Br_sh, {wn, 0}));
+        asm volatile("s_waitcnt lgkmcnt(0)");
+
+        // Extract tile data
+        fp4_intx8_t tA0[2], tA1[2], tBl[2], tBr[2];
+        for (int i = 0; i < 2; i++) {
+            tA0[i] = fp4_extract_tile(a0_rt, i);
+            tA1[i] = fp4_extract_tile(a1_rt, i);
+            tBl[i] = fp4_extract_tile(bl_rt, i);
+            tBr[i] = fp4_extract_tile(br_rt, i);
         }
 
-        // Extract A0/Bl operands for this iteration
-        fp4_intx4_t a0l = fp4_lo4(tA0[0]), a1l = fp4_lo4(tA0[1]);
-        fp4_intx4_t a0h = fp4_hi4(tA0[0]), a1h = fp4_hi4(tA0[1]);
-        fp4_intx4_t bl0l = fp4_lo4(tBl[0]), bl1l = fp4_lo4(tBl[1]);
-        fp4_intx4_t bl0h = fp4_hi4(tBl[0]), bl1h = fp4_hi4(tBl[1]);
-        unsigned sa0_v = std::bit_cast<unsigned>(a0_raw);
-        unsigned sa1_v = std::bit_cast<unsigned>(a1_raw);
-        unsigned sbl_v = std::bit_cast<unsigned>(bl_raw);
-        unsigned sbr_v = std::bit_cast<unsigned>(br_raw);
+        // Extract operands
+        fp4_intx4_t a0l=fp4_lo4(tA0[0]),a0_1l=fp4_lo4(tA0[1]),a0h=fp4_hi4(tA0[0]),a0_1h=fp4_hi4(tA0[1]);
+        fp4_intx4_t a1l=fp4_lo4(tA1[0]),a1_1l=fp4_lo4(tA1[1]),a1h=fp4_hi4(tA1[0]),a1_1h=fp4_hi4(tA1[1]);
+        fp4_intx4_t bl0l=fp4_lo4(tBl[0]),bl1l=fp4_lo4(tBl[1]),bl0h=fp4_hi4(tBl[0]),bl1h=fp4_hi4(tBl[1]);
+        fp4_intx4_t br0l=fp4_lo4(tBr[0]),br1l=fp4_lo4(tBr[1]),br0h=fp4_hi4(tBr[0]),br1h=fp4_hi4(tBr[1]);
 
-        // ── Step 1: A0 x Bl (8 MFMAs) + ds_read Br ──
-        float4 br_d[4];
-        mfma8_with_4lds(acc_A0Bl, a0l, a1l, a0h, a1h, bl0l, bl1l, bl0h, bl1h,
-                        sa0_v, sbl_v, br_d[0], br_d[1], br_d[2], br_d[3],
-                        sel_br_p0, sel_br_p1);
-
-        // Tile prefetch: A0, A1
-        #pragma unroll
-        for (int i = 0; i < PF_MPT; i++) emit_one_pf(pf_a0_p, i);
-
-        asm volatile("s_waitcnt lgkmcnt(0)");
-        fp4_intx8_t tBr[2];
-        extract_tile_small(br_d, tBr);
-
-        // ── Step 2: A0 x Br (8 MFMAs) + ds_read A1 ──
-        float4 a1_d[4];
-        {
-            fp4_intx4_t br0l = fp4_lo4(tBr[0]), br1l = fp4_lo4(tBr[1]);
-            fp4_intx4_t br0h = fp4_hi4(tBr[0]), br1h = fp4_hi4(tBr[1]);
-            mfma8_with_4lds(acc_A0Br, a0l, a1l, a0h, a1h, br0l, br1l, br0h, br1h,
-                            sa0_v, sbr_v, a1_d[0], a1_d[1], a1_d[2], a1_d[3],
-                            sel_a1_p0, sel_a1_p1);
-        }
-
-        // Tile prefetch: A1
-        #pragma unroll
-        for (int i = 0; i < PF_MPT; i++) emit_one_pf(pf_a1_p, i);
-
-        asm volatile("s_waitcnt lgkmcnt(0)");
-        fp4_intx8_t tA1[2];
-        extract_tile_small(a1_d, tA1);
-
-        fp4_intx4_t a1_0l = fp4_lo4(tA1[0]), a1_1l = fp4_lo4(tA1[1]);
-        fp4_intx4_t a1_0h = fp4_hi4(tA1[0]), a1_1h = fp4_hi4(tA1[1]);
-
-        // vmcnt+barrier for next tile data
-        asm volatile("s_waitcnt vmcnt(0)\ns_barrier\n" ::: "memory");
-
-        // ── Step 3: A1 x Bl (8 MFMAs) + ds_read A0[nxt] ──
-        float4 nxt_a0_d[4];
-        mfma8_with_4lds(acc_A1Bl, a1_0l, a1_1l, a1_0h, a1_1h, bl0l, bl1l, bl0h, bl1h,
-                        sa1_v, sbl_v, nxt_a0_d[0], nxt_a0_d[1], nxt_a0_d[2], nxt_a0_d[3],
-                        sel_a0_p0, sel_a0_p1);
-
-        // Tile prefetch: Bl
-        #pragma unroll
-        for (int i = 0; i < PF_MPT; i++) emit_one_pf(pf_bl_p, i);
-
-        // ── Step 4: A1 x Br (8 MFMAs) + ds_read Bl[nxt] ──
-        float4 nxt_bl_d[4];
-        {
-            fp4_intx4_t br0l = fp4_lo4(tBr[0]), br1l = fp4_lo4(tBr[1]);
-            fp4_intx4_t br0h = fp4_hi4(tBr[0]), br1h = fp4_hi4(tBr[1]);
-            mfma8_with_4lds(acc_A1Br, a1_0l, a1_1l, a1_0h, a1_1h, br0l, br1l, br0h, br1h,
-                            sa1_v, sbr_v, nxt_bl_d[0], nxt_bl_d[1], nxt_bl_d[2], nxt_bl_d[3],
-                            sel_bl_p0, sel_bl_p1);
-        }
-
-        // Tile prefetch: Br
-        #pragma unroll
-        for (int i = 0; i < PF_MPT; i++) emit_one_pf(pf_br_p, i);
-
-        asm volatile("s_waitcnt lgkmcnt(0)");
-        extract_tile_small(nxt_a0_d, tA0);
-        extract_tile_small(nxt_bl_d, tBl);
+        // 4 blocks x 8 MFMAs = 32 MFMAs total
+        mfma8_pure(acc_A0Bl, a0l, a0_1l, a0h, a0_1h, bl0l, bl1l, bl0h, bl1h, sa0_v, sbl_v);
+        mfma8_pure(acc_A0Br, a0l, a0_1l, a0h, a0_1h, br0l, br1l, br0h, br1h, sa0_v, sbr_v);
+        mfma8_pure(acc_A1Bl, a1l, a1_1l, a1h, a1_1h, bl0l, bl1l, bl0h, bl1h, sa1_v, sbl_v);
+        mfma8_pure(acc_A1Br, a1l, a1_1l, a1h, a1_1h, br0l, br1l, br0h, br1h, sa1_v, sbr_v);
     }
 
     // ═══════════ Store C ═══════════
-    // 32x32 per accumulator block, 2x2 = 4 base tiles (16x16)
     auto store_block = [&](const fp4_floatx4_t acc[4], int mh, int nh) {
         const int lid = kittens::laneid();
         const int base_row = br * BLK + mh * HB + wm * RBM;
