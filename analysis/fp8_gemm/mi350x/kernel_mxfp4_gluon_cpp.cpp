@@ -1260,6 +1260,127 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     }
 
     // ═══════════ Main loop (2-tile pipeline) ═══════════
+#if SWAP_STEP34_MAIN
+    // Split steady-state iterations from the final tail to keep the hot loop free
+    // of last-iteration branches and reduce live-range pressure.
+#ifdef UNROLL_K
+  #if UNROLL_K == 0
+    #pragma unroll
+  #else
+    #pragma unroll UNROLL_K
+  #endif
+#elif (K_DIM / 256) <= 16
+    #pragma unroll
+#elif (K_DIM / 256) <= 32
+    #pragma unroll 16
+#else
+    #pragma unroll 8
+#endif
+    for (int bt = 0; bt + 1 < k_byte_iters; ++bt) {
+        const int cur = bt & 1;
+        const int nxt = 1 - cur;
+        const uint32_t sel_br_p0 = cur ? br_1_p0 : br_0_p0;
+        const uint32_t sel_br_p1 = cur ? br_1_p1 : br_0_p1;
+        const uint32_t sel_a1_p0 = cur ? a1_1_p0 : a1_0_p0;
+        const uint32_t sel_a1_p1 = cur ? a1_1_p1 : a1_0_p1;
+        const uint32_t sel_a0_p0 = nxt ? a0_1_p0 : a0_0_p0;
+        const uint32_t sel_a0_p1 = nxt ? a0_1_p1 : a0_0_p1;
+        const uint32_t sel_bl_p0 = nxt ? bl_1_p0 : bl_0_p0;
+        const uint32_t sel_bl_p1 = nxt ? bl_1_p1 : bl_0_p1;
+
+        const int pf_bt = (bt + 2 < k_byte_iters) ? (bt + 2) : (k_byte_iters - 1);
+        tile_pf_params pf_a0_p = make_pf_params(A0_db[cur], g.a, coord<ST_tile>(0,0,br*2,     pf_bt), so_a, srd_a, base_a, lb_a0[cur]);
+        tile_pf_params pf_a1_p = make_pf_params(A1_db[cur], g.a, coord<ST_tile>(0,0,br*2+1,   pf_bt), so_a, srd_a, base_a, lb_a1[cur]);
+        tile_pf_params pf_bl_p = make_pf_params(Bl_db[cur], g.b, coord<ST_tile>(0,0,bc*2,     pf_bt), so_b, srd_b, base_b, lb_bl[cur]);
+        tile_pf_params pf_br_p = make_pf_params(Br_db[cur], g.b, coord<ST_tile>(0,0,bc*2+1,   pf_bt), so_b, srd_b, base_b, lb_br[cur]);
+
+        fp8e8m0_4 a0_raw[a_packs], a1_raw[a_packs], bl_raw[b_packs], br_raw[b_packs];
+        #pragma unroll
+        for (int p = 0; p < a_packs; ++p) { a0_raw[p] = pf_a0[p]; a1_raw[p] = pf_a1[p]; }
+        #pragma unroll
+        for (int p = 0; p < b_packs; ++p) { bl_raw[p] = pf_bl[p]; br_raw[p] = pf_br[p]; }
+
+        {
+            const uint32_t nxt_scale = static_cast<uint32_t>(bt + 1) << 9;
+            load_pq_scale_x2_async(a0_srd, lane_soff_x2, nxt_scale, pf_a0[0], pf_a0[1]);
+            load_pq_scale_x2_async(a1_srd, lane_soff_x2, nxt_scale, pf_a1[0], pf_a1[1]);
+            load_pq_scale_x2_async(bl_srd, lane_soff_x2, nxt_scale, pf_bl[0], pf_bl[1]);
+            load_pq_scale_x2_async(br_srd, lane_soff_x2, nxt_scale, pf_br[0], pf_br[1]);
+        }
+
+        float4 br_d[8], a1_d[8];
+        kpair_64mfma_step12(acc_A0Bl, acc_A0Br, tA0, tBl,
+            a0_raw, bl_raw, br_raw, br_d, a1_d,
+            sel_br_p0, sel_br_p1, sel_a1_p0, sel_a1_p1);
+
+        asm volatile("s_waitcnt lgkmcnt(0)");
+        fp4_intx8_t tBr[4], tA1[4];
+        extract_tile(br_d, tBr);
+        extract_tile(a1_d, tA1);
+
+#if !STEP3_EMBED_BARRIER
+        asm volatile("s_waitcnt vmcnt(0)\ns_barrier\n" ::: "memory");
+#endif
+
+        float4 nxt_a0_d[8];
+        float4 nxt_bl_d[8];
+        kpair_32mfma_with_lds_and_pf_swapped_sel<8, STEP3_EMBED_BARRIER>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
+            nxt_a0_d[0], nxt_a0_d[1], nxt_a0_d[2], nxt_a0_d[3],
+            nxt_a0_d[4], nxt_a0_d[5], nxt_a0_d[6], nxt_a0_d[7],
+            sel_a0_p0, sel_a0_p1, pf_a0_p, pf_a1_p);
+
+#if STEP4_EXTERNAL_BR_PREFETCH
+        kpair_32mfma_with_lds_and_pf_swapped_sel<4>(acc_A1Br, tA1, tBr, a1_raw, br_raw,
+            nxt_bl_d[0], nxt_bl_d[1], nxt_bl_d[2], nxt_bl_d[3],
+            nxt_bl_d[4], nxt_bl_d[5], nxt_bl_d[6], nxt_bl_d[7],
+            sel_bl_p0, sel_bl_p1, pf_bl_p, pf_br_p);
+        #pragma unroll
+        for (int pi = 0; pi < PF_MPT; ++pi) emit_one_pf(pf_br_p, pi);
+#else
+        kpair_32mfma_with_lds_and_pf_swapped_sel<8>(acc_A1Br, tA1, tBr, a1_raw, br_raw,
+            nxt_bl_d[0], nxt_bl_d[1], nxt_bl_d[2], nxt_bl_d[3],
+            nxt_bl_d[4], nxt_bl_d[5], nxt_bl_d[6], nxt_bl_d[7],
+            sel_bl_p0, sel_bl_p1, pf_bl_p, pf_br_p);
+#endif
+
+        asm volatile("s_waitcnt lgkmcnt(0)");
+        extract_tile(nxt_a0_d, tA0);
+        extract_tile(nxt_bl_d, tBl);
+    }
+
+    {
+        const int bt = k_byte_iters - 1;
+        const int cur = bt & 1;
+        const uint32_t sel_br_p0 = cur ? br_1_p0 : br_0_p0;
+        const uint32_t sel_br_p1 = cur ? br_1_p1 : br_0_p1;
+        const uint32_t sel_a1_p0 = cur ? a1_1_p0 : a1_0_p0;
+        const uint32_t sel_a1_p1 = cur ? a1_1_p1 : a1_0_p1;
+
+        fp8e8m0_4 a0_raw[a_packs], a1_raw[a_packs], bl_raw[b_packs], br_raw[b_packs];
+        #pragma unroll
+        for (int p = 0; p < a_packs; ++p) { a0_raw[p] = pf_a0[p]; a1_raw[p] = pf_a1[p]; }
+        #pragma unroll
+        for (int p = 0; p < b_packs; ++p) { bl_raw[p] = pf_bl[p]; br_raw[p] = pf_br[p]; }
+
+        float4 br_d[8], a1_d[8];
+        kpair_64mfma_step12(acc_A0Bl, acc_A0Br, tA0, tBl,
+            a0_raw, bl_raw, br_raw, br_d, a1_d,
+            sel_br_p0, sel_br_p1, sel_a1_p0, sel_a1_p1);
+
+        asm volatile("s_waitcnt lgkmcnt(0)");
+        fp4_intx8_t tBr[4], tA1[4];
+        extract_tile(br_d, tBr);
+        extract_tile(a1_d, tA1);
+
+#if !STEP3_EMBED_BARRIER
+        asm volatile("s_waitcnt vmcnt(0)\ns_barrier\n" ::: "memory");
+#endif
+
+        tile_pf_params dummy_pf = {};
+        kpair_32mfma_with_pf_swapped_sel<0>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw, dummy_pf, dummy_pf);
+        kpair_32mfma_with_pf_swapped_sel<0>(acc_A1Br, tA1, tBr, a1_raw, br_raw, dummy_pf, dummy_pf);
+    }
+#else
     // Unroll: override via -DUNROLL_K=N, else auto by K size
 #ifdef UNROLL_K
   #if UNROLL_K == 0
@@ -1277,9 +1398,6 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     for (int bt = 0; bt < k_byte_iters; ++bt) {
         const int cur = bt & 1;
         const int nxt = 1 - cur;
-#if SWAP_STEP34_MAIN
-        const bool has_next = bt + 1 < k_byte_iters;
-#endif
 
         const uint32_t sel_br_p0 = cur ? br_1_p0 : br_0_p0;
         const uint32_t sel_br_p1 = cur ? br_1_p1 : br_0_p1;
@@ -1329,76 +1447,31 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         // Step 3: A1×Bl (32 MFMAs) + ds_read A0[nxt] — barrier at entry
         float4 nxt_a0_d[8];
         float4 nxt_bl_d[8];
-#if SWAP_STEP34_MAIN
-        if (has_next) {
-            kpair_32mfma_with_lds_and_pf_swapped_sel<8, STEP3_EMBED_BARRIER>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
-                nxt_a0_d[0], nxt_a0_d[1], nxt_a0_d[2], nxt_a0_d[3],
-                nxt_a0_d[4], nxt_a0_d[5], nxt_a0_d[6], nxt_a0_d[7],
-                sel_a0_p0, sel_a0_p1, pf_a0_p, pf_a1_p);
-        } else {
-            tile_pf_params dummy_pf = {};
-            kpair_32mfma_with_pf_swapped_sel<0>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw, dummy_pf, dummy_pf);
-        }
-#else
         kpair_32mfma_with_lds_and_pf<8, STEP3_EMBED_BARRIER>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
             nxt_a0_d[0], nxt_a0_d[1], nxt_a0_d[2], nxt_a0_d[3],
             nxt_a0_d[4], nxt_a0_d[5], nxt_a0_d[6], nxt_a0_d[7],
             sel_a0_p0, sel_a0_p1, pf_a0_p, pf_a1_p);
-#endif
 
         // Step4 Br prefetch can either stay interleaved or be issued after compute.
 #if STEP4_EXTERNAL_BR_PREFETCH
-#if SWAP_STEP34_MAIN
-        if (has_next) {
-            kpair_32mfma_with_lds_and_pf_swapped_sel<4>(acc_A1Br, tA1, tBr, a1_raw, br_raw,
-                nxt_bl_d[0], nxt_bl_d[1], nxt_bl_d[2], nxt_bl_d[3],
-                nxt_bl_d[4], nxt_bl_d[5], nxt_bl_d[6], nxt_bl_d[7],
-                sel_bl_p0, sel_bl_p1, pf_bl_p, pf_br_p);
-        } else {
-            tile_pf_params dummy_pf = {};
-            kpair_32mfma_with_pf_swapped_sel<0>(acc_A1Br, tA1, tBr, a1_raw, br_raw, dummy_pf, dummy_pf);
-        }
-#else
         kpair_32mfma_with_lds_and_pf<4>(acc_A1Br, tA1, tBr, a1_raw, br_raw,
             nxt_bl_d[0], nxt_bl_d[1], nxt_bl_d[2], nxt_bl_d[3],
             nxt_bl_d[4], nxt_bl_d[5], nxt_bl_d[6], nxt_bl_d[7],
             sel_bl_p0, sel_bl_p1, pf_bl_p, pf_br_p);
-#endif
-        if (has_next) {
-            #pragma unroll
-            for (int pi = 0; pi < PF_MPT; ++pi) emit_one_pf(pf_br_p, pi);
-        }
-#else
-#if SWAP_STEP34_MAIN
-        if (has_next) {
-            kpair_32mfma_with_lds_and_pf_swapped_sel<8>(acc_A1Br, tA1, tBr, a1_raw, br_raw,
-                nxt_bl_d[0], nxt_bl_d[1], nxt_bl_d[2], nxt_bl_d[3],
-                nxt_bl_d[4], nxt_bl_d[5], nxt_bl_d[6], nxt_bl_d[7],
-                sel_bl_p0, sel_bl_p1, pf_bl_p, pf_br_p);
-        } else {
-            tile_pf_params dummy_pf = {};
-            kpair_32mfma_with_pf_swapped_sel<0>(acc_A1Br, tA1, tBr, a1_raw, br_raw, dummy_pf, dummy_pf);
-        }
+        #pragma unroll
+        for (int pi = 0; pi < PF_MPT; ++pi) emit_one_pf(pf_br_p, pi);
 #else
         kpair_32mfma_with_lds_and_pf<8>(acc_A1Br, tA1, tBr, a1_raw, br_raw,
             nxt_bl_d[0], nxt_bl_d[1], nxt_bl_d[2], nxt_bl_d[3],
             nxt_bl_d[4], nxt_bl_d[5], nxt_bl_d[6], nxt_bl_d[7],
             sel_bl_p0, sel_bl_p1, pf_bl_p, pf_br_p);
 #endif
-#endif
 
-#if SWAP_STEP34_MAIN
-        if (has_next) {
-            asm volatile("s_waitcnt lgkmcnt(0)");
-            extract_tile(nxt_a0_d, tA0);
-            extract_tile(nxt_bl_d, tBl);
-        }
-#else
         asm volatile("s_waitcnt lgkmcnt(0)");
         extract_tile(nxt_a0_d, tA0);
         extract_tile(nxt_bl_d, tBl);
-#endif
     }
+#endif
 
     // ═══════════ Store C — streamlined direct store ═══════════
     // Process base tiles directly from accumulators without materializing RT_C.
@@ -1428,6 +1501,9 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         }
     };
 
+    store_block(acc_A0Bl, 0, 0);
+    store_block(acc_A0Br, 0, 1);
+#if SWAP_STEP34_MAIN
     auto store_block_inner = [&](const fp4_floatx4_t acc[16], int mh, int nh) {
         const int lid = kittens::laneid();
         const int tile_r = br * WARPS_M * 2 + WARPS_M * mh + wm;
@@ -1452,10 +1528,6 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
             }
         }
     };
-
-    store_block(acc_A0Bl, 0, 0);
-    store_block(acc_A0Br, 0, 1);
-#if SWAP_STEP34_MAIN
     store_block_inner(acc_A1Bl, 1, 0);
     store_block_inner(acc_A1Br, 1, 1);
 #else
