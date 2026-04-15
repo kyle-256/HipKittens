@@ -731,16 +731,13 @@ __device__ __forceinline__ void store_acc_block_inner_transpose(
     }
 }
 
-__device__ __forceinline__ void store_acc_block_inner_permlane(
-    const _gl_float &out, const fp4_floatx4_t acc[16], int row_base)
+__device__ __forceinline__ void store_acc_block_inner_permlane_tile(
+    float *dst_ptr, int row_stride, const fp4_floatx4_t acc[16])
 {
     const int lid = kittens::laneid();
     const int lane_group = lid / 16;
     const int lane_pos = lid % 16;
     const bool write_lane = (lane_group & 1) == 0;
-
-    const int stride = out.cols();
-    float *dst_ptr = out.raw_ptr + static_cast<size_t>(row_base) * stride;
 
     #pragma unroll
     for (int i = 0; i < 4; ++i) {
@@ -766,16 +763,36 @@ __device__ __forceinline__ void store_acc_block_inner_permlane(
             if (!write_lane) continue;
             const int row = i * 16 + lane_pos;
             const int col = j * 16 + 8 * (lane_group / 2);
-            dst_ptr[row * stride + col + 0] = std::bit_cast<float>(sw0[0]);
-            dst_ptr[row * stride + col + 1] = std::bit_cast<float>(sw1[0]);
-            dst_ptr[row * stride + col + 2] = std::bit_cast<float>(sw2[0]);
-            dst_ptr[row * stride + col + 3] = std::bit_cast<float>(sw3[0]);
-            dst_ptr[row * stride + col + 4] = std::bit_cast<float>(sw0[1]);
-            dst_ptr[row * stride + col + 5] = std::bit_cast<float>(sw1[1]);
-            dst_ptr[row * stride + col + 6] = std::bit_cast<float>(sw2[1]);
-            dst_ptr[row * stride + col + 7] = std::bit_cast<float>(sw3[1]);
+            dst_ptr[row * row_stride + col + 0] = std::bit_cast<float>(sw0[0]);
+            dst_ptr[row * row_stride + col + 1] = std::bit_cast<float>(sw1[0]);
+            dst_ptr[row * row_stride + col + 2] = std::bit_cast<float>(sw2[0]);
+            dst_ptr[row * row_stride + col + 3] = std::bit_cast<float>(sw3[0]);
+            dst_ptr[row * row_stride + col + 4] = std::bit_cast<float>(sw0[1]);
+            dst_ptr[row * row_stride + col + 5] = std::bit_cast<float>(sw1[1]);
+            dst_ptr[row * row_stride + col + 6] = std::bit_cast<float>(sw2[1]);
+            dst_ptr[row * row_stride + col + 7] = std::bit_cast<float>(sw3[1]);
         }
     }
+}
+
+__device__ __forceinline__ void store_acc_block_inner_permlane(
+    const _gl_float &out, const fp4_floatx4_t acc[16], int row_base)
+{
+    const int row_stride = out.cols();
+    float *dst_ptr = out.raw_ptr + static_cast<size_t>(row_base) * row_stride;
+    store_acc_block_inner_permlane_tile(dst_ptr, row_stride, acc);
+}
+
+__device__ __forceinline__ void store_active_block_inner_permlane(
+    const operand_swap_debug_globals &g, const fp4_floatx4_t acc[16],
+    int wm, int wn, int mh, int nh)
+{
+    const int tile_r = WARPS_M * mh + wm;
+    const int tile_c = WARPS_N * nh + wn;
+    const int row_stride = g.out.cols();
+    float *dst_ptr = g.out.raw_ptr + static_cast<size_t>(tile_r * 64) * row_stride
+                   + static_cast<size_t>(tile_c * 64);
+    store_acc_block_inner_permlane_tile(dst_ptr, row_stride, acc);
 }
 
 // ── Merged Steps 1+2: 64 MFMAs + 16 ds_reads (Br + A1) in one asm block ──
@@ -2152,8 +2169,8 @@ void mxfp4_active_block_swap_step34_mainlike_kernel(const operand_swap_debug_glo
     mxfp4_active_block_debug_body<true, true, true>(g);
 }
 
-__global__ __launch_bounds__(_NUM_THREADS, 1)
-void mxfp4_active_block_swap_all_nonfused_kernel(const operand_swap_debug_globals g) {
+template<bool USE_PERMLANE_STORE>
+__device__ __forceinline__ void mxfp4_active_block_swap_all_nonfused_body(const operand_swap_debug_globals g) {
     constexpr int a_packs = RBM / 32;
     constexpr int b_packs = RBN / 32;
 
@@ -2259,14 +2276,31 @@ void mxfp4_active_block_swap_all_nonfused_kernel(const operand_swap_debug_global
         }
     };
 
-    store_block_inner(acc_A0Bl, 0, 0);
-    store_block_inner(acc_A1Bl, 1, 0);
-    store_block_inner(acc_A0Br, 0, 1);
-    store_block_inner(acc_A1Br, 1, 1);
+    if constexpr (USE_PERMLANE_STORE) {
+        store_active_block_inner_permlane(g, acc_A0Bl, wm, wn, 0, 0);
+        store_active_block_inner_permlane(g, acc_A1Bl, wm, wn, 1, 0);
+        store_active_block_inner_permlane(g, acc_A0Br, wm, wn, 0, 1);
+        store_active_block_inner_permlane(g, acc_A1Br, wm, wn, 1, 1);
+    } else {
+        store_block_inner(acc_A0Bl, 0, 0);
+        store_block_inner(acc_A1Bl, 1, 0);
+        store_block_inner(acc_A0Br, 0, 1);
+        store_block_inner(acc_A1Br, 1, 1);
+    }
 }
 
 __global__ __launch_bounds__(_NUM_THREADS, 1)
-void mxfp4_active_block_swap_all_fused_kernel(const operand_swap_debug_globals g) {
+void mxfp4_active_block_swap_all_nonfused_kernel(const operand_swap_debug_globals g) {
+    mxfp4_active_block_swap_all_nonfused_body<false>(g);
+}
+
+__global__ __launch_bounds__(_NUM_THREADS, 1)
+void mxfp4_active_block_swap_all_nonfused_permlane_kernel(const operand_swap_debug_globals g) {
+    mxfp4_active_block_swap_all_nonfused_body<true>(g);
+}
+
+template<bool USE_PERMLANE_STORE>
+__device__ __forceinline__ void mxfp4_active_block_swap_all_fused_body(const operand_swap_debug_globals g) {
     constexpr int a_packs = RBM / 32;
     constexpr int b_packs = RBN / 32;
 
@@ -2389,10 +2423,27 @@ void mxfp4_active_block_swap_all_fused_kernel(const operand_swap_debug_globals g
         }
     };
 
-    store_block_inner(acc_A0Bl, 0, 0);
-    store_block_inner(acc_A1Bl, 1, 0);
-    store_block_inner(acc_A0Br, 0, 1);
-    store_block_inner(acc_A1Br, 1, 1);
+    if constexpr (USE_PERMLANE_STORE) {
+        store_active_block_inner_permlane(g, acc_A0Bl, wm, wn, 0, 0);
+        store_active_block_inner_permlane(g, acc_A1Bl, wm, wn, 1, 0);
+        store_active_block_inner_permlane(g, acc_A0Br, wm, wn, 0, 1);
+        store_active_block_inner_permlane(g, acc_A1Br, wm, wn, 1, 1);
+    } else {
+        store_block_inner(acc_A0Bl, 0, 0);
+        store_block_inner(acc_A1Bl, 1, 0);
+        store_block_inner(acc_A0Br, 0, 1);
+        store_block_inner(acc_A1Br, 1, 1);
+    }
+}
+
+__global__ __launch_bounds__(_NUM_THREADS, 1)
+void mxfp4_active_block_swap_all_fused_kernel(const operand_swap_debug_globals g) {
+    mxfp4_active_block_swap_all_fused_body<false>(g);
+}
+
+__global__ __launch_bounds__(_NUM_THREADS, 1)
+void mxfp4_active_block_swap_all_fused_permlane_kernel(const operand_swap_debug_globals g) {
+    mxfp4_active_block_swap_all_fused_body<true>(g);
 }
 
 // Dump the lane-local fp4 tiles produced by direct RT extraction vs fused ds_read
@@ -2625,8 +2676,16 @@ void dispatch_active_block_swap_all_nonfused(operand_swap_debug_globals g) {
     mxfp4_active_block_swap_all_nonfused_kernel<<<1, dim3(_NUM_THREADS), 0>>>(g);
 }
 
+void dispatch_active_block_swap_all_nonfused_permlane(operand_swap_debug_globals g) {
+    mxfp4_active_block_swap_all_nonfused_permlane_kernel<<<1, dim3(_NUM_THREADS), 0>>>(g);
+}
+
 void dispatch_active_block_swap_all_fused(operand_swap_debug_globals g) {
     mxfp4_active_block_swap_all_fused_kernel<<<1, dim3(_NUM_THREADS), 0>>>(g);
+}
+
+void dispatch_active_block_swap_all_fused_permlane(operand_swap_debug_globals g) {
+    mxfp4_active_block_swap_all_fused_permlane_kernel<<<1, dim3(_NUM_THREADS), 0>>>(g);
 }
 
 void dispatch_step12_layout_debug(operand_swap_debug_globals g) {
@@ -2671,7 +2730,15 @@ PYBIND11_MODULE(tk_mxfp4_gluon_cpp, m) {
         &operand_swap_debug_globals::a, &operand_swap_debug_globals::b,
         &operand_swap_debug_globals::a_scale, &operand_swap_debug_globals::b_scale,
         &operand_swap_debug_globals::out);
+    py::bind_function<dispatch_active_block_swap_all_nonfused_permlane>(m, "debug_active_block_swap_all_nonfused_permlane",
+        &operand_swap_debug_globals::a, &operand_swap_debug_globals::b,
+        &operand_swap_debug_globals::a_scale, &operand_swap_debug_globals::b_scale,
+        &operand_swap_debug_globals::out);
     py::bind_function<dispatch_active_block_swap_all_fused>(m, "debug_active_block_swap_all_fused",
+        &operand_swap_debug_globals::a, &operand_swap_debug_globals::b,
+        &operand_swap_debug_globals::a_scale, &operand_swap_debug_globals::b_scale,
+        &operand_swap_debug_globals::out);
+    py::bind_function<dispatch_active_block_swap_all_fused_permlane>(m, "debug_active_block_swap_all_fused_permlane",
         &operand_swap_debug_globals::a, &operand_swap_debug_globals::b,
         &operand_swap_debug_globals::a_scale, &operand_swap_debug_globals::b_scale,
         &operand_swap_debug_globals::out);
