@@ -56,6 +56,7 @@ aiter的store epilogue用:
 
 ## 工作方式
 - 多个agent并行在不同GPU上
+- **所有agent必须使用opus模型** (model: opus)
 - 不要sleep()轮询, 用子agent监控
 - 每个改动: 编译→正确性→性能→commit或revert
 - commit用: git -c user.name="kyle-256" -c user.email="Kyle.Zhao@amd.com" commit
