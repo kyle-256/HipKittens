@@ -39,6 +39,22 @@ constexpr int RBN = HB / WARPS_N;
 constexpr int K_BYTES = K_DIM / 2;
 constexpr int k_byte_iters = K_BYTES / BK;
 
+#ifndef STEP3_EMBED_BARRIER
+#define STEP3_EMBED_BARRIER 1
+#endif
+#ifndef STEP3_BARRIER_VMCNT
+#define STEP3_BARRIER_VMCNT 8
+#endif
+#ifndef STEP4_EXTERNAL_BR_PREFETCH
+#define STEP4_EXTERNAL_BR_PREFETCH 0
+#endif
+#ifndef SWAP_STEP34_MAIN
+#define SWAP_STEP34_MAIN 0
+#endif
+
+#define MXFP4_STR_IMPL(x) #x
+#define MXFP4_STR(x) MXFP4_STR_IMPL(x)
+
 using ST_tile = st_fp8e4m3<HB, BK, st_16x128_s>;
 using A_row_reg = rt_fp8e4m3<RBM, BK, row_l, rt_16x128_s>;
 using B_row_reg = rt_fp8e4m3<RBN, BK, row_l, rt_16x128_s>;
@@ -48,12 +64,19 @@ using G = kittens::group<_NUM_WARPS>;
 using _gl_fp4   = gl<fp8e4m3, -1, -1, -1, -1>;
 using _gl_scale = gl<fp8e8m0, -1, -1, -1, -1>;
 using _gl_bf16  = gl<bf16, -1, -1, -1, -1>;
+using _gl_float = gl<float, -1, -1, -1, -1>;
 
 struct gluon_globals {
     _gl_fp4 a, b;
     _gl_scale a_scale, b_scale;
     _gl_bf16 c;
     float scale = 1.0f;
+};
+
+struct operand_swap_debug_globals {
+    _gl_fp4 a, b;
+    _gl_scale a_scale, b_scale;
+    _gl_float out;
 };
 
 using fp4_intx8_t   = int __attribute__((__vector_size__(8 * sizeof(int))));
@@ -418,6 +441,68 @@ __device__ __forceinline__ void kpair_32mfma_with_pf(
     if constexpr (PF_N > 7) emit_one_pf(pf1, 3);
 }
 
+template<int PF_N = 8>
+__device__ __forceinline__ void kpair_32mfma_with_pf_swapped_sel(
+    fp4_floatx4_t acc[16],
+    const fp4_intx8_t A[4], const fp4_intx8_t B[4],
+    const fp8e8m0_4 a_raw[2], const fp8e8m0_4 b_raw[2],
+    const tile_pf_params &pf0, const tile_pf_params &pf1)
+{
+    KPAIR_SETUP();
+    // Row 0
+    asm volatile(
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %24, %16, %0,  %34, %32 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %25, %16, %1,  %34, %32 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %26, %16, %2,  %35, %32 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %27, %16, %3,  %35, %32 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %28, %20, %0,  %34, %32 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %29, %20, %1,  %34, %32 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %30, %20, %2,  %35, %32 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %31, %20, %3,  %35, %32 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        : KPAIR_ACC_CLOBBER : KPAIR_INPUTS);
+    if constexpr (PF_N > 0) emit_one_pf(pf0, 0);
+    if constexpr (PF_N > 1) emit_one_pf(pf0, 1);
+    // Row 1
+    asm volatile(
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %24, %17, %4,  %34, %32 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %25, %17, %5,  %34, %32 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %26, %17, %6,  %35, %32 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %27, %17, %7,  %35, %32 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %28, %21, %4,  %34, %32 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %29, %21, %5,  %34, %32 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %30, %21, %6,  %35, %32 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %31, %21, %7,  %35, %32 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        : KPAIR_ACC_CLOBBER : KPAIR_INPUTS);
+    if constexpr (PF_N > 2) emit_one_pf(pf0, 2);
+    if constexpr (PF_N > 3) emit_one_pf(pf0, 3);
+    // Row 2
+    asm volatile(
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %24, %18, %8,  %34, %33 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %25, %18, %9,  %34, %33 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %26, %18, %10, %35, %33 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %27, %18, %11, %35, %33 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %28, %22, %8,  %34, %33 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %29, %22, %9,  %34, %33 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %30, %22, %10, %35, %33 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %31, %22, %11, %35, %33 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        : KPAIR_ACC_CLOBBER : KPAIR_INPUTS);
+    if constexpr (PF_N > 4) emit_one_pf(pf1, 0);
+    if constexpr (PF_N > 5) emit_one_pf(pf1, 1);
+    // Row 3
+    asm volatile(
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %24, %19, %12, %34, %33 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %25, %19, %13, %34, %33 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %26, %19, %14, %35, %33 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %27, %19, %15, %35, %33 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %28, %23, %12, %34, %33 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %29, %23, %13, %34, %33 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %30, %23, %14, %35, %33 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %31, %23, %15, %35, %33 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        : KPAIR_ACC_CLOBBER : KPAIR_INPUTS);
+    if constexpr (PF_N > 6) emit_one_pf(pf1, 2);
+    if constexpr (PF_N > 7) emit_one_pf(pf1, 3);
+}
+
 // ── 32 KPAIR MFMAs, no interleaved ops (single asm block) ──
 __device__ __forceinline__ void kpair_32mfma_pure(
     fp4_floatx4_t acc[16],
@@ -459,6 +544,158 @@ __device__ __forceinline__ void kpair_32mfma_pure(
         "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %23, %30, %14, %33, %35 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %23, %31, %15, %33, %35 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         : KPAIR_ACC_CLOBBER : KPAIR_INPUTS);
+}
+
+// Operand-swap POC variant 1:
+// swap src/scale operands but keep the original op_sel bit assignment.
+__device__ __forceinline__ void kpair_32mfma_pure_swapped_plain(
+    fp4_floatx4_t acc[16],
+    const fp4_intx8_t A[4], const fp4_intx8_t B[4],
+    const fp8e8m0_4 a_raw[2], const fp8e8m0_4 b_raw[2])
+{
+    KPAIR_SETUP();
+    asm volatile(
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %24, %16, %0,  %34, %32 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %25, %16, %1,  %34, %32 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %26, %16, %2,  %35, %32 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %27, %16, %3,  %35, %32 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %28, %20, %0,  %34, %32 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %29, %20, %1,  %34, %32 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %30, %20, %2,  %35, %32 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %31, %20, %3,  %35, %32 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %24, %17, %4,  %34, %32 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %25, %17, %5,  %34, %32 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %26, %17, %6,  %35, %32 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %27, %17, %7,  %35, %32 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %28, %21, %4,  %34, %32 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %29, %21, %5,  %34, %32 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %30, %21, %6,  %35, %32 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %31, %21, %7,  %35, %32 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %24, %18, %8,  %34, %33 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %25, %18, %9,  %34, %33 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %26, %18, %10, %35, %33 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %27, %18, %11, %35, %33 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %28, %22, %8,  %34, %33 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %29, %22, %9,  %34, %33 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %30, %22, %10, %35, %33 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %31, %22, %11, %35, %33 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %24, %19, %12, %34, %33 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %25, %19, %13, %34, %33 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %26, %19, %14, %35, %33 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %27, %19, %15, %35, %33 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %28, %23, %12, %34, %33 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %29, %23, %13, %34, %33 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %30, %23, %14, %35, %33 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %31, %23, %15, %35, %33 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        : KPAIR_ACC_CLOBBER : KPAIR_INPUTS);
+}
+
+// Operand-swap POC variant 2:
+// swap src/scale operands and also swap the first two op_sel/op_sel_hi bits.
+__device__ __forceinline__ void kpair_32mfma_pure_swapped_sel(
+    fp4_floatx4_t acc[16],
+    const fp4_intx8_t A[4], const fp4_intx8_t B[4],
+    const fp8e8m0_4 a_raw[2], const fp8e8m0_4 b_raw[2])
+{
+    KPAIR_SETUP();
+    asm volatile(
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %24, %16, %0,  %34, %32 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %25, %16, %1,  %34, %32 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %26, %16, %2,  %35, %32 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %27, %16, %3,  %35, %32 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %28, %20, %0,  %34, %32 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %29, %20, %1,  %34, %32 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %30, %20, %2,  %35, %32 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %31, %20, %3,  %35, %32 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %24, %17, %4,  %34, %32 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %25, %17, %5,  %34, %32 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %26, %17, %6,  %35, %32 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %27, %17, %7,  %35, %32 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %28, %21, %4,  %34, %32 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %29, %21, %5,  %34, %32 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %30, %21, %6,  %35, %32 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %31, %21, %7,  %35, %32 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %24, %18, %8,  %34, %33 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %25, %18, %9,  %34, %33 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %26, %18, %10, %35, %33 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %27, %18, %11, %35, %33 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %28, %22, %8,  %34, %33 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %29, %22, %9,  %34, %33 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %30, %22, %10, %35, %33 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %31, %22, %11, %35, %33 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %24, %19, %12, %34, %33 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %25, %19, %13, %34, %33 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %26, %19, %14, %35, %33 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %27, %19, %15, %35, %33 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %28, %23, %12, %34, %33 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %29, %23, %13, %34, %33 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %30, %23, %14, %35, %33 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %31, %23, %15, %35, %33 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        : KPAIR_ACC_CLOBBER : KPAIR_INPUTS);
+}
+
+__device__ __forceinline__ void dump_acc_raw(
+    const _gl_float &out, const fp4_floatx4_t acc[16], int variant)
+{
+    const int lid = kittens::laneid();
+    float *dst = out.raw_ptr
+               + static_cast<size_t>(variant) * WARP_THREADS * 16 * 4
+               + static_cast<size_t>(lid) * 16 * 4;
+    #pragma unroll
+    for (int i = 0; i < 16; ++i) {
+        dst[i * 4 + 0] = acc[i][0];
+        dst[i * 4 + 1] = acc[i][1];
+        dst[i * 4 + 2] = acc[i][2];
+        dst[i * 4 + 3] = acc[i][3];
+    }
+}
+
+__device__ __forceinline__ void store_acc_block_standard(
+    const _gl_float &out, const fp4_floatx4_t acc[16], int row_base)
+{
+    const int lid = kittens::laneid();
+    const int row_off = 4 * (lid / 16);
+    const int col_off = lid % 16;
+    const int stride = out.cols();
+    float *dst_ptr = out.raw_ptr + static_cast<size_t>(row_base) * stride;
+
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            fp4_floatx4_t s = acc[i * 4 + j];
+            const int row = i * 16 + row_off;
+            const int col = j * 16 + col_off;
+            dst_ptr[(row + 0) * stride + col] = s[0];
+            dst_ptr[(row + 1) * stride + col] = s[1];
+            dst_ptr[(row + 2) * stride + col] = s[2];
+            dst_ptr[(row + 3) * stride + col] = s[3];
+        }
+    }
+}
+
+__device__ __forceinline__ void store_acc_block_inner_transpose(
+    const _gl_float &out, const fp4_floatx4_t acc[16], int row_base)
+{
+    const int lid = kittens::laneid();
+    const int lane_group = lid / 16;
+    const int lane_pos = lid % 16;
+    const int stride = out.cols();
+    float *dst_ptr = out.raw_ptr + static_cast<size_t>(row_base) * stride;
+
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            fp4_floatx4_t s = acc[i * 4 + j];
+            const int row = i * 16 + lane_pos;
+            const int col = j * 16 + 4 * lane_group;
+            dst_ptr[row * stride + col + 0] = s[0];
+            dst_ptr[row * stride + col + 1] = s[1];
+            dst_ptr[row * stride + col + 2] = s[2];
+            dst_ptr[row * stride + col + 3] = s[3];
+        }
+    }
 }
 
 // ── Merged Steps 1+2: 64 MFMAs + 16 ds_reads (Br + A1) in one asm block ──
@@ -715,7 +952,7 @@ __device__ __forceinline__ void kpair_32mfma_with_lds_and_pf(
     // Row 0: 8 MFMAs + ALL 8 ds_reads front-loaded (1:1 interleave)
     // When EMIT_BARRIER: vmcnt+barrier at top, MFMAs overlap with any stall
     if constexpr (EMIT_BARRIER) {
-        asm volatile("s_waitcnt vmcnt(8)\ns_barrier\n" ::: "memory");
+        asm volatile("s_waitcnt vmcnt(" MXFP4_STR(STEP3_BARRIER_VMCNT) ")\ns_barrier\n" ::: "memory");
     }
     asm volatile(
         "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %24, %32, %0,  %40, %42 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
@@ -778,6 +1015,89 @@ __device__ __forceinline__ void kpair_32mfma_with_lds_and_pf(
         "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %23, %29, %13, %33, %34 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %23, %30, %14, %33, %35 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %23, %31, %15, %33, %35 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        : KPAIR_ACC_CLOBBER : KPAIR_INPUTS);
+    if constexpr (PF_N > 6) emit_one_pf(pf1, 2);
+    if constexpr (PF_N > 7) emit_one_pf(pf1, 3);
+}
+
+template<int PF_N = 8, bool EMIT_BARRIER = false>
+__device__ __forceinline__ void kpair_32mfma_with_lds_and_pf_swapped_sel(
+    fp4_floatx4_t acc[16],
+    const fp4_intx8_t A[4], const fp4_intx8_t B[4],
+    const fp8e8m0_4 a_raw[2], const fp8e8m0_4 b_raw[2],
+    float4 &d0, float4 &d1, float4 &d2, float4 &d3,
+    float4 &d4, float4 &d5, float4 &d6, float4 &d7,
+    uint32_t lds_a0, uint32_t lds_a1,
+    const tile_pf_params &pf0, const tile_pf_params &pf1)
+{
+    KPAIR_SETUP();
+    // Row 0 keeps the with_lds operand numbering where ds_read outputs
+    // occupy %16..23, so the swapped MFMA indices are not a direct copy of
+    // kpair_32mfma_with_pf_swapped_sel.
+    if constexpr (EMIT_BARRIER) {
+        asm volatile("s_waitcnt vmcnt(" MXFP4_STR(STEP3_BARRIER_VMCNT) ")\ns_barrier\n" ::: "memory");
+    }
+    asm volatile(
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %32, %24, %0,  %42, %40 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %16, %44 offset:0\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %33, %24, %1,  %42, %40 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %17, %44 offset:2048\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %34, %24, %2,  %43, %40 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %18, %44 offset:4096\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %35, %24, %3,  %43, %40 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %19, %44 offset:6144\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %36, %28, %0,  %42, %40 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %20, %45 offset:0\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %37, %28, %1,  %42, %40 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %21, %45 offset:2048\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %38, %28, %2,  %43, %40 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %22, %45 offset:4096\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %39, %28, %3,  %43, %40 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %23, %45 offset:6144\n"
+        : KPAIR_ACC_CLOBBER,
+          "=&v"(d0), "=&v"(d1), "=&v"(d2), "=&v"(d3),
+          "=&v"(d4), "=&v"(d5), "=&v"(d6), "=&v"(d7)
+        : KPAIR_INPUTS,
+          "v"(lds_a0), "v"(lds_a1)
+    );
+    if constexpr (PF_N > 0) emit_one_pf(pf0, 0);
+    if constexpr (PF_N > 1) emit_one_pf(pf0, 1);
+    // Row 1
+    asm volatile(
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %24, %17, %4,  %34, %32 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %25, %17, %5,  %34, %32 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %26, %17, %6,  %35, %32 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %27, %17, %7,  %35, %32 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %28, %21, %4,  %34, %32 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %29, %21, %5,  %34, %32 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %30, %21, %6,  %35, %32 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %31, %21, %7,  %35, %32 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        : KPAIR_ACC_CLOBBER : KPAIR_INPUTS);
+    if constexpr (PF_N > 2) emit_one_pf(pf0, 2);
+    if constexpr (PF_N > 3) emit_one_pf(pf0, 3);
+    // Row 2
+    asm volatile(
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %24, %18, %8,  %34, %33 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %25, %18, %9,  %34, %33 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %26, %18, %10, %35, %33 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %27, %18, %11, %35, %33 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %28, %22, %8,  %34, %33 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %29, %22, %9,  %34, %33 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %30, %22, %10, %35, %33 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %31, %22, %11, %35, %33 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        : KPAIR_ACC_CLOBBER : KPAIR_INPUTS);
+    if constexpr (PF_N > 4) emit_one_pf(pf1, 0);
+    if constexpr (PF_N > 5) emit_one_pf(pf1, 1);
+    // Row 3
+    asm volatile(
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %24, %19, %12, %34, %33 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %25, %19, %13, %34, %33 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %26, %19, %14, %35, %33 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %27, %19, %15, %35, %33 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %28, %23, %12, %34, %33 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %29, %23, %13, %34, %33 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %30, %23, %14, %35, %33 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %31, %23, %15, %35, %33 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         : KPAIR_ACC_CLOBBER : KPAIR_INPUTS);
     if constexpr (PF_N > 6) emit_one_pf(pf1, 2);
     if constexpr (PF_N > 7) emit_one_pf(pf1, 3);
@@ -957,6 +1277,9 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     for (int bt = 0; bt < k_byte_iters; ++bt) {
         const int cur = bt & 1;
         const int nxt = 1 - cur;
+#if SWAP_STEP34_MAIN
+        const bool has_next = bt + 1 < k_byte_iters;
+#endif
 
         const uint32_t sel_br_p0 = cur ? br_1_p0 : br_0_p0;
         const uint32_t sel_br_p1 = cur ? br_1_p1 : br_0_p1;
@@ -998,25 +1321,83 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         extract_tile(br_d, tBr);
         extract_tile(a1_d, tA1);
 
-        // vmcnt+barrier moved into Step3's first asm block via EMIT_BARRIER=true
+        // Step3 barrier placement is configurable for A/B experiments.
+#if !STEP3_EMBED_BARRIER
+        asm volatile("s_waitcnt vmcnt(0)\ns_barrier\n" ::: "memory");
+#endif
 
         // Step 3: A1×Bl (32 MFMAs) + ds_read A0[nxt] — barrier at entry
         float4 nxt_a0_d[8];
-        kpair_32mfma_with_lds_and_pf<8, true>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
+        float4 nxt_bl_d[8];
+#if SWAP_STEP34_MAIN
+        if (has_next) {
+            kpair_32mfma_with_lds_and_pf_swapped_sel<8, STEP3_EMBED_BARRIER>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
+                nxt_a0_d[0], nxt_a0_d[1], nxt_a0_d[2], nxt_a0_d[3],
+                nxt_a0_d[4], nxt_a0_d[5], nxt_a0_d[6], nxt_a0_d[7],
+                sel_a0_p0, sel_a0_p1, pf_a0_p, pf_a1_p);
+        } else {
+            tile_pf_params dummy_pf = {};
+            kpair_32mfma_with_pf_swapped_sel<0>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw, dummy_pf, dummy_pf);
+        }
+#else
+        kpair_32mfma_with_lds_and_pf<8, STEP3_EMBED_BARRIER>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
             nxt_a0_d[0], nxt_a0_d[1], nxt_a0_d[2], nxt_a0_d[3],
             nxt_a0_d[4], nxt_a0_d[5], nxt_a0_d[6], nxt_a0_d[7],
             sel_a0_p0, sel_a0_p1, pf_a0_p, pf_a1_p);
+#endif
 
-        // Step 4: A1×Br (32 MFMAs) + ds_read Bl[nxt] — single asm block
-        float4 nxt_bl_d[8];
+        // Step4 Br prefetch can either stay interleaved or be issued after compute.
+#if STEP4_EXTERNAL_BR_PREFETCH
+#if SWAP_STEP34_MAIN
+        if (has_next) {
+            kpair_32mfma_with_lds_and_pf_swapped_sel<4>(acc_A1Br, tA1, tBr, a1_raw, br_raw,
+                nxt_bl_d[0], nxt_bl_d[1], nxt_bl_d[2], nxt_bl_d[3],
+                nxt_bl_d[4], nxt_bl_d[5], nxt_bl_d[6], nxt_bl_d[7],
+                sel_bl_p0, sel_bl_p1, pf_bl_p, pf_br_p);
+        } else {
+            tile_pf_params dummy_pf = {};
+            kpair_32mfma_with_pf_swapped_sel<0>(acc_A1Br, tA1, tBr, a1_raw, br_raw, dummy_pf, dummy_pf);
+        }
+#else
+        kpair_32mfma_with_lds_and_pf<4>(acc_A1Br, tA1, tBr, a1_raw, br_raw,
+            nxt_bl_d[0], nxt_bl_d[1], nxt_bl_d[2], nxt_bl_d[3],
+            nxt_bl_d[4], nxt_bl_d[5], nxt_bl_d[6], nxt_bl_d[7],
+            sel_bl_p0, sel_bl_p1, pf_bl_p, pf_br_p);
+#endif
+        if (has_next) {
+            #pragma unroll
+            for (int pi = 0; pi < PF_MPT; ++pi) emit_one_pf(pf_br_p, pi);
+        }
+#else
+#if SWAP_STEP34_MAIN
+        if (has_next) {
+            kpair_32mfma_with_lds_and_pf_swapped_sel<8>(acc_A1Br, tA1, tBr, a1_raw, br_raw,
+                nxt_bl_d[0], nxt_bl_d[1], nxt_bl_d[2], nxt_bl_d[3],
+                nxt_bl_d[4], nxt_bl_d[5], nxt_bl_d[6], nxt_bl_d[7],
+                sel_bl_p0, sel_bl_p1, pf_bl_p, pf_br_p);
+        } else {
+            tile_pf_params dummy_pf = {};
+            kpair_32mfma_with_pf_swapped_sel<0>(acc_A1Br, tA1, tBr, a1_raw, br_raw, dummy_pf, dummy_pf);
+        }
+#else
         kpair_32mfma_with_lds_and_pf<8>(acc_A1Br, tA1, tBr, a1_raw, br_raw,
             nxt_bl_d[0], nxt_bl_d[1], nxt_bl_d[2], nxt_bl_d[3],
             nxt_bl_d[4], nxt_bl_d[5], nxt_bl_d[6], nxt_bl_d[7],
             sel_bl_p0, sel_bl_p1, pf_bl_p, pf_br_p);
+#endif
+#endif
 
+#if SWAP_STEP34_MAIN
+        if (has_next) {
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            extract_tile(nxt_a0_d, tA0);
+            extract_tile(nxt_bl_d, tBl);
+        }
+#else
         asm volatile("s_waitcnt lgkmcnt(0)");
         extract_tile(nxt_a0_d, tA0);
         extract_tile(nxt_bl_d, tBl);
+#endif
     }
 
     // ═══════════ Store C — streamlined direct store ═══════════
@@ -1047,10 +1428,530 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         }
     };
 
+    auto store_block_inner = [&](const fp4_floatx4_t acc[16], int mh, int nh) {
+        const int lid = kittens::laneid();
+        const int tile_r = br * WARPS_M * 2 + WARPS_M * mh + wm;
+        const int tile_c = bc * WARPS_N * 2 + WARPS_N * nh + wn;
+        bf16 *dst_ptr = g.c.raw_ptr + static_cast<size_t>(tile_r * 64) * g.c.cols()
+                        + static_cast<size_t>(tile_c * 64);
+        const int row_stride = g.c.cols();
+        const int lane_group = lid / 16;
+        const int lane_pos = lid % 16;
+
+        #pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            #pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                fp4_floatx4_t s = acc[i * 4 + j] * g.scale;
+                const int row = i * 16 + lane_pos;
+                const int col = j * 16 + 4 * lane_group;
+                dst_ptr[row * row_stride + col + 0] = base_types::convertor<bf16, float>::convert(s[0]);
+                dst_ptr[row * row_stride + col + 1] = base_types::convertor<bf16, float>::convert(s[1]);
+                dst_ptr[row * row_stride + col + 2] = base_types::convertor<bf16, float>::convert(s[2]);
+                dst_ptr[row * row_stride + col + 3] = base_types::convertor<bf16, float>::convert(s[3]);
+            }
+        }
+    };
+
     store_block(acc_A0Bl, 0, 0);
-    store_block(acc_A1Bl, 1, 0);
     store_block(acc_A0Br, 0, 1);
+#if SWAP_STEP34_MAIN
+    store_block_inner(acc_A1Bl, 1, 0);
+    store_block_inner(acc_A1Br, 1, 1);
+#else
+    store_block(acc_A1Bl, 1, 0);
     store_block(acc_A1Br, 1, 1);
+#endif
+}
+
+__global__ __launch_bounds__(_NUM_THREADS, 1)
+void mxfp4_operand_swap_debug_kernel(const operand_swap_debug_globals g) {
+    constexpr int a_packs = RBM / 32;
+    constexpr int b_packs = RBN / 32;
+
+    __shared__ ST_tile A0_dbg, B0_dbg;
+
+    uint32_t so_a[PF_MPT], so_b[PF_MPT];
+    G::prefill_swizzled_offsets(A0_dbg, g.a, so_a);
+    G::prefill_swizzled_offsets(B0_dbg, g.b, so_b);
+
+    auto make_srd = [](const void* raw_ptr) {
+        i32x4 s = std::bit_cast<i32x4>(make_buffer_resource(
+            static_cast<uint64_t>(reinterpret_cast<std::uintptr_t>(raw_ptr)),
+            0xFFFFFFFFu, 0x00110000u));
+        s[0] = __builtin_amdgcn_readfirstlane(s[0]);
+        s[1] = __builtin_amdgcn_readfirstlane(s[1]);
+        s[2] = __builtin_amdgcn_readfirstlane(s[2]);
+        s[3] = __builtin_amdgcn_readfirstlane(s[3]);
+        return s;
+    };
+    i32x4 srd_a = make_srd(g.a.raw_ptr), srd_b = make_srd(g.b.raw_ptr);
+    const void *base_a = (const void*)g.a.raw_ptr, *base_b = (const void*)g.b.raw_ptr;
+
+    constexpr int epw = 16 / sizeof(fp8e4m3) * WARP_THREADS;
+    const uint32_t wlo = (warpid() % _NUM_WARPS) * epw * sizeof(fp8e4m3);
+    auto lb = [&](auto &t) -> uint32_t {
+        return __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(
+            reinterpret_cast<uintptr_t>(&t.data[0]) + wlo));
+    };
+    const uint32_t lb_a0 = lb(A0_dbg), lb_b0 = lb(B0_dbg);
+
+    emit_tile_pf(A0_dbg, g.a, coord<ST_tile>(0, 0, 0, 0), so_a, srd_a, base_a, lb_a0);
+    emit_tile_pf(B0_dbg, g.b, coord<ST_tile>(0, 0, 0, 0), so_b, srd_b, base_b, lb_b0);
+
+    const uint32_t lane_soff_x2 =
+        (static_cast<uint32_t>(kittens::laneid() / 16) << 7) |
+        (static_cast<uint32_t>(kittens::laneid() % 16) << 3);
+    i32x4 a_srd = make_scale_srd(preshuffled_scale_row_base_ptr(g.a_scale, 0));
+    i32x4 b_srd = make_scale_srd(preshuffled_scale_row_base_ptr(g.b_scale, 0));
+
+    fp8e8m0_4 a_raw[a_packs], b_raw[b_packs];
+    load_pq_scale_x2_async(a_srd, lane_soff_x2, 0, a_raw[0], a_raw[1]);
+    load_pq_scale_x2_async(b_srd, lane_soff_x2, 0, b_raw[0], b_raw[1]);
+
+    __builtin_amdgcn_s_waitcnt(0);
+    __builtin_amdgcn_s_barrier();
+
+    if (warpid() != 0) return;
+
+    A_row_reg a_rt;
+    B_row_reg b_rt;
+    fp4_load_st_to_rt(a_rt, kittens::subtile_inplace<RBM, BK>(A0_dbg, {0, 0}));
+    fp4_load_st_to_rt(b_rt, kittens::subtile_inplace<RBN, BK>(B0_dbg, {0, 0}));
+    asm volatile("s_waitcnt lgkmcnt(0)");
+
+    fp4_intx8_t tA[4], tB[4];
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        tA[i] = fp4_extract_tile(a_rt, i);
+        tB[i] = fp4_extract_tile(b_rt, i);
+    }
+
+    fp4_floatx4_t acc_orig[16] = {};
+    fp4_floatx4_t acc_swap_plain[16] = {};
+    fp4_floatx4_t acc_swap_sel[16] = {};
+
+    kpair_32mfma_pure(acc_orig, tA, tB, a_raw, b_raw);
+    kpair_32mfma_pure_swapped_plain(acc_swap_plain, tA, tB, a_raw, b_raw);
+    kpair_32mfma_pure_swapped_sel(acc_swap_sel, tA, tB, a_raw, b_raw);
+
+    dump_acc_raw(g.out, acc_orig, 0);
+    dump_acc_raw(g.out, acc_swap_plain, 1);
+    dump_acc_raw(g.out, acc_swap_sel, 2);
+}
+
+__global__ __launch_bounds__(_NUM_THREADS, 1)
+void mxfp4_operand_swap_block_kernel(const operand_swap_debug_globals g) {
+    constexpr int a_packs = RBM / 32;
+    constexpr int b_packs = RBN / 32;
+
+    __shared__ ST_tile A0_dbg, B0_dbg;
+
+    uint32_t so_a[PF_MPT], so_b[PF_MPT];
+    G::prefill_swizzled_offsets(A0_dbg, g.a, so_a);
+    G::prefill_swizzled_offsets(B0_dbg, g.b, so_b);
+
+    auto make_srd = [](const void* raw_ptr) {
+        i32x4 s = std::bit_cast<i32x4>(make_buffer_resource(
+            static_cast<uint64_t>(reinterpret_cast<std::uintptr_t>(raw_ptr)),
+            0xFFFFFFFFu, 0x00110000u));
+        s[0] = __builtin_amdgcn_readfirstlane(s[0]);
+        s[1] = __builtin_amdgcn_readfirstlane(s[1]);
+        s[2] = __builtin_amdgcn_readfirstlane(s[2]);
+        s[3] = __builtin_amdgcn_readfirstlane(s[3]);
+        return s;
+    };
+    i32x4 srd_a = make_srd(g.a.raw_ptr), srd_b = make_srd(g.b.raw_ptr);
+    const void *base_a = (const void*)g.a.raw_ptr, *base_b = (const void*)g.b.raw_ptr;
+
+    constexpr int epw = 16 / sizeof(fp8e4m3) * WARP_THREADS;
+    const uint32_t wlo = (warpid() % _NUM_WARPS) * epw * sizeof(fp8e4m3);
+    auto lb = [&](auto &t) -> uint32_t {
+        return __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(
+            reinterpret_cast<uintptr_t>(&t.data[0]) + wlo));
+    };
+    const uint32_t lb_a0 = lb(A0_dbg), lb_b0 = lb(B0_dbg);
+
+    emit_tile_pf(A0_dbg, g.a, coord<ST_tile>(0, 0, 0, 0), so_a, srd_a, base_a, lb_a0);
+    emit_tile_pf(B0_dbg, g.b, coord<ST_tile>(0, 0, 0, 0), so_b, srd_b, base_b, lb_b0);
+
+    const uint32_t lane_soff_x2 =
+        (static_cast<uint32_t>(kittens::laneid() / 16) << 7) |
+        (static_cast<uint32_t>(kittens::laneid() % 16) << 3);
+    i32x4 a_srd = make_scale_srd(preshuffled_scale_row_base_ptr(g.a_scale, 0));
+    i32x4 b_srd = make_scale_srd(preshuffled_scale_row_base_ptr(g.b_scale, 0));
+
+    fp8e8m0_4 a_raw[a_packs], b_raw[b_packs];
+    load_pq_scale_x2_async(a_srd, lane_soff_x2, 0, a_raw[0], a_raw[1]);
+    load_pq_scale_x2_async(b_srd, lane_soff_x2, 0, b_raw[0], b_raw[1]);
+
+    __builtin_amdgcn_s_waitcnt(0);
+    __builtin_amdgcn_s_barrier();
+
+    if (warpid() != 0) return;
+
+    A_row_reg a_rt;
+    B_row_reg b_rt;
+    fp4_load_st_to_rt(a_rt, kittens::subtile_inplace<RBM, BK>(A0_dbg, {0, 0}));
+    fp4_load_st_to_rt(b_rt, kittens::subtile_inplace<RBN, BK>(B0_dbg, {0, 0}));
+    asm volatile("s_waitcnt lgkmcnt(0)");
+
+    fp4_intx8_t tA[4], tB[4];
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        tA[i] = fp4_extract_tile(a_rt, i);
+        tB[i] = fp4_extract_tile(b_rt, i);
+    }
+
+    fp4_floatx4_t acc_orig[16] = {};
+    fp4_floatx4_t acc_swap_sel[16] = {};
+    kpair_32mfma_pure(acc_orig, tA, tB, a_raw, b_raw);
+    kpair_32mfma_pure_swapped_sel(acc_swap_sel, tA, tB, a_raw, b_raw);
+
+    store_acc_block_standard(g.out, acc_orig, 0);
+    store_acc_block_inner_transpose(g.out, acc_swap_sel, 64);
+}
+
+template<bool SWAP_STEP34, bool USE_LDS_STEP34 = false, bool USE_MAINLIKE_STEP34 = false>
+__device__ __forceinline__ void mxfp4_active_block_debug_body(const operand_swap_debug_globals g) {
+    constexpr int a_packs = RBM / 32;
+    constexpr int b_packs = RBN / 32;
+
+    __shared__ ST_tile A0_db, A1_db, Bl_db, Br_db;
+
+    const int wm = warpid() / WARPS_N;
+    const int wn = warpid() % WARPS_N;
+
+    uint32_t so_a[PF_MPT], so_b[PF_MPT];
+    G::prefill_swizzled_offsets(A0_db, g.a, so_a);
+    G::prefill_swizzled_offsets(Bl_db, g.b, so_b);
+
+    auto make_srd = [](const void* raw_ptr) {
+        i32x4 s = std::bit_cast<i32x4>(make_buffer_resource(
+            static_cast<uint64_t>(reinterpret_cast<std::uintptr_t>(raw_ptr)),
+            0xFFFFFFFFu, 0x00110000u));
+        s[0] = __builtin_amdgcn_readfirstlane(s[0]);
+        s[1] = __builtin_amdgcn_readfirstlane(s[1]);
+        s[2] = __builtin_amdgcn_readfirstlane(s[2]);
+        s[3] = __builtin_amdgcn_readfirstlane(s[3]);
+        return s;
+    };
+    i32x4 srd_a = make_srd(g.a.raw_ptr), srd_b = make_srd(g.b.raw_ptr);
+    const void *base_a = (const void*)g.a.raw_ptr, *base_b = (const void*)g.b.raw_ptr;
+
+    constexpr int epw = 16 / sizeof(fp8e4m3) * WARP_THREADS;
+    const uint32_t wlo = (warpid() % _NUM_WARPS) * epw * sizeof(fp8e4m3);
+    auto lb = [&](auto &t) -> uint32_t {
+        return __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(
+            reinterpret_cast<uintptr_t>(&t.data[0]) + wlo));
+    };
+    const uint32_t lb_a0 = lb(A0_db), lb_a1 = lb(A1_db);
+    const uint32_t lb_bl = lb(Bl_db), lb_br = lb(Br_db);
+
+    emit_tile_pf(A0_db, g.a, coord<ST_tile>(0, 0, 0, 0), so_a, srd_a, base_a, lb_a0);
+    emit_tile_pf(A1_db, g.a, coord<ST_tile>(0, 0, 1, 0), so_a, srd_a, base_a, lb_a1);
+    emit_tile_pf(Bl_db, g.b, coord<ST_tile>(0, 0, 0, 0), so_b, srd_b, base_b, lb_bl);
+    emit_tile_pf(Br_db, g.b, coord<ST_tile>(0, 0, 1, 0), so_b, srd_b, base_b, lb_br);
+
+    const uint32_t lane_soff_x2 =
+        (static_cast<uint32_t>(kittens::laneid() / 16) << 7) |
+        (static_cast<uint32_t>(kittens::laneid() % 16) << 3);
+    i32x4 a0_srd = make_scale_srd(preshuffled_scale_row_base_ptr(g.a_scale, (wm * RBM) >> 6));
+    i32x4 a1_srd = make_scale_srd(preshuffled_scale_row_base_ptr(g.a_scale, (HB + wm * RBM) >> 6));
+    i32x4 bl_srd = make_scale_srd(preshuffled_scale_row_base_ptr(g.b_scale, (wn * RBN) >> 6));
+    i32x4 br_srd = make_scale_srd(preshuffled_scale_row_base_ptr(g.b_scale, (HB + wn * RBN) >> 6));
+
+    fp8e8m0_4 a0_raw[a_packs], a1_raw[a_packs], bl_raw[b_packs], br_raw[b_packs];
+    load_pq_scale_x2_async(a0_srd, lane_soff_x2, 0, a0_raw[0], a0_raw[1]);
+    load_pq_scale_x2_async(a1_srd, lane_soff_x2, 0, a1_raw[0], a1_raw[1]);
+    load_pq_scale_x2_async(bl_srd, lane_soff_x2, 0, bl_raw[0], bl_raw[1]);
+    load_pq_scale_x2_async(br_srd, lane_soff_x2, 0, br_raw[0], br_raw[1]);
+
+    asm volatile("s_waitcnt vmcnt(0)");
+    __builtin_amdgcn_s_barrier();
+
+    A_row_reg a0_rt;
+    B_row_reg bl_rt;
+    fp4_load_st_to_rt(a0_rt, kittens::subtile_inplace<RBM, BK>(A0_db, {wm, 0}));
+    fp4_load_st_to_rt(bl_rt, kittens::subtile_inplace<RBN, BK>(Bl_db, {wn, 0}));
+    asm volatile("s_waitcnt lgkmcnt(0)");
+
+    fp4_intx8_t tA0[4], tBl[4];
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        tA0[i] = fp4_extract_tile(a0_rt, i);
+        tBl[i] = fp4_extract_tile(bl_rt, i);
+    }
+
+    uint32_t a0_p0, a0_p1, a1_p0, a1_p1, bl_p0, bl_p1, br_p0, br_p1;
+    compute_lds_base_addrs<A_row_reg>(kittens::subtile_inplace<RBM, BK>(A0_db, {wm, 0}), a0_p0, a0_p1);
+    compute_lds_base_addrs<A_row_reg>(kittens::subtile_inplace<RBM, BK>(A1_db, {wm, 0}), a1_p0, a1_p1);
+    compute_lds_base_addrs<B_row_reg>(kittens::subtile_inplace<RBN, BK>(Bl_db, {wn, 0}), bl_p0, bl_p1);
+    compute_lds_base_addrs<B_row_reg>(kittens::subtile_inplace<RBN, BK>(Br_db, {wn, 0}), br_p0, br_p1);
+
+    tile_pf_params pf_a0_p = {}, pf_a1_p = {}, pf_bl_p = {}, pf_br_p = {};
+    if constexpr (USE_MAINLIKE_STEP34) {
+        pf_a0_p = make_pf_params(A0_db, g.a, coord<ST_tile>(0, 0, 0, 0), so_a, srd_a, base_a, lb_a0);
+        pf_a1_p = make_pf_params(A1_db, g.a, coord<ST_tile>(0, 0, 1, 0), so_a, srd_a, base_a, lb_a1);
+        pf_bl_p = make_pf_params(Bl_db, g.b, coord<ST_tile>(0, 0, 0, 0), so_b, srd_b, base_b, lb_bl);
+        pf_br_p = make_pf_params(Br_db, g.b, coord<ST_tile>(0, 0, 1, 0), so_b, srd_b, base_b, lb_br);
+    }
+
+    auto extract_tile = [](const float4 d[8], fp4_intx8_t t[4]) __attribute__((always_inline)) {
+        #pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            auto lo = *reinterpret_cast<const fp4_intx4_t*>(&d[i]);
+            auto hi = *reinterpret_cast<const fp4_intx4_t*>(&d[i + 4]);
+            t[i][0] = lo[0]; t[i][1] = lo[1]; t[i][2] = lo[2]; t[i][3] = lo[3];
+            t[i][4] = hi[0]; t[i][5] = hi[1]; t[i][6] = hi[2]; t[i][7] = hi[3];
+        }
+    };
+
+    fp4_floatx4_t acc_A0Bl[16] = {}, acc_A0Br[16] = {}, acc_A1Bl[16] = {}, acc_A1Br[16] = {};
+    float4 br_d[8], a1_d[8];
+    kpair_64mfma_step12(acc_A0Bl, acc_A0Br, tA0, tBl,
+        a0_raw, bl_raw, br_raw, br_d, a1_d,
+        br_p0, br_p1, a1_p0, a1_p1);
+
+    asm volatile("s_waitcnt lgkmcnt(0)");
+    fp4_intx8_t tBr[4], tA1[4];
+    extract_tile(br_d, tBr);
+    extract_tile(a1_d, tA1);
+
+    tile_pf_params dummy_pf = {};
+    if constexpr (SWAP_STEP34) {
+        if constexpr (USE_LDS_STEP34) {
+            float4 nxt_a0_d[8], nxt_bl_d[8];
+            if constexpr (USE_MAINLIKE_STEP34) {
+                kpair_32mfma_with_lds_and_pf_swapped_sel<8, STEP3_EMBED_BARRIER>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
+                    nxt_a0_d[0], nxt_a0_d[1], nxt_a0_d[2], nxt_a0_d[3],
+                    nxt_a0_d[4], nxt_a0_d[5], nxt_a0_d[6], nxt_a0_d[7],
+                    a0_p0, a0_p1, pf_a0_p, pf_a1_p);
+#if STEP4_EXTERNAL_BR_PREFETCH
+                kpair_32mfma_with_lds_and_pf_swapped_sel<4>(acc_A1Br, tA1, tBr, a1_raw, br_raw,
+                    nxt_bl_d[0], nxt_bl_d[1], nxt_bl_d[2], nxt_bl_d[3],
+                    nxt_bl_d[4], nxt_bl_d[5], nxt_bl_d[6], nxt_bl_d[7],
+                    bl_p0, bl_p1, pf_bl_p, pf_br_p);
+                #pragma unroll
+                for (int pi = 0; pi < PF_MPT; ++pi) emit_one_pf(pf_br_p, pi);
+#else
+                kpair_32mfma_with_lds_and_pf_swapped_sel<8>(acc_A1Br, tA1, tBr, a1_raw, br_raw,
+                    nxt_bl_d[0], nxt_bl_d[1], nxt_bl_d[2], nxt_bl_d[3],
+                    nxt_bl_d[4], nxt_bl_d[5], nxt_bl_d[6], nxt_bl_d[7],
+                    bl_p0, bl_p1, pf_bl_p, pf_br_p);
+#endif
+            } else {
+                kpair_32mfma_with_lds_and_pf_swapped_sel<0>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
+                    nxt_a0_d[0], nxt_a0_d[1], nxt_a0_d[2], nxt_a0_d[3],
+                    nxt_a0_d[4], nxt_a0_d[5], nxt_a0_d[6], nxt_a0_d[7],
+                    a0_p0, a0_p1, dummy_pf, dummy_pf);
+                kpair_32mfma_with_lds_and_pf_swapped_sel<0>(acc_A1Br, tA1, tBr, a1_raw, br_raw,
+                    nxt_bl_d[0], nxt_bl_d[1], nxt_bl_d[2], nxt_bl_d[3],
+                    nxt_bl_d[4], nxt_bl_d[5], nxt_bl_d[6], nxt_bl_d[7],
+                    bl_p0, bl_p1, dummy_pf, dummy_pf);
+            }
+            asm volatile("s_waitcnt lgkmcnt(0)");
+        } else {
+            kpair_32mfma_with_pf_swapped_sel<0>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw, dummy_pf, dummy_pf);
+            kpair_32mfma_with_pf_swapped_sel<0>(acc_A1Br, tA1, tBr, a1_raw, br_raw, dummy_pf, dummy_pf);
+        }
+    } else {
+        kpair_32mfma_with_pf<0>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw, dummy_pf, dummy_pf);
+        kpair_32mfma_with_pf<0>(acc_A1Br, tA1, tBr, a1_raw, br_raw, dummy_pf, dummy_pf);
+    }
+
+    auto store_block = [&](const fp4_floatx4_t acc[16], int mh, int nh) {
+        const int lid = kittens::laneid();
+        const int tile_r = WARPS_M * mh + wm;
+        const int tile_c = WARPS_N * nh + wn;
+        float *dst_ptr = g.out.raw_ptr + static_cast<size_t>(tile_r * 64) * g.out.cols()
+                       + static_cast<size_t>(tile_c * 64);
+        const int row_stride = g.out.cols();
+        const int row_off = 4 * (lid / 16);
+        const int col_off = lid % 16;
+
+        #pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            #pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                fp4_floatx4_t s = acc[i * 4 + j];
+                const int row_base = i * 16 + row_off;
+                const int col = j * 16 + col_off;
+                dst_ptr[(row_base + 0) * row_stride + col] = s[0];
+                dst_ptr[(row_base + 1) * row_stride + col] = s[1];
+                dst_ptr[(row_base + 2) * row_stride + col] = s[2];
+                dst_ptr[(row_base + 3) * row_stride + col] = s[3];
+            }
+        }
+    };
+
+    auto store_block_inner = [&](const fp4_floatx4_t acc[16], int mh, int nh) {
+        const int lid = kittens::laneid();
+        const int tile_r = WARPS_M * mh + wm;
+        const int tile_c = WARPS_N * nh + wn;
+        float *dst_ptr = g.out.raw_ptr + static_cast<size_t>(tile_r * 64) * g.out.cols()
+                       + static_cast<size_t>(tile_c * 64);
+        const int row_stride = g.out.cols();
+        const int lane_group = lid / 16;
+        const int lane_pos = lid % 16;
+
+        #pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            #pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                fp4_floatx4_t s = acc[i * 4 + j];
+                const int row = i * 16 + lane_pos;
+                const int col = j * 16 + 4 * lane_group;
+                dst_ptr[row * row_stride + col + 0] = s[0];
+                dst_ptr[row * row_stride + col + 1] = s[1];
+                dst_ptr[row * row_stride + col + 2] = s[2];
+                dst_ptr[row * row_stride + col + 3] = s[3];
+            }
+        }
+    };
+
+    store_block(acc_A0Bl, 0, 0);
+    store_block(acc_A0Br, 0, 1);
+    if constexpr (SWAP_STEP34) {
+        store_block_inner(acc_A1Bl, 1, 0);
+        store_block_inner(acc_A1Br, 1, 1);
+    } else {
+        store_block(acc_A1Bl, 1, 0);
+        store_block(acc_A1Br, 1, 1);
+    }
+}
+
+__global__ __launch_bounds__(_NUM_THREADS, 1)
+void mxfp4_active_block_debug_kernel(const operand_swap_debug_globals g) {
+    mxfp4_active_block_debug_body<false, false, false>(g);
+}
+
+__global__ __launch_bounds__(_NUM_THREADS, 1)
+void mxfp4_active_block_swap_step34_kernel(const operand_swap_debug_globals g) {
+    mxfp4_active_block_debug_body<true, false, false>(g);
+}
+
+__global__ __launch_bounds__(_NUM_THREADS, 1)
+void mxfp4_active_block_swap_step34_with_lds_kernel(const operand_swap_debug_globals g) {
+    mxfp4_active_block_debug_body<true, true, false>(g);
+}
+
+__global__ __launch_bounds__(_NUM_THREADS, 1)
+void mxfp4_active_block_swap_step34_mainlike_kernel(const operand_swap_debug_globals g) {
+    mxfp4_active_block_debug_body<true, true, true>(g);
+}
+
+__global__ __launch_bounds__(_NUM_THREADS, 1)
+void mxfp4_active_block_swap_all_nonfused_kernel(const operand_swap_debug_globals g) {
+    constexpr int a_packs = RBM / 32;
+    constexpr int b_packs = RBN / 32;
+
+    __shared__ ST_tile A0_db, A1_db, Bl_db, Br_db;
+
+    const int wm = warpid() / WARPS_N;
+    const int wn = warpid() % WARPS_N;
+
+    uint32_t so_a[PF_MPT], so_b[PF_MPT];
+    G::prefill_swizzled_offsets(A0_db, g.a, so_a);
+    G::prefill_swizzled_offsets(Bl_db, g.b, so_b);
+
+    auto make_srd = [](const void* raw_ptr) {
+        i32x4 s = std::bit_cast<i32x4>(make_buffer_resource(
+            static_cast<uint64_t>(reinterpret_cast<std::uintptr_t>(raw_ptr)),
+            0xFFFFFFFFu, 0x00110000u));
+        s[0] = __builtin_amdgcn_readfirstlane(s[0]);
+        s[1] = __builtin_amdgcn_readfirstlane(s[1]);
+        s[2] = __builtin_amdgcn_readfirstlane(s[2]);
+        s[3] = __builtin_amdgcn_readfirstlane(s[3]);
+        return s;
+    };
+    i32x4 srd_a = make_srd(g.a.raw_ptr), srd_b = make_srd(g.b.raw_ptr);
+    const void *base_a = (const void*)g.a.raw_ptr, *base_b = (const void*)g.b.raw_ptr;
+
+    constexpr int epw = 16 / sizeof(fp8e4m3) * WARP_THREADS;
+    const uint32_t wlo = (warpid() % _NUM_WARPS) * epw * sizeof(fp8e4m3);
+    auto lb = [&](auto &t) -> uint32_t {
+        return __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(
+            reinterpret_cast<uintptr_t>(&t.data[0]) + wlo));
+    };
+    const uint32_t lb_a0 = lb(A0_db), lb_a1 = lb(A1_db);
+    const uint32_t lb_bl = lb(Bl_db), lb_br = lb(Br_db);
+
+    emit_tile_pf(A0_db, g.a, coord<ST_tile>(0, 0, 0, 0), so_a, srd_a, base_a, lb_a0);
+    emit_tile_pf(A1_db, g.a, coord<ST_tile>(0, 0, 1, 0), so_a, srd_a, base_a, lb_a1);
+    emit_tile_pf(Bl_db, g.b, coord<ST_tile>(0, 0, 0, 0), so_b, srd_b, base_b, lb_bl);
+    emit_tile_pf(Br_db, g.b, coord<ST_tile>(0, 0, 1, 0), so_b, srd_b, base_b, lb_br);
+
+    const uint32_t lane_soff_x2 =
+        (static_cast<uint32_t>(kittens::laneid() / 16) << 7) |
+        (static_cast<uint32_t>(kittens::laneid() % 16) << 3);
+    i32x4 a0_srd = make_scale_srd(preshuffled_scale_row_base_ptr(g.a_scale, (wm * RBM) >> 6));
+    i32x4 a1_srd = make_scale_srd(preshuffled_scale_row_base_ptr(g.a_scale, (HB + wm * RBM) >> 6));
+    i32x4 bl_srd = make_scale_srd(preshuffled_scale_row_base_ptr(g.b_scale, (wn * RBN) >> 6));
+    i32x4 br_srd = make_scale_srd(preshuffled_scale_row_base_ptr(g.b_scale, (HB + wn * RBN) >> 6));
+
+    fp8e8m0_4 a0_raw[a_packs], a1_raw[a_packs], bl_raw[b_packs], br_raw[b_packs];
+    load_pq_scale_x2_async(a0_srd, lane_soff_x2, 0, a0_raw[0], a0_raw[1]);
+    load_pq_scale_x2_async(a1_srd, lane_soff_x2, 0, a1_raw[0], a1_raw[1]);
+    load_pq_scale_x2_async(bl_srd, lane_soff_x2, 0, bl_raw[0], bl_raw[1]);
+    load_pq_scale_x2_async(br_srd, lane_soff_x2, 0, br_raw[0], br_raw[1]);
+
+    asm volatile("s_waitcnt vmcnt(0)");
+    __builtin_amdgcn_s_barrier();
+
+    A_row_reg a0_rt, a1_rt;
+    B_row_reg bl_rt, br_rt;
+    fp4_load_st_to_rt(a0_rt, kittens::subtile_inplace<RBM, BK>(A0_db, {wm, 0}));
+    fp4_load_st_to_rt(a1_rt, kittens::subtile_inplace<RBM, BK>(A1_db, {wm, 0}));
+    fp4_load_st_to_rt(bl_rt, kittens::subtile_inplace<RBN, BK>(Bl_db, {wn, 0}));
+    fp4_load_st_to_rt(br_rt, kittens::subtile_inplace<RBN, BK>(Br_db, {wn, 0}));
+    asm volatile("s_waitcnt lgkmcnt(0)");
+
+    fp4_intx8_t tA0[4], tA1[4], tBl[4], tBr[4];
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        tA0[i] = fp4_extract_tile(a0_rt, i);
+        tA1[i] = fp4_extract_tile(a1_rt, i);
+        tBl[i] = fp4_extract_tile(bl_rt, i);
+        tBr[i] = fp4_extract_tile(br_rt, i);
+    }
+
+    fp4_floatx4_t acc_A0Bl[16] = {}, acc_A0Br[16] = {}, acc_A1Bl[16] = {}, acc_A1Br[16] = {};
+    tile_pf_params dummy_pf = {};
+    kpair_32mfma_pure_swapped_sel(acc_A0Bl, tA0, tBl, a0_raw, bl_raw);
+    kpair_32mfma_pure_swapped_sel(acc_A0Br, tA0, tBr, a0_raw, br_raw);
+    kpair_32mfma_with_pf_swapped_sel<0>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw, dummy_pf, dummy_pf);
+    kpair_32mfma_with_pf_swapped_sel<0>(acc_A1Br, tA1, tBr, a1_raw, br_raw, dummy_pf, dummy_pf);
+
+    auto store_block_inner = [&](const fp4_floatx4_t acc[16], int mh, int nh) {
+        const int lid = kittens::laneid();
+        const int tile_r = WARPS_M * mh + wm;
+        const int tile_c = WARPS_N * nh + wn;
+        float *dst_ptr = g.out.raw_ptr + static_cast<size_t>(tile_r * 64) * g.out.cols()
+                       + static_cast<size_t>(tile_c * 64);
+        const int row_stride = g.out.cols();
+        const int lane_group = lid / 16;
+        const int lane_pos = lid % 16;
+
+        #pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            #pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                fp4_floatx4_t s = acc[i * 4 + j];
+                const int row = i * 16 + lane_pos;
+                const int col = j * 16 + 4 * lane_group;
+                dst_ptr[row * row_stride + col + 0] = s[0];
+                dst_ptr[row * row_stride + col + 1] = s[1];
+                dst_ptr[row * row_stride + col + 2] = s[2];
+                dst_ptr[row * row_stride + col + 3] = s[3];
+            }
+        }
+    };
+
+    store_block_inner(acc_A0Bl, 0, 0);
+    store_block_inner(acc_A1Bl, 1, 0);
+    store_block_inner(acc_A0Br, 0, 1);
+    store_block_inner(acc_A1Br, 1, 1);
 }
 
 void dispatch_gluon_cpp(gluon_globals g) {
@@ -1060,10 +1961,66 @@ void dispatch_gluon_cpp(gluon_globals g) {
     mxfp4_gluon_cpp_kernel<<<grid, dim3(_NUM_THREADS), 0>>>(g);
 }
 
+void dispatch_operand_swap_debug(operand_swap_debug_globals g) {
+    mxfp4_operand_swap_debug_kernel<<<1, dim3(_NUM_THREADS), 0>>>(g);
+}
+
+void dispatch_operand_swap_block(operand_swap_debug_globals g) {
+    mxfp4_operand_swap_block_kernel<<<1, dim3(_NUM_THREADS), 0>>>(g);
+}
+
+void dispatch_active_block_debug(operand_swap_debug_globals g) {
+    mxfp4_active_block_debug_kernel<<<1, dim3(_NUM_THREADS), 0>>>(g);
+}
+
+void dispatch_active_block_swap_step34(operand_swap_debug_globals g) {
+    mxfp4_active_block_swap_step34_kernel<<<1, dim3(_NUM_THREADS), 0>>>(g);
+}
+
+void dispatch_active_block_swap_step34_with_lds(operand_swap_debug_globals g) {
+    mxfp4_active_block_swap_step34_with_lds_kernel<<<1, dim3(_NUM_THREADS), 0>>>(g);
+}
+
+void dispatch_active_block_swap_step34_mainlike(operand_swap_debug_globals g) {
+    mxfp4_active_block_swap_step34_mainlike_kernel<<<1, dim3(_NUM_THREADS), 0>>>(g);
+}
+
+void dispatch_active_block_swap_all_nonfused(operand_swap_debug_globals g) {
+    mxfp4_active_block_swap_all_nonfused_kernel<<<1, dim3(_NUM_THREADS), 0>>>(g);
+}
+
 PYBIND11_MODULE(tk_mxfp4_gluon_cpp, m) {
     m.doc() = "MXFP4 Gluon-arch kernel (C++ reimplementation)";
     py::bind_function<dispatch_gluon_cpp>(m, "gemm_rcr",
         &gluon_globals::a, &gluon_globals::b,
         &gluon_globals::a_scale, &gluon_globals::b_scale,
         &gluon_globals::c);
+    py::bind_function<dispatch_operand_swap_debug>(m, "debug_operand_swap_raw",
+        &operand_swap_debug_globals::a, &operand_swap_debug_globals::b,
+        &operand_swap_debug_globals::a_scale, &operand_swap_debug_globals::b_scale,
+        &operand_swap_debug_globals::out);
+    py::bind_function<dispatch_operand_swap_block>(m, "debug_operand_swap_block",
+        &operand_swap_debug_globals::a, &operand_swap_debug_globals::b,
+        &operand_swap_debug_globals::a_scale, &operand_swap_debug_globals::b_scale,
+        &operand_swap_debug_globals::out);
+    py::bind_function<dispatch_active_block_debug>(m, "debug_active_block",
+        &operand_swap_debug_globals::a, &operand_swap_debug_globals::b,
+        &operand_swap_debug_globals::a_scale, &operand_swap_debug_globals::b_scale,
+        &operand_swap_debug_globals::out);
+    py::bind_function<dispatch_active_block_swap_step34>(m, "debug_active_block_swap_step34",
+        &operand_swap_debug_globals::a, &operand_swap_debug_globals::b,
+        &operand_swap_debug_globals::a_scale, &operand_swap_debug_globals::b_scale,
+        &operand_swap_debug_globals::out);
+    py::bind_function<dispatch_active_block_swap_step34_with_lds>(m, "debug_active_block_swap_step34_with_lds",
+        &operand_swap_debug_globals::a, &operand_swap_debug_globals::b,
+        &operand_swap_debug_globals::a_scale, &operand_swap_debug_globals::b_scale,
+        &operand_swap_debug_globals::out);
+    py::bind_function<dispatch_active_block_swap_step34_mainlike>(m, "debug_active_block_swap_step34_mainlike",
+        &operand_swap_debug_globals::a, &operand_swap_debug_globals::b,
+        &operand_swap_debug_globals::a_scale, &operand_swap_debug_globals::b_scale,
+        &operand_swap_debug_globals::out);
+    py::bind_function<dispatch_active_block_swap_all_nonfused>(m, "debug_active_block_swap_all_nonfused",
+        &operand_swap_debug_globals::a, &operand_swap_debug_globals::b,
+        &operand_swap_debug_globals::a_scale, &operand_swap_debug_globals::b_scale,
+        &operand_swap_debug_globals::out);
 }
