@@ -1160,23 +1160,17 @@ void mxfp4_art_kernel(const gluon_globals g) {
             );
         }
 
-        // Wait for A1 global loads from Step 1's buffer_loads
+        // Wait for A1 global loads + scale prefetches from Step 1
         asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
 
-        // B prefetch to LDS + barrier for double-buffer
-        if (bt + 2 < k_byte_iters) {
-            load_b_tiles(bt + 2, cur);
-        }
-        asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
-        __builtin_amdgcn_s_barrier();
-
-        // B tile prefetch params for bt+2
+        // B prefetch to LDS for bt+2 (only emit_one_pf, no duplicate load_b_tiles)
         #pragma unroll
         for (int i = 0; i < PF_MPT; ++i) emit_one_pf(pf_bl_p, i);
         #pragma unroll
         for (int i = 0; i < PF_MPT; ++i) emit_one_pf(pf_br_p, i);
 
         // ═══ Steps 3+4: monolithic 64 MFMAs + 8 ds_read Bl[nxt] + 8 buffer_load A0[nxt] ═══
+        // vmcnt(0) + barrier at asm entry for tighter scheduling
         {
             uint32_t nxt_a0_soff = __builtin_amdgcn_readfirstlane(
                 a0_soff_base + (bt + 1 < k_byte_iters ? bt + 1 : bt) * BK);
@@ -1186,6 +1180,9 @@ void mxfp4_art_kernel(const gluon_globals g) {
             uint32_t s4 = nxt_a0_soff + 2*ss, s5 = nxt_a0_soff + 2*ss + 64;
             uint32_t s6 = nxt_a0_soff + 3*ss, s7 = nxt_a0_soff + 3*ss + 64;
             asm volatile(
+                // Wait for B prefetches + barrier for LDS double-buffer
+                "s_waitcnt vmcnt(0)\n"
+                "s_barrier\n"
                 // ── Step 3: A1×Bl (32 MFMAs) + 8 buffer_load A0[nxt]→v[62:93] ──
                 // A1=v[126:157], Bl=v[30:61], acc=a[128:191], scales=v[168:169]/v[158:159]
                 // Row 0 Phase 0: 4 MFMAs + 2 buffer_load A0[nxt]

@@ -788,19 +788,6 @@ __device__ __forceinline__ void kpair_32mfma_with_lds_and_pf(
 
 constexpr uint32_t K_STRIDE = K_DIM / 2;  // bytes per row in A (FP4 packed)
 
-// Compute 8 soffsets for one A tile in extract_tile-compatible order:
-//   soffs[0..3] = lo (K-phase 0) for subtiles 0-3
-//   soffs[4..7] = hi (K-phase 1) for subtiles 0-3
-__device__ __forceinline__ void compute_a_soffs(
-    uint32_t soffs[8], uint32_t row_soff, uint32_t k_soff) {
-    constexpr uint32_t ss = 16 * K_STRIDE;
-    #pragma unroll
-    for (int i = 0; i < 4; i++) {
-        soffs[i]   = row_soff + i * ss + k_soff;       // lo (K-phase 0)
-        soffs[i+4] = row_soff + i * ss + k_soff + 64;  // hi (K-phase 1)
-    }
-}
-
 // Synchronous A tile load (for prologue) — extract_tile compatible ordering
 __device__ __forceinline__ void load_a_tile_direct(
     fp4_intx8_t dst[4], i32x4 srd, uint32_t voff, uint32_t soff_base) {
@@ -827,9 +814,10 @@ __device__ __forceinline__ void load_a_tile_direct(
 }
 
 // 32 MFMAs + 8 buffer_load_dwordx4 for next A tile (inline ASM interleaved)
-// Same structure as kpair_32mfma_with_lds but buffer_load_dwordx4 instead of ds_read_b128
-// Outputs: %16..23 = d0..d7 (float4, for extract_tile -> fp4_intx8_t[4])
-// Inputs: KPAIR + voff(VGPR), srd(SGPR x4), soff0..soff7(SGPR each)
+// Takes a single base soffset and computes the remaining 7 from compile-time constants:
+//   soffs[i] = base + i*ss (for i=0..3, lo subtiles)
+//   soffs[i+4] = base + i*ss + 64 (for i=0..3, hi subtiles)
+// This uses only 1 SGPR soffset instead of 8, reducing register pressure.
 __device__ __forceinline__ void kpair_32mfma_with_vmem(
     fp4_floatx4_t acc[16],
     const fp4_intx8_t A[4], const fp4_intx8_t B[4],
@@ -837,10 +825,19 @@ __device__ __forceinline__ void kpair_32mfma_with_vmem(
     float4 &d0, float4 &d1, float4 &d2, float4 &d3,
     float4 &d4, float4 &d5, float4 &d6, float4 &d7,
     uint32_t a_voff, i32x4 a_srd,
-    uint32_t soff0, uint32_t soff1, uint32_t soff2, uint32_t soff3,
-    uint32_t soff4, uint32_t soff5, uint32_t soff6, uint32_t soff7)
+    uint32_t soff_base)
 {
     KPAIR_SETUP();
+    constexpr uint32_t ss = 16 * K_STRIDE;  // subtile stride
+    // Pre-compute soffsets in SGPRs (compiler keeps these in SGPRs since base is SGPR)
+    uint32_t s0 = soff_base;
+    uint32_t s1 = soff_base + ss;
+    uint32_t s2 = soff_base + 2*ss;
+    uint32_t s3 = soff_base + 3*ss;
+    uint32_t s4 = soff_base + 64;
+    uint32_t s5 = soff_base + ss + 64;
+    uint32_t s6 = soff_base + 2*ss + 64;
+    uint32_t s7 = soff_base + 3*ss + 64;
     asm volatile(
         // Row 0 Phase 0 — ALL 8 buffer_loads front-loaded (1:1 with first 8 MFMAs)
         "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %24, %32, %0,  %40, %42 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
@@ -890,93 +887,9 @@ __device__ __forceinline__ void kpair_32mfma_with_vmem(
           "=&v"(d4), "=&v"(d5), "=&v"(d6), "=&v"(d7)
         : KPAIR_INPUTS,
           "v"(a_voff), "s"(a_srd),
-          "s"(soff0), "s"(soff1), "s"(soff2), "s"(soff3),
-          "s"(soff4), "s"(soff5), "s"(soff6), "s"(soff7)
+          "s"(s0), "s"(s1), "s"(s2), "s"(s3),
+          "s"(s4), "s"(s5), "s"(s6), "s"(s7)
     );
-}
-
-// 32 MFMAs + 8 buffer_load_dwordx4 for next A0 + 8 B tile prefetches
-// Combines vmem loading with B tile prefetching in the gaps between MFMAs
-template<int PF_N = 8>
-__device__ __forceinline__ void kpair_32mfma_with_vmem_and_pf(
-    fp4_floatx4_t acc[16],
-    const fp4_intx8_t A[4], const fp4_intx8_t B[4],
-    const fp8e8m0_4 a_raw[2], const fp8e8m0_4 b_raw[2],
-    float4 &d0, float4 &d1, float4 &d2, float4 &d3,
-    float4 &d4, float4 &d5, float4 &d6, float4 &d7,
-    uint32_t a_voff, i32x4 a_srd,
-    uint32_t soff0, uint32_t soff1, uint32_t soff2, uint32_t soff3,
-    uint32_t soff4, uint32_t soff5, uint32_t soff6, uint32_t soff7,
-    const tile_pf_params &pf0, const tile_pf_params &pf1)
-{
-    KPAIR_SETUP();
-    // Row 0: 8 MFMAs + 8 buffer_loads
-    asm volatile(
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %24, %32, %0,  %40, %42 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "buffer_load_dwordx4 %16, %44, %45, %46 offen\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %24, %33, %1,  %40, %42 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "buffer_load_dwordx4 %17, %44, %45, %47 offen\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %24, %34, %2,  %40, %43 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "buffer_load_dwordx4 %18, %44, %45, %48 offen\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %24, %35, %3,  %40, %43 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "buffer_load_dwordx4 %19, %44, %45, %49 offen\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %28, %36, %0,  %40, %42 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "buffer_load_dwordx4 %20, %44, %45, %50 offen\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %28, %37, %1,  %40, %42 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "buffer_load_dwordx4 %21, %44, %45, %51 offen\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %28, %38, %2,  %40, %43 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "buffer_load_dwordx4 %22, %44, %45, %52 offen\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %28, %39, %3,  %40, %43 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "buffer_load_dwordx4 %23, %44, %45, %53 offen\n"
-        : KPAIR_ACC_CLOBBER,
-          "=&v"(d0), "=&v"(d1), "=&v"(d2), "=&v"(d3),
-          "=&v"(d4), "=&v"(d5), "=&v"(d6), "=&v"(d7)
-        : KPAIR_INPUTS,
-          "v"(a_voff), "s"(a_srd),
-          "s"(soff0), "s"(soff1), "s"(soff2), "s"(soff3),
-          "s"(soff4), "s"(soff5), "s"(soff6), "s"(soff7)
-    );
-    if constexpr (PF_N > 0) emit_one_pf(pf0, 0);
-    if constexpr (PF_N > 1) emit_one_pf(pf0, 1);
-    // Row 1
-    asm volatile(
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %17, %24, %4,  %32, %34 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %17, %25, %5,  %32, %34 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %17, %26, %6,  %32, %35 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %17, %27, %7,  %32, %35 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %21, %28, %4,  %32, %34 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %21, %29, %5,  %32, %34 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %21, %30, %6,  %32, %35 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %21, %31, %7,  %32, %35 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        : KPAIR_ACC_CLOBBER : KPAIR_INPUTS);
-    if constexpr (PF_N > 2) emit_one_pf(pf0, 2);
-    if constexpr (PF_N > 3) emit_one_pf(pf0, 3);
-    // Row 2
-    asm volatile(
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %18, %24, %8,  %33, %34 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %18, %25, %9,  %33, %34 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %18, %26, %10, %33, %35 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %18, %27, %11, %33, %35 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %22, %28, %8,  %33, %34 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %22, %29, %9,  %33, %34 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %22, %30, %10, %33, %35 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %22, %31, %11, %33, %35 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        : KPAIR_ACC_CLOBBER : KPAIR_INPUTS);
-    if constexpr (PF_N > 4) emit_one_pf(pf1, 0);
-    if constexpr (PF_N > 5) emit_one_pf(pf1, 1);
-    // Row 3
-    asm volatile(
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %19, %24, %12, %33, %34 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %19, %25, %13, %33, %34 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %19, %26, %14, %33, %35 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %19, %27, %15, %33, %35 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %23, %28, %12, %33, %34 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %23, %29, %13, %33, %34 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %23, %30, %14, %33, %35 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %23, %31, %15, %33, %35 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        : KPAIR_ACC_CLOBBER : KPAIR_INPUTS);
-    if constexpr (PF_N > 6) emit_one_pf(pf1, 2);
-    if constexpr (PF_N > 7) emit_one_pf(pf1, 3);
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1027,8 +940,9 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     const int bc = (bid % num_pig) / gsm;
     const int wm = warpid() / WARPS_N, wn = warpid() % WARPS_N;
 
+    // B-only swizzled offsets (no A prefetch to LDS needed)
     uint32_t so_a[PF_MPT], so_b[PF_MPT];
-    G::prefill_swizzled_offsets(A0_db[0], g.a, so_a);
+    G::prefill_swizzled_offsets(A1_db[0], g.a, so_a);
     G::prefill_swizzled_offsets(Bl_db[0], g.b, so_b);
 
     // Scale SRDs — merged preshuffle format (64-row super-groups, dwordx2 loads)
@@ -1063,34 +977,37 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     i32x4 srd_a = make_srd(g.a.raw_ptr), srd_b = make_srd(g.b.raw_ptr);
     const void *base_a = (const void*)g.a.raw_ptr, *base_b = (const void*)g.b.raw_ptr;
 
+    // ── Direct-A: per-thread voffset and per-warp soffset bases ──
+    const int lid = kittens::laneid();
+    const uint32_t a_voff = static_cast<uint32_t>(lid % 16) * K_STRIDE
+                          + static_cast<uint32_t>(lid / 16) * 16;
+    // Scalar soffset base for A0 tile (row offset in bytes)
+    const uint32_t a0_row_soff = __builtin_amdgcn_readfirstlane(
+        static_cast<uint32_t>((br * BLK + wm * RBM) * K_STRIDE));
+
+    // ── A1+B tiles: LDS infrastructure ──
     constexpr int epw = 16 / sizeof(fp8e4m3) * WARP_THREADS;
     const uint32_t wlo = (warpid() % _NUM_WARPS) * epw * sizeof(fp8e4m3);
     auto lb = [&](auto &t) -> uint32_t {
         return __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(
             reinterpret_cast<uintptr_t>(&t.data[0]) + wlo));
     };
-    uint32_t lb_a0[2], lb_a1[2], lb_bl[2], lb_br[2];
+    uint32_t lb_a1[2], lb_bl[2], lb_br[2];
     for (int d = 0; d < 2; ++d) {
-        lb_a0[d]=lb(A0_db[d]); lb_a1[d]=lb(A1_db[d]);
+        lb_a1[d]=lb(A1_db[d]);
         lb_bl[d]=lb(Bl_db[d]); lb_br[d]=lb(Br_db[d]);
     }
 
-    auto load_tiles = [&](int bt, int db) {
-        emit_tile_pf(A0_db[db], g.a, coord<ST_tile>(0,0,br*2,    bt), so_a, srd_a, base_a, lb_a0[db]);
+    auto load_lds_tiles = [&](int bt, int db) {
         emit_tile_pf(A1_db[db], g.a, coord<ST_tile>(0,0,br*2+1,  bt), so_a, srd_a, base_a, lb_a1[db]);
         emit_tile_pf(Bl_db[db], g.b, coord<ST_tile>(0,0,bc*2,    bt), so_b, srd_b, base_b, lb_bl[db]);
         emit_tile_pf(Br_db[db], g.b, coord<ST_tile>(0,0,bc*2+1,  bt), so_b, srd_b, base_b, lb_br[db]);
     };
 
-    // Pre-compute LDS addresses as 16 static named variables (one per db-slot × phase).
-    // Avoids runtime-indexed [2][2] arrays that compiler spills to LDS + ds_read_b64.
-    // Selection via ternary (compiles to v_cndmask). No swap needed.
-    uint32_t a0_0_p0, a0_0_p1, a0_1_p0, a0_1_p1;
+    // Pre-compute LDS addresses (no A0 LDS addresses needed)
     uint32_t bl_0_p0, bl_0_p1, bl_1_p0, bl_1_p1;
     uint32_t br_0_p0, br_0_p1, br_1_p0, br_1_p1;
     uint32_t a1_0_p0, a1_0_p1, a1_1_p0, a1_1_p1;
-    compute_lds_base_addrs<A_row_reg>(kittens::subtile_inplace<RBM, BK>(A0_db[0], {wm, 0}), a0_0_p0, a0_0_p1);
-    compute_lds_base_addrs<A_row_reg>(kittens::subtile_inplace<RBM, BK>(A0_db[1], {wm, 0}), a0_1_p0, a0_1_p1);
     compute_lds_base_addrs<B_row_reg>(kittens::subtile_inplace<RBN, BK>(Bl_db[0], {wn, 0}), bl_0_p0, bl_0_p1);
     compute_lds_base_addrs<B_row_reg>(kittens::subtile_inplace<RBN, BK>(Bl_db[1], {wn, 0}), bl_1_p0, bl_1_p1);
     compute_lds_base_addrs<B_row_reg>(kittens::subtile_inplace<RBN, BK>(Br_db[0], {wn, 0}), br_0_p0, br_0_p1);
@@ -1098,7 +1015,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     compute_lds_base_addrs<A_row_reg>(kittens::subtile_inplace<RBM, BK>(A1_db[0], {wm, 0}), a1_0_p0, a1_0_p1);
     compute_lds_base_addrs<A_row_reg>(kittens::subtile_inplace<RBM, BK>(A1_db[1], {wm, 0}), a1_1_p0, a1_1_p1);
 
-    // Tile extraction helper (ds_read float4[8] → fp4_intx8_t[4])
+    // Tile extraction helper (ds_read/buffer_load float4[8] -> fp4_intx8_t[4])
     auto extract_tile = [](const float4 d[8], fp4_intx8_t t[4]) __attribute__((always_inline)) {
         #pragma unroll
         for (int i = 0; i < 4; i++) {
@@ -1110,8 +1027,13 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     };
 
     // ═══════════ Prologue ═══════════
-    load_tiles(0, 0);
-    if (k_byte_iters > 1) load_tiles(1, 1);
+    // Load A1+B tiles to LDS (2-deep pipeline)
+    load_lds_tiles(0, 0);
+    if (k_byte_iters > 1) load_lds_tiles(1, 1);
+
+    // Load initial A0 directly to VGPRs via buffer_load
+    fp4_intx8_t tA0[4];
+    load_a_tile_direct(tA0, srd_a, a_voff, a0_row_soff + 0 * BK);
 
     fp8e8m0_4 pf_a0[a_packs], pf_a1[a_packs], pf_bl[b_packs], pf_br[b_packs];
     {
@@ -1121,20 +1043,18 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         load_pq_scale_x2_async(br_srd, lane_soff_x2, 0, pf_br[0], pf_br[1]);
     }
 
-    // Pre-load A0+Bl for iteration 0 from LDS (2-tile software pipeline)
+    // Wait for A0 buffer loads + A1/B LDS prefetches, then load Bl from LDS
     asm volatile("s_waitcnt vmcnt(0)");
     __builtin_amdgcn_s_barrier();
-    A_row_reg a0_rt;
     B_row_reg bl_rt;
-    fp4_load_st_to_rt(a0_rt, kittens::subtile_inplace<RBM, BK>(A0_db[0], {wm, 0}));
     fp4_load_st_to_rt(bl_rt, kittens::subtile_inplace<RBN, BK>(Bl_db[0], {wn, 0}));
     asm volatile("s_waitcnt lgkmcnt(0)");
-    fp4_intx8_t tA0[4], tBl[4];
+    fp4_intx8_t tBl[4];
     #pragma unroll
     for (int i = 0; i < 4; i++) {
-        tA0[i] = fp4_extract_tile(a0_rt, i);
         tBl[i] = fp4_extract_tile(bl_rt, i);
     }
+    // tA0 already loaded directly to VGPRs above
 
     // ═══════════ Main loop (2-tile pipeline) ═══════════
     // Unroll: override via -DUNROLL_K=N, else auto by K size
@@ -1155,17 +1075,16 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         const int cur = bt & 1;
         const int nxt = 1 - cur;
 
+        // B+A1 LDS address selection (no A0 LDS addresses)
         const uint32_t sel_br_p0 = cur ? br_1_p0 : br_0_p0;
         const uint32_t sel_br_p1 = cur ? br_1_p1 : br_0_p1;
         const uint32_t sel_a1_p0 = cur ? a1_1_p0 : a1_0_p0;
         const uint32_t sel_a1_p1 = cur ? a1_1_p1 : a1_0_p1;
-        const uint32_t sel_a0_p0 = nxt ? a0_1_p0 : a0_0_p0;
-        const uint32_t sel_a0_p1 = nxt ? a0_1_p1 : a0_0_p1;
         const uint32_t sel_bl_p0 = nxt ? bl_1_p0 : bl_0_p0;
         const uint32_t sel_bl_p1 = nxt ? bl_1_p1 : bl_0_p1;
 
+        // B+A1 prefetch params (no A0 prefetch to LDS)
         const int pf_bt = (bt + 2 < k_byte_iters) ? (bt + 2) : (k_byte_iters - 1);
-        tile_pf_params pf_a0_p = make_pf_params(A0_db[cur], g.a, coord<ST_tile>(0,0,br*2,     pf_bt), so_a, srd_a, base_a, lb_a0[cur]);
         tile_pf_params pf_a1_p = make_pf_params(A1_db[cur], g.a, coord<ST_tile>(0,0,br*2+1,   pf_bt), so_a, srd_a, base_a, lb_a1[cur]);
         tile_pf_params pf_bl_p = make_pf_params(Bl_db[cur], g.b, coord<ST_tile>(0,0,bc*2,     pf_bt), so_b, srd_b, base_b, lb_bl[cur]);
         tile_pf_params pf_br_p = make_pf_params(Br_db[cur], g.b, coord<ST_tile>(0,0,bc*2+1,   pf_bt), so_b, srd_b, base_b, lb_br[cur]);
@@ -1184,7 +1103,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
             load_pq_scale_x2_async(br_srd, lane_soff_x2, nxt_scale, pf_br[0], pf_br[1]);
         }
 
-        // Steps 1+2 merged: A0×Bl (32 MFMAs) + ds_read Br + A0×Br (32 MFMAs) + ds_read A1
+        // Steps 1+2 merged: A0*Bl (32 MFMAs) + ds_read Br, then A0*Br (32 MFMAs) + ds_read A1
         float4 br_d[8], a1_d[8];
         kpair_64mfma_step12(acc_A0Bl, acc_A0Br, tA0, tBl,
             a0_raw, bl_raw, br_raw, br_d, a1_d,
@@ -1195,30 +1114,40 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         extract_tile(br_d, tBr);
         extract_tile(a1_d, tA1);
 
-        // vmcnt+barrier moved into Step3's first asm block via EMIT_BARRIER=true
+        // Barrier for LDS double-buffer swap (wait for A1+B prefetches)
+        asm volatile("s_waitcnt vmcnt(0)\ns_barrier\n" ::: "memory");
 
-        // Step 3: A1×Bl (32 MFMAs) + ds_read A0[nxt] — barrier at entry
+        // Step 3: A1*Bl (32 MFMAs) + buffer_load A0[nxt]
+        const uint32_t nxt_k_soff = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(
+            (bt + 1 < k_byte_iters ? bt + 1 : bt) * BK));
         float4 nxt_a0_d[8];
-        kpair_32mfma_with_lds_and_pf<8, true>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
-            nxt_a0_d[0], nxt_a0_d[1], nxt_a0_d[2], nxt_a0_d[3],
-            nxt_a0_d[4], nxt_a0_d[5], nxt_a0_d[6], nxt_a0_d[7],
-            sel_a0_p0, sel_a0_p1, pf_a0_p, pf_a1_p);
+        {
+            const uint32_t soff_base = a0_row_soff + nxt_k_soff;
+            kpair_32mfma_with_vmem(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
+                nxt_a0_d[0], nxt_a0_d[1], nxt_a0_d[2], nxt_a0_d[3],
+                nxt_a0_d[4], nxt_a0_d[5], nxt_a0_d[6], nxt_a0_d[7],
+                a_voff, srd_a, soff_base);
+        }
 
-        // Step 4: A1×Br (32 MFMAs) + ds_read Bl[nxt] — single asm block
+        // Step 4: A1*Br (32 MFMAs) + ds_read Bl[nxt] + A1/B prefetches
         float4 nxt_bl_d[8];
         kpair_32mfma_with_lds_and_pf<8>(acc_A1Br, tA1, tBr, a1_raw, br_raw,
             nxt_bl_d[0], nxt_bl_d[1], nxt_bl_d[2], nxt_bl_d[3],
             nxt_bl_d[4], nxt_bl_d[5], nxt_bl_d[6], nxt_bl_d[7],
-            sel_bl_p0, sel_bl_p1, pf_bl_p, pf_br_p);
+            sel_bl_p0, sel_bl_p1, pf_a1_p, pf_bl_p);
 
-        asm volatile("s_waitcnt lgkmcnt(0)");
+        // Remaining 4 Br prefetches
+        #pragma unroll
+        for (int pi = 0; pi < PF_MPT; ++pi) emit_one_pf(pf_br_p, pi);
+
+        // Wait for A0 buffer loads + Bl[nxt] ds_reads
+        asm volatile("s_waitcnt lgkmcnt(0) vmcnt(0)");
         extract_tile(nxt_a0_d, tA0);
         extract_tile(nxt_bl_d, tBl);
     }
 
     // ═══════════ Store C — streamlined direct store ═══════════
     // Process base tiles directly from accumulators without materializing RT_C.
-    // Uses 252 VGPRs (4 fewer than original), no spills.
     auto store_block = [&](const fp4_floatx4_t acc[16], int mh, int nh) {
         const int lid = kittens::laneid();
         const int tile_r = br * WARPS_M * 2 + WARPS_M * mh + wm;
@@ -1257,8 +1186,8 @@ void dispatch_gluon_cpp(gluon_globals g) {
     mxfp4_gluon_cpp_kernel<<<grid, dim3(_NUM_THREADS), 0>>>(g);
 }
 
-PYBIND11_MODULE(tk_mxfp4_gluon_cpp, m) {
-    m.doc() = "MXFP4 Gluon-arch kernel (C++ reimplementation)";
+PYBIND11_MODULE(tk_mxfp4_half_direct, m) {
+    m.doc() = "MXFP4 Gluon-arch kernel with half-direct-A loading (A0 via buffer_load, A1 via LDS)";
     py::bind_function<dispatch_gluon_cpp>(m, "gemm_rcr",
         &gluon_globals::a, &gluon_globals::b,
         &gluon_globals::a_scale, &gluon_globals::b_scale,
