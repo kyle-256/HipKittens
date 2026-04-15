@@ -89,6 +89,21 @@ aiter的ASM kernel来自CK codegen。CK有自动tuning和手写ASM template。
 可以研究CK的FP4 GEMM实现,理解它如何做到direct-A + vectorized store。
 关键文件: `/opt/rocm/include/ck/tensor_operation/gpu/warp/xdlops_gemm.hpp`
 
+## ART Kernel Progress (2026-04-15)
+- **kernel_mxfp4_art.cpp**: ART-style MXFP4 GEMM with direct-A loading
+- **Status**: Bit-exact correct, 256V+256A, 0 spills, 0 scratch
+- **Performance**: 2486T at 8192³ (55% of original 4561T)
+- **Bottleneck**: 128 MFMAs per K-step use separate asm volatile blocks → no MFMA pipeline overlap
+- **Monolithic Step1+2**: 64 MFMAs + 16 loads in one asm → minor improvement
+- **Next steps**:
+  1. Merge ALL 128 MFMAs + 32 loads into monolithic asm blocks (careful register scheduling needed)
+  2. Or: use HipKittens3 ART framework for proper register tile management
+  3. Add MFMA operand swap (A↔B) for row-oriented output → enables vectorized store
+- **Key bugs fixed**:
+  - Compiler uses AGPRs as scratch during store → dump all AGPRs in single asm block first
+  - Separate asm volatile blocks → compiler reuses pinned VGPRs → clobbers must precede writes
+  - ds_read interleaved with MFMAs must not overwrite live operands (Bl→Step4 not Step3)
+
 ## 关键文件索引
 | 文件 | 用途 |
 |------|------|
@@ -104,5 +119,3 @@ aiter的ASM kernel来自CK codegen。CK有自动tuning和手写ASM template。
 | Kernel | 8192³ | 42-shape avg |
 |--------|-------|-------------|
 | Our C++ | 4740T | 4286T |
-| Gluon LLIR | 4983T | 4274T |
-| aiter ASM | 4082T | 3850T |
