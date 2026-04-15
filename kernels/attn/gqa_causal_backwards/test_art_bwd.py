@@ -83,26 +83,35 @@ dK_tk = torch.zeros(B, N, H_KV, D_QK, dtype=dtype, device='cuda')
 dV_tk = torch.zeros(B, N, H_KV, D_V, dtype=dtype, device='cuda')
 
 # Warmup
+# opt1 combined kernel computes dK/dV only; dQ comes from dispatch_bwd_dq (BHND atomic layout).
 for _ in range(3):
     dQ_tk_bhnd.zero_()
     dK_tk.zero_()
     dV_tk.zero_()
     tk_kernel_bkwd.dispatch_bwd_combined(Q_tk, K_tk, V_tk, dO_tk, dQ_tk_bhnd, dK_tk, dV_tk, L_tk, delta_tk)
+    tk_kernel_bkwd.dispatch_bwd_dq(Q_tk, K_tk, V_tk, dO_tk, dQ_tk_bhnd, L_tk, delta_tk)
     torch.cuda.synchronize()
 
-# Timed run
+# Timed run (split: combined vs standalone dQ — matches opt1 split design)
 dQ_tk_bhnd.zero_()
 dK_tk.zero_()
 dV_tk.zero_()
-start = torch.cuda.Event(enable_timing=True)
-end = torch.cuda.Event(enable_timing=True)
+start_c = torch.cuda.Event(enable_timing=True)
+end_c = torch.cuda.Event(enable_timing=True)
+start_q = torch.cuda.Event(enable_timing=True)
+end_q = torch.cuda.Event(enable_timing=True)
 torch.cuda.synchronize()
-start.record()
+start_c.record()
 tk_kernel_bkwd.dispatch_bwd_combined(Q_tk, K_tk, V_tk, dO_tk, dQ_tk_bhnd, dK_tk, dV_tk, L_tk, delta_tk)
-end.record()
+end_c.record()
+start_q.record()
+tk_kernel_bkwd.dispatch_bwd_dq(Q_tk, K_tk, V_tk, dO_tk, dQ_tk_bhnd, L_tk, delta_tk)
+end_q.record()
 torch.cuda.synchronize()
-ms = start.elapsed_time(end)
-print(f"Backward kernel: {ms:.3f} ms")
+ms_c = start_c.elapsed_time(end_c)
+ms_q = start_q.elapsed_time(end_q)
+print(f"Backward kernel (dK/dV combined): {ms_c:.3f} ms")
+print(f"Backward kernel (dQ standalone): {ms_q:.3f} ms")
 
 # Convert dQ from BHND to BNHD for comparison
 dQ_tk = dQ_tk_bhnd.transpose(1, 2).contiguous()
