@@ -1353,8 +1353,12 @@ void mxfp4_art_kernel(const gluon_globals g) {
         const int row_off = 4 * (lid / 16);
         const int col_off = lid % 16;
 
-        // Read ALL 64 AGPRs in ONE asm block to prevent compiler AGPR interference
+        // Read ALL 64 AGPRs and multiply by scale in ONE asm block.
+        // This prevents compiler AGPR interference AND folds the scale multiply
+        // into the asm, eliminating 64 compiler v_mul_f32 instructions.
+        // The outputs are pre-scaled floats; the C++ loop only does bf16 convert + store.
         float vals[64];
+        const float sc = g.scale;
         asm volatile(
             "v_accvgpr_read_b32 %0, a[%64]\n"   "v_accvgpr_read_b32 %1, a[%65]\n"
             "v_accvgpr_read_b32 %2, a[%66]\n"   "v_accvgpr_read_b32 %3, a[%67]\n"
@@ -1388,22 +1392,55 @@ void mxfp4_art_kernel(const gluon_globals g) {
             "v_accvgpr_read_b32 %58, a[%122]\n" "v_accvgpr_read_b32 %59, a[%123]\n"
             "v_accvgpr_read_b32 %60, a[%124]\n" "v_accvgpr_read_b32 %61, a[%125]\n"
             "v_accvgpr_read_b32 %62, a[%126]\n" "v_accvgpr_read_b32 %63, a[%127]\n"
-            : "=v"(vals[0]),  "=v"(vals[1]),  "=v"(vals[2]),  "=v"(vals[3]),
-              "=v"(vals[4]),  "=v"(vals[5]),  "=v"(vals[6]),  "=v"(vals[7]),
-              "=v"(vals[8]),  "=v"(vals[9]),  "=v"(vals[10]), "=v"(vals[11]),
-              "=v"(vals[12]), "=v"(vals[13]), "=v"(vals[14]), "=v"(vals[15]),
-              "=v"(vals[16]), "=v"(vals[17]), "=v"(vals[18]), "=v"(vals[19]),
-              "=v"(vals[20]), "=v"(vals[21]), "=v"(vals[22]), "=v"(vals[23]),
-              "=v"(vals[24]), "=v"(vals[25]), "=v"(vals[26]), "=v"(vals[27]),
-              "=v"(vals[28]), "=v"(vals[29]), "=v"(vals[30]), "=v"(vals[31]),
-              "=v"(vals[32]), "=v"(vals[33]), "=v"(vals[34]), "=v"(vals[35]),
-              "=v"(vals[36]), "=v"(vals[37]), "=v"(vals[38]), "=v"(vals[39]),
-              "=v"(vals[40]), "=v"(vals[41]), "=v"(vals[42]), "=v"(vals[43]),
-              "=v"(vals[44]), "=v"(vals[45]), "=v"(vals[46]), "=v"(vals[47]),
-              "=v"(vals[48]), "=v"(vals[49]), "=v"(vals[50]), "=v"(vals[51]),
-              "=v"(vals[52]), "=v"(vals[53]), "=v"(vals[54]), "=v"(vals[55]),
-              "=v"(vals[56]), "=v"(vals[57]), "=v"(vals[58]), "=v"(vals[59]),
-              "=v"(vals[60]), "=v"(vals[61]), "=v"(vals[62]), "=v"(vals[63])
+            // Scale all 64 values by sc (%128)
+            "v_mul_f32 %0, %128, %0\n"   "v_mul_f32 %1, %128, %1\n"
+            "v_mul_f32 %2, %128, %2\n"   "v_mul_f32 %3, %128, %3\n"
+            "v_mul_f32 %4, %128, %4\n"   "v_mul_f32 %5, %128, %5\n"
+            "v_mul_f32 %6, %128, %6\n"   "v_mul_f32 %7, %128, %7\n"
+            "v_mul_f32 %8, %128, %8\n"   "v_mul_f32 %9, %128, %9\n"
+            "v_mul_f32 %10, %128, %10\n" "v_mul_f32 %11, %128, %11\n"
+            "v_mul_f32 %12, %128, %12\n" "v_mul_f32 %13, %128, %13\n"
+            "v_mul_f32 %14, %128, %14\n" "v_mul_f32 %15, %128, %15\n"
+            "v_mul_f32 %16, %128, %16\n" "v_mul_f32 %17, %128, %17\n"
+            "v_mul_f32 %18, %128, %18\n" "v_mul_f32 %19, %128, %19\n"
+            "v_mul_f32 %20, %128, %20\n" "v_mul_f32 %21, %128, %21\n"
+            "v_mul_f32 %22, %128, %22\n" "v_mul_f32 %23, %128, %23\n"
+            "v_mul_f32 %24, %128, %24\n" "v_mul_f32 %25, %128, %25\n"
+            "v_mul_f32 %26, %128, %26\n" "v_mul_f32 %27, %128, %27\n"
+            "v_mul_f32 %28, %128, %28\n" "v_mul_f32 %29, %128, %29\n"
+            "v_mul_f32 %30, %128, %30\n" "v_mul_f32 %31, %128, %31\n"
+            "v_mul_f32 %32, %128, %32\n" "v_mul_f32 %33, %128, %33\n"
+            "v_mul_f32 %34, %128, %34\n" "v_mul_f32 %35, %128, %35\n"
+            "v_mul_f32 %36, %128, %36\n" "v_mul_f32 %37, %128, %37\n"
+            "v_mul_f32 %38, %128, %38\n" "v_mul_f32 %39, %128, %39\n"
+            "v_mul_f32 %40, %128, %40\n" "v_mul_f32 %41, %128, %41\n"
+            "v_mul_f32 %42, %128, %42\n" "v_mul_f32 %43, %128, %43\n"
+            "v_mul_f32 %44, %128, %44\n" "v_mul_f32 %45, %128, %45\n"
+            "v_mul_f32 %46, %128, %46\n" "v_mul_f32 %47, %128, %47\n"
+            "v_mul_f32 %48, %128, %48\n" "v_mul_f32 %49, %128, %49\n"
+            "v_mul_f32 %50, %128, %50\n" "v_mul_f32 %51, %128, %51\n"
+            "v_mul_f32 %52, %128, %52\n" "v_mul_f32 %53, %128, %53\n"
+            "v_mul_f32 %54, %128, %54\n" "v_mul_f32 %55, %128, %55\n"
+            "v_mul_f32 %56, %128, %56\n" "v_mul_f32 %57, %128, %57\n"
+            "v_mul_f32 %58, %128, %58\n" "v_mul_f32 %59, %128, %59\n"
+            "v_mul_f32 %60, %128, %60\n" "v_mul_f32 %61, %128, %61\n"
+            "v_mul_f32 %62, %128, %62\n" "v_mul_f32 %63, %128, %63\n"
+            : "=&v"(vals[0]),  "=&v"(vals[1]),  "=&v"(vals[2]),  "=&v"(vals[3]),
+              "=&v"(vals[4]),  "=&v"(vals[5]),  "=&v"(vals[6]),  "=&v"(vals[7]),
+              "=&v"(vals[8]),  "=&v"(vals[9]),  "=&v"(vals[10]), "=&v"(vals[11]),
+              "=&v"(vals[12]), "=&v"(vals[13]), "=&v"(vals[14]), "=&v"(vals[15]),
+              "=&v"(vals[16]), "=&v"(vals[17]), "=&v"(vals[18]), "=&v"(vals[19]),
+              "=&v"(vals[20]), "=&v"(vals[21]), "=&v"(vals[22]), "=&v"(vals[23]),
+              "=&v"(vals[24]), "=&v"(vals[25]), "=&v"(vals[26]), "=&v"(vals[27]),
+              "=&v"(vals[28]), "=&v"(vals[29]), "=&v"(vals[30]), "=&v"(vals[31]),
+              "=&v"(vals[32]), "=&v"(vals[33]), "=&v"(vals[34]), "=&v"(vals[35]),
+              "=&v"(vals[36]), "=&v"(vals[37]), "=&v"(vals[38]), "=&v"(vals[39]),
+              "=&v"(vals[40]), "=&v"(vals[41]), "=&v"(vals[42]), "=&v"(vals[43]),
+              "=&v"(vals[44]), "=&v"(vals[45]), "=&v"(vals[46]), "=&v"(vals[47]),
+              "=&v"(vals[48]), "=&v"(vals[49]), "=&v"(vals[50]), "=&v"(vals[51]),
+              "=&v"(vals[52]), "=&v"(vals[53]), "=&v"(vals[54]), "=&v"(vals[55]),
+              "=&v"(vals[56]), "=&v"(vals[57]), "=&v"(vals[58]), "=&v"(vals[59]),
+              "=&v"(vals[60]), "=&v"(vals[61]), "=&v"(vals[62]), "=&v"(vals[63])
             : "n"(acc_base+0),  "n"(acc_base+1),  "n"(acc_base+2),  "n"(acc_base+3),
               "n"(acc_base+4),  "n"(acc_base+5),  "n"(acc_base+6),  "n"(acc_base+7),
               "n"(acc_base+8),  "n"(acc_base+9),  "n"(acc_base+10), "n"(acc_base+11),
@@ -1419,23 +1456,22 @@ void mxfp4_art_kernel(const gluon_globals g) {
               "n"(acc_base+48), "n"(acc_base+49), "n"(acc_base+50), "n"(acc_base+51),
               "n"(acc_base+52), "n"(acc_base+53), "n"(acc_base+54), "n"(acc_base+55),
               "n"(acc_base+56), "n"(acc_base+57), "n"(acc_base+58), "n"(acc_base+59),
-              "n"(acc_base+60), "n"(acc_base+61), "n"(acc_base+62), "n"(acc_base+63)
+              "n"(acc_base+60), "n"(acc_base+61), "n"(acc_base+62), "n"(acc_base+63),
+              "v"(sc)
         );
 
-        // Now process from compiler-managed VGPRs (no AGPRs touched)
+        // vals[] already pre-multiplied by scale — just convert to bf16 and store
         #pragma unroll
         for (int i = 0; i < 4; i++) {
             #pragma unroll
             for (int j = 0; j < 4; j++) {
                 const int idx = i * 16 + j * 4;
-                float f0 = vals[idx] * g.scale, f1 = vals[idx+1] * g.scale;
-                float f2 = vals[idx+2] * g.scale, f3 = vals[idx+3] * g.scale;
                 const int row_base = i * 16 + row_off;
                 const int col = j * 16 + col_off;
-                dst_ptr[(row_base+0)*row_stride+col] = base_types::convertor<bf16, float>::convert(f0);
-                dst_ptr[(row_base+1)*row_stride+col] = base_types::convertor<bf16, float>::convert(f1);
-                dst_ptr[(row_base+2)*row_stride+col] = base_types::convertor<bf16, float>::convert(f2);
-                dst_ptr[(row_base+3)*row_stride+col] = base_types::convertor<bf16, float>::convert(f3);
+                dst_ptr[(row_base+0)*row_stride+col] = base_types::convertor<bf16, float>::convert(vals[idx]);
+                dst_ptr[(row_base+1)*row_stride+col] = base_types::convertor<bf16, float>::convert(vals[idx+1]);
+                dst_ptr[(row_base+2)*row_stride+col] = base_types::convertor<bf16, float>::convert(vals[idx+2]);
+                dst_ptr[(row_base+3)*row_stride+col] = base_types::convertor<bf16, float>::convert(vals[idx+3]);
             }
         }
     };

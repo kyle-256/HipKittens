@@ -782,6 +782,203 @@ __device__ __forceinline__ void kpair_32mfma_with_lds_and_pf(
     if constexpr (PF_N > 7) emit_one_pf(pf1, 3);
 }
 
+// ── Direct-A loading: buffer_load_dwordx4 from global memory to VGPRs ──
+// Thread t loads from A row (t%16) at K-byte-offset (t/16)*16
+// KPAIR: lo half = K-phase 0 (bytes 0-63), hi half = K-phase 1 (bytes 64-127)
+
+constexpr uint32_t K_STRIDE = K_DIM / 2;  // bytes per row in A (FP4 packed)
+
+// Compute 8 soffsets for one A tile in extract_tile-compatible order:
+//   soffs[0..3] = lo (K-phase 0) for subtiles 0-3
+//   soffs[4..7] = hi (K-phase 1) for subtiles 0-3
+__device__ __forceinline__ void compute_a_soffs(
+    uint32_t soffs[8], uint32_t row_soff, uint32_t k_soff) {
+    constexpr uint32_t ss = 16 * K_STRIDE;
+    #pragma unroll
+    for (int i = 0; i < 4; i++) {
+        soffs[i]   = row_soff + i * ss + k_soff;       // lo (K-phase 0)
+        soffs[i+4] = row_soff + i * ss + k_soff + 64;  // hi (K-phase 1)
+    }
+}
+
+// Synchronous A tile load (for prologue) — extract_tile compatible ordering
+__device__ __forceinline__ void load_a_tile_direct(
+    fp4_intx8_t dst[4], i32x4 srd, uint32_t voff, uint32_t soff_base) {
+    constexpr uint32_t ss = 16 * K_STRIDE;
+    // Load in extract_tile order: d[0..3] = lo subtiles, d[4..7] = hi subtiles
+    float4 d[8];
+    #pragma unroll
+    for (int i = 0; i < 4; i++) {
+        uint32_t si = soff_base + i * ss;
+        d[i]   = std::bit_cast<float4>(llvm_amdgcn_raw_buffer_load_b128(srd, voff, si, 0));
+        d[i+4] = std::bit_cast<float4>(llvm_amdgcn_raw_buffer_load_b128(srd, voff, si + 64, 0));
+    }
+    // Use the same extract_tile path as the loop
+    auto lo_to_tile = [](const float4 dd[8], fp4_intx8_t t[4]) __attribute__((always_inline)) {
+        #pragma unroll
+        for (int i = 0; i < 4; i++) {
+            auto lo = *reinterpret_cast<const fp4_intx4_t*>(&dd[i]);
+            auto hi = *reinterpret_cast<const fp4_intx4_t*>(&dd[i + 4]);
+            t[i][0]=lo[0]; t[i][1]=lo[1]; t[i][2]=lo[2]; t[i][3]=lo[3];
+            t[i][4]=hi[0]; t[i][5]=hi[1]; t[i][6]=hi[2]; t[i][7]=hi[3];
+        }
+    };
+    lo_to_tile(d, dst);
+}
+
+// 32 MFMAs + 8 buffer_load_dwordx4 for next A tile (inline ASM interleaved)
+// Same structure as kpair_32mfma_with_lds but buffer_load_dwordx4 instead of ds_read_b128
+// Outputs: %16..23 = d0..d7 (float4, for extract_tile -> fp4_intx8_t[4])
+// Inputs: KPAIR + voff(VGPR), srd(SGPR x4), soff0..soff7(SGPR each)
+__device__ __forceinline__ void kpair_32mfma_with_vmem(
+    fp4_floatx4_t acc[16],
+    const fp4_intx8_t A[4], const fp4_intx8_t B[4],
+    const fp8e8m0_4 a_raw[2], const fp8e8m0_4 b_raw[2],
+    float4 &d0, float4 &d1, float4 &d2, float4 &d3,
+    float4 &d4, float4 &d5, float4 &d6, float4 &d7,
+    uint32_t a_voff, i32x4 a_srd,
+    uint32_t soff0, uint32_t soff1, uint32_t soff2, uint32_t soff3,
+    uint32_t soff4, uint32_t soff5, uint32_t soff6, uint32_t soff7)
+{
+    KPAIR_SETUP();
+    asm volatile(
+        // Row 0 Phase 0 — ALL 8 buffer_loads front-loaded (1:1 with first 8 MFMAs)
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %24, %32, %0,  %40, %42 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "buffer_load_dwordx4 %16, %44, %45, %46 offen\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %24, %33, %1,  %40, %42 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "buffer_load_dwordx4 %17, %44, %45, %47 offen\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %24, %34, %2,  %40, %43 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "buffer_load_dwordx4 %18, %44, %45, %48 offen\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %24, %35, %3,  %40, %43 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "buffer_load_dwordx4 %19, %44, %45, %49 offen\n"
+        // Row 0 Phase 1
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %28, %36, %0,  %40, %42 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "buffer_load_dwordx4 %20, %44, %45, %50 offen\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %28, %37, %1,  %40, %42 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "buffer_load_dwordx4 %21, %44, %45, %51 offen\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %28, %38, %2,  %40, %43 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "buffer_load_dwordx4 %22, %44, %45, %52 offen\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %28, %39, %3,  %40, %43 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "buffer_load_dwordx4 %23, %44, %45, %53 offen\n"
+        // Rows 1-3: pure MFMAs (24 total)
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %25, %32, %4,  %40, %42 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %25, %33, %5,  %40, %42 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %25, %34, %6,  %40, %43 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %25, %35, %7,  %40, %43 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %29, %36, %4,  %40, %42 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %29, %37, %5,  %40, %42 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %29, %38, %6,  %40, %43 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %29, %39, %7,  %40, %43 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %26, %32, %8,  %41, %42 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %26, %33, %9,  %41, %42 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %26, %34, %10, %41, %43 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %26, %35, %11, %41, %43 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %30, %36, %8,  %41, %42 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %30, %37, %9,  %41, %42 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %30, %38, %10, %41, %43 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %30, %39, %11, %41, %43 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %27, %32, %12, %41, %42 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %27, %33, %13, %41, %42 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %27, %34, %14, %41, %43 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %27, %35, %15, %41, %43 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %31, %36, %12, %41, %42 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %31, %37, %13, %41, %42 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %31, %38, %14, %41, %43 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %31, %39, %15, %41, %43 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        : KPAIR_ACC_CLOBBER,
+          "=&v"(d0), "=&v"(d1), "=&v"(d2), "=&v"(d3),
+          "=&v"(d4), "=&v"(d5), "=&v"(d6), "=&v"(d7)
+        : KPAIR_INPUTS,
+          "v"(a_voff), "s"(a_srd),
+          "s"(soff0), "s"(soff1), "s"(soff2), "s"(soff3),
+          "s"(soff4), "s"(soff5), "s"(soff6), "s"(soff7)
+    );
+}
+
+// 32 MFMAs + 8 buffer_load_dwordx4 for next A0 + 8 B tile prefetches
+// Combines vmem loading with B tile prefetching in the gaps between MFMAs
+template<int PF_N = 8>
+__device__ __forceinline__ void kpair_32mfma_with_vmem_and_pf(
+    fp4_floatx4_t acc[16],
+    const fp4_intx8_t A[4], const fp4_intx8_t B[4],
+    const fp8e8m0_4 a_raw[2], const fp8e8m0_4 b_raw[2],
+    float4 &d0, float4 &d1, float4 &d2, float4 &d3,
+    float4 &d4, float4 &d5, float4 &d6, float4 &d7,
+    uint32_t a_voff, i32x4 a_srd,
+    uint32_t soff0, uint32_t soff1, uint32_t soff2, uint32_t soff3,
+    uint32_t soff4, uint32_t soff5, uint32_t soff6, uint32_t soff7,
+    const tile_pf_params &pf0, const tile_pf_params &pf1)
+{
+    KPAIR_SETUP();
+    // Row 0: 8 MFMAs + 8 buffer_loads
+    asm volatile(
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %24, %32, %0,  %40, %42 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "buffer_load_dwordx4 %16, %44, %45, %46 offen\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %24, %33, %1,  %40, %42 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "buffer_load_dwordx4 %17, %44, %45, %47 offen\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %24, %34, %2,  %40, %43 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "buffer_load_dwordx4 %18, %44, %45, %48 offen\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %24, %35, %3,  %40, %43 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "buffer_load_dwordx4 %19, %44, %45, %49 offen\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %28, %36, %0,  %40, %42 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "buffer_load_dwordx4 %20, %44, %45, %50 offen\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %28, %37, %1,  %40, %42 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "buffer_load_dwordx4 %21, %44, %45, %51 offen\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %28, %38, %2,  %40, %43 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "buffer_load_dwordx4 %22, %44, %45, %52 offen\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %28, %39, %3,  %40, %43 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "buffer_load_dwordx4 %23, %44, %45, %53 offen\n"
+        : KPAIR_ACC_CLOBBER,
+          "=&v"(d0), "=&v"(d1), "=&v"(d2), "=&v"(d3),
+          "=&v"(d4), "=&v"(d5), "=&v"(d6), "=&v"(d7)
+        : KPAIR_INPUTS,
+          "v"(a_voff), "s"(a_srd),
+          "s"(soff0), "s"(soff1), "s"(soff2), "s"(soff3),
+          "s"(soff4), "s"(soff5), "s"(soff6), "s"(soff7)
+    );
+    if constexpr (PF_N > 0) emit_one_pf(pf0, 0);
+    if constexpr (PF_N > 1) emit_one_pf(pf0, 1);
+    // Row 1
+    asm volatile(
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %17, %24, %4,  %32, %34 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %17, %25, %5,  %32, %34 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %17, %26, %6,  %32, %35 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %17, %27, %7,  %32, %35 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %21, %28, %4,  %32, %34 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %21, %29, %5,  %32, %34 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %21, %30, %6,  %32, %35 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %21, %31, %7,  %32, %35 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        : KPAIR_ACC_CLOBBER : KPAIR_INPUTS);
+    if constexpr (PF_N > 2) emit_one_pf(pf0, 2);
+    if constexpr (PF_N > 3) emit_one_pf(pf0, 3);
+    // Row 2
+    asm volatile(
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %18, %24, %8,  %33, %34 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %18, %25, %9,  %33, %34 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %18, %26, %10, %33, %35 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %18, %27, %11, %33, %35 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %22, %28, %8,  %33, %34 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %22, %29, %9,  %33, %34 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %22, %30, %10, %33, %35 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %22, %31, %11, %33, %35 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        : KPAIR_ACC_CLOBBER : KPAIR_INPUTS);
+    if constexpr (PF_N > 4) emit_one_pf(pf1, 0);
+    if constexpr (PF_N > 5) emit_one_pf(pf1, 1);
+    // Row 3
+    asm volatile(
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %19, %24, %12, %33, %34 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %19, %25, %13, %33, %34 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %19, %26, %14, %33, %35 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %19, %27, %15, %33, %35 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %23, %28, %12, %33, %34 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %23, %29, %13, %33, %34 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %23, %30, %14, %33, %35 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %23, %31, %15, %33, %35 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        : KPAIR_ACC_CLOBBER : KPAIR_INPUTS);
+    if constexpr (PF_N > 6) emit_one_pf(pf1, 2);
+    if constexpr (PF_N > 7) emit_one_pf(pf1, 3);
+}
+
 // ══════════════════════════════════════════════════════════════
 // Main kernel
 // ══════════════════════════════════════════════════════════════
@@ -794,7 +991,8 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     constexpr int a_packs = RBM / 32;
     constexpr int b_packs = RBN / 32;
 
-    __shared__ ST_tile A0_db[2], A1_db[2], Bl_db[2], Br_db[2];
+    // Half-direct-A: A0 via buffer_load (no LDS), A1+B via LDS
+    __shared__ ST_tile A1_db[2], Bl_db[2], Br_db[2];
 
     // XCD-aware dispatch + GROUP_SIZE_M swizzle for L2 B-tile reuse
     constexpr int NUM_XCDS = 8;
