@@ -115,6 +115,17 @@ aiter的store epilogue用:
 - Half-direct-A (A0 direct, A1 LDS): 3703T (WORSE — global load latency > LDS)
 - Direct-A C++ (23 spills): 2547T (spills kill performance)
 - Compiler flags, unroll sweep: no improvement
+- sched_group_barrier + iglp_opt: 5023T vs 5025T baseline (NO improvement)
+- ds_bpermute wide store: 3321T vs 3953T reference (16% WORSE — LDS latency)
+- GROUP_SIZE_M=16: no improvement on any shape
+- CK without preshuffle: 165T (30× WORSE)
+
+### Assembly analysis findings
+- Compiler generates only 4 instructions gap between MFMA blocks (2 waitcnts + barrier + 1 salu)
+- extract_tile is optimized away (zero v_mov instructions between ds_read and MFMA)
+- 384 MFMAs + 96 ds_reads + 48 buffer_load_lds per 3-unrolled loop body
+- Structural overhead: 28 extra memory ops per iteration vs aiter (B through LDS)
+- Per-MFMA overhead: ~3.6 cycles slower than aiter = ~14% on compute-bound shapes
 
 ### Key discoveries
 1. **C++ structural limit = 4926T** — cannot be broken without ASM rewrite
@@ -124,11 +135,21 @@ aiter的store epilogue用:
 5. **UNROLL_K>1 crashes with K=128256** on ART kernel (code size limit)
 6. **aiter confirmed row-major output** (not transposed)
 
-### Next steps to reach 5484T (97% of aiter)
-1. Full HipKittens3 ART framework rewrite with hand-scheduled inner loop (~3000 lines)
-2. Or: CK (Composable Kernel) backend integration
-3. MFMA operand swap (A↔B) for row-oriented output → vectorized store
-4. See OPTIMIZATION_ROADMAP.md for full plan
+### Remaining 8 shapes below 97% of net aiter (structural gap)
+| Shape | Best | net aiter | net% | Bottleneck |
+|-------|------|-----------|------|------------|
+| 14336×4096×32768 | 4621 | 5054 | 91.4% | Compute (direct-B advantage) |
+| 16384×4096×28672 | 4899 | 5339 | 91.8% | Compute (direct-B advantage) |
+| 28672×32768×4096 | 4000 | 4396 | 91.0% | Store + dispatch |
+| 28672×4096×16384 | 4897 | 5249 | 93.3% | Compute |
+| 16384×28672×2048 | 3216 | 3407 | 94.4% | Store + dispatch |
+| 32768×4096×14336 | 4810 | 5138 | 93.6% | Compute |
+| 14336×32768×4096 | 4086 | 4323 | 94.5% | Store + dispatch |
+| 16384×28672×4096 | 4075 | 4292 | 94.9% | Store + dispatch |
+
+### Next steps (require fundamental architecture change)
+1. Full hand-written ASM kernel (multi-month effort) — eliminates B LDS overhead via direct-B with runtime shuffle
+2. Or: accept 91-95% on 8 shapes as C++ structural limit
 
 ## 关键文件索引
 | 文件 | 用途 |
