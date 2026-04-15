@@ -1160,42 +1160,131 @@ void mxfp4_art_kernel(const gluon_globals g) {
             );
         }
 
-        // Wait for A1 global loads (buffer_load_dwordx4 from Step 1)
+        // Wait for A1 global loads from Step 1's buffer_loads
         asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
 
-        // Prefetch next B tiles to LDS (for bt+2)
+        // B prefetch to LDS + barrier for double-buffer
         if (bt + 2 < k_byte_iters) {
             load_b_tiles(bt + 2, cur);
         }
-        // Barrier for LDS double-buffer (previous B tile prefetch must complete)
-        // Actually, the barrier should happen BEFORE we read the next B tile.
-        // For the pipeline: bt's B tiles were loaded in prologue or bt-2's slot.
-        // We need the barrier before Step 3's B read from nxt slot.
-
-        // Prefetch next B tiles to LDS
-        if (bt + 2 < k_byte_iters) {
-            load_b_tiles(bt + 2, cur);
-        }
+        asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
         __builtin_amdgcn_s_barrier();
 
-        // ═══ Step 3: A1×Bl (32 MFMAs) ═══
-        art_32mfma<256+128, 126, 30, 168, 158>();
+        // B tile prefetch params for bt+2
         #pragma unroll
         for (int i = 0; i < PF_MPT; ++i) emit_one_pf(pf_bl_p, i);
-
-        // ═══ Step 4: A1×Br (32 MFMAs) ═══
-        art_32mfma<256+192, 126, 94, 168, 160>();
         #pragma unroll
         for (int i = 0; i < PF_MPT; ++i) emit_one_pf(pf_br_p, i);
 
-        // Load next Bl from LDS + next A0 from global
-        asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
-        __builtin_amdgcn_s_barrier();
-        art_load_b_from_lds<30>(nxt_bl_p0, nxt_bl_p1);
-        if (bt + 1 < k_byte_iters) {
-            uint32_t a0_soff = __builtin_amdgcn_readfirstlane(a0_soff_base + (bt + 1) * BK);
-            art_load_a_from_global<62>(srd_a, a_voffset_base, a0_soff);
+        // ═══ Steps 3+4: monolithic 64 MFMAs + 8 ds_read Bl[nxt] + 8 buffer_load A0[nxt] ═══
+        {
+            uint32_t nxt_a0_soff = __builtin_amdgcn_readfirstlane(
+                a0_soff_base + (bt + 1 < k_byte_iters ? bt + 1 : bt) * BK);
+            constexpr uint32_t ss = 16 * (K_DIM / 2);
+            uint32_t s0 = nxt_a0_soff, s1 = nxt_a0_soff + 64;
+            uint32_t s2 = nxt_a0_soff + ss, s3 = nxt_a0_soff + ss + 64;
+            uint32_t s4 = nxt_a0_soff + 2*ss, s5 = nxt_a0_soff + 2*ss + 64;
+            uint32_t s6 = nxt_a0_soff + 3*ss, s7 = nxt_a0_soff + 3*ss + 64;
+            asm volatile(
+                // ── Step 3: A1×Bl (32 MFMAs) + 8 buffer_load A0[nxt]→v[62:93] ──
+                // A1=v[126:157], Bl=v[30:61], acc=a[128:191], scales=v[168:169]/v[158:159]
+                // Row 0 Phase 0: 4 MFMAs + 2 buffer_load A0[nxt]
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[128:131], v[126:129], v[30:33], a[128:131], v[168], v[158] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[132:135], v[126:129], v[38:41], a[132:135], v[168], v[158] op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+                "buffer_load_dwordx4 v[62:65], %2, %3, %4 offen\n"
+                "buffer_load_dwordx4 v[66:69], %2, %3, %5 offen\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[136:139], v[126:129], v[46:49], a[136:139], v[168], v[159] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[140:143], v[126:129], v[54:57], a[140:143], v[168], v[159] op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+                // Row 0 Phase 1: 4 MFMAs + 2 buffer_load A0[nxt]
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[128:131], v[130:133], v[34:37], a[128:131], v[168], v[158] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[132:135], v[130:133], v[42:45], a[132:135], v[168], v[158] op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+                "buffer_load_dwordx4 v[70:73], %2, %3, %6 offen\n"
+                "buffer_load_dwordx4 v[74:77], %2, %3, %7 offen\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[136:139], v[130:133], v[50:53], a[136:139], v[168], v[159] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[140:143], v[130:133], v[58:61], a[140:143], v[168], v[159] op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+                // Rows 1-3: 24 pure MFMAs + 4 more buffer_load A0[nxt]
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[144:147], v[134:137], v[30:33], a[144:147], v[168], v[158] op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[148:151], v[134:137], v[38:41], a[148:151], v[168], v[158] op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+                "buffer_load_dwordx4 v[78:81], %2, %3, %8 offen\n"
+                "buffer_load_dwordx4 v[82:85], %2, %3, %9 offen\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[152:155], v[134:137], v[46:49], a[152:155], v[168], v[159] op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[156:159], v[134:137], v[54:57], a[156:159], v[168], v[159] op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[144:147], v[138:141], v[34:37], a[144:147], v[168], v[158] op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[148:151], v[138:141], v[42:45], a[148:151], v[168], v[158] op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+                "buffer_load_dwordx4 v[86:89], %2, %3, %10 offen\n"
+                "buffer_load_dwordx4 v[90:93], %2, %3, %11 offen\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[152:155], v[138:141], v[50:53], a[152:155], v[168], v[159] op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[156:159], v[138:141], v[58:61], a[156:159], v[168], v[159] op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[160:163], v[142:145], v[30:33], a[160:163], v[169], v[158] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[164:167], v[142:145], v[38:41], a[164:167], v[169], v[158] op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[168:171], v[142:145], v[46:49], a[168:171], v[169], v[159] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[172:175], v[142:145], v[54:57], a[172:175], v[169], v[159] op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[160:163], v[146:149], v[34:37], a[160:163], v[169], v[158] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[164:167], v[146:149], v[42:45], a[164:167], v[169], v[158] op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[168:171], v[146:149], v[50:53], a[168:171], v[169], v[159] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[172:175], v[146:149], v[58:61], a[172:175], v[169], v[159] op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[176:179], v[150:153], v[30:33], a[176:179], v[169], v[158] op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[180:183], v[150:153], v[38:41], a[180:183], v[169], v[158] op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[184:187], v[150:153], v[46:49], a[184:187], v[169], v[159] op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[188:191], v[150:153], v[54:57], a[188:191], v[169], v[159] op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[176:179], v[154:157], v[34:37], a[176:179], v[169], v[158] op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[180:183], v[154:157], v[42:45], a[180:183], v[169], v[158] op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[184:187], v[154:157], v[50:53], a[184:187], v[169], v[159] op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[188:191], v[154:157], v[58:61], a[188:191], v[169], v[159] op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+                // ── Step 4: A1×Br (32 MFMAs) + 8 ds_read Bl[nxt]→v[30:61] ──
+                // A1=v[126:157], Br=v[94:125], acc=a[192:255], scales=v[168:169]/v[160:161]
+                // Bl[nxt] ds_reads are SAFE here: Step 4 uses Br not Bl
+                // Row 0 Phase 0: 4 MFMAs + 4 ds_read Bl[nxt]
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[192:195], v[126:129], v[94:97], a[192:195], v[168], v[160] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+                "ds_read_b128 v[30:33], %0 offset:0\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[196:199], v[126:129], v[102:105], a[196:199], v[168], v[160] op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+                "ds_read_b128 v[34:37], %1 offset:0\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[200:203], v[126:129], v[110:113], a[200:203], v[168], v[161] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+                "ds_read_b128 v[38:41], %0 offset:2048\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[204:207], v[126:129], v[118:121], a[204:207], v[168], v[161] op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+                "ds_read_b128 v[42:45], %1 offset:2048\n"
+                // Row 0 Phase 1: 4 MFMAs + 4 ds_read Bl[nxt]
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[192:195], v[130:133], v[98:101], a[192:195], v[168], v[160] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+                "ds_read_b128 v[46:49], %0 offset:4096\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[196:199], v[130:133], v[106:109], a[196:199], v[168], v[160] op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+                "ds_read_b128 v[50:53], %1 offset:4096\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[200:203], v[130:133], v[114:117], a[200:203], v[168], v[161] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+                "ds_read_b128 v[54:57], %0 offset:6144\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[204:207], v[130:133], v[122:125], a[204:207], v[168], v[161] op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+                "ds_read_b128 v[58:61], %1 offset:6144\n"
+                // Rows 1-3: 24 pure MFMAs
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[208:211], v[134:137], v[94:97], a[208:211], v[168], v[160] op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[212:215], v[134:137], v[102:105], a[212:215], v[168], v[160] op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[216:219], v[134:137], v[110:113], a[216:219], v[168], v[161] op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[220:223], v[134:137], v[118:121], a[220:223], v[168], v[161] op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[208:211], v[138:141], v[98:101], a[208:211], v[168], v[160] op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[212:215], v[138:141], v[106:109], a[212:215], v[168], v[160] op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[216:219], v[138:141], v[114:117], a[216:219], v[168], v[161] op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[220:223], v[138:141], v[122:125], a[220:223], v[168], v[161] op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[224:227], v[142:145], v[94:97], a[224:227], v[169], v[160] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[228:231], v[142:145], v[102:105], a[228:231], v[169], v[160] op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[232:235], v[142:145], v[110:113], a[232:235], v[169], v[161] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[236:239], v[142:145], v[118:121], a[236:239], v[169], v[161] op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[224:227], v[146:149], v[98:101], a[224:227], v[169], v[160] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[228:231], v[146:149], v[106:109], a[228:231], v[169], v[160] op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[232:235], v[146:149], v[114:117], a[232:235], v[169], v[161] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[236:239], v[146:149], v[122:125], a[236:239], v[169], v[161] op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[240:243], v[150:153], v[94:97], a[240:243], v[169], v[160] op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[244:247], v[150:153], v[102:105], a[244:247], v[169], v[160] op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[248:251], v[150:153], v[110:113], a[248:251], v[169], v[161] op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[252:255], v[150:153], v[118:121], a[252:255], v[169], v[161] op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[240:243], v[154:157], v[98:101], a[240:243], v[169], v[160] op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[244:247], v[154:157], v[106:109], a[244:247], v[169], v[160] op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[248:251], v[154:157], v[114:117], a[248:251], v[169], v[161] op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+                "v_mfma_scale_f32_16x16x128_f8f6f4 a[252:255], v[154:157], v[122:125], a[252:255], v[169], v[161] op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+                : : "v"(nxt_bl_p0), "v"(nxt_bl_p1),
+                    "v"(a_voffset_base), "s"(srd_a),
+                    "s"(s0), "s"(s1), "s"(s2), "s"(s3),
+                    "s"(s4), "s"(s5), "s"(s6), "s"(s7)
+                : "memory"
+            );
         }
+        // Wait for Bl[nxt] ds_reads + A0[nxt] buffer_loads
         asm volatile("s_waitcnt vmcnt(0) lgkmcnt(0)" ::: "memory");
     }
 
