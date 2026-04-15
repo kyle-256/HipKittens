@@ -88,6 +88,7 @@ struct operand_swap_debug_globals {
 using fp4_intx8_t   = int __attribute__((__vector_size__(8 * sizeof(int))));
 using fp4_intx4_t   = int __attribute__((__vector_size__(4 * sizeof(int))));
 using fp4_floatx4_t = float __attribute__((__vector_size__(4 * sizeof(float))));
+using u32x2_t       = unsigned int __attribute__((ext_vector_type(2)));
 
 __device__ __forceinline__ fp4_intx4_t fp4_lo4(const fp4_intx8_t& x) {
     return __builtin_shufflevector(x, x, 0, 1, 2, 3);
@@ -726,6 +727,53 @@ __device__ __forceinline__ void store_acc_block_inner_transpose(
             dst_ptr[row * stride + col + 1] = s[1];
             dst_ptr[row * stride + col + 2] = s[2];
             dst_ptr[row * stride + col + 3] = s[3];
+        }
+    }
+}
+
+__device__ __forceinline__ void store_acc_block_inner_permlane(
+    const _gl_float &out, const fp4_floatx4_t acc[16], int row_base)
+{
+    const int lid = kittens::laneid();
+    const int lane_group = lid / 16;
+    const int lane_pos = lid % 16;
+    const bool write_lane = (lane_group & 1) == 0;
+
+    const int stride = out.cols();
+    float *dst_ptr = out.raw_ptr + static_cast<size_t>(row_base) * stride;
+
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            fp4_floatx4_t s = acc[i * 4 + j];
+            u32x2_t sw0 = __builtin_amdgcn_permlane16_swap(
+                std::bit_cast<unsigned int>(s[0]),
+                std::bit_cast<unsigned int>(s[0]),
+                false, false);
+            u32x2_t sw1 = __builtin_amdgcn_permlane16_swap(
+                std::bit_cast<unsigned int>(s[1]),
+                std::bit_cast<unsigned int>(s[1]),
+                false, false);
+            u32x2_t sw2 = __builtin_amdgcn_permlane16_swap(
+                std::bit_cast<unsigned int>(s[2]),
+                std::bit_cast<unsigned int>(s[2]),
+                false, false);
+            u32x2_t sw3 = __builtin_amdgcn_permlane16_swap(
+                std::bit_cast<unsigned int>(s[3]),
+                std::bit_cast<unsigned int>(s[3]),
+                false, false);
+            if (!write_lane) continue;
+            const int row = i * 16 + lane_pos;
+            const int col = j * 16 + 8 * (lane_group / 2);
+            dst_ptr[row * stride + col + 0] = std::bit_cast<float>(sw0[0]);
+            dst_ptr[row * stride + col + 1] = std::bit_cast<float>(sw1[0]);
+            dst_ptr[row * stride + col + 2] = std::bit_cast<float>(sw2[0]);
+            dst_ptr[row * stride + col + 3] = std::bit_cast<float>(sw3[0]);
+            dst_ptr[row * stride + col + 4] = std::bit_cast<float>(sw0[1]);
+            dst_ptr[row * stride + col + 5] = std::bit_cast<float>(sw1[1]);
+            dst_ptr[row * stride + col + 6] = std::bit_cast<float>(sw2[1]);
+            dst_ptr[row * stride + col + 7] = std::bit_cast<float>(sw3[1]);
         }
     }
 }
@@ -1710,12 +1758,14 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 #if SWAP_STEP12_MAIN
     store_block_inner(acc_A0Bl, 0, 0);
     store_block_inner(acc_A0Br, 0, 1);
+    store_block_inner(acc_A1Bl, 1, 0);
+    store_block_inner(acc_A1Br, 1, 1);
 #else
     store_block(acc_A0Bl, 0, 0);
     store_block(acc_A0Br, 0, 1);
-#endif
     store_block_inner(acc_A1Bl, 1, 0);
     store_block_inner(acc_A1Br, 1, 1);
+#endif
 #else
     store_block(acc_A0Bl, 0, 0);
     store_block(acc_A0Br, 0, 1);
@@ -1870,6 +1920,7 @@ void mxfp4_operand_swap_block_kernel(const operand_swap_debug_globals g) {
 
     store_acc_block_standard(g.out, acc_orig, 0);
     store_acc_block_inner_transpose(g.out, acc_swap_sel, 64);
+    store_acc_block_inner_permlane(g.out, acc_swap_sel, 128);
 }
 
 template<bool SWAP_STEP34, bool USE_LDS_STEP34 = false, bool USE_MAINLIKE_STEP34 = false>

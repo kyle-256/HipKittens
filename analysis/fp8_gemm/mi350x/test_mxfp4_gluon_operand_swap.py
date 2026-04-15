@@ -75,7 +75,7 @@ def main() -> None:
     active_swap_step34_with_lds_out = torch.empty((M, N), dtype=torch.float32, device="cuda")
     active_swap_step34_mainlike_out = torch.empty((M, N), dtype=torch.float32, device="cuda")
     active_swap_all_nonfused_out = torch.empty((M, N), dtype=torch.float32, device="cuda")
-    swap_out = torch.empty((128, 64), dtype=torch.float32, device="cuda")
+    swap_out = torch.empty((192, 64), dtype=torch.float32, device="cuda")
 
     tk_mxfp4_gluon_cpp.debug_active_block(a, b, a_sc, b_sc, active_out)
     tk_mxfp4_gluon_cpp.debug_active_block_swap_step34(a, b, a_sc, b_sc, active_swap_step34_out)
@@ -94,7 +94,8 @@ def main() -> None:
     active_swap_step34_mainlike_err = (active_swap_step34_mainlike_out - ref).abs().max().item()
     active_swap_all_nonfused_err = (active_swap_all_nonfused_out - ref).abs().max().item()
     orig_block_err = (swap_out[:64, :] - ref00).abs().max().item()
-    swap_block_err = (swap_out[64:, :] - ref00).abs().max().item()
+    swap_block_err = (swap_out[64:128, :] - ref00).abs().max().item()
+    permlane_block_err = (swap_out[128:192, :] - ref00).abs().max().item()
 
     print(f"debug_active_block max_err: {active_err:.6f}")
     print(f"debug_active_block_swap_step34 max_err: {active_swap_step34_err:.6f}")
@@ -103,6 +104,7 @@ def main() -> None:
     print(f"debug_active_block_swap_all_nonfused max_err: {active_swap_all_nonfused_err:.6f}")
     print(f"debug_operand_swap_block orig max_err: {orig_block_err:.6f}")
     print(f"debug_operand_swap_block swap_sel max_err: {swap_block_err:.6f}")
+    print(f"debug_operand_swap_block permlane max_err: {permlane_block_err:.6f}")
 
     ok = (
         active_err == 0.0
@@ -112,6 +114,7 @@ def main() -> None:
         and active_swap_all_nonfused_err == 0.0
         and orig_block_err == 0.0
         and swap_block_err == 0.0
+        and permlane_block_err == 0.0
     )
     print(f"Result: {'PASS' if ok else 'FAIL'}")
     if not ok:
