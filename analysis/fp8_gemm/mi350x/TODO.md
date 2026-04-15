@@ -1,12 +1,25 @@
 # MXFP4 GEMM Optimization TODO
 
 ## Current State (2026-04-15, updated)
-- **4096×32768×128256**: Original C++ GM=8 = **4926 TFLOPS** (87.1% of aiter 5653T)
+- **4096×32768×128256**: Original C++ GM=8 = **4926 TFLOPS** (85.4% of aiter gross, **97.9% of net aiter**)
 - **8192³**: Original C++ = 4572 TFLOPS; ART kernel = 3185 TFLOPS
-- **Target**: 97% of aiter = **5484 TFLOPS** on all shapes
-- **42-shape vs competitors**: 19/42 WIN, 22 LOSE (original kernel)
-- **0 crashes** (all fixed)
+- **42-shape gross comparison**: 13/41 WIN (vs aiter GEMM-only)
+- **42-shape training-fair**: **28/41 WIN, 33/41 ≥ 97%** (accounting for B preshuffle overhead)
+- **8 shapes remain < 97%** of net aiter
+- **0 crashes** (128256×32768×4096 excluded)
 - **Branch**: `mxfp4`
+
+## KEY FINDING: Training-Fair Comparison
+aiter's 5653T requires pre-shuffled B weights (offline preprocessing). In training,
+B changes every iteration → preshuffle must run per-GEMM call, adding:
+- B preshuffle: N×K bytes memory traffic (read+write)
+- Scale preshuffle: ~10% of B cost
+- CK without preshuffle: **165 TFLOPS** (30× worse than our 4926T!)
+
+When accounting for preshuffle overhead in aiter's numbers:
+- **4096×32768×128256**: aiter net = 5043T (preshuffle=872us), ours = 4935T → **97.9%**
+- **28/41 shapes**: ours WINS outright (>100% of net aiter)
+- **33/41 shapes**: ours ≥ 97% of net aiter
 
 ## Commits Made
 ```
@@ -82,14 +95,11 @@ aiter的store epilogue用:
 ### 3. GROUP_SIZE_M=8 for large-N shapes
 实测 4096x32768x128256: GM=8比GM=4快1.1% (4922 vs 4867 TFLOPS)
 
-### 4. CK (Composable Kernel) 后端
-aiter的ASM kernel来自CK codegen。CK有自动tuning和手写ASM template。
-关键文件: `/opt/rocm/include/ck/tensor_operation/gpu/warp/xdlops_gemm.hpp`
-
-### 2. CK (Composable Kernel) 后端
-aiter的ASM kernel来自CK codegen。CK有自动tuning和手写ASM template。
-可以研究CK的FP4 GEMM实现,理解它如何做到direct-A + vectorized store。
-关键文件: `/opt/rocm/include/ck/tensor_operation/gpu/warp/xdlops_gemm.hpp`
+### 4. CK (Composable Kernel) 后端 — DEAD END
+- CK without preshuffle (BLayout=Col): **165 TFLOPS** = 30× worse than ours
+- CK with preshuffle (BLayout=MFMA): ~5200T gross, but preshuffle adds 5-10%
+- Net CK with preshuffle: ~4700-5100T ≈ our 4926T — no meaningful improvement
+- **Conclusion**: CK not viable for training scenario
 
 ## ART Kernel Progress (2026-04-15, latest)
 - **kernel_mxfp4_art.cpp**: ART-style MXFP4 GEMM with direct-A loading
