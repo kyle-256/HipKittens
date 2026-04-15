@@ -189,9 +189,8 @@ __global__ void attend_bwd_combined_d192v128_ker(
     st_bf<BLOCK_KV, D_QK, st_32x32_s> (&K_smem)     = al.allocate<st_bf<BLOCK_KV, D_QK, st_32x32_s>>();
     st_bf<BLOCK_KV, D_V,  st_32x32_s> (&V_smem)     = al.allocate<st_bf<BLOCK_KV, D_V,  st_32x32_s>>();
     // Double-buffered Q/dO
-    st_bf<Q_TILE, D_QK, st_32x32_s>   (&Q_smem)[2]      = al.allocate<st_bf<Q_TILE, D_QK, st_32x32_s>, 2>();
-    st_bf<Q_TILE, D_QK, st_8x32_s>    (&Q_smem_col)[2]  = al.allocate<st_bf<Q_TILE, D_QK, st_8x32_s>, 2>();
-    st_bf<Q_TILE, D_V,  st_32x32_s>   (&dO_smem)[2]     = al.allocate<st_bf<Q_TILE, D_V,  st_32x32_s>, 2>();
+    st_bf<Q_TILE, D_QK, st_32x32_s>   (&Q_smem)[2]  = al.allocate<st_bf<Q_TILE, D_QK, st_32x32_s>, 2>();
+    st_bf<Q_TILE, D_V,  st_32x32_s>   (&dO_smem)[2] = al.allocate<st_bf<Q_TILE, D_V,  st_32x32_s>, 2>();
     sv_fl<Q_TILE> (&L_smem)[2]     = al.allocate<sv_fl<Q_TILE>, 2>();
     sv_fl<Q_TILE> (&delta_smem)[2] = al.allocate<sv_fl<Q_TILE>, 2>();
 
@@ -231,7 +230,6 @@ __global__ void attend_bwd_combined_d192v128_ker(
             const int qi0 = first_q;
             const int qh0 = kv_head * GROUP_SIZE;
             G::load<QKVO_AXIS, false>(Q_smem[0], g.Q, {batch, qi0, qh0, 0});
-            G::load<QKVO_AXIS, false>(Q_smem_col[0], g.Q, {batch, qi0, qh0, 0});
             G::load<QKVO_AXIS, false>(dO_smem[0], g.dOg, {batch, qi0, qh0, 0});
             load_L_delta_direct(reinterpret_cast<float*>(&L_smem[0]),
                                 g.L_vec, batch, qh0, qi0);
@@ -257,7 +255,6 @@ __global__ void attend_bwd_combined_d192v128_ker(
                 const int nqho = (iter + 1) % GROUP_SIZE;
                 const int nqh  = kv_head * GROUP_SIZE + nqho;
                 G::load<QKVO_AXIS, false>(Q_smem[nxt], g.Q, {batch, nqi, nqh, 0});
-                G::load<QKVO_AXIS, false>(Q_smem_col[nxt], g.Q, {batch, nqi, nqh, 0});
                 G::load<QKVO_AXIS, false>(dO_smem[nxt], g.dOg, {batch, nqi, nqh, 0});
                 load_L_delta_direct(reinterpret_cast<float*>(&L_smem[nxt]),
                                     g.L_vec, batch, nqh, nqi);
@@ -356,8 +353,16 @@ __global__ void attend_bwd_combined_d192v128_ker(
                 using Q_chunk_rt = rt<bf16, 16, 32, col_l, rt_16x32_4_s>;
                 Q_chunk_rt &Q_col_d32_lo = reinterpret_cast<Q_chunk_rt &>(Q_col.tiles[0][1]);
                 Q_chunk_rt &Q_col_d32_hi = reinterpret_cast<Q_chunk_rt &>(Q_col.tiles[1][1]);
-                load(Q_col_d32_lo, subtile_inplace<16, 32>(Q_smem_col[cur], {0, 1}));
-                load(Q_col_d32_hi, subtile_inplace<16, 32>(Q_smem_col[cur], {1, 1}));
+                coord<> q_d32_lo_idx{batch, qi * Q_TILE, q_head, 32};
+                coord<> q_d32_hi_idx{batch, qi * Q_TILE + 16, q_head, 32};
+                load<QKVO_AXIS, Q_chunk_rt, _gl>(Q_col_d32_lo, g.Q, q_d32_lo_idx);
+                load<QKVO_AXIS, Q_chunk_rt, _gl>(Q_col_d32_hi, g.Q, q_d32_hi_idx);
+                Q_chunk_rt &Q_col_d64_lo = reinterpret_cast<Q_chunk_rt &>(Q_col.tiles[0][2]);
+                Q_chunk_rt &Q_col_d64_hi = reinterpret_cast<Q_chunk_rt &>(Q_col.tiles[1][2]);
+                coord<> q_d64_lo_idx{batch, qi * Q_TILE, q_head, 64};
+                coord<> q_d64_hi_idx{batch, qi * Q_TILE + 16, q_head, 64};
+                load<QKVO_AXIS, Q_chunk_rt, _gl>(Q_col_d64_lo, g.Q, q_d64_lo_idx);
+                load<QKVO_AXIS, Q_chunk_rt, _gl>(Q_col_d64_hi, g.Q, q_d64_hi_idx);
 
                 rt<bf16, Q_TILE, KV_BLOCK, col_l, rt_32x32_s> dS_bf;
                 copy(dS_bf, dP_ij);
