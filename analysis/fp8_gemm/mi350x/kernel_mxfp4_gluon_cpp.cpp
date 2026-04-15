@@ -57,6 +57,15 @@ constexpr int k_byte_iters = K_BYTES / BK;
 #if SWAP_STEP12_MAIN && !SWAP_STEP34_MAIN
 #error "SWAP_STEP12_MAIN requires SWAP_STEP34_MAIN"
 #endif
+#ifndef MAIN_PERMLANE_BF16_STORE_POC
+#define MAIN_PERMLANE_BF16_STORE_POC 0
+#endif
+#if MAIN_PERMLANE_BF16_STORE_POC && !SWAP_STEP34_MAIN
+#error "MAIN_PERMLANE_BF16_STORE_POC requires SWAP_STEP34_MAIN"
+#endif
+#if MAIN_PERMLANE_BF16_STORE_POC && !SWAP_STEP12_MAIN
+#error "MAIN_PERMLANE_BF16_STORE_POC requires SWAP_STEP12_MAIN"
+#endif
 
 #define MXFP4_STR_IMPL(x) #x
 #define MXFP4_STR(x) MXFP4_STR_IMPL(x)
@@ -793,6 +802,62 @@ __device__ __forceinline__ void store_active_block_inner_permlane(
     float *dst_ptr = g.out.raw_ptr + static_cast<size_t>(tile_r * 64) * row_stride
                    + static_cast<size_t>(tile_c * 64);
     store_acc_block_inner_permlane_tile(dst_ptr, row_stride, acc);
+}
+
+__device__ __forceinline__ void store_c_block_inner_permlane_tile(
+    bf16 *dst_ptr, int row_stride, const fp4_floatx4_t acc[16], float scale)
+{
+    const int lid = kittens::laneid();
+    const int lane_group = lid / 16;
+    const int lane_pos = lid % 16;
+    const bool write_lane = (lane_group & 1) == 0;
+
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            fp4_floatx4_t s = acc[i * 4 + j] * scale;
+            u32x2_t sw0 = __builtin_amdgcn_permlane16_swap(
+                std::bit_cast<unsigned int>(s[0]),
+                std::bit_cast<unsigned int>(s[0]),
+                false, false);
+            u32x2_t sw1 = __builtin_amdgcn_permlane16_swap(
+                std::bit_cast<unsigned int>(s[1]),
+                std::bit_cast<unsigned int>(s[1]),
+                false, false);
+            u32x2_t sw2 = __builtin_amdgcn_permlane16_swap(
+                std::bit_cast<unsigned int>(s[2]),
+                std::bit_cast<unsigned int>(s[2]),
+                false, false);
+            u32x2_t sw3 = __builtin_amdgcn_permlane16_swap(
+                std::bit_cast<unsigned int>(s[3]),
+                std::bit_cast<unsigned int>(s[3]),
+                false, false);
+            if (!write_lane) continue;
+            const int row = i * 16 + lane_pos;
+            const int col = j * 16 + 8 * (lane_group / 2);
+            dst_ptr[row * row_stride + col + 0] = base_types::convertor<bf16, float>::convert(std::bit_cast<float>(sw0[0]));
+            dst_ptr[row * row_stride + col + 1] = base_types::convertor<bf16, float>::convert(std::bit_cast<float>(sw1[0]));
+            dst_ptr[row * row_stride + col + 2] = base_types::convertor<bf16, float>::convert(std::bit_cast<float>(sw2[0]));
+            dst_ptr[row * row_stride + col + 3] = base_types::convertor<bf16, float>::convert(std::bit_cast<float>(sw3[0]));
+            dst_ptr[row * row_stride + col + 4] = base_types::convertor<bf16, float>::convert(std::bit_cast<float>(sw0[1]));
+            dst_ptr[row * row_stride + col + 5] = base_types::convertor<bf16, float>::convert(std::bit_cast<float>(sw1[1]));
+            dst_ptr[row * row_stride + col + 6] = base_types::convertor<bf16, float>::convert(std::bit_cast<float>(sw2[1]));
+            dst_ptr[row * row_stride + col + 7] = base_types::convertor<bf16, float>::convert(std::bit_cast<float>(sw3[1]));
+        }
+    }
+}
+
+__device__ __forceinline__ void store_c_block_inner_permlane(
+    const gluon_globals &g, const fp4_floatx4_t acc[16],
+    int br, int bc, int wm, int wn, int mh, int nh)
+{
+    const int tile_r = br * WARPS_M * 2 + WARPS_M * mh + wm;
+    const int tile_c = bc * WARPS_N * 2 + WARPS_N * nh + wn;
+    const int row_stride = g.c.cols();
+    bf16 *dst_ptr = g.c.raw_ptr + static_cast<size_t>(tile_r * 64) * row_stride
+                  + static_cast<size_t>(tile_c * 64);
+    store_c_block_inner_permlane_tile(dst_ptr, row_stride, acc, g.scale);
 }
 
 // ── Merged Steps 1+2: 64 MFMAs + 16 ds_reads (Br + A1) in one asm block ──
@@ -1749,6 +1814,9 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 
 #if SWAP_STEP34_MAIN
     auto store_block_inner = [&](const fp4_floatx4_t acc[16], int mh, int nh) {
+#if MAIN_PERMLANE_BF16_STORE_POC
+        store_c_block_inner_permlane(g, acc, br, bc, wm, wn, mh, nh);
+#else
         const int lid = kittens::laneid();
         const int tile_r = br * WARPS_M * 2 + WARPS_M * mh + wm;
         const int tile_c = bc * WARPS_N * 2 + WARPS_N * nh + wn;
@@ -1771,6 +1839,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
                 dst_ptr[row * row_stride + col + 3] = base_types::convertor<bf16, float>::convert(s[3]);
             }
         }
+#endif
     };
 #if SWAP_STEP12_MAIN
     store_block_inner(acc_A0Bl, 0, 0);
