@@ -318,6 +318,9 @@ def main():
         ("_u8", "-DUNROLL_K=8"),                           # GM4, unroll 8
         ("_u32", "-DUNROLL_K=32"),                         # GM4, unroll 32
         ("_gm8u16", "-DGROUP_SIZE_M=8 -DUNROLL_K=16"),   # GM8, unroll 16
+        ("_gm16", "-DGROUP_SIZE_M=16"),                    # GM16, auto-unroll
+        ("_gm8u8", "-DGROUP_SIZE_M=8 -DUNROLL_K=8"),     # GM8, unroll 8
+        ("_gm16u16", "-DGROUP_SIZE_M=16 -DUNROLL_K=16"), # GM16, unroll 16
     ]
     for n_val, k_val in nk_pairs:
         for suffix, cppflags in variants:
