@@ -1088,5 +1088,124 @@ struct zero {
   }
 };
 
+// ═══════════ MXFP4 MFMA with block scaling ═══════════
+// v_mfma_scale_f32_16x16x128_f8f6f4 D[0:3], A[0:3], B[0:3], C[0:3], scaleA, scaleB
+//   op_sel:[SEL_A, SEL_B, 0] op_sel_hi:[HI_A, HI_B, 0] cbsz:4 blgp:4
+//
+// Template params:
+//   GPR_D/A/B/C: register start (0-255=VGPR, 256-511=AGPR)
+//   GPR_SA/SB: scale registers (must be VGPR, <256)
+//   SEL_A/SEL_B: op_sel bits (0 or 1, selects A/B subgroup within KPAIR)
+//   HI_A/HI_B: op_sel_hi bits (0 or 1, selects K-phase lo/hi)
+
+// Helper: generate v[N:N+3] or a[N:N+3] string prefix
+#define _MFMA_FP4_REG(GPR, IDX) \
+    (GPR >= 256 ? "a" : "v"), "n"(GPR >= 256 ? GPR - 256 + IDX : GPR + IDX)
+
+// Main macro: dispatches D/A/B/C to v[] or a[] based on GPR values
+// We generate all 16 combinations via a helper that builds the asm string
+template<int GPR_D, int GPR_A, int GPR_B, int GPR_C, int GPR_SA, int GPR_SB,
+         int SEL_A=0, int SEL_B=0, int HI_A=0, int HI_B=0>
+__device__ __forceinline__ void mfma_scale_f32_16x16x128_fp4() {
+    static_assert(GPR_SA < 256 && GPR_SB < 256, "Scale registers must be VGPRs");
+    // Build op_sel and op_sel_hi strings at compile time via if constexpr
+    // The instruction: v_mfma_scale_f32_16x16x128_f8f6f4 D, A, B, C, SA, SB [modifiers]
+
+    // We need the D register prefix/range, A prefix/range, etc.
+    // Using compile-time dispatch for D/A/B/C v/a prefixes
+
+    constexpr auto d_lo = GPR_D >= 256 ? GPR_D - 256 : GPR_D;
+    constexpr auto d_hi = d_lo + 3;
+    constexpr auto a_lo = GPR_A >= 256 ? GPR_A - 256 : GPR_A;
+    constexpr auto a_hi = a_lo + 3;
+    constexpr auto b_lo = GPR_B >= 256 ? GPR_B - 256 : GPR_B;
+    constexpr auto b_hi = b_lo + 3;
+    constexpr auto c_lo = GPR_C >= 256 ? GPR_C - 256 : GPR_C;
+    constexpr auto c_hi = c_lo + 3;
+
+    // Most common case for GEMM: D=AGPR, A=VGPR, B=VGPR/AGPR, C=AGPR
+    // Generate op_sel/op_sel_hi modifier string
+    // op_sel:[SEL_A, SEL_B, 0]  op_sel_hi:[HI_A, HI_B, 0]
+
+    // For simplicity and correctness, enumerate all op_sel/phase combos
+    // The instruction encoding changes based on op_sel bits
+
+    // Phase 0 (op_sel_hi:[0,0,0]): first 128 FP4 of K-step
+    // Phase 1 (op_sel_hi:[1,1,0]): second 128 FP4 of K-step
+
+    #define _FP4_ASM_BODY(D_PFX, A_PFX, B_PFX, C_PFX, OPSEL, OPSELHI) \
+        asm volatile("v_mfma_scale_f32_16x16x128_f8f6f4 " \
+            D_PFX "[%0:%1], " A_PFX "[%2:%3], " B_PFX "[%4:%5], " \
+            C_PFX "[%6:%7], v[%8], v[%9] " OPSEL " " OPSELHI " cbsz:4 blgp:4" \
+            : : "n"(d_lo), "n"(d_hi), "n"(a_lo), "n"(a_hi), \
+                "n"(b_lo), "n"(b_hi), "n"(c_lo), "n"(c_hi), \
+                "n"(GPR_SA), "n"(GPR_SB))
+
+    // Select op_sel string
+    #define _OPSEL_STR \
+        (SEL_A == 0 && SEL_B == 0) ? "" : \
+        (SEL_A == 0 && SEL_B == 1) ? "op_sel:[0,1,0]" : \
+        (SEL_A == 1 && SEL_B == 0) ? "op_sel:[1,0,0]" : \
+                                     "op_sel:[1,1,0]"
+    // Can't use ternary for asm strings. Use if constexpr instead.
+
+    // Combine: D/A/B/C prefix × op_sel × op_sel_hi
+    // For maximum clarity, spell out the 4 most common D/A/B/C patterns:
+
+    constexpr bool dA = GPR_D >= 256, aA = GPR_A >= 256, bA = GPR_B >= 256, cA = GPR_C >= 256;
+
+    // Build full modifier string based on SEL_A, SEL_B, HI_A, HI_B
+    // Since we can't concatenate strings in constexpr asm, use separate if branches
+
+    // The 4 sel/phase combinations used in KPAIR:
+    // (SEL_A=0, SEL_B=0, HI=0): row 0/2, phase 0, col 0/2
+    // (SEL_A=0, SEL_B=1, HI=0): row 0/2, phase 0, col 1/3
+    // (SEL_A=1, SEL_B=0, HI=0): row 1/3, phase 0, col 0/2
+    // (SEL_A=1, SEL_B=1, HI=0): row 1/3, phase 0, col 1/3
+    // Same 4 with HI=1 for phase 1
+
+    #define _DO_MFMA(DP, AP, BP, CP) do { \
+        if constexpr (SEL_A==0 && SEL_B==0 && HI_A==0 && HI_B==0) { \
+            _FP4_ASM_BODY(DP, AP, BP, CP, "", "op_sel_hi:[0,0,0]"); \
+        } else if constexpr (SEL_A==0 && SEL_B==1 && HI_A==0 && HI_B==0) { \
+            _FP4_ASM_BODY(DP, AP, BP, CP, "op_sel:[0,1,0]", "op_sel_hi:[0,0,0]"); \
+        } else if constexpr (SEL_A==1 && SEL_B==0 && HI_A==0 && HI_B==0) { \
+            _FP4_ASM_BODY(DP, AP, BP, CP, "op_sel:[1,0,0]", "op_sel_hi:[0,0,0]"); \
+        } else if constexpr (SEL_A==1 && SEL_B==1 && HI_A==0 && HI_B==0) { \
+            _FP4_ASM_BODY(DP, AP, BP, CP, "op_sel:[1,1,0]", "op_sel_hi:[0,0,0]"); \
+        } else if constexpr (SEL_A==0 && SEL_B==0 && HI_A==1 && HI_B==1) { \
+            _FP4_ASM_BODY(DP, AP, BP, CP, "", "op_sel_hi:[1,1,0]"); \
+        } else if constexpr (SEL_A==0 && SEL_B==1 && HI_A==1 && HI_B==1) { \
+            _FP4_ASM_BODY(DP, AP, BP, CP, "op_sel:[0,1,0]", "op_sel_hi:[1,1,0]"); \
+        } else if constexpr (SEL_A==1 && SEL_B==0 && HI_A==1 && HI_B==1) { \
+            _FP4_ASM_BODY(DP, AP, BP, CP, "op_sel:[1,0,0]", "op_sel_hi:[1,1,0]"); \
+        } else if constexpr (SEL_A==1 && SEL_B==1 && HI_A==1 && HI_B==1) { \
+            _FP4_ASM_BODY(DP, AP, BP, CP, "op_sel:[1,1,0]", "op_sel_hi:[1,1,0]"); \
+        } \
+    } while(0)
+
+    // Dispatch D/A/B/C VGPR/AGPR prefixes (16 combinations)
+    if constexpr (dA && aA && bA && cA) { _DO_MFMA("a","a","a","a"); }
+    else if constexpr (dA && aA && bA && !cA) { _DO_MFMA("a","a","a","v"); }
+    else if constexpr (dA && aA && !bA && cA) { _DO_MFMA("a","a","v","a"); }
+    else if constexpr (dA && !aA && bA && cA) { _DO_MFMA("a","v","a","a"); }
+    else if constexpr (!dA && aA && bA && cA) { _DO_MFMA("v","a","a","a"); }
+    else if constexpr (dA && aA && !bA && !cA) { _DO_MFMA("a","a","v","v"); }
+    else if constexpr (dA && !aA && bA && !cA) { _DO_MFMA("a","v","a","v"); }
+    else if constexpr (dA && !aA && !bA && cA) { _DO_MFMA("a","v","v","a"); }
+    else if constexpr (!dA && aA && bA && !cA) { _DO_MFMA("v","a","a","v"); }
+    else if constexpr (!dA && aA && !bA && cA) { _DO_MFMA("v","a","v","a"); }
+    else if constexpr (!dA && !aA && bA && cA) { _DO_MFMA("v","v","a","a"); }
+    else if constexpr (dA && !aA && !bA && !cA) { _DO_MFMA("a","v","v","v"); }
+    else if constexpr (!dA && aA && !bA && !cA) { _DO_MFMA("v","a","v","v"); }
+    else if constexpr (!dA && !aA && bA && !cA) { _DO_MFMA("v","v","a","v"); }
+    else if constexpr (!dA && !aA && !bA && cA) { _DO_MFMA("v","v","v","a"); }
+    else { _DO_MFMA("v","v","v","v"); }
+
+    #undef _DO_MFMA
+    #undef _FP4_ASM_BODY
+}
+#undef _MFMA_FP4_REG
+
 } // namespace macros
 } // namespace kittens
