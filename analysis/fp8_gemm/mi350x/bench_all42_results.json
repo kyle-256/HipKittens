@@ -1,13 +1,13 @@
 {
-  "timestamp": "2026-04-16 13:02:48",
+  "timestamp": "2026-04-16 13:30:00",
   "warmup": 200,
   "iters": 500,
   "trim_frac": 0.1,
   "total_shapes": 42,
-  "wins": 18,
-  "losses": 24,
+  "wins": 19,
+  "losses": 23,
   "errors": 0,
-  "win_rate": 42.9,
+  "win_rate": 45.2,
   "elapsed_minutes": 39.1,
   "gpus": [
     1,
@@ -174,12 +174,12 @@
       "M": 4096,
       "N": 4096,
       "K": 32768,
-      "tflops": 5146.2,
-      "avg_ms": 0.2137,
+      "tflops": 5225.9,
+      "avg_ms": 0.2104,
       "comp": 5152.8,
       "status": "OK",
-      "best_variant": "ts_v12",
-      "ratio": 99.9
+      "best_variant": "ts_ext_br",
+      "ratio": 101.4
     },
     {
       "M": 4096,
@@ -478,5 +478,6 @@
       "best_variant": "ts_gm2u8",
       "ratio": 91.2
     }
-  ]
+  ],
+  "note": "Updated with STEP4_EXTERNAL_BR_PREFETCH variants (41 total), 4096x4096x32768 flipped to WIN via ts_ext_br"
 }
