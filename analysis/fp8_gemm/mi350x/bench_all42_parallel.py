@@ -78,6 +78,9 @@ VARIANTS = [
     ("_v16", "v16"), ("_ts_v16", "ts_v16"),
     ("_no_embed", "no_embed"), ("_ts_no_embed", "ts_no_embed"),
     ("_ts_no_embed_v12", "ts_no_embed_v12"),
+    ("_ts_tv16", "ts_tv16"), ("_ts_tv0", "ts_tv0"),
+    ("_gm8_lgk2", "gm8_lgk2"), ("_ts_gm2_lgk2", "ts_gm2_lgk2"),
+    ("_ts_gm2_lgk2_v12", "ts_gm2_lgk2_v12"),
 ]
 
 

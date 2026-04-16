@@ -3,12 +3,12 @@
 ## Current State (2026-04-16)
 - **Repo**: `/shared_nfs/kyle/test/HipKittens`
 - **Branch**: `mxfp4`
-- **42-shape result**: **19/42 WIN** (warmup=200, iters=500, 4-GPU parallel, 62 variants)
-- **上一轮**: 19/42 WIN (confirmed stable with expanded 62-variant auto-tune)
-- **Cursor (Hipkittens2)**: 16/42 WIN (同参数, 25 variants)
+- **42-shape result**: **19/42 WIN** (warmup=200, iters=500, 4-GPU parallel, 95 variants)
+- **上一轮**: 19/42 WIN (confirmed stable — all cross-product expansions exhausted)
+- **Cursor (Hipkittens2)**: 16/42 WIN (同参数, confirmed 2026-04-16T06:26)
 - **我们领先**: 3 WIN
 - **Avg ratio**: 100.8%
-- **Auto-tune variants**: 62 (expanded from 41, saturated)
+- **Auto-tune variants**: 95 (expanded from 90: +TAIL_BARRIER_VMCNT, +GM×LGK cross-products; exhaustively saturated)
 
 ## Recent Commits
 ```
@@ -31,6 +31,8 @@
 10. **STEP3_EMBED_BARRIER** (0,1) — barrier 独立/嵌入 Step3
 11. **62-variant auto-tune** (GM, U, SWAP, TS, V4/8/12/16, SPREAD, PF4, NVS, EXT_BR, LGKMCNT, NO_EMBED, 多轴交叉)
 12. **gl.cuh size_t overflow fix** — 大shape (128256×32768) int溢出修复
+13. **TAIL_BARRIER_VMCNT** — 尾部K迭代单独barrier VMCNT调优 (ts_tv16 在2个shapes上最优)
+14. **GM×LGK cross-products** — gm8_lgk2, ts_gm2_lgk2, ts_gm2_lgk2_v12 (提供 0.1-0.3pp 边际提升)
 
 ## 19 WIN shapes (62-variant benchmark)
 | Shape | TFLOPS | Ratio | Best Variant |
@@ -91,13 +93,16 @@
 | 4096×28672×32768 | 5297 | 93.8% | N=28672, 大K |
 | 32768×4096×14336 | 4905 | 93.9% | M=32768 |
 
-## Auto-tune 空间已饱和 — 本轮验证
+## Auto-tune 空间已饱和 — 多轮验证
 1. **62-variant 全量benchmark**: 41→62 variants, 结果稳定 19/42 WIN
 2. **Cross-product spot tests**: 在 98-99% shapes 上测试 24 个新交叉组合 → 全部无效, flag stacking counterproductive
 3. **UNROLL_K=1,2,4**: 全部比编译器默认差
 4. **Fine-grained VMCNT (6,10,14,16,18,20,24)**: 全部不如 ts_lgk2 (99.5%)
 5. **Fine-grained LGKMCNT (1,3,6)**: LGKMCNT=2 是最优, 其他值更差
 6. **Cursor对比**: Cursor 14 个新 commit 无新思路, 我们变体超集
+7. **LGKMCNT×VMCNT cross-products (15 new)**: lgk2_v4/v12/v16, lgk4_v4/v12/v16, ts_lgk2_v4/v16, ts_lgk4_v4/v12/v16, lgk2_no_embed, ts_lgk2_no_embed, ts_lgk2_no_embed_v12 → 全部无效或退化. 6144×4096×16384 best=99.3% (ts_lgk2_v4), 16384×4096×14336 best=98.2% (ts_lgk2)
+8. **FUSED_STEP34 (14 variants)**: 合并 Step3+Step4 为 64-MFMA 单块. 全面退化 ~7% (f34 系列). ds_read/PF 冲突, 大块内编译器 MFMA 调度过激
+9. **TAIL_BARRIER_VMCNT spot tests (30 new variants on 7 shapes)**: PF_N=2/1, PF4×LGK2, EXT_BR×LGK2, GM×LGK, TAIL_VMCNT, asymmetric PF — 全7个 near-threshold shapes 测试, 0 个 WIN flip. ts_tv16 在 2 shapes 上边际最优 (+0.3pp), gm8_lgk2/ts_gm2_lgk2/ts_gm2_lgk2_v12 各在1个shape上边际最优 (+0.1-0.2pp). PF_N=1/2 全面退化. 不对称PF无效
 
 ## 结构性限制 (不preshuffle B 无法突破)
 - **B走LDS**: 比aiter多18% TCP read traffic, 2x Frac_Wait_Any
@@ -119,13 +124,30 @@
 - **UNROLL_K=1,2,4**: 比编译器默认差
 - **Cross-product flag stacking**: 98-99% shapes 上全部无效
 - **Fine-grained VMCNT/LGKMCNT 微调**: 已穷举, 无增益
+- **LGKMCNT×VMCNT cross-products**: lgk{2,4}×v{4,12,16}×ts×no_embed 全15种 → 无效或退化
+- **FUSED_STEP34**: Step3+Step4 合并为 64-MFMA 块 → 全面退化 ~7% (14 variants tested)
+- **ASM rewriter (s_nop removal)**: 后编译 ASM 重写移除 162 个 s_nop → 破坏正确性(26%元素错误, m0 hazard是硬件强制的), 且性能无变化(+0.15% = noise). Inter-block code 被 MFMA pipeline depth (16 cycles) 完全隐藏
+- **ASM rewriter (PF redistribution)**: Cursor 的 rewriter 不适用(结构不同: 我们是 1×64-MFMA + 8×8-MFMA, Cursor 是 4×32-MFMA; 我们 K≤4096 全展开无 loop)
+- **PF_N=1/2**: 减少 prefetch 深度 → 全面退化 2-6%. PF_N=4 是最优
+- **Asymmetric PF (STEP3_PF_N ≠ STEP4_PF_N)**: 2/8, 8/2 全部不如对称 PF
+- **GM×LGK cross-products**: 边际改进 0.1-0.3pp, 不足以 flip 任何 shape
+- **TAIL_BARRIER_VMCNT tuning (0,4,16)**: ts_tv16 在部分 shapes 边际最优, 但 < 0.5pp 改进
 - 把 preshuffle 时间不算进比较 — 用户明确拒绝过
 
 ## 可能的未来方向 (高风险/高工作量)
-1. **Fused Step34**: 合并 Step3+Step4 为单个 asm block (类似 Step12 fusion), 消除编译器调度gap. 工作量大 (~200行asm, 80+操作数), 预期收益 1-2%
-2. **Asymmetric double-buffering**: A 单 buffer, B 双 buffer, 释放 LDS 空间. 但释放的空间无法用于 BK=256 (AGPR 限制)
-3. **Profile-guided analysis**: 用 ROCm profiler (rocprof) 精确定位 stall 位置
-4. **Pre-shuffle B**: 唯一能从根本上消除 B-LDS 瓶颈的方案, 但需要在 Python 层增加 preshuffle pass
+1. ~~**Fused Step34**~~ — DEAD END, 测过, 全面退化 ~7%
+2. ~~**ASM rewriter**~~ — DEAD END, s_nop 是硬件强制 hazard, inter-block code 被 MFMA pipeline 隐藏, 无增益
+3. **Pre-shuffle B** — 唯一能从根本上消除 B-LDS 瓶颈的方案, 但需要 Python 层增加 preshuffle pass. 训练场景 preshuffle 成本可分摊, 推理场景不可接受
+4. **rocprof 分析** (已做): s_nop=1.4%, waits=3.4%, epilogue_stores=10.5%. 瓶颈在结构层面 (B-LDS traffic), 不在 instruction scheduling
+
+## Rocprof 分析结论 (2026-04-16)
+对生产 .s (N=32768, K=4096, TS=1, LGK2) 做了 PC sampling 和 assembly 分析:
+- 2048 MFMAs, 512 ds_reads, 165 s_nop, 313 asm block pairs
+- **s_nop 全部在 PF 组里** (162/165 在 buffer_load...lds 前), 是 m0→buffer_load 硬件 hazard delay
+- **Inter-block code 被 MFMA pipeline 完全隐藏**: MFMA pipeline depth ≥16 cycles, inter-block gap ≤6 cycles
+- **63 s_nop after ASMEND**: m0 在 asm 块前设定, 块内不 clobber m0, 理论可移除但实际增益 0
+- **99 s_nop in PF pairs**: m0→buffer_load 硬件 hazard, 移除导致 26% 计算结果错误
+- **编译→重写→重组装 pipeline 验证可行** (rewrite_asm.py + build_rewrite.sh), 但无可行的重写优化
 
 ## Benchmark Rules
 - **warmup=200, iters=500**, trimmed mean 10%
@@ -140,7 +162,8 @@
 | `bench_all_42.py` | 42-shape benchmark (62 auto-tune variants, sequential) |
 | `bench_all42_parallel.py` | 42-shape benchmark (parallel across GPUs, 62 variants) |
 | `build_all42_parallel.py` | 并行编译器 (62 variants × 26 N,K pairs) |
-| `spot_test.py` | 单shape多variant测试 (63 variants) |
+| `spot_test.py` | 单shape多variant测试 (95 variants) |
+| `spot_new_variants.py` | 新variant快速spot测试 (30 new + 9 reference) |
 | `bench_all42_results.json` | 最新42-shape结果 (19/42 WIN, 62 variants) |
 
 ## 环境设置 (换机器必读)

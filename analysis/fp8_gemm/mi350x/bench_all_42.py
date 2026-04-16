@@ -364,6 +364,22 @@ def main():
         ("_ts_lgk2", "-DTAIL_SPLIT=1 -DSTEP12_BR_LGKMCNT=2"),       # TS+lgkmcnt2
         ("_ts_lgk4", "-DTAIL_SPLIT=1 -DSTEP12_BR_LGKMCNT=4"),       # TS+lgkmcnt4
         ("_ts_lgk2_v12", "-DTAIL_SPLIT=1 -DSTEP12_BR_LGKMCNT=2 -DSTEP3_BARRIER_VMCNT=12"), # TS+lgk2+V12
+        # LGKMCNT × VMCNT cross-products
+        ("_lgk2_v4", "-DSTEP12_BR_LGKMCNT=2 -DSTEP3_BARRIER_VMCNT=4"),     # lgk2+V4
+        ("_lgk2_v12", "-DSTEP12_BR_LGKMCNT=2 -DSTEP3_BARRIER_VMCNT=12"),   # lgk2+V12
+        ("_lgk2_v16", "-DSTEP12_BR_LGKMCNT=2 -DSTEP3_BARRIER_VMCNT=16"),   # lgk2+V16
+        ("_lgk4_v4", "-DSTEP12_BR_LGKMCNT=4 -DSTEP3_BARRIER_VMCNT=4"),     # lgk4+V4
+        ("_lgk4_v12", "-DSTEP12_BR_LGKMCNT=4 -DSTEP3_BARRIER_VMCNT=12"),   # lgk4+V12
+        ("_lgk4_v16", "-DSTEP12_BR_LGKMCNT=4 -DSTEP3_BARRIER_VMCNT=16"),   # lgk4+V16
+        ("_ts_lgk2_v4", "-DTAIL_SPLIT=1 -DSTEP12_BR_LGKMCNT=2 -DSTEP3_BARRIER_VMCNT=4"),   # TS+lgk2+V4
+        ("_ts_lgk2_v16", "-DTAIL_SPLIT=1 -DSTEP12_BR_LGKMCNT=2 -DSTEP3_BARRIER_VMCNT=16"), # TS+lgk2+V16
+        ("_ts_lgk4_v4", "-DTAIL_SPLIT=1 -DSTEP12_BR_LGKMCNT=4 -DSTEP3_BARRIER_VMCNT=4"),   # TS+lgk4+V4
+        ("_ts_lgk4_v12", "-DTAIL_SPLIT=1 -DSTEP12_BR_LGKMCNT=4 -DSTEP3_BARRIER_VMCNT=12"), # TS+lgk4+V12
+        ("_ts_lgk4_v16", "-DTAIL_SPLIT=1 -DSTEP12_BR_LGKMCNT=4 -DSTEP3_BARRIER_VMCNT=16"), # TS+lgk4+V16
+        # LGKMCNT × NO_EMBED crosses
+        ("_lgk2_no_embed", "-DSTEP12_BR_LGKMCNT=2 -DSTEP3_EMBED_BARRIER=0"),               # lgk2+no_embed
+        ("_ts_lgk2_no_embed", "-DTAIL_SPLIT=1 -DSTEP12_BR_LGKMCNT=2 -DSTEP3_EMBED_BARRIER=0"), # TS+lgk2+no_embed
+        ("_ts_lgk2_no_embed_v12", "-DTAIL_SPLIT=1 -DSTEP12_BR_LGKMCNT=2 -DSTEP3_EMBED_BARRIER=0 -DSTEP3_BARRIER_VMCNT=12"), # TS+lgk2+no_embed+V12
         ("_v4", "-DSTEP3_BARRIER_VMCNT=4"),                          # conservative barrier
         ("_ts_v4", "-DTAIL_SPLIT=1 -DSTEP3_BARRIER_VMCNT=4"),        # TS+conservative barrier
         ("_v16", "-DSTEP3_BARRIER_VMCNT=16"),                        # aggressive barrier
@@ -371,6 +387,27 @@ def main():
         ("_no_embed", "-DSTEP3_EMBED_BARRIER=0"),                    # separate barrier
         ("_ts_no_embed", "-DTAIL_SPLIT=1 -DSTEP3_EMBED_BARRIER=0"), # TS+separate barrier
         ("_ts_no_embed_v12", "-DTAIL_SPLIT=1 -DSTEP3_EMBED_BARRIER=0 -DSTEP3_BARRIER_VMCNT=12"), # TS+separate+V12
+        # TAIL_BARRIER_VMCNT variants (separate tail iteration barrier VMCNT)
+        ("_ts_tv16", "-DTAIL_SPLIT=1 -DTAIL_BARRIER_VMCNT=16"),               # TS+tail VMCNT=16
+        ("_ts_tv0", "-DTAIL_SPLIT=1 -DTAIL_BARRIER_VMCNT=0"),                 # TS+tail VMCNT=0
+        # GM × LGK cross-products (tile scheduling × LDS wait)
+        ("_gm8_lgk2", "-DGROUP_SIZE_M=8 -DSTEP12_BR_LGKMCNT=2"),             # GM8+LGK2
+        ("_ts_gm2_lgk2", "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=2 -DSTEP12_BR_LGKMCNT=2"), # TS+GM2+LGK2
+        ("_ts_gm2_lgk2_v12", "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=2 -DSTEP12_BR_LGKMCNT=2 -DSTEP3_BARRIER_VMCNT=12"), # TS+GM2+LGK2+V12
+        # FUSED_STEP34 variants (merged Steps 3+4 into single asm block)
+        ("_f34", "-DFUSED_STEP34=1"),                                    # fused step34 default
+        ("_f34_ts", "-DFUSED_STEP34=1 -DTAIL_SPLIT=1"),                 # fused + tail-split
+        ("_f34_lgk2", "-DFUSED_STEP34=1 -DSTEP12_BR_LGKMCNT=2"),        # fused + lgkmcnt2
+        ("_f34_ts_lgk2", "-DFUSED_STEP34=1 -DTAIL_SPLIT=1 -DSTEP12_BR_LGKMCNT=2"), # fused+TS+lgk2
+        ("_f34_v12", "-DFUSED_STEP34=1 -DSTEP3_BARRIER_VMCNT=12"),      # fused + VMCNT12
+        ("_f34_v4", "-DFUSED_STEP34=1 -DSTEP3_BARRIER_VMCNT=4"),        # fused + VMCNT4
+        ("_f34_ts_v12", "-DFUSED_STEP34=1 -DTAIL_SPLIT=1 -DSTEP3_BARRIER_VMCNT=12"), # fused+TS+V12
+        ("_f34_gm2", "-DFUSED_STEP34=1 -DGROUP_SIZE_M=2"),              # fused + GM2
+        ("_f34_gm8", "-DFUSED_STEP34=1 -DGROUP_SIZE_M=8"),              # fused + GM8
+        ("_f34_ts_gm2_v12", "-DFUSED_STEP34=1 -DTAIL_SPLIT=1 -DGROUP_SIZE_M=2 -DSTEP3_BARRIER_VMCNT=12"), # fused+TS+GM2+V12
+        ("_f34_ts_lgk2_v12", "-DFUSED_STEP34=1 -DTAIL_SPLIT=1 -DSTEP12_BR_LGKMCNT=2 -DSTEP3_BARRIER_VMCNT=12"), # fused+TS+lgk2+V12
+        ("_f34_u8", "-DFUSED_STEP34=1 -DUNROLL_K=8"),                   # fused + U8
+        ("_f34_u16", "-DFUSED_STEP34=1 -DUNROLL_K=16"),                 # fused + U16
     ]
     for n_val, k_val in nk_pairs:
         for suffix, cppflags in variants:
