@@ -1,91 +1,66 @@
 # MXFP4 GEMM 优化 — Agent提示词
 
-你是MXFP4 GEMM优化项目的技术负责人。项目在 /shared_nfs/kyle/test/HipKittens, branch: mxfp4。
+你在继续推进 `HipKittens` 的 MXFP4 GEMM 优化工作，跟 Cursor (Hipkittens2) 竞赛。
 
-## 目标
-- **主测shape**: 4096×32768×128256
-- **aiter基线**: 5653 TFLOPS (MI355X)
-- **目标**: 97% of aiter = **5484 TFLOPS**
-- **当前最佳**: 4926 TFLOPS (原版C++ GM=8, 87.1% of aiter)
+## 项目位置
+- **我们的 Repo**: `/shared_nfs/kyle/test/HipKittens`
+- **Branch**: `mxfp4`
+- **工作目录**: `analysis/fp8_gemm/mi350x`
+- **Cursor Repo**: `/shared_nfs/kyle/test/Hipkittens2` (只读参考)
 
-## 当前状态 (2026-04-15)
+## 当前成绩
+- **我们**: **18/42 WIN** (warmup=200, iters=500)
+- **Cursor**: 17/42 WIN (同参数)
+- **我们领先 1 WIN, 26/42 shapes 绝对 TFLOPS 更高**
+- **28/42 在 5% 以内, 14/42 超过 5% gap**
+- **Target shape** 4096×32768×128256: 我们 4967T (85.9%), Cursor 5089T (88.0%)
 
-### 生产kernel (原版C++)
-- `kernel_mxfp4_gluon_cpp.cpp`: 4926T (GM=8), 252 VGPRs, 0 spills
-- 这是C++框架的结构极限，无法通过增量优化突破
+## 已做的优化
+1. Store block reorder (A0Bl,A0Br,A1Bl,A1Br) — +0.8% commit `8f10b09e`
+2. MFMA operand SWAP — 正确但慢, auto-tune 选项
+3. TAIL_SPLIT=1 — 小K帮助, 大K退化, auto-tune 选项
+4. SPREAD_LDS=1 — 退化1-2%, auto-tune 选项
+5. 20-variant auto-tune (GM1/2/4/8/16, U8/16/32, SWAP, TS, 组合)
 
-### ART kernel (实验性)
-- `kernel_mxfp4_art.cpp`: 3185T, 256V+256A, 0 spills, direct-A loading
-- 单monolithic asm block (128 MFMAs + 32 loads + barrier)
-- Bit-exact correct vs 原版
+## 不要再做的事
+- **Direct-B (不preshuffle)**: 正确但慢28% (buffer_load延迟)
+- **BK=256**: LDS装不下 (256KB > 160KB max)
+- **Preshuffle-B 1-pass**: VGPR spill → NaN
+- **Preshuffle-B 2-pass**: 正确但慢56% (K-loop跑两遍)
+- **Non-volatile scale loads**: 在我们代码上产出NaN (Cursor能用但我们不行)
+- **Rowspread ds_reads**: 退化1-2%
+- **sched_group_barrier / iglp_opt**: 无改善
+- **ds_bpermute wide stores**: 退化16%
+- 把 preshuffle 时间不算进比较 — 用户明确拒绝过
 
-### 差距分析 (4926T → 5484T, 需要+558T = +11.3%)
-| 因素 | 我们 | aiter | 影响 |
-|------|------|-------|------|
-| A tile loading | LDS round-trip (48 ds_reads) | Direct global (20 ds_reads) | ~5-8% |
-| Loop VALU | 8 v_cndmask + overhead | 0 VALU | ~3-5% |
-| Store | 256× scalar 2B stores | 32× vectorized 16B stores | ~2-5% |
-| Instruction scheduling | Compiler-managed | Hand-scheduled ASM | ~5-10% |
+## 结构性限制
+- B走LDS是根本瓶颈: +18% read traffic, 2x wait time vs aiter
+- 256 AGPR (4 acc blocks) + B tiles 无法同时放进 256 VGPRs
+- 不 preshuffle B 就不能跳过 LDS
+- LDS swizzle 是 MFMA 需要的数据排列 (非 bank conflict avoidance)
+- buffer_load 200cy vs ds_read 20cy → direct loading 总是更慢
 
-## 已穷尽的方向 (严禁重试)
-- ASM inline kernel参数化 (严禁使用)
-- Gluon LLIR kernel直接集成 (不允许)
-- XOR double-buffer toggle → 无效 (compiler已优化)
-- Compiler flags (-mllvm options) → 无效
-- UNROLL_K sweep → 无效 (K=128256太大)
-- Vectorized store (LDS transpose) → 反而更慢
-- Half-direct-A (A0 direct, A1 LDS) → 反而更慢 (global load延迟>LDS)
-- Direct-A C++ (无ART) → 23 spills杀性能
+## Cursor 在做的 (可学习)
+- `NONVOLATILE_SCALE_X2_POC=1`: 去掉 scale load 的 volatile (在他们代码上有效)
+- `STEP3_BARRIER_VMCNT=12`: large-N shapes 上有收益
+- `SPREAD_LDS + VMCNT=12 + TAIL_SPLIT 组合`: 针对 large-N shapes
+- `STEP3_PF_N/STEP4_PF_N` 调参: 不同 prefetch 深度
 
-## 唯一可行路径: Full HipKittens3 ART Rewrite
+## 优先方向
+1. **VMCNT=12 auto-tune**: 加入 bench_all_42.py variants
+2. **Debug non-volatile scale**: 找到为什么在我们这里 NaN
+3. **Per-shape 精准调参**: 针对 Cursor 赢的 10 个 shapes
+4. **benchmark 跑完后分析**: GPU1 上的 bench_all_42 正在跑
 
-### Phase A: MFMA operand swap
-- 交换MFMA A/B operands: B-matrix→MFMA-A, A-matrix→MFMA-B
-- 每个thread得到4个连续COLUMN → row-oriented output
-- 使能 v_permlane16_swap + buffer_store_dwordx4 vectorized store
-
-### Phase B: Full hand-scheduled inner loop
-- 用HipKittens3 ART framework (`art<>` tiles)
-- 所有128 MFMAs + loads + scales + barrier在一个hand-scheduled序列
-- 0 VALU in loop
-- Direct-A loading with perfect latency hiding (关键！)
-- 参考: /shared_nfs/kyle/HipKittens3/kernels/attn/gqa_causal_backwards/attn_bkwd_causal.cpp
-
-### Phase C: 42-shape validation
-- bench_all_42.py跑全量对比
-- 每shape auto-tune GROUP_SIZE_M
-- 所有shape ≥ 97% of aiter
-
-## 关键发现 (必读)
-1. **Direct-A without latency hiding = SLOWER** — buffer_load 200+cy vs ds_read 20-40cy
-2. **Compiler clobbers AGPRs during store** → 必须在单asm block读完所有64 AGPRs
-3. **`"=&v"` early-clobber** → 所有64个output operand必须用`"=&v"`防止alias
-4. **UNROLL_K>1 + K=128256** → ART kernel crash (code size limit), 用UNROLL_K=1
-5. **aiter输出确认是标准row-major** (不是transposed)
-6. **v_mfma_scale_f32_16x16x128_f8f6f4 macro** 已添加到HipKittens3 macros.cuh
-
-## 环境
-- MI355X (gfx950), 8 GPUs
-- benchmark规则: warmup=200, iters=500, trimmed mean 10%, HIP_VISIBLE_DEVICES=N
-- triton_for_gluon: /shared_nfs/kyle/test/triton_for_gluon (matmul_4waves branch)
-- aiter: /shared_nfs/kyle/test/aiter
-- HipKittens3 ART框架: /shared_nfs/kyle/HipKittens3
-
-## 工作方式
-- **所有agent必须使用opus模型** (model: opus)
-- 不要sleep()轮询, 用子agent监控
-- 每个改动: 编译→正确性→性能→commit或revert
-- commit用: `git -c user.name="kyle-256" -c user.email="Kyle.Zhao@amd.com" commit`
-- 完整优化路线图: `OPTIMIZATION_ROADMAP.md`
+## Benchmark 规则
+- **warmup=200, iters=500**, trimmed mean 10%
+- GPU 1-4 可用 (`HIP_VISIBLE_DEVICES=1,2,3,4`)
+- `rocm-smi --showuse` 确认 GPU 空闲
+- 所有 benchmark 结论必须标注 warmup/iters
 
 ## 关键文件
-| 文件 | 用途 | 性能 |
-|------|------|------|
-| `kernel_mxfp4_gluon_cpp.cpp` | 生产C++内核 | 4926T (GM=8) |
-| `kernel_mxfp4_art.cpp` | ART实验内核 | 3185T |
-| `kernel_mxfp4_half_direct.cpp` | Half-direct实验 | 3703T |
-| `bench_all_42.py` | 42-shape benchmark | — |
-| `bench_aiter_a4w4_42.py` | aiter竞品benchmark | — |
-| `test_mxfp4_gluon_cpp.py` | 快速正确性测试 | — |
-| `art_register_map.md` | ART寄存器分配 | — |
-| `OPTIMIZATION_ROADMAP.md` | 完整优化路线图 | — |
+- `kernel_mxfp4_gluon_cpp.cpp` — 主内核
+- `bench_all_42.py` — 42-shape benchmark (20 auto-tune variants)
+- `spot_test.py` — 单shape多variant测试
+- `bench_all42_results.json` — 最新结果
+- `kernel_mxfp4_direct_b.cpp` — Direct-B 实验 (参考, 不用于生产)
