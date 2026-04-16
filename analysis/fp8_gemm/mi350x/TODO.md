@@ -36,21 +36,26 @@
      - `TCP_TOTAL_READ_sum`: `5.27224e9 -> 5.27224e9`
      - `TCC_REQ_sum`: `5.68768e8 -> 5.68768e8`
      - `SQ_WAIT_INST_ANY`: `1.05367e9 -> 1.03737e9` (about `-1.55%`)
-3. **`permlane -> bf16 pack -> global_store_dwordx4` lowering is real**, but target-shape speedup is still only noise-level.
-4. **The remaining gap is mainly read-side traffic and pipeline overlap**, not row-store micro-tuning.
-5. **Existing `half_direct` / `direct_a` / current `direct_b` idea are not ready to be mainline candidates for this shape.**
+3. **The current 42-shape harness was still missing a useful small-K large-N branch.**
+   - `16384x28672x2048`: old harness best `3204.4T` (`92.0%`) but `_ts_gm2` reaches `3279.5T` (`94.2%`)
+   - `32768x28672x2048`: old harness best `3237.1T` (`96.5%`) but `_ts_gm2u8` reaches `3306.7T` (`98.6%`)
+   - `4096x32768x6144`: `_spread_gm2u8` reaches `4158.8T` (`91.4%`), slightly above plain `_spread`, but still far below the `95%` gate
+   - `bench_all_42.py` now includes `_ts_gm2`, `_ts_gm2u8`, and `_spread_gm2u8` so the next full sweep can actually see those wins
+4. **`permlane -> bf16 pack -> global_store_dwordx4` lowering is real**, but target-shape speedup is still only noise-level.
+5. **The remaining gap is mainly read-side traffic and pipeline overlap**, not row-store micro-tuning.
+6. **Existing `half_direct` / `direct_a` / current `direct_b` idea are not ready to be mainline candidates for this shape.**
    - `half_direct` + `GM=8`: `3457.83T`
    - `direct_a` + `GM=8`: `2527.51T`
    - integrated `DIRECT_B` target-shape A/B in `HipKittens` also regressed in the current swap/gm8 form
-6. **Current Hipkittens2 default hot path is already basically aligned with `HipKittens` default hot path outside this scale-load scheduling change.**
+7. **Current Hipkittens2 default hot path is already basically aligned with `HipKittens` default hot path outside this scale-load scheduling change.**
    - no obvious missing default-path patch remains to be copied over
-7. **Recent dead-end closures**:
+8. **Recent dead-end closures**:
    - `PF_N` tuning in Step3/4: no target-shape win
    - isolated Step12-swapped POC: no credible target-shape win
    - Step12 batch-style structural POC: target regressed
    - `TAIL_SPLIT` / `SPREAD_LDS`: only tiny small-K help, no target-shape win
    - low-risk compile-flag sweeps: no stable target-shape win
-8. **User direction remains valid**: ART is not mandatory, and the original C++ kernel is still the main production path.
+9. **User direction remains valid**: ART is not mandatory, and the original C++ kernel is still the main production path.
 
 ## Keep And Track
 These are experiment evidence and should stay in the repo instead of being treated as disposable garbage:
@@ -95,6 +100,7 @@ These are experiment evidence and should stay in the repo instead of being treat
 
 ### 2. Refresh 42-shape status after any real kernel win
 - Re-run `bench_all_42.py`
+- Make sure the next sweep includes the newly-added `_ts_gm2` / `_ts_gm2u8` variants before judging the small-K large-N family again
 - Re-check `128256x32768x4096` instead of assuming the latest non-crash result is permanent
 - Report both:
   - strict `WIN` count

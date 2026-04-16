@@ -31,6 +31,11 @@
   - `TCC_REQ_sum`: `5.68768e8 -> 5.68768e8`（基本不变）
   - `SQ_WAIT_INST_ANY`: `1.05367e9 -> 1.03737e9`（约 `-1.55%`）
 - 当前完整 42-shape artifact 还没有吸收这次 `NONVOLATILE_SCALE_X2_POC` 默认开启后的收益，所以 **variant 排序需要重新跑 42-shape 才能更新正式结论**。
+- 新的 targeted probe 已确认：当前 `bench_all_42.py` 还漏了一条对 **small-K + large-N** 家族有实际价值的分支：
+  - `16384x28672x2048`: 旧 harness 最优 `3204.4T` (`92.0%`) -> `_ts_gm2` 可到 `3279.5T` (`94.2%`)
+  - `32768x28672x2048`: 旧 harness 最优 `3237.1T` (`96.5%`) -> `_ts_gm2u8` 可到 `3306.7T` (`98.6%`)
+  - `4096x32768x6144`: `_spread` 基线附近只被 `_spread_gm2u8` 小幅抬高到 `4158.8T` (`91.4%`)，说明这类 `N=32768` 家族仍主要是 kernel 问题，不是单纯漏了一个 variant
+  - 因此 `bench_all_42.py` 已补入 `_ts_gm2`、`_ts_gm2u8` 与 `_spread_gm2u8`
 - default path 与 `/shared_nfs/kyle/test/HipKittens` 的默认热路径基本一致，没有漏掉一个显而易见的现成 patch。
 - 已有独立 kernel 证据显示：`half_direct`（≈ `3457.83T`）和 `direct_a`（≈ `2527.51T`）远低于当前主线，不应盲目 graft 回主核。
 - `PF_N` 细调、低风险 barrier/prefetch flag 组合，以及 isolated Step12-swapped POC 目前都没有给出可信 target-shape 正收益。
@@ -99,6 +104,7 @@
 8. **`buffer_load_dwordx2` 的 scale 直读调度自由度是真问题，`asm volatile -> asm` 已给出首个广义正收益**
 9. **判断这类 read-side 改动时，要优先看“同等读量下 wait 是否下降”，而不只是看 bytes/counter 总量**
 10. **42-shape 汇报时必须显式给出 `<95%` 的 shape 数量，因为当前用户硬门槛就是全 shape 不得落后超过 `5%`**
+11. **`TAIL_SPLIT` 不是单独万能，但 `TAIL_SPLIT + GM2` 已经证明对 `N=28672, K=2048` 家族有真收益**
 
 ## 常用文件
 - `kernel_mxfp4_gluon_cpp.cpp`

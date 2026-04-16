@@ -324,8 +324,11 @@ def main():
         ("_swap", "-DSWAP_STEP34_MAIN=1 -DSWAP_STEP12_MAIN=1"), # swap path
         ("_swap_gm8", "-DSWAP_STEP34_MAIN=1 -DSWAP_STEP12_MAIN=1 -DGROUP_SIZE_M=8"), # swap + GM8
         ("_ts", "-DTAIL_SPLIT=1"),                        # tail-split, mainly for small K
+        ("_ts_gm2", "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=2"),  # tail-split + GM2, helps small-K large-N cases
         ("_ts_gm8", "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=8"),   # tail-split + GM8
+        ("_ts_gm2u8", "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=2 -DUNROLL_K=8"), # tail-split + GM2 + U8
         ("_spread", "-DSPREAD_LDS=1"),                    # spread LDS reads across rows
+        ("_spread_gm2u8", "-DSPREAD_LDS=1 -DGROUP_SIZE_M=2 -DUNROLL_K=8"), # spread + GM2 + U8
         ("_spread_gm8", "-DSPREAD_LDS=1 -DGROUP_SIZE_M=8"), # spread LDS + GM8
     ]
     for n_val, k_val in nk_pairs:
