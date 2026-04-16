@@ -321,6 +321,8 @@ def main():
         ("_gm16", "-DGROUP_SIZE_M=16"),                    # GM16, auto-unroll
         ("_gm8u8", "-DGROUP_SIZE_M=8 -DUNROLL_K=8"),     # GM8, unroll 8
         ("_gm16u16", "-DGROUP_SIZE_M=16 -DUNROLL_K=16"), # GM16, unroll 16
+        ("_swap", "-DSWAP_STEP34_MAIN=1 -DSWAP_STEP12_MAIN=1"), # operand swap
+        ("_swap_gm8", "-DSWAP_STEP34_MAIN=1 -DSWAP_STEP12_MAIN=1 -DGROUP_SIZE_M=8"), # swap+GM8
     ]
     for n_val, k_val in nk_pairs:
         for suffix, cppflags in variants:
