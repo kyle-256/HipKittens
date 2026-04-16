@@ -52,6 +52,36 @@ VARIANTS = [
     ("gm64", "-DGROUP_SIZE_M=64"),
     ("ts_gm16", "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=16"),
     ("ts_gm32", "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=32"),
+    # EXT_BR × V12 combinations
+    ("ext_br_v12", "-DSTEP4_EXTERNAL_BR_PREFETCH=1 -DSTEP3_BARRIER_VMCNT=12"),
+    ("ts_ext_br_v12", "-DTAIL_SPLIT=1 -DSTEP4_EXTERNAL_BR_PREFETCH=1 -DSTEP3_BARRIER_VMCNT=12"),
+    # EXT_BR × GM2 combinations
+    ("gm2_ext_br", "-DGROUP_SIZE_M=2 -DSTEP4_EXTERNAL_BR_PREFETCH=1"),
+    ("ts_gm2_ext_br", "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=2 -DSTEP4_EXTERNAL_BR_PREFETCH=1"),
+    # V12 without TS combinations
+    ("gm16_v12", "-DGROUP_SIZE_M=16 -DSTEP3_BARRIER_VMCNT=12"),
+    ("gm1_v12", "-DGROUP_SIZE_M=1 -DSTEP3_BARRIER_VMCNT=12"),
+    # TS + V12 + GM2
+    ("ts_gm2_v12", "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=2 -DSTEP3_BARRIER_VMCNT=12"),
+    # EXT_BR × GM2 × V12
+    ("gm2_ext_br_v12", "-DGROUP_SIZE_M=2 -DSTEP4_EXTERNAL_BR_PREFETCH=1 -DSTEP3_BARRIER_VMCNT=12"),
+    ("ts_gm2_ext_br_v12", "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=2 -DSTEP4_EXTERNAL_BR_PREFETCH=1 -DSTEP3_BARRIER_VMCNT=12"),
+    # lgkmcnt relaxation (Step12 Br wait)
+    ("lgk2", "-DSTEP12_BR_LGKMCNT=2"),
+    ("lgk4", "-DSTEP12_BR_LGKMCNT=4"),
+    ("ts_lgk2", "-DTAIL_SPLIT=1 -DSTEP12_BR_LGKMCNT=2"),
+    ("ts_lgk4", "-DTAIL_SPLIT=1 -DSTEP12_BR_LGKMCNT=4"),
+    ("ts_lgk2_v12", "-DTAIL_SPLIT=1 -DSTEP12_BR_LGKMCNT=2 -DSTEP3_BARRIER_VMCNT=12"),
+    # VMCNT=4 (more conservative barrier)
+    ("v4", "-DSTEP3_BARRIER_VMCNT=4"),
+    ("ts_v4", "-DTAIL_SPLIT=1 -DSTEP3_BARRIER_VMCNT=4"),
+    # VMCNT=16 (more aggressive barrier)
+    ("v16", "-DSTEP3_BARRIER_VMCNT=16"),
+    ("ts_v16", "-DTAIL_SPLIT=1 -DSTEP3_BARRIER_VMCNT=16"),
+    # EMBED_BARRIER=0 (separate barrier from Step3 MFMAs)
+    ("no_embed", "-DSTEP3_EMBED_BARRIER=0"),
+    ("ts_no_embed", "-DTAIL_SPLIT=1 -DSTEP3_EMBED_BARRIER=0"),
+    ("ts_no_embed_v12", "-DTAIL_SPLIT=1 -DSTEP3_EMBED_BARRIER=0 -DSTEP3_BARRIER_VMCNT=12"),
 ]
 
 def build(n, k, tag, flags, build_dir):

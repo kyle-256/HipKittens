@@ -350,6 +350,27 @@ def main():
         ("_gm64", "-DGROUP_SIZE_M=64"),                              # GM64
         ("_ts_gm16", "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=16"),           # TS+GM16
         ("_ts_gm32", "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=32"),           # TS+GM32
+        ("_ext_br_v12", "-DSTEP4_EXTERNAL_BR_PREFETCH=1 -DSTEP3_BARRIER_VMCNT=12"), # EXT_BR+V12
+        ("_ts_ext_br_v12", "-DTAIL_SPLIT=1 -DSTEP4_EXTERNAL_BR_PREFETCH=1 -DSTEP3_BARRIER_VMCNT=12"), # TS+EXT_BR+V12
+        ("_gm2_ext_br", "-DGROUP_SIZE_M=2 -DSTEP4_EXTERNAL_BR_PREFETCH=1"), # GM2+EXT_BR
+        ("_ts_gm2_ext_br", "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=2 -DSTEP4_EXTERNAL_BR_PREFETCH=1"), # TS+GM2+EXT_BR
+        ("_gm16_v12", "-DGROUP_SIZE_M=16 -DSTEP3_BARRIER_VMCNT=12"), # GM16+V12
+        ("_gm1_v12", "-DGROUP_SIZE_M=1 -DSTEP3_BARRIER_VMCNT=12"), # GM1+V12
+        ("_ts_gm2_v12", "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=2 -DSTEP3_BARRIER_VMCNT=12"), # TS+GM2+V12
+        ("_gm2_ext_br_v12", "-DGROUP_SIZE_M=2 -DSTEP4_EXTERNAL_BR_PREFETCH=1 -DSTEP3_BARRIER_VMCNT=12"), # GM2+EXT_BR+V12
+        ("_ts_gm2_ext_br_v12", "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=2 -DSTEP4_EXTERNAL_BR_PREFETCH=1 -DSTEP3_BARRIER_VMCNT=12"), # TS+GM2+EXT_BR+V12
+        ("_lgk2", "-DSTEP12_BR_LGKMCNT=2"),                         # lgkmcnt relaxation
+        ("_lgk4", "-DSTEP12_BR_LGKMCNT=4"),                         # lgkmcnt relaxation aggressive
+        ("_ts_lgk2", "-DTAIL_SPLIT=1 -DSTEP12_BR_LGKMCNT=2"),       # TS+lgkmcnt2
+        ("_ts_lgk4", "-DTAIL_SPLIT=1 -DSTEP12_BR_LGKMCNT=4"),       # TS+lgkmcnt4
+        ("_ts_lgk2_v12", "-DTAIL_SPLIT=1 -DSTEP12_BR_LGKMCNT=2 -DSTEP3_BARRIER_VMCNT=12"), # TS+lgk2+V12
+        ("_v4", "-DSTEP3_BARRIER_VMCNT=4"),                          # conservative barrier
+        ("_ts_v4", "-DTAIL_SPLIT=1 -DSTEP3_BARRIER_VMCNT=4"),        # TS+conservative barrier
+        ("_v16", "-DSTEP3_BARRIER_VMCNT=16"),                        # aggressive barrier
+        ("_ts_v16", "-DTAIL_SPLIT=1 -DSTEP3_BARRIER_VMCNT=16"),      # TS+aggressive barrier
+        ("_no_embed", "-DSTEP3_EMBED_BARRIER=0"),                    # separate barrier
+        ("_ts_no_embed", "-DTAIL_SPLIT=1 -DSTEP3_EMBED_BARRIER=0"), # TS+separate barrier
+        ("_ts_no_embed_v12", "-DTAIL_SPLIT=1 -DSTEP3_EMBED_BARRIER=0 -DSTEP3_BARRIER_VMCNT=12"), # TS+separate+V12
     ]
     for n_val, k_val in nk_pairs:
         for suffix, cppflags in variants:

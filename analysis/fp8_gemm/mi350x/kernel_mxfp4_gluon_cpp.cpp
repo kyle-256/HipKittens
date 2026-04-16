@@ -61,6 +61,10 @@ using namespace kittens;
 #error "MAIN_PERMLANE_BF16_STORE_POC requires SWAP_STEP12_MAIN"
 #endif
 
+#ifndef STEP12_BR_LGKMCNT
+#define STEP12_BR_LGKMCNT 0
+#endif
+
 #define MXFP4_STR_IMPL(x) #x
 #define MXFP4_STR(x) MXFP4_STR_IMPL(x)
 
@@ -622,8 +626,8 @@ __device__ __forceinline__ void kpair_64mfma_step12(
         "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %55, %61, %13, %65, %66 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %55, %62, %14, %65, %67 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %55, %63, %15, %65, %67 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        // Wait for Br ds_reads
-        "s_waitcnt lgkmcnt(0)\n"
+        // Wait for Br ds_reads (tunable: lgkmcnt(STEP12_BR_LGKMCNT))
+        "s_waitcnt lgkmcnt(" MXFP4_STR(STEP12_BR_LGKMCNT) ")\n"
         // ═══ STEP 2: A0×Br (32 MFMAs) + 8 ds_reads for A1 ═══
         "v_mfma_scale_f32_16x16x128_f8f6f4 %16, %48, %32, %16, %64, %68 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "ds_read_b128 %40, %72 offset:0\n"
@@ -1147,8 +1151,8 @@ __device__ __forceinline__ void kpair_64mfma_step12_swapped_sel(
         "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %61, %55, %13, %66, %65 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %62, %55, %14, %67, %65 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %63, %55, %15, %67, %65 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        // Wait for Br ds_reads
-        "s_waitcnt lgkmcnt(0)\n"
+        // Wait for Br ds_reads (tunable: lgkmcnt(STEP12_BR_LGKMCNT))
+        "s_waitcnt lgkmcnt(" MXFP4_STR(STEP12_BR_LGKMCNT) ")\n"
         // STEP 2: A0*Br (swapped) + 8 ds_reads for A1
         "v_mfma_scale_f32_16x16x128_f8f6f4 %16, %32, %48, %16, %68, %64 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "ds_read_b128 %40, %72 offset:0\n"
