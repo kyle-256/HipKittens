@@ -48,6 +48,9 @@ using namespace kittens;
 #ifndef NONVOLATILE_SCALE_X2_POC
 #define NONVOLATILE_SCALE_X2_POC 1
 #endif
+#ifndef STEP4_EXTERNAL_BR_PREFETCH
+#define STEP4_EXTERNAL_BR_PREFETCH 0
+#endif
 #ifndef MAIN_PERMLANE_BF16_STORE_POC
 #define MAIN_PERMLANE_BF16_STORE_POC 0
 #endif
@@ -319,7 +322,11 @@ __device__ __forceinline__ void emit_one_pf(const tile_pf_params& p, int idx) {
 #define STEP3_PF_N 8
 #endif
 #ifndef STEP4_PF_N
+#if STEP4_EXTERNAL_BR_PREFETCH
+#define STEP4_PF_N 4
+#else
 #define STEP4_PF_N 8
+#endif
 #endif
 
 static_assert(STEP3_PF_N >= 0 && STEP3_PF_N <= 2 * PF_MPT);
@@ -1523,7 +1530,12 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
             nxt_bl_d[0], nxt_bl_d[1], nxt_bl_d[2], nxt_bl_d[3],
             nxt_bl_d[4], nxt_bl_d[5], nxt_bl_d[6], nxt_bl_d[7],
             sel_bl_p0, sel_bl_p1, pf_bl_p, pf_br_p);
+#if STEP4_EXTERNAL_BR_PREFETCH
+        #pragma unroll
+        for (int pi = 0; pi < PF_MPT; ++pi) emit_one_pf(pf_br_p, pi);
+#else
         emit_pf_tail<STEP4_PF_N>(pf_bl_p, pf_br_p);
+#endif
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         extract_tile(nxt_a0_d, tA0);
@@ -1560,12 +1572,8 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         extract_tile(br_d, tBr);
         extract_tile(a1_d, tA1);
 
-#if !STEP3_EMBED_BARRIER
+        // Tail: always emit barrier (no embedded barrier in pure-MFMA Step3/4)
         asm volatile("s_waitcnt vmcnt(" MXFP4_STR(STEP3_BARRIER_VMCNT) ")\ns_barrier\n" ::: "memory");
-#endif
-#if STEP3_EMBED_BARRIER
-        asm volatile("s_waitcnt vmcnt(" MXFP4_STR(STEP3_BARRIER_VMCNT) ")\ns_barrier\n" ::: "memory");
-#endif
 
         tile_pf_params dummy_pf = {};
         kpair_32mfma_with_pf_swapped_sel<0>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw, dummy_pf, dummy_pf);
@@ -1664,7 +1672,12 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
             nxt_bl_d[0], nxt_bl_d[1], nxt_bl_d[2], nxt_bl_d[3],
             nxt_bl_d[4], nxt_bl_d[5], nxt_bl_d[6], nxt_bl_d[7],
             sel_bl_p0, sel_bl_p1, pf_bl_p, pf_br_p);
+#if STEP4_EXTERNAL_BR_PREFETCH
+        #pragma unroll
+        for (int pi = 0; pi < PF_MPT; ++pi) emit_one_pf(pf_br_p, pi);
+#else
         emit_pf_tail<STEP4_PF_N>(pf_bl_p, pf_br_p);
+#endif
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         extract_tile(nxt_a0_d, tA0);
@@ -1697,12 +1710,8 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         extract_tile(br_d, tBr);
         extract_tile(a1_d, tA1);
 
-#if !STEP3_EMBED_BARRIER
+        // Tail: always emit barrier (no embedded barrier in pure-MFMA Step3/4)
         asm volatile("s_waitcnt vmcnt(" MXFP4_STR(STEP3_BARRIER_VMCNT) ")\ns_barrier\n" ::: "memory");
-#endif
-#if STEP3_EMBED_BARRIER
-        asm volatile("s_waitcnt vmcnt(" MXFP4_STR(STEP3_BARRIER_VMCNT) ")\ns_barrier\n" ::: "memory");
-#endif
 
         // Steps 3+4: pure MFMAs, no ds_reads, no prefetches
         tile_pf_params dummy_pf = {};
@@ -1792,7 +1801,12 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
             nxt_bl_d[0], nxt_bl_d[1], nxt_bl_d[2], nxt_bl_d[3],
             nxt_bl_d[4], nxt_bl_d[5], nxt_bl_d[6], nxt_bl_d[7],
             sel_bl_p0, sel_bl_p1, pf_bl_p, pf_br_p);
+#if STEP4_EXTERNAL_BR_PREFETCH
+        #pragma unroll
+        for (int pi = 0; pi < PF_MPT; ++pi) emit_one_pf(pf_br_p, pi);
+#else
         emit_pf_tail<STEP4_PF_N>(pf_bl_p, pf_br_p);
+#endif
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         extract_tile(nxt_a0_d, tA0);

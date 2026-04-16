@@ -44,6 +44,14 @@ VARIANTS = [
     ("pf4", "-DSTEP3_PF_N=4 -DSTEP4_PF_N=4"),
     ("ts_pf4", "-DTAIL_SPLIT=1 -DSTEP3_PF_N=4 -DSTEP4_PF_N=4"),
     ("gm2_v12", "-DGROUP_SIZE_M=2 -DSTEP3_BARRIER_VMCNT=12"),
+    ("ext_br", "-DSTEP4_EXTERNAL_BR_PREFETCH=1"),
+    ("ts_ext_br", "-DTAIL_SPLIT=1 -DSTEP4_EXTERNAL_BR_PREFETCH=1"),
+    ("gm8_ext_br", "-DGROUP_SIZE_M=8 -DSTEP4_EXTERNAL_BR_PREFETCH=1"),
+    ("ts_gm8_ext_br", "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=8 -DSTEP4_EXTERNAL_BR_PREFETCH=1"),
+    ("gm32", "-DGROUP_SIZE_M=32"),
+    ("gm64", "-DGROUP_SIZE_M=64"),
+    ("ts_gm16", "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=16"),
+    ("ts_gm32", "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=32"),
 ]
 
 def build(n, k, tag, flags, build_dir):

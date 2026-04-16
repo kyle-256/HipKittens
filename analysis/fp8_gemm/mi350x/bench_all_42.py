@@ -342,6 +342,14 @@ def main():
         ("_pf4", "-DSTEP3_PF_N=4 -DSTEP4_PF_N=4"),              # reduced prefetch depth
         ("_ts_pf4", "-DTAIL_SPLIT=1 -DSTEP3_PF_N=4 -DSTEP4_PF_N=4"), # TS + reduced PF
         ("_gm2_v12", "-DGROUP_SIZE_M=2 -DSTEP3_BARRIER_VMCNT=12"), # GM2+V12
+        ("_ext_br", "-DSTEP4_EXTERNAL_BR_PREFETCH=1"),              # external Br PF
+        ("_ts_ext_br", "-DTAIL_SPLIT=1 -DSTEP4_EXTERNAL_BR_PREFETCH=1"), # TS + ext Br PF
+        ("_gm8_ext_br", "-DGROUP_SIZE_M=8 -DSTEP4_EXTERNAL_BR_PREFETCH=1"), # GM8 + ext Br PF
+        ("_ts_gm8_ext_br", "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=8 -DSTEP4_EXTERNAL_BR_PREFETCH=1"), # TS+GM8+ext Br
+        ("_gm32", "-DGROUP_SIZE_M=32"),                              # GM32
+        ("_gm64", "-DGROUP_SIZE_M=64"),                              # GM64
+        ("_ts_gm16", "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=16"),           # TS+GM16
+        ("_ts_gm32", "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=32"),           # TS+GM32
     ]
     for n_val, k_val in nk_pairs:
         for suffix, cppflags in variants:
