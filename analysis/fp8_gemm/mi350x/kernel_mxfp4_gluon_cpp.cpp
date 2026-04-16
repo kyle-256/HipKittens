@@ -45,6 +45,9 @@ using namespace kittens;
 #ifndef SPREAD_LDS
 #define SPREAD_LDS 0
 #endif
+#ifndef NONVOLATILE_SCALE_X2_POC
+#define NONVOLATILE_SCALE_X2_POC 1
+#endif
 #ifndef MAIN_PERMLANE_BF16_STORE_POC
 #define MAIN_PERMLANE_BF16_STORE_POC 0
 #endif
@@ -199,11 +202,19 @@ __device__ __forceinline__ void load_pq_scale_x2_async(
     i32x4 srsrc, uint32_t voffset, uint32_t soffset,
     fp8e8m0_4 &out_lo, fp8e8m0_4 &out_hi) {
     uint64_t pair;
+#if NONVOLATILE_SCALE_X2_POC
+    asm(
+        "buffer_load_dwordx2 %0, %1, %2, %3 offen"
+        : "=v"(pair)
+        : "v"(voffset), "s"(srsrc), "s"(soffset)
+    );
+#else
     asm volatile(
         "buffer_load_dwordx2 %0, %1, %2, %3 offen"
         : "=v"(pair)
         : "v"(voffset), "s"(srsrc), "s"(soffset)
     );
+#endif
     out_lo = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(pair));
     out_hi = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(pair >> 32));
 }
@@ -1497,7 +1508,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         extract_tile(a1_d, tA1);
 
 #if !STEP3_EMBED_BARRIER
-        asm volatile("s_waitcnt vmcnt(0)\ns_barrier\n" ::: "memory");
+        asm volatile("s_waitcnt vmcnt(" MXFP4_STR(STEP3_BARRIER_VMCNT) ")\ns_barrier\n" ::: "memory");
 #endif
 
         float4 nxt_a0_d[8];
@@ -1550,7 +1561,10 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         extract_tile(a1_d, tA1);
 
 #if !STEP3_EMBED_BARRIER
-        asm volatile("s_waitcnt vmcnt(0)\ns_barrier\n" ::: "memory");
+        asm volatile("s_waitcnt vmcnt(" MXFP4_STR(STEP3_BARRIER_VMCNT) ")\ns_barrier\n" ::: "memory");
+#endif
+#if STEP3_EMBED_BARRIER
+        asm volatile("s_waitcnt vmcnt(" MXFP4_STR(STEP3_BARRIER_VMCNT) ")\ns_barrier\n" ::: "memory");
 #endif
 
         tile_pf_params dummy_pf = {};
@@ -1625,7 +1639,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         extract_tile(a1_d, tA1);
 
 #if !STEP3_EMBED_BARRIER
-        asm volatile("s_waitcnt vmcnt(0)\ns_barrier\n" ::: "memory");
+        asm volatile("s_waitcnt vmcnt(" MXFP4_STR(STEP3_BARRIER_VMCNT) ")\ns_barrier\n" ::: "memory");
 #endif
 
         // Step 3: A1*Bl (32 MFMAs) + ds_read A0[nxt] + prefetch
@@ -1684,7 +1698,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         extract_tile(a1_d, tA1);
 
 #if !STEP3_EMBED_BARRIER
-        asm volatile("s_waitcnt vmcnt(0)\ns_barrier\n" ::: "memory");
+        asm volatile("s_waitcnt vmcnt(" MXFP4_STR(STEP3_BARRIER_VMCNT) ")\ns_barrier\n" ::: "memory");
 #endif
 #if STEP3_EMBED_BARRIER
         asm volatile("s_waitcnt vmcnt(" MXFP4_STR(STEP3_BARRIER_VMCNT) ")\ns_barrier\n" ::: "memory");
@@ -1755,7 +1769,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         extract_tile(a1_d, tA1);
 
 #if !STEP3_EMBED_BARRIER
-        asm volatile("s_waitcnt vmcnt(0)\ns_barrier\n" ::: "memory");
+        asm volatile("s_waitcnt vmcnt(" MXFP4_STR(STEP3_BARRIER_VMCNT) ")\ns_barrier\n" ::: "memory");
 #endif
 
         float4 nxt_a0_d[8];

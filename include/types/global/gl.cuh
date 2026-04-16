@@ -69,10 +69,18 @@ struct gl {
     __host__ __device__ inline gl(const gl &other) :
             raw_ptr(other.raw_ptr), batch_internal(other.batch_internal), depth_internal(other.depth_internal), rows_internal(other.rows_internal), cols_internal(other.cols_internal), tma_descs(other.tma_descs) {}
     __device__ inline T& operator[](const coord<ducks::default_type> &idx) const { // yes I am abusing the const qualifier here a bit.
-        return raw_ptr[((idx.b*depth() + idx.d)*rows() + idx.r)*cols() + idx.c];
+        const size_t linear_idx =
+            (((static_cast<size_t>(idx.b) * static_cast<size_t>(depth()) +
+               static_cast<size_t>(idx.d)) * static_cast<size_t>(rows()) +
+              static_cast<size_t>(idx.r)) * static_cast<size_t>(cols())) +
+            static_cast<size_t>(idx.c);
+        return raw_ptr[linear_idx];
     }
-    __device__ inline int idx(const coord<ducks::default_type> &idx) const {
-        return ((idx.b*depth() + idx.d)*rows() + idx.r)*cols() + idx.c;
+    __device__ inline size_t idx(const coord<ducks::default_type> &idx) const {
+        return (((static_cast<size_t>(idx.b) * static_cast<size_t>(depth()) +
+                  static_cast<size_t>(idx.d)) * static_cast<size_t>(rows()) +
+                static_cast<size_t>(idx.r)) * static_cast<size_t>(cols())) +
+               static_cast<size_t>(idx.c);
     }
     template<int axis> __device__ inline size_t shape() const {
         static_assert(axis==0 || axis==1 || axis==2 || axis==3, "Axis must be 0, 1, 2, or 3.");
@@ -83,9 +91,9 @@ struct gl {
     }
     template<int axis> __device__ inline size_t stride() const { 
         static_assert(axis==0 || axis==1 || axis==2 || axis==3, "Axis must be 0, 1, 2, or 3.");
-        if      constexpr (axis==0) { return depth()*rows()*cols(); }
-        else if constexpr (axis==1) { return rows()*cols(); }
-        else if constexpr (axis==2) { return cols(); }
+        if      constexpr (axis==0) { return static_cast<size_t>(depth()) * static_cast<size_t>(rows()) * static_cast<size_t>(cols()); }
+        else if constexpr (axis==1) { return static_cast<size_t>(rows()) * static_cast<size_t>(cols()); }
+        else if constexpr (axis==2) { return static_cast<size_t>(cols()); }
         else if constexpr (axis==3) { return 1; }
     }
 };

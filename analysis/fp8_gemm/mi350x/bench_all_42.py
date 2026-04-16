@@ -329,6 +329,19 @@ def main():
         ("_gm2u8", "-DGROUP_SIZE_M=2 -DUNROLL_K=8"),         # GM2 + U8
         ("_gm16u8", "-DGROUP_SIZE_M=16 -DUNROLL_K=8"),       # GM16 + U8
         ("_gm1u16", "-DGROUP_SIZE_M=1 -DUNROLL_K=16"),       # GM1 + U16
+        ("_ts_v12", "-DTAIL_SPLIT=1 -DSTEP3_BARRIER_VMCNT=12"),   # tail-split + VMCNT12
+        ("_ts_gm8_v12", "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=8 -DSTEP3_BARRIER_VMCNT=12"), # TS+GM8+V12
+        ("_ts_gm2", "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=2"),           # tail-split + GM2
+        ("_ts_gm2u8", "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=2 -DUNROLL_K=8"), # TS+GM2+U8
+        ("_spread_gm2u8", "-DSPREAD_LDS=1 -DGROUP_SIZE_M=2 -DUNROLL_K=8"), # spread+GM2+U8
+        ("_spread_gm2u8_v12", "-DSPREAD_LDS=1 -DGROUP_SIZE_M=2 -DUNROLL_K=8 -DSTEP3_BARRIER_VMCNT=12"), # spread+GM2+U8+V12
+        ("_spread_gm8", "-DSPREAD_LDS=1 -DGROUP_SIZE_M=8"),       # spread+GM8
+        ("_v12", "-DSTEP3_BARRIER_VMCNT=12"),                      # default + VMCNT12
+        ("_gm8_v12", "-DGROUP_SIZE_M=8 -DSTEP3_BARRIER_VMCNT=12"), # GM8+V12
+        ("_no_nvs", "-DNONVOLATILE_SCALE_X2_POC=0"),               # volatile scale fallback
+        ("_pf4", "-DSTEP3_PF_N=4 -DSTEP4_PF_N=4"),              # reduced prefetch depth
+        ("_ts_pf4", "-DTAIL_SPLIT=1 -DSTEP3_PF_N=4 -DSTEP4_PF_N=4"), # TS + reduced PF
+        ("_gm2_v12", "-DGROUP_SIZE_M=2 -DSTEP3_BARRIER_VMCNT=12"), # GM2+V12
     ]
     for n_val, k_val in nk_pairs:
         for suffix, cppflags in variants:

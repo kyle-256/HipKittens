@@ -32,6 +32,18 @@ VARIANTS = [
     ("ts_gm2u16", "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=2 -DUNROLL_K=16"),
     ("swap", "-DSWAP_STEP34_MAIN=1 -DSWAP_STEP12_MAIN=1"),
     ("swap_gm8", "-DSWAP_STEP34_MAIN=1 -DSWAP_STEP12_MAIN=1 -DGROUP_SIZE_M=8"),
+    ("ts_v12", "-DTAIL_SPLIT=1 -DSTEP3_BARRIER_VMCNT=12"),
+    ("ts_gm8_v12", "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=8 -DSTEP3_BARRIER_VMCNT=12"),
+    ("ts_gm2u8", "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=2 -DUNROLL_K=8"),
+    ("spread_gm2u8", "-DSPREAD_LDS=1 -DGROUP_SIZE_M=2 -DUNROLL_K=8"),
+    ("spread_gm2u8_v12", "-DSPREAD_LDS=1 -DGROUP_SIZE_M=2 -DUNROLL_K=8 -DSTEP3_BARRIER_VMCNT=12"),
+    ("spread_gm8", "-DSPREAD_LDS=1 -DGROUP_SIZE_M=8"),
+    ("v12", "-DSTEP3_BARRIER_VMCNT=12"),
+    ("gm8_v12", "-DGROUP_SIZE_M=8 -DSTEP3_BARRIER_VMCNT=12"),
+    ("no_nvs", "-DNONVOLATILE_SCALE_X2_POC=0"),
+    ("pf4", "-DSTEP3_PF_N=4 -DSTEP4_PF_N=4"),
+    ("ts_pf4", "-DTAIL_SPLIT=1 -DSTEP3_PF_N=4 -DSTEP4_PF_N=4"),
+    ("gm2_v12", "-DGROUP_SIZE_M=2 -DSTEP3_BARRIER_VMCNT=12"),
 ]
 
 def build(n, k, tag, flags, build_dir):
