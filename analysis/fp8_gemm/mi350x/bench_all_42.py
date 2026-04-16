@@ -2,7 +2,7 @@
 """Benchmark MXFP4 Gluon C++ kernel across all 42 competitor shapes.
 
 Uses preshuffle_mfma16_merged scale format.
-hipEvent timing: warmup 50, timing 100, trimmed mean (10% trim).
+hipEvent timing: warmup 200, timing 500, trimmed mean (10% trim).
 Each shape runs in its own subprocess for crash isolation.
 
 The kernel uses compile-time N_DIM for block decomposition (bpc = N_DIM / BLK),
@@ -292,7 +292,7 @@ def main():
     print(f"Total shapes: {len(ALL_SHAPES)}")
     print(f"ThunderKittens: {TK_ROOT}")
     print(f"Scale format: preshuffle_mfma16_merged")
-    print(f"Warmup: 50, Iters: 100, Trimmed mean (10% each end)")
+    print(f"Warmup: 200, Iters: 500, Trimmed mean (10% each end)")
     print(f"Each shape runs in its own subprocess for isolation")
     print()
 
@@ -318,6 +318,15 @@ def main():
         ("_u8", "-DUNROLL_K=8"),                           # GM4, unroll 8
         ("_u32", "-DUNROLL_K=32"),                         # GM4, unroll 32
         ("_gm8u16", "-DGROUP_SIZE_M=8 -DUNROLL_K=16"),   # GM8, unroll 16
+        ("_gm16", "-DGROUP_SIZE_M=16"),                    # GM16, auto-unroll
+        ("_gm8u8", "-DGROUP_SIZE_M=8 -DUNROLL_K=8"),      # GM8, unroll 8
+        ("_gm16u16", "-DGROUP_SIZE_M=16 -DUNROLL_K=16"),  # GM16, unroll 16
+        ("_swap", "-DSWAP_STEP34_MAIN=1 -DSWAP_STEP12_MAIN=1"), # swap path
+        ("_swap_gm8", "-DSWAP_STEP34_MAIN=1 -DSWAP_STEP12_MAIN=1 -DGROUP_SIZE_M=8"), # swap + GM8
+        ("_ts", "-DTAIL_SPLIT=1"),                        # tail-split, mainly for small K
+        ("_ts_gm8", "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=8"),   # tail-split + GM8
+        ("_spread", "-DSPREAD_LDS=1"),                    # spread LDS reads across rows
+        ("_spread_gm8", "-DSPREAD_LDS=1 -DGROUP_SIZE_M=8"), # spread LDS + GM8
     ]
     for n_val, k_val in nk_pairs:
         for suffix, cppflags in variants:
@@ -413,8 +422,8 @@ def main():
         json.dump({
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
             "scale_format": "preshuffle_mfma16_merged",
-            "warmup": 50,
-            "iters": 100,
+            "warmup": 200,
+            "iters": 500,
             "trim_frac": 0.10,
             "total_shapes": total,
             "wins": wins,
