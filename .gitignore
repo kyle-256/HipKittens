@@ -44,3 +44,6 @@ analysis/fp8_gemm/mi350x/test_opsel_scale
 analysis/fp8_gemm/mi350x/gpucore.*
 analysis/fp8_gemm/mi350x/bench_gluon_a4w4_results.json
 .claude/
+.venv-mxfp4/
+analysis/fp8_gemm/mi350x/mxfp4_gluon_cpp_device.s
+analysis/fp8_gemm/mi350x/mxfp4_gluon_cpp_opt.s

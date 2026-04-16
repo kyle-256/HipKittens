@@ -1,91 +1,91 @@
 # MXFP4 GEMM 优化 — Agent提示词
 
-你是MXFP4 GEMM优化项目的技术负责人。项目在 /shared_nfs/kyle/test/HipKittens, branch: mxfp4。
+你在继续推进 `Hipkittens2` 里的 MXFP4 GEMM 优化工作。
 
-## 目标
-- **主测shape**: 4096×32768×128256
-- **aiter基线**: 5653 TFLOPS (MI355X)
-- **目标**: 97% of aiter = **5484 TFLOPS**
-- **当前最佳**: 4926 TFLOPS (原版C++ GM=8, 87.1% of aiter)
+## 项目位置
+- **Repo**: `/shared_nfs/kyle/test/Hipkittens2`
+- **Branch**: `agent/mxfp4-art-rewrite`
+- **工作目录**: `analysis/fp8_gemm/mi350x`
 
-## 当前状态 (2026-04-15)
+## 主目标
+- **主测 shape**: `4096x32768x128256`
+- **项目目标**: `5484 TFLOPS`（原始 `5653T` aiter baseline 的 `97%`）
+- **当前默认 full-swap 可复现水平**: 约 `4902T` 到 `4911T`
+- **当前 `bench_all42_results.json` 记录**: `4974.6T / 5781.1T = 86.0%`
 
-### 生产kernel (原版C++)
-- `kernel_mxfp4_gluon_cpp.cpp`: 4926T (GM=8), 252 VGPRs, 0 spills
-- 这是C++框架的结构极限，无法通过增量优化突破
+## 当前已验证状态
+- `kernel_mxfp4_gluon_cpp.cpp` 仍然是主生产内核和主线优化对象。
+- guarded `permlane` / packed wide-store 路径已经接好并验证过。
+- `4bffa75d` 证明了 `permlane -> v_cvt_pk_bf16_f32 -> global_store_dwordx4` 的 lowering 是真的。
+- `399cd546` 与 `PACKED_WIDESTORE_PMC.md` 证明了：**store epilogue 不是 target shape 的主瓶颈**。
+- 当前 42-shape 工件是：`18 WIN / 23 LOSE / 1 CRASH`，其中 `25/42 >= 97%`。
+- 当前 sweep 里记录的 crash shape 是 `128256x32768x4096`。
 
-### ART kernel (实验性)
-- `kernel_mxfp4_art.cpp`: 3185T, 256V+256A, 0 spills, direct-A loading
-- 单monolithic asm block (128 MFMAs + 32 loads + barrier)
-- Bit-exact correct vs 原版
+## 不要再做的事
+- 不要假设 ART 是唯一可行路径。用户已经明确允许继续优化原始 C++ kernel。
+- 不要在没有 counter 证据时继续磨 store-only 优化。
+- 不要重复老的死路：
+  - LDS-transpose vecstore
+  - 盲目的 barrier/prefetch 小修
+  - 把 `GROUP_SIZE_M` 的噪声级波动包装成突破
+- 不要混淆 `bench_all_42.py` 里的 `competitor_tflops` 和 live `aiter` 跑分；报告时必须说清口径。
 
-### 差距分析 (4926T → 5484T, 需要+558T = +11.3%)
-| 因素 | 我们 | aiter | 影响 |
-|------|------|-------|------|
-| A tile loading | LDS round-trip (48 ds_reads) | Direct global (20 ds_reads) | ~5-8% |
-| Loop VALU | 8 v_cndmask + overhead | 0 VALU | ~3-5% |
-| Store | 256× scalar 2B stores | 32× vectorized 16B stores | ~2-5% |
-| Instruction scheduling | Compiler-managed | Hand-scheduled ASM | ~5-10% |
+## 当前主线判断
+当前与 `aiter` 的主要差距更像在 **读路径和整体流水线重叠**，不是 store：
 
-## 已穷尽的方向 (严禁重试)
-- ASM inline kernel参数化 (严禁使用)
-- Gluon LLIR kernel直接集成 (不允许)
-- XOR double-buffer toggle → 无效 (compiler已优化)
-- Compiler flags (-mllvm options) → 无效
-- UNROLL_K sweep → 无效 (K=128256太大)
-- Vectorized store (LDS transpose) → 反而更慢
-- Half-direct-A (A0 direct, A1 LDS) → 反而更慢 (global load延迟>LDS)
-- Direct-A C++ (无ART) → 23 spills杀性能
+- `Frac_Active_VMEM` 更高
+- `Frac_Wait_Any` 更高
+- `TCP_TOTAL_READ_sum` 更高
 
-## 唯一可行路径: Full HipKittens3 ART Rewrite
+所以下一阶段更值得做的是：
 
-### Phase A: MFMA operand swap
-- 交换MFMA A/B operands: B-matrix→MFMA-A, A-matrix→MFMA-B
-- 每个thread得到4个连续COLUMN → row-oriented output
-- 使能 v_permlane16_swap + buffer_store_dwordx4 vectorized store
+1. 减少 read-side traffic
+2. 减少 LDS/global round-trips
+3. 改善 inner-loop 的 load/compute overlap
 
-### Phase B: Full hand-scheduled inner loop
-- 用HipKittens3 ART framework (`art<>` tiles)
-- 所有128 MFMAs + loads + scales + barrier在一个hand-scheduled序列
-- 0 VALU in loop
-- Direct-A loading with perfect latency hiding (关键！)
-- 参考: /shared_nfs/kyle/HipKittens3/kernels/attn/gqa_causal_backwards/attn_bkwd_causal.cpp
+## 优先实验方向
+优先做 **最小、可 guard、可 A/B、可 PMC 验证** 的实验：
 
-### Phase C: 42-shape validation
-- bench_all_42.py跑全量对比
-- 每shape auto-tune GROUP_SIZE_M
-- 所有shape ≥ 97% of aiter
+1. `kernel_mxfp4_gluon_cpp.cpp` 中 Step3/4 的 prefetch 交错方式
+2. Step12 fused schedule 的局部重排
+3. 最小化的 A0-direct / half-direct 风格 read-side POC
 
-## 关键发现 (必读)
-1. **Direct-A without latency hiding = SLOWER** — buffer_load 200+cy vs ds_read 20-40cy
-2. **Compiler clobbers AGPRs during store** → 必须在单asm block读完所有64 AGPRs
-3. **`"=&v"` early-clobber** → 所有64个output operand必须用`"=&v"`防止alias
-4. **UNROLL_K>1 + K=128256** → ART kernel crash (code size limit), 用UNROLL_K=1
-5. **aiter输出确认是标准row-major** (不是transposed)
-6. **v_mfma_scale_f32_16x16x128_f8f6f4 macro** 已添加到HipKittens3 macros.cuh
+如果一个实验不能很快回答“对 target shape 有无实质收益”，就不要把它扩成大改。
 
-## 环境
-- MI355X (gfx950), 8 GPUs
-- benchmark规则: warmup=200, iters=500, trimmed mean 10%, HIP_VISIBLE_DEVICES=N
-- triton_for_gluon: /shared_nfs/kyle/test/triton_for_gluon (matmul_4waves branch)
-- aiter: /shared_nfs/kyle/test/aiter
-- HipKittens3 ART框架: /shared_nfs/kyle/HipKittens3
+## 验证要求
+每个像样的实验都必须按这个顺序闭环：
 
-## 工作方式
-- **所有agent必须使用opus模型** (model: opus)
-- 不要sleep()轮询, 用子agent监控
-- 每个改动: 编译→正确性→性能→commit或revert
-- commit用: `git -c user.name="kyle-256" -c user.email="Kyle.Zhao@amd.com" commit`
-- 完整优化路线图: `OPTIMIZATION_ROADMAP.md`
+1. 编译
+2. 正确性
+3. target-shape benchmark
+4. 如果看起来有希望，再做 PMC
+5. 决定 commit 还是回退
 
-## 关键文件
-| 文件 | 用途 | 性能 |
-|------|------|------|
-| `kernel_mxfp4_gluon_cpp.cpp` | 生产C++内核 | 4926T (GM=8) |
-| `kernel_mxfp4_art.cpp` | ART实验内核 | 3185T |
-| `kernel_mxfp4_half_direct.cpp` | Half-direct实验 | 3703T |
-| `bench_all_42.py` | 42-shape benchmark | — |
-| `bench_aiter_a4w4_42.py` | aiter竞品benchmark | — |
-| `test_mxfp4_gluon_cpp.py` | 快速正确性测试 | — |
-| `art_register_map.md` | ART寄存器分配 | — |
-| `OPTIMIZATION_ROADMAP.md` | 完整优化路线图 | — |
+一个改动只有在满足下面至少一条时才值得 commit：
+
+- 有可复现的性能正收益
+- 以硬证据封死了一条很诱人的死路
+- 留下了可复用的 scaffold，并且 lowering / geometry / PMC 结论已经坐实
+
+## 关键发现
+1. **Direct-A without latency hiding = slower**
+2. **Store path 已经证明不是当前 target shape 的主瓶颈**
+3. **`packed wide-store` 是有效 scaffold，不是主线性能解**
+4. **以后做结论必须显式写 benchmark 口径**
+
+## 常用文件
+- `kernel_mxfp4_gluon_cpp.cpp`
+- `PACKED_WIDESTORE_PMC.md`
+- `TODO.md`
+- `bench_all_42.py`
+- `bench_all42_results.json`
+- `docs/profiling/profile_pmc_counters.sh`
+- `docs/profiling/analyze_pmc_counter_output.py`
+
+## 关键数据目录
+- `pmc_aiter_4096x32768x128256/`
+- `pmc_baseline_4096x32768x128256/`
+- `pmc_baseline_gm8_4096x32768x128256/`
+- `pmc_rewrite_4096x32768x128256/`
+- `pmc_fullswap_curr_4096x32768x128256/`
+- `pmc_packedwide_curr_4096x32768x128256/`
