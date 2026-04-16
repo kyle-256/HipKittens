@@ -40,7 +40,11 @@
    - `16384x28672x2048`: old harness best `3204.4T` (`92.0%`) but `_ts_gm2` reaches `3279.5T` (`94.2%`)
    - `32768x28672x2048`: old harness best `3237.1T` (`96.5%`) but `_ts_gm2u8` reaches `3306.7T` (`98.6%`)
    - `4096x32768x6144`: `_spread_gm2u8` reaches `4158.8T` (`91.4%`), slightly above plain `_spread`, but still far below the `95%` gate
-   - `bench_all_42.py` now includes `_ts_gm2`, `_ts_gm2u8`, and `_spread_gm2u8` so the next full sweep can actually see those wins
+   - `STEP3_BARRIER_VMCNT=12` also shows a repeatable `TAIL_SPLIT` family gain for `N=32768`:
+     - `4096x32768x14336`: `_ts 4963.5T` -> `_ts_v12 4973.9T`
+     - `4096x32768x28672`: `_ts 5115.4T` -> `_ts_v12 5132.7T`
+     - `4096x32768x128256`: `_ts_gm8 5104.5T` -> `_ts_gm8_v12 5125.3T`
+   - `bench_all_42.py` now includes `_ts_gm2`, `_ts_gm2u8`, `_spread_gm2u8`, `_ts_v12`, and `_ts_gm8_v12` so the next full sweep can actually see those wins
 4. **`permlane -> bf16 pack -> global_store_dwordx4` lowering is real**, but target-shape speedup is still only noise-level.
 5. **The remaining gap is mainly read-side traffic and pipeline overlap**, not row-store micro-tuning.
 6. **Existing `half_direct` / `direct_a` / current `direct_b` idea are not ready to be mainline candidates for this shape.**
@@ -54,6 +58,8 @@
    - isolated Step12-swapped POC: no credible target-shape win
    - Step12 batch-style structural POC: target regressed
    - `TAIL_SPLIT` / `SPREAD_LDS`: only tiny small-K help, no target-shape win
+   - `STEP4_EXTERNAL_BR_PREFETCH=1`: no consistent broad gain; for `4096x32768x14336` it is a large regression
+   - `STEP3_BARRIER_VMCNT=0` / `STEP3_EMBED_BARRIER=0`: confirmed bad on the tested `N=32768` family
    - low-risk compile-flag sweeps: no stable target-shape win
 9. **User direction remains valid**: ART is not mandatory, and the original C++ kernel is still the main production path.
 

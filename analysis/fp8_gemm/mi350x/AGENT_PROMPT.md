@@ -35,7 +35,12 @@
   - `16384x28672x2048`: 旧 harness 最优 `3204.4T` (`92.0%`) -> `_ts_gm2` 可到 `3279.5T` (`94.2%`)
   - `32768x28672x2048`: 旧 harness 最优 `3237.1T` (`96.5%`) -> `_ts_gm2u8` 可到 `3306.7T` (`98.6%`)
   - `4096x32768x6144`: `_spread` 基线附近只被 `_spread_gm2u8` 小幅抬高到 `4158.8T` (`91.4%`)，说明这类 `N=32768` 家族仍主要是 kernel 问题，不是单纯漏了一个 variant
-  - 因此 `bench_all_42.py` 已补入 `_ts_gm2`、`_ts_gm2u8` 与 `_spread_gm2u8`
+  - `STEP3_BARRIER_VMCNT=12` 也在 `N=32768` 的 `TAIL_SPLIT` 家族上给出一致小胜：
+    - `4096x32768x14336`: `_ts 4963.5T` -> `_ts_v12 4973.9T`
+    - `4096x32768x28672`: `_ts 5115.4T` -> `_ts_v12 5132.7T`
+    - `4096x32768x128256`: `_ts_gm8 5104.5T` -> `_ts_gm8_v12 5125.3T`
+  - 与之相对，`STEP3_BARRIER_VMCNT=0` 和 `STEP3_EMBED_BARRIER=0` 在已测大 `N` 家族上都是明显回退
+  - 因此 `bench_all_42.py` 已补入 `_ts_gm2`、`_ts_gm2u8`、`_spread_gm2u8`、`_ts_v12` 与 `_ts_gm8_v12`
 - default path 与 `/shared_nfs/kyle/test/HipKittens` 的默认热路径基本一致，没有漏掉一个显而易见的现成 patch。
 - 已有独立 kernel 证据显示：`half_direct`（≈ `3457.83T`）和 `direct_a`（≈ `2527.51T`）远低于当前主线，不应盲目 graft 回主核。
 - `PF_N` 细调、低风险 barrier/prefetch flag 组合，以及 isolated Step12-swapped POC 目前都没有给出可信 target-shape 正收益。
@@ -105,6 +110,7 @@
 9. **判断这类 read-side 改动时，要优先看“同等读量下 wait 是否下降”，而不只是看 bytes/counter 总量**
 10. **42-shape 汇报时必须显式给出 `<95%` 的 shape 数量，因为当前用户硬门槛就是全 shape 不得落后超过 `5%`**
 11. **`TAIL_SPLIT` 不是单独万能，但 `TAIL_SPLIT + GM2` 已经证明对 `N=28672, K=2048` 家族有真收益**
+12. **对当前 non-SWAP 主核，`STEP3_BARRIER_VMCNT=12` 比 `8` 更值得重点盯 `N=32768` 的 `TAIL_SPLIT` 家族**
 
 ## 常用文件
 - `kernel_mxfp4_gluon_cpp.cpp`
