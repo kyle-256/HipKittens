@@ -325,8 +325,10 @@ def main():
         ("_swap_gm8", "-DSWAP_STEP34_MAIN=1 -DSWAP_STEP12_MAIN=1 -DGROUP_SIZE_M=8"), # swap+GM8
         ("_ts", "-DTAIL_SPLIT=1"),                           # tail-split (good for small K ≤4096)
         ("_ts_gm8", "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=8"),     # tail-split + GM8
-        ("_spread", "-DSPREAD_LDS=1"),                       # rowspread ds_reads
-        ("_spread_gm8", "-DSPREAD_LDS=1 -DGROUP_SIZE_M=8"), # rowspread + GM8
+        ("_ts_u16", "-DTAIL_SPLIT=1 -DUNROLL_K=16"),         # tail-split + U16
+        ("_gm2u8", "-DGROUP_SIZE_M=2 -DUNROLL_K=8"),         # GM2 + U8
+        ("_gm16u8", "-DGROUP_SIZE_M=16 -DUNROLL_K=8"),       # GM16 + U8
+        ("_gm1u16", "-DGROUP_SIZE_M=1 -DUNROLL_K=16"),       # GM1 + U16
     ]
     for n_val, k_val in nk_pairs:
         for suffix, cppflags in variants:
