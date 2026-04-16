@@ -323,6 +323,10 @@ def main():
         ("_gm16u16", "-DGROUP_SIZE_M=16 -DUNROLL_K=16"), # GM16, unroll 16
         ("_swap", "-DSWAP_STEP34_MAIN=1 -DSWAP_STEP12_MAIN=1"), # operand swap
         ("_swap_gm8", "-DSWAP_STEP34_MAIN=1 -DSWAP_STEP12_MAIN=1 -DGROUP_SIZE_M=8"), # swap+GM8
+        ("_ts", "-DTAIL_SPLIT=1"),                           # tail-split (good for small K ≤4096)
+        ("_ts_gm8", "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=8"),     # tail-split + GM8
+        ("_spread", "-DSPREAD_LDS=1"),                       # rowspread ds_reads
+        ("_spread_gm8", "-DSPREAD_LDS=1 -DGROUP_SIZE_M=8"), # rowspread + GM8
     ]
     for n_val, k_val in nk_pairs:
         for suffix, cppflags in variants:
@@ -418,8 +422,8 @@ def main():
         json.dump({
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
             "scale_format": "preshuffle_mfma16_merged",
-            "warmup": 50,
-            "iters": 100,
+            "warmup": 200,
+            "iters": 500,
             "trim_frac": 0.10,
             "total_shapes": total,
             "wins": wins,
