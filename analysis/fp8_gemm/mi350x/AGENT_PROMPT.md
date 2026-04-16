@@ -39,8 +39,10 @@
     - `4096x32768x14336`: `_ts 4963.5T` -> `_ts_v12 4973.9T`
     - `4096x32768x28672`: `_ts 5115.4T` -> `_ts_v12 5132.7T`
     - `4096x32768x128256`: `_ts_gm8 5104.5T` -> `_ts_gm8_v12 5125.3T`
+  - 同一个 `vmcnt=12` 旋钮在 default/`SPREAD_LDS` 家族也不是纯噪声：GPU6 同口径下 `4096x32768x6144` 有 `_spread_gm2u8 4104.9T` -> `_spread_gm2u8_v12 4164.6T`
   - 与之相对，`STEP3_BARRIER_VMCNT=0` 和 `STEP3_EMBED_BARRIER=0` 在已测大 `N` 家族上都是明显回退
-  - 因此 `bench_all_42.py` 已补入 `_ts_gm2`、`_ts_gm2u8`、`_spread_gm2u8`、`_ts_v12` 与 `_ts_gm8_v12`
+  - `STEP3_PF_N=6` 只在 `4096x32768x6144/14336` 给出小胜，但在 `4096x32768x28672/128256` 回退，因此目前只保留为 probe 旋钮，不升格为通用 variant
+  - 因此 `bench_all_42.py` 已补入 `_ts_gm2`、`_ts_gm2u8`、`_spread_gm2u8`、`_spread_gm2u8_v12`、`_ts_v12` 与 `_ts_gm8_v12`
 - default path 与 `/shared_nfs/kyle/test/HipKittens` 的默认热路径基本一致，没有漏掉一个显而易见的现成 patch。
 - 已有独立 kernel 证据显示：`half_direct`（≈ `3457.83T`）和 `direct_a`（≈ `2527.51T`）远低于当前主线，不应盲目 graft 回主核。
 - `PF_N` 细调、低风险 barrier/prefetch flag 组合，以及 isolated Step12-swapped POC 目前都没有给出可信 target-shape 正收益。

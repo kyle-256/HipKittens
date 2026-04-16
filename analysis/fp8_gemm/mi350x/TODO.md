@@ -44,7 +44,9 @@
      - `4096x32768x14336`: `_ts 4963.5T` -> `_ts_v12 4973.9T`
      - `4096x32768x28672`: `_ts 5115.4T` -> `_ts_v12 5132.7T`
      - `4096x32768x128256`: `_ts_gm8 5104.5T` -> `_ts_gm8_v12 5125.3T`
-   - `bench_all_42.py` now includes `_ts_gm2`, `_ts_gm2u8`, `_spread_gm2u8`, `_ts_v12`, and `_ts_gm8_v12` so the next full sweep can actually see those wins
+  - The same `vmcnt=12` knob also helps the default/`SPREAD_LDS` family on `4096x32768x6144`: GPU6 same-run `4104.9T` (`_spread_gm2u8`) -> `4164.6T` (`_spread_gm2u8_v12`)
+  - `STEP3_PF_N=6` only shows small wins on `4096x32768x6144/14336` but regresses `4096x32768x28672/128256`, so it stays a probe-only knob for now
+  - `bench_all_42.py` now includes `_ts_gm2`, `_ts_gm2u8`, `_spread_gm2u8`, `_spread_gm2u8_v12`, `_ts_v12`, and `_ts_gm8_v12` so the next full sweep can actually see those wins
 4. **`permlane -> bf16 pack -> global_store_dwordx4` lowering is real**, but target-shape speedup is still only noise-level.
 5. **The remaining gap is mainly read-side traffic and pipeline overlap**, not row-store micro-tuning.
 6. **Existing `half_direct` / `direct_a` / current `direct_b` idea are not ready to be mainline candidates for this shape.**
