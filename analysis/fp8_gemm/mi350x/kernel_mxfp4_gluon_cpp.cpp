@@ -1048,8 +1048,8 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     };
 
     store_block(acc_A0Bl, 0, 0);
-    store_block(acc_A1Bl, 1, 0);
     store_block(acc_A0Br, 0, 1);
+    store_block(acc_A1Bl, 1, 0);
     store_block(acc_A1Br, 1, 1);
 }
 
