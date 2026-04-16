@@ -27,6 +27,34 @@ using namespace kittens;
 #define N_DIM 8192
 #endif
 
+#ifndef STEP3_EMBED_BARRIER
+#define STEP3_EMBED_BARRIER 1
+#endif
+#ifndef STEP3_BARRIER_VMCNT
+#define STEP3_BARRIER_VMCNT 8
+#endif
+#ifndef SWAP_STEP34_MAIN
+#define SWAP_STEP34_MAIN 0
+#endif
+#ifndef SWAP_STEP12_MAIN
+#define SWAP_STEP12_MAIN 0
+#endif
+#if SWAP_STEP12_MAIN && !SWAP_STEP34_MAIN
+#error "SWAP_STEP12_MAIN requires SWAP_STEP34_MAIN"
+#endif
+#ifndef MAIN_PERMLANE_BF16_STORE_POC
+#define MAIN_PERMLANE_BF16_STORE_POC 0
+#endif
+#if MAIN_PERMLANE_BF16_STORE_POC && !SWAP_STEP34_MAIN
+#error "MAIN_PERMLANE_BF16_STORE_POC requires SWAP_STEP34_MAIN"
+#endif
+#if MAIN_PERMLANE_BF16_STORE_POC && !SWAP_STEP12_MAIN
+#error "MAIN_PERMLANE_BF16_STORE_POC requires SWAP_STEP12_MAIN"
+#endif
+
+#define MXFP4_STR_IMPL(x) #x
+#define MXFP4_STR(x) MXFP4_STR_IMPL(x)
+
 constexpr int BLK = 256;
 constexpr int BK  = 128;
 constexpr int WARPS_M = 2, WARPS_N = 2;
@@ -59,6 +87,15 @@ struct gluon_globals {
 using fp4_intx8_t   = int __attribute__((__vector_size__(8 * sizeof(int))));
 using fp4_intx4_t   = int __attribute__((__vector_size__(4 * sizeof(int))));
 using fp4_floatx4_t = float __attribute__((__vector_size__(4 * sizeof(float))));
+using u32x2_t       = unsigned int __attribute__((ext_vector_type(2)));
+static_assert(sizeof(u32x2_t) == 8);
+
+__device__ __forceinline__ unsigned int pack_bf16x2(float x, float y) {
+    unsigned int out;
+    asm volatile("v_cvt_pk_bf16_f32 %0, %1, %2"
+        : "=v"(out) : "v"(x), "v"(y));
+    return out;
+}
 
 __device__ __forceinline__ fp4_intx4_t fp4_lo4(const fp4_intx8_t& x) {
     return __builtin_shufflevector(x, x, 0, 1, 2, 3);
@@ -117,6 +154,16 @@ __device__ __forceinline__ void fp4_load_st_to_rt(RT &dst, const ST &src) {
 template<ducks::rt::row_layout RT>
 __device__ __forceinline__ fp4_intx8_t fp4_extract_tile(const RT &src, int tile_row) {
     return *reinterpret_cast<const fp4_intx8_t*>(&src.tiles[tile_row][0].data[0]);
+}
+
+__device__ __forceinline__ void extract_dsread_tile(const float4 d[8], fp4_intx8_t t[4]) {
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        auto lo = *reinterpret_cast<const fp4_intx4_t*>(&d[i]);
+        auto hi = *reinterpret_cast<const fp4_intx4_t*>(&d[i + 4]);
+        t[i][0] = lo[0]; t[i][1] = lo[1]; t[i][2] = lo[2]; t[i][3] = lo[3];
+        t[i][4] = hi[0]; t[i][5] = hi[1]; t[i][6] = hi[2]; t[i][7] = hi[3];
+    }
 }
 
 // ── Scale helpers ──
@@ -252,6 +299,30 @@ __device__ __forceinline__ void emit_one_pf(const tile_pf_params& p, int idx) {
         (as3_uint32_ptr)(uintptr_t)p.lds_addrs[idx],
         16, p.voffs[idx], p.soff, 0,
         static_cast<int>(coherency::cache_all));
+}
+
+#ifndef STEP3_PF_N
+#define STEP3_PF_N 8
+#endif
+#ifndef STEP4_PF_N
+#define STEP4_PF_N 8
+#endif
+
+static_assert(STEP3_PF_N >= 0 && STEP3_PF_N <= 2 * PF_MPT);
+static_assert(STEP4_PF_N >= 0 && STEP4_PF_N <= 2 * PF_MPT);
+
+template<int PF_N>
+__device__ __forceinline__ void emit_pf_tail(const tile_pf_params& pf0, const tile_pf_params& pf1) {
+    static_assert(PF_N >= 0 && PF_N <= 2 * PF_MPT);
+    if constexpr (PF_N < PF_MPT) {
+        #pragma unroll
+        for (int pi = PF_N; pi < PF_MPT; ++pi) emit_one_pf(pf0, pi);
+        #pragma unroll
+        for (int pi = 0; pi < PF_MPT; ++pi) emit_one_pf(pf1, pi);
+    } else if constexpr (PF_N < 2 * PF_MPT) {
+        #pragma unroll
+        for (int pi = PF_N - PF_MPT; pi < PF_MPT; ++pi) emit_one_pf(pf1, pi);
+    }
 }
 
 // ── KPAIR shared operand setup macro ──
@@ -715,7 +786,7 @@ __device__ __forceinline__ void kpair_32mfma_with_lds_and_pf(
     // Row 0: 8 MFMAs + ALL 8 ds_reads front-loaded (1:1 interleave)
     // When EMIT_BARRIER: vmcnt+barrier at top, MFMAs overlap with any stall
     if constexpr (EMIT_BARRIER) {
-        asm volatile("s_waitcnt vmcnt(8)\ns_barrier\n" ::: "memory");
+        asm volatile("s_waitcnt vmcnt(" MXFP4_STR(STEP3_BARRIER_VMCNT) ")\ns_barrier\n" ::: "memory");
     }
     asm volatile(
         "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %24, %32, %0,  %40, %42 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
@@ -778,6 +849,323 @@ __device__ __forceinline__ void kpair_32mfma_with_lds_and_pf(
         "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %23, %29, %13, %33, %34 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %23, %30, %14, %33, %35 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %23, %31, %15, %33, %35 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        : KPAIR_ACC_CLOBBER : KPAIR_INPUTS);
+    if constexpr (PF_N > 6) emit_one_pf(pf1, 2);
+    if constexpr (PF_N > 7) emit_one_pf(pf1, 3);
+}
+
+// ── Swapped-operand MFMA variants ──
+// These compute C^T instead of C by swapping A↔B operands and scales.
+// The accumulator layout is transposed (row↔col).
+
+template<int PF_N = 8>
+__device__ __forceinline__ void kpair_32mfma_with_pf_swapped_sel(
+    fp4_floatx4_t acc[16],
+    const fp4_intx8_t A[4], const fp4_intx8_t B[4],
+    const fp8e8m0_4 a_raw[2], const fp8e8m0_4 b_raw[2],
+    const tile_pf_params &pf0, const tile_pf_params &pf1)
+{
+    KPAIR_SETUP();
+    // Row 0
+    asm volatile(
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %24, %16, %0,  %34, %32 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %25, %16, %1,  %34, %32 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %26, %16, %2,  %35, %32 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %27, %16, %3,  %35, %32 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %28, %20, %0,  %34, %32 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %29, %20, %1,  %34, %32 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %30, %20, %2,  %35, %32 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %31, %20, %3,  %35, %32 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        : KPAIR_ACC_CLOBBER : KPAIR_INPUTS);
+    if constexpr (PF_N > 0) emit_one_pf(pf0, 0);
+    if constexpr (PF_N > 1) emit_one_pf(pf0, 1);
+    // Row 1
+    asm volatile(
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %24, %17, %4,  %34, %32 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %25, %17, %5,  %34, %32 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %26, %17, %6,  %35, %32 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %27, %17, %7,  %35, %32 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %28, %21, %4,  %34, %32 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %29, %21, %5,  %34, %32 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %30, %21, %6,  %35, %32 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %31, %21, %7,  %35, %32 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        : KPAIR_ACC_CLOBBER : KPAIR_INPUTS);
+    if constexpr (PF_N > 2) emit_one_pf(pf0, 2);
+    if constexpr (PF_N > 3) emit_one_pf(pf0, 3);
+    // Row 2
+    asm volatile(
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %24, %18, %8,  %34, %33 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %25, %18, %9,  %34, %33 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %26, %18, %10, %35, %33 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %27, %18, %11, %35, %33 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %28, %22, %8,  %34, %33 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %29, %22, %9,  %34, %33 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %30, %22, %10, %35, %33 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %31, %22, %11, %35, %33 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        : KPAIR_ACC_CLOBBER : KPAIR_INPUTS);
+    if constexpr (PF_N > 4) emit_one_pf(pf1, 0);
+    if constexpr (PF_N > 5) emit_one_pf(pf1, 1);
+    // Row 3
+    asm volatile(
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %24, %19, %12, %34, %33 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %25, %19, %13, %34, %33 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %26, %19, %14, %35, %33 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %27, %19, %15, %35, %33 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %28, %23, %12, %34, %33 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %29, %23, %13, %34, %33 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %30, %23, %14, %35, %33 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %31, %23, %15, %35, %33 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        : KPAIR_ACC_CLOBBER : KPAIR_INPUTS);
+    if constexpr (PF_N > 6) emit_one_pf(pf1, 2);
+    if constexpr (PF_N > 7) emit_one_pf(pf1, 3);
+}
+
+__device__ __forceinline__ void kpair_32mfma_pure_swapped_plain(
+    fp4_floatx4_t acc[16],
+    const fp4_intx8_t A[4], const fp4_intx8_t B[4],
+    const fp8e8m0_4 a_raw[2], const fp8e8m0_4 b_raw[2])
+{
+    KPAIR_SETUP();
+    asm volatile(
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %24, %16, %0,  %34, %32 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %25, %16, %1,  %34, %32 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %26, %16, %2,  %35, %32 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %27, %16, %3,  %35, %32 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %28, %20, %0,  %34, %32 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %29, %20, %1,  %34, %32 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %30, %20, %2,  %35, %32 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %31, %20, %3,  %35, %32 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %24, %17, %4,  %34, %32 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %25, %17, %5,  %34, %32 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %26, %17, %6,  %35, %32 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %27, %17, %7,  %35, %32 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %28, %21, %4,  %34, %32 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %29, %21, %5,  %34, %32 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %30, %21, %6,  %35, %32 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %31, %21, %7,  %35, %32 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %24, %18, %8,  %34, %33 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %25, %18, %9,  %34, %33 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %26, %18, %10, %35, %33 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %27, %18, %11, %35, %33 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %28, %22, %8,  %34, %33 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %29, %22, %9,  %34, %33 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %30, %22, %10, %35, %33 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %31, %22, %11, %35, %33 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %24, %19, %12, %34, %33 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %25, %19, %13, %34, %33 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %26, %19, %14, %35, %33 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %27, %19, %15, %35, %33 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %28, %23, %12, %34, %33 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %29, %23, %13, %34, %33 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %30, %23, %14, %35, %33 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %31, %23, %15, %35, %33 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        : KPAIR_ACC_CLOBBER : KPAIR_INPUTS);
+}
+
+// Swapped Step12: fused ds_read schedule with operand-swapped MFMAs
+__device__ __forceinline__ void kpair_64mfma_step12_swapped_sel(
+    fp4_floatx4_t acc_bl[16], fp4_floatx4_t acc_br[16],
+    const fp4_intx8_t A0[4], const fp4_intx8_t Bl[4],
+    const fp8e8m0_4 a_raw[2], const fp8e8m0_4 bl_raw[2], const fp8e8m0_4 br_raw[2],
+    float4 br_d[8], float4 a1_d[8],
+    uint32_t br_p0, uint32_t br_p1,
+    uint32_t a1_p0, uint32_t a1_p1)
+{
+    fp4_intx4_t a0l=fp4_lo4(A0[0]), a1l=fp4_lo4(A0[1]), a2l=fp4_lo4(A0[2]), a3l=fp4_lo4(A0[3]);
+    fp4_intx4_t a0h=fp4_hi4(A0[0]), a1h=fp4_hi4(A0[1]), a2h=fp4_hi4(A0[2]), a3h=fp4_hi4(A0[3]);
+    fp4_intx4_t b0l=fp4_lo4(Bl[0]), b1l=fp4_lo4(Bl[1]), b2l=fp4_lo4(Bl[2]), b3l=fp4_lo4(Bl[3]);
+    fp4_intx4_t b0h=fp4_hi4(Bl[0]), b1h=fp4_hi4(Bl[1]), b2h=fp4_hi4(Bl[2]), b3h=fp4_hi4(Bl[3]);
+    unsigned sa0 = std::bit_cast<unsigned>(a_raw[0]);
+    unsigned sa1 = std::bit_cast<unsigned>(a_raw[1]);
+    unsigned sb_bl0 = std::bit_cast<unsigned>(bl_raw[0]);
+    unsigned sb_bl1 = std::bit_cast<unsigned>(bl_raw[1]);
+    unsigned sb_br0 = std::bit_cast<unsigned>(br_raw[0]);
+    unsigned sb_br1 = std::bit_cast<unsigned>(br_raw[1]);
+
+    asm volatile(
+        // STEP 1: A0*Bl (swapped) + 8 ds_reads for Br
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %56, %48, %0,  %66, %64 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %32, %70 offset:0\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %57, %48, %1,  %66, %64 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %33, %70 offset:2048\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %58, %48, %2,  %67, %64 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %34, %70 offset:4096\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %59, %48, %3,  %67, %64 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %35, %70 offset:6144\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %60, %52, %0,  %66, %64 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %36, %71 offset:0\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %61, %52, %1,  %66, %64 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %37, %71 offset:2048\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %62, %52, %2,  %67, %64 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %38, %71 offset:4096\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %63, %52, %3,  %67, %64 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %39, %71 offset:6144\n"
+        // Rows 1-3: 24 pure Step 1 MFMAs
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %56, %49, %4,  %66, %64 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %57, %49, %5,  %66, %64 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %58, %49, %6,  %67, %64 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %59, %49, %7,  %67, %64 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %60, %53, %4,  %66, %64 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %61, %53, %5,  %66, %64 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %62, %53, %6,  %67, %64 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %63, %53, %7,  %67, %64 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %56, %50, %8,  %66, %65 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %57, %50, %9,  %66, %65 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %58, %50, %10, %67, %65 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %59, %50, %11, %67, %65 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %60, %54, %8,  %66, %65 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %61, %54, %9,  %66, %65 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %62, %54, %10, %67, %65 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %63, %54, %11, %67, %65 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %56, %51, %12, %66, %65 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %57, %51, %13, %66, %65 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %58, %51, %14, %67, %65 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %59, %51, %15, %67, %65 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %60, %55, %12, %66, %65 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %61, %55, %13, %66, %65 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %62, %55, %14, %67, %65 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %63, %55, %15, %67, %65 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        // Wait for Br ds_reads
+        "s_waitcnt lgkmcnt(0)\n"
+        // STEP 2: A0*Br (swapped) + 8 ds_reads for A1
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %16, %32, %48, %16, %68, %64 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %40, %72 offset:0\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %17, %33, %48, %17, %68, %64 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %41, %72 offset:2048\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %18, %34, %48, %18, %69, %64 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %42, %72 offset:4096\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %19, %35, %48, %19, %69, %64 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %43, %72 offset:6144\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %16, %36, %52, %16, %68, %64 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %44, %73 offset:0\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %17, %37, %52, %17, %68, %64 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %45, %73 offset:2048\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %18, %38, %52, %18, %69, %64 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %46, %73 offset:4096\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %19, %39, %52, %19, %69, %64 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %47, %73 offset:6144\n"
+        // Rows 1-3: 24 pure Step 2 MFMAs
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %20, %32, %49, %20, %68, %64 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %21, %33, %49, %21, %68, %64 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %22, %34, %49, %22, %69, %64 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %23, %35, %49, %23, %69, %64 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %20, %36, %53, %20, %68, %64 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %21, %37, %53, %21, %68, %64 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %22, %38, %53, %22, %69, %64 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %23, %39, %53, %23, %69, %64 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %24, %32, %50, %24, %68, %65 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %25, %33, %50, %25, %68, %65 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %26, %34, %50, %26, %69, %65 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %27, %35, %50, %27, %69, %65 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %24, %36, %54, %24, %68, %65 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %25, %37, %54, %25, %68, %65 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %26, %38, %54, %26, %69, %65 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %27, %39, %54, %27, %69, %65 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %28, %32, %51, %28, %68, %65 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %29, %33, %51, %29, %68, %65 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %30, %34, %51, %30, %69, %65 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %31, %35, %51, %31, %69, %65 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %28, %36, %55, %28, %68, %65 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %29, %37, %55, %29, %68, %65 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %30, %38, %55, %30, %69, %65 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %31, %39, %55, %31, %69, %65 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        : "+a"(acc_bl[0]),  "+a"(acc_bl[1]),  "+a"(acc_bl[2]),  "+a"(acc_bl[3]),
+          "+a"(acc_bl[4]),  "+a"(acc_bl[5]),  "+a"(acc_bl[6]),  "+a"(acc_bl[7]),
+          "+a"(acc_bl[8]),  "+a"(acc_bl[9]),  "+a"(acc_bl[10]), "+a"(acc_bl[11]),
+          "+a"(acc_bl[12]), "+a"(acc_bl[13]), "+a"(acc_bl[14]), "+a"(acc_bl[15]),
+          "+a"(acc_br[0]),  "+a"(acc_br[1]),  "+a"(acc_br[2]),  "+a"(acc_br[3]),
+          "+a"(acc_br[4]),  "+a"(acc_br[5]),  "+a"(acc_br[6]),  "+a"(acc_br[7]),
+          "+a"(acc_br[8]),  "+a"(acc_br[9]),  "+a"(acc_br[10]), "+a"(acc_br[11]),
+          "+a"(acc_br[12]), "+a"(acc_br[13]), "+a"(acc_br[14]), "+a"(acc_br[15]),
+          "=&v"(br_d[0]), "=&v"(br_d[1]), "=&v"(br_d[2]), "=&v"(br_d[3]),
+          "=&v"(br_d[4]), "=&v"(br_d[5]), "=&v"(br_d[6]), "=&v"(br_d[7]),
+          "=&v"(a1_d[0]), "=&v"(a1_d[1]), "=&v"(a1_d[2]), "=&v"(a1_d[3]),
+          "=&v"(a1_d[4]), "=&v"(a1_d[5]), "=&v"(a1_d[6]), "=&v"(a1_d[7])
+        : "v"(a0l), "v"(a1l), "v"(a2l), "v"(a3l),
+          "v"(a0h), "v"(a1h), "v"(a2h), "v"(a3h),
+          "v"(b0l), "v"(b1l), "v"(b2l), "v"(b3l),
+          "v"(b0h), "v"(b1h), "v"(b2h), "v"(b3h),
+          "v"(sa0), "v"(sa1), "v"(sb_bl0), "v"(sb_bl1),
+          "v"(sb_br0), "v"(sb_br1),
+          "v"(br_p0), "v"(br_p1), "v"(a1_p0), "v"(a1_p1)
+    );
+}
+
+template<int PF_N = 8, bool EMIT_BARRIER = false>
+__device__ __forceinline__ void kpair_32mfma_with_lds_and_pf_swapped_sel(
+    fp4_floatx4_t acc[16],
+    const fp4_intx8_t A[4], const fp4_intx8_t B[4],
+    const fp8e8m0_4 a_raw[2], const fp8e8m0_4 b_raw[2],
+    float4 &d0, float4 &d1, float4 &d2, float4 &d3,
+    float4 &d4, float4 &d5, float4 &d6, float4 &d7,
+    uint32_t lds_a0, uint32_t lds_a1,
+    const tile_pf_params &pf0, const tile_pf_params &pf1)
+{
+    KPAIR_SETUP();
+    if constexpr (EMIT_BARRIER) {
+        asm volatile("s_waitcnt vmcnt(" MXFP4_STR(STEP3_BARRIER_VMCNT) ")\ns_barrier\n" ::: "memory");
+    }
+    asm volatile(
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %32, %24, %0,  %42, %40 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %16, %44 offset:0\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %33, %24, %1,  %42, %40 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %17, %44 offset:2048\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %34, %24, %2,  %43, %40 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %18, %44 offset:4096\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %35, %24, %3,  %43, %40 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %19, %44 offset:6144\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %36, %28, %0,  %42, %40 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %20, %45 offset:0\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %37, %28, %1,  %42, %40 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %21, %45 offset:2048\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %38, %28, %2,  %43, %40 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %22, %45 offset:4096\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %39, %28, %3,  %43, %40 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %23, %45 offset:6144\n"
+        : KPAIR_ACC_CLOBBER,
+          "=&v"(d0), "=&v"(d1), "=&v"(d2), "=&v"(d3),
+          "=&v"(d4), "=&v"(d5), "=&v"(d6), "=&v"(d7)
+        : KPAIR_INPUTS,
+          "v"(lds_a0), "v"(lds_a1)
+    );
+    if constexpr (PF_N > 0) emit_one_pf(pf0, 0);
+    if constexpr (PF_N > 1) emit_one_pf(pf0, 1);
+    // Row 1
+    asm volatile(
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %24, %17, %4,  %34, %32 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %25, %17, %5,  %34, %32 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %26, %17, %6,  %35, %32 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %27, %17, %7,  %35, %32 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %28, %21, %4,  %34, %32 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %29, %21, %5,  %34, %32 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %30, %21, %6,  %35, %32 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %31, %21, %7,  %35, %32 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        : KPAIR_ACC_CLOBBER : KPAIR_INPUTS);
+    if constexpr (PF_N > 2) emit_one_pf(pf0, 2);
+    if constexpr (PF_N > 3) emit_one_pf(pf0, 3);
+    // Row 2
+    asm volatile(
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %24, %18, %8,  %34, %33 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %25, %18, %9,  %34, %33 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %26, %18, %10, %35, %33 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %27, %18, %11, %35, %33 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %28, %22, %8,  %34, %33 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %29, %22, %9,  %34, %33 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %30, %22, %10, %35, %33 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %31, %22, %11, %35, %33 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        : KPAIR_ACC_CLOBBER : KPAIR_INPUTS);
+    if constexpr (PF_N > 4) emit_one_pf(pf1, 0);
+    if constexpr (PF_N > 5) emit_one_pf(pf1, 1);
+    // Row 3
+    asm volatile(
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %24, %19, %12, %34, %33 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %25, %19, %13, %34, %33 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %26, %19, %14, %35, %33 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %27, %19, %15, %35, %33 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %28, %23, %12, %34, %33 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %29, %23, %13, %34, %33 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %30, %23, %14, %35, %33 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %31, %23, %15, %35, %33 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         : KPAIR_ACC_CLOBBER : KPAIR_INPUTS);
     if constexpr (PF_N > 6) emit_one_pf(pf1, 2);
     if constexpr (PF_N > 7) emit_one_pf(pf1, 3);
@@ -940,6 +1328,132 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     }
 
     // ═══════════ Main loop (2-tile pipeline) ═══════════
+#if SWAP_STEP34_MAIN
+    // Split steady-state iterations from the final tail to keep the hot loop free
+    // of last-iteration branches and reduce live-range pressure.
+#ifdef UNROLL_K
+  #if UNROLL_K == 0
+    #pragma unroll
+  #else
+    #pragma unroll UNROLL_K
+  #endif
+#elif (K_DIM / 256) <= 16
+    #pragma unroll
+#elif (K_DIM / 256) <= 32
+    #pragma unroll 16
+#else
+    #pragma unroll 8
+#endif
+    for (int bt = 0; bt + 1 < k_byte_iters; ++bt) {
+        const int cur = bt & 1;
+        const int nxt = 1 - cur;
+        const uint32_t sel_br_p0 = cur ? br_1_p0 : br_0_p0;
+        const uint32_t sel_br_p1 = cur ? br_1_p1 : br_0_p1;
+        const uint32_t sel_a1_p0 = cur ? a1_1_p0 : a1_0_p0;
+        const uint32_t sel_a1_p1 = cur ? a1_1_p1 : a1_0_p1;
+        const uint32_t sel_a0_p0 = nxt ? a0_1_p0 : a0_0_p0;
+        const uint32_t sel_a0_p1 = nxt ? a0_1_p1 : a0_0_p1;
+        const uint32_t sel_bl_p0 = nxt ? bl_1_p0 : bl_0_p0;
+        const uint32_t sel_bl_p1 = nxt ? bl_1_p1 : bl_0_p1;
+
+        const int pf_bt = (bt + 2 < k_byte_iters) ? (bt + 2) : (k_byte_iters - 1);
+        tile_pf_params pf_a0_p = make_pf_params(A0_db[cur], g.a, coord<ST_tile>(0,0,br*2,     pf_bt), so_a, srd_a, base_a, lb_a0[cur]);
+        tile_pf_params pf_a1_p = make_pf_params(A1_db[cur], g.a, coord<ST_tile>(0,0,br*2+1,   pf_bt), so_a, srd_a, base_a, lb_a1[cur]);
+        tile_pf_params pf_bl_p = make_pf_params(Bl_db[cur], g.b, coord<ST_tile>(0,0,bc*2,     pf_bt), so_b, srd_b, base_b, lb_bl[cur]);
+        tile_pf_params pf_br_p = make_pf_params(Br_db[cur], g.b, coord<ST_tile>(0,0,bc*2+1,   pf_bt), so_b, srd_b, base_b, lb_br[cur]);
+
+        fp8e8m0_4 a0_raw[a_packs], a1_raw[a_packs], bl_raw[b_packs], br_raw[b_packs];
+        #pragma unroll
+        for (int p = 0; p < a_packs; ++p) { a0_raw[p] = pf_a0[p]; a1_raw[p] = pf_a1[p]; }
+        #pragma unroll
+        for (int p = 0; p < b_packs; ++p) { bl_raw[p] = pf_bl[p]; br_raw[p] = pf_br[p]; }
+
+        {
+            const uint32_t nxt_scale = static_cast<uint32_t>(bt + 1) << 9;
+            load_pq_scale_x2_async(a0_srd, lane_soff_x2, nxt_scale, pf_a0[0], pf_a0[1]);
+            load_pq_scale_x2_async(a1_srd, lane_soff_x2, nxt_scale, pf_a1[0], pf_a1[1]);
+            load_pq_scale_x2_async(bl_srd, lane_soff_x2, nxt_scale, pf_bl[0], pf_bl[1]);
+            load_pq_scale_x2_async(br_srd, lane_soff_x2, nxt_scale, pf_br[0], pf_br[1]);
+        }
+
+        float4 br_d[8], a1_d[8];
+#if SWAP_STEP12_MAIN
+        kpair_64mfma_step12_swapped_sel(acc_A0Bl, acc_A0Br, tA0, tBl,
+            a0_raw, bl_raw, br_raw, br_d, a1_d,
+            sel_br_p0, sel_br_p1, sel_a1_p0, sel_a1_p1);
+#else
+        kpair_64mfma_step12(acc_A0Bl, acc_A0Br, tA0, tBl,
+            a0_raw, bl_raw, br_raw, br_d, a1_d,
+            sel_br_p0, sel_br_p1, sel_a1_p0, sel_a1_p1);
+#endif
+
+        asm volatile("s_waitcnt lgkmcnt(0)");
+        fp4_intx8_t tBr[4], tA1[4];
+        extract_tile(br_d, tBr);
+        extract_tile(a1_d, tA1);
+
+#if !STEP3_EMBED_BARRIER
+        asm volatile("s_waitcnt vmcnt(0)\ns_barrier\n" ::: "memory");
+#endif
+
+        float4 nxt_a0_d[8];
+        float4 nxt_bl_d[8];
+        kpair_32mfma_with_lds_and_pf_swapped_sel<STEP3_PF_N, STEP3_EMBED_BARRIER>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
+            nxt_a0_d[0], nxt_a0_d[1], nxt_a0_d[2], nxt_a0_d[3],
+            nxt_a0_d[4], nxt_a0_d[5], nxt_a0_d[6], nxt_a0_d[7],
+            sel_a0_p0, sel_a0_p1, pf_a0_p, pf_a1_p);
+        emit_pf_tail<STEP3_PF_N>(pf_a0_p, pf_a1_p);
+
+        kpair_32mfma_with_lds_and_pf_swapped_sel<STEP4_PF_N>(acc_A1Br, tA1, tBr, a1_raw, br_raw,
+            nxt_bl_d[0], nxt_bl_d[1], nxt_bl_d[2], nxt_bl_d[3],
+            nxt_bl_d[4], nxt_bl_d[5], nxt_bl_d[6], nxt_bl_d[7],
+            sel_bl_p0, sel_bl_p1, pf_bl_p, pf_br_p);
+        emit_pf_tail<STEP4_PF_N>(pf_bl_p, pf_br_p);
+
+        asm volatile("s_waitcnt lgkmcnt(0)");
+        extract_tile(nxt_a0_d, tA0);
+        extract_tile(nxt_bl_d, tBl);
+    }
+
+    {
+        const int bt = k_byte_iters - 1;
+        const int cur = bt & 1;
+        const uint32_t sel_br_p0 = cur ? br_1_p0 : br_0_p0;
+        const uint32_t sel_br_p1 = cur ? br_1_p1 : br_0_p1;
+        const uint32_t sel_a1_p0 = cur ? a1_1_p0 : a1_0_p0;
+        const uint32_t sel_a1_p1 = cur ? a1_1_p1 : a1_0_p1;
+
+        fp8e8m0_4 a0_raw[a_packs], a1_raw[a_packs], bl_raw[b_packs], br_raw[b_packs];
+        #pragma unroll
+        for (int p = 0; p < a_packs; ++p) { a0_raw[p] = pf_a0[p]; a1_raw[p] = pf_a1[p]; }
+        #pragma unroll
+        for (int p = 0; p < b_packs; ++p) { bl_raw[p] = pf_bl[p]; br_raw[p] = pf_br[p]; }
+
+        float4 br_d[8], a1_d[8];
+#if SWAP_STEP12_MAIN
+        kpair_64mfma_step12_swapped_sel(acc_A0Bl, acc_A0Br, tA0, tBl,
+            a0_raw, bl_raw, br_raw, br_d, a1_d,
+            sel_br_p0, sel_br_p1, sel_a1_p0, sel_a1_p1);
+#else
+        kpair_64mfma_step12(acc_A0Bl, acc_A0Br, tA0, tBl,
+            a0_raw, bl_raw, br_raw, br_d, a1_d,
+            sel_br_p0, sel_br_p1, sel_a1_p0, sel_a1_p1);
+#endif
+
+        asm volatile("s_waitcnt lgkmcnt(0)");
+        fp4_intx8_t tBr[4], tA1[4];
+        extract_tile(br_d, tBr);
+        extract_tile(a1_d, tA1);
+
+#if !STEP3_EMBED_BARRIER
+        asm volatile("s_waitcnt vmcnt(0)\ns_barrier\n" ::: "memory");
+#endif
+
+        tile_pf_params dummy_pf = {};
+        kpair_32mfma_with_pf_swapped_sel<0>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw, dummy_pf, dummy_pf);
+        kpair_32mfma_with_pf_swapped_sel<0>(acc_A1Br, tA1, tBr, a1_raw, br_raw, dummy_pf, dummy_pf);
+    }
+#else
     // Unroll: override via -DUNROLL_K=N, else auto by K size
 #ifdef UNROLL_K
   #if UNROLL_K == 0
@@ -987,7 +1501,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
             load_pq_scale_x2_async(br_srd, lane_soff_x2, nxt_scale, pf_br[0], pf_br[1]);
         }
 
-        // Steps 1+2 merged: A0×Bl (32 MFMAs) + ds_read Br + A0×Br (32 MFMAs) + ds_read A1
+        // Steps 1+2 merged: A0*Bl (32 MFMAs) + ds_read Br + A0*Br (32 MFMAs) + ds_read A1
         float4 br_d[8], a1_d[8];
         kpair_64mfma_step12(acc_A0Bl, acc_A0Br, tA0, tBl,
             a0_raw, bl_raw, br_raw, br_d, a1_d,
@@ -998,30 +1512,35 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         extract_tile(br_d, tBr);
         extract_tile(a1_d, tA1);
 
-        // vmcnt+barrier moved into Step3's first asm block via EMIT_BARRIER=true
+        // Step3 barrier placement is configurable for A/B experiments.
+#if !STEP3_EMBED_BARRIER
+        asm volatile("s_waitcnt vmcnt(0)\ns_barrier\n" ::: "memory");
+#endif
 
-        // Step 3: A1×Bl (32 MFMAs) + ds_read A0[nxt] — barrier at entry
+        // Step 3: A1*Bl (32 MFMAs) + ds_read A0[nxt] -- barrier at entry
         float4 nxt_a0_d[8];
-        kpair_32mfma_with_lds_and_pf<8, true>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
+        float4 nxt_bl_d[8];
+        kpair_32mfma_with_lds_and_pf<STEP3_PF_N, STEP3_EMBED_BARRIER>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
             nxt_a0_d[0], nxt_a0_d[1], nxt_a0_d[2], nxt_a0_d[3],
             nxt_a0_d[4], nxt_a0_d[5], nxt_a0_d[6], nxt_a0_d[7],
             sel_a0_p0, sel_a0_p1, pf_a0_p, pf_a1_p);
+        emit_pf_tail<STEP3_PF_N>(pf_a0_p, pf_a1_p);
 
-        // Step 4: A1×Br (32 MFMAs) + ds_read Bl[nxt] — single asm block
-        float4 nxt_bl_d[8];
-        kpair_32mfma_with_lds_and_pf<8>(acc_A1Br, tA1, tBr, a1_raw, br_raw,
+        // Step4 Br prefetch depth can be reduced without changing MFMA math.
+        kpair_32mfma_with_lds_and_pf<STEP4_PF_N>(acc_A1Br, tA1, tBr, a1_raw, br_raw,
             nxt_bl_d[0], nxt_bl_d[1], nxt_bl_d[2], nxt_bl_d[3],
             nxt_bl_d[4], nxt_bl_d[5], nxt_bl_d[6], nxt_bl_d[7],
             sel_bl_p0, sel_bl_p1, pf_bl_p, pf_br_p);
+        emit_pf_tail<STEP4_PF_N>(pf_bl_p, pf_br_p);
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         extract_tile(nxt_a0_d, tA0);
         extract_tile(nxt_bl_d, tBl);
     }
+#endif
 
-    // ═══════════ Store C — streamlined direct store ═══════════
+    // ═══════════ Store C -- streamlined direct store ═══════════
     // Process base tiles directly from accumulators without materializing RT_C.
-    // Uses 252 VGPRs (4 fewer than original), no spills.
     auto store_block = [&](const fp4_floatx4_t acc[16], int mh, int nh) {
         const int lid = kittens::laneid();
         const int tile_r = br * WARPS_M * 2 + WARPS_M * mh + wm;
@@ -1047,10 +1566,48 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         }
     };
 
+#if SWAP_STEP34_MAIN
+    auto store_block_inner = [&](const fp4_floatx4_t acc[16], int mh, int nh) {
+        const int lid = kittens::laneid();
+        const int tile_r = br * WARPS_M * 2 + WARPS_M * mh + wm;
+        const int tile_c = bc * WARPS_N * 2 + WARPS_N * nh + wn;
+        bf16 *dst_ptr = g.c.raw_ptr + static_cast<size_t>(tile_r * 64) * g.c.cols()
+                        + static_cast<size_t>(tile_c * 64);
+        const int row_stride = g.c.cols();
+        const int lane_group = lid / 16;
+        const int lane_pos = lid % 16;
+
+        #pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            #pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                fp4_floatx4_t s = acc[i * 4 + j] * g.scale;
+                const int row = i * 16 + lane_pos;
+                const int col = j * 16 + 4 * lane_group;
+                dst_ptr[row * row_stride + col + 0] = base_types::convertor<bf16, float>::convert(s[0]);
+                dst_ptr[row * row_stride + col + 1] = base_types::convertor<bf16, float>::convert(s[1]);
+                dst_ptr[row * row_stride + col + 2] = base_types::convertor<bf16, float>::convert(s[2]);
+                dst_ptr[row * row_stride + col + 3] = base_types::convertor<bf16, float>::convert(s[3]);
+            }
+        }
+    };
+#if SWAP_STEP12_MAIN
+    store_block_inner(acc_A0Bl, 0, 0);
+    store_block_inner(acc_A0Br, 0, 1);
+    store_block_inner(acc_A1Bl, 1, 0);
+    store_block_inner(acc_A1Br, 1, 1);
+#else
+    store_block(acc_A0Bl, 0, 0);
+    store_block(acc_A0Br, 0, 1);
+    store_block_inner(acc_A1Bl, 1, 0);
+    store_block_inner(acc_A1Br, 1, 1);
+#endif
+#else
     store_block(acc_A0Bl, 0, 0);
     store_block(acc_A0Br, 0, 1);
     store_block(acc_A1Bl, 1, 0);
     store_block(acc_A1Br, 1, 1);
+#endif
 }
 
 void dispatch_gluon_cpp(gluon_globals g) {
