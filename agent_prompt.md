@@ -279,6 +279,58 @@ for (int g = 0; g < crr_a_pack_count; g++) {
 
 下一会话不要再用并行 dev fan-out 微调，**单条深入做 LDS 布局 transpose**。
 
+## 第十二轮评审结果 (2026-04-17) — Diagnostic-S 推翻 R10 LDS-pipe 假设，新瓶颈：SPI launch allocator stall
+
+### Diagnostic-S 用 rocprofv3 测了 33 个 cycle-level counter（5 PMC chunk，GPU6 vs GPU6）
+
+**新发现（与 R10 矛盾的核心）**：
+- `SQ_LDS_BANK_CONFLICT`、`SQ_LDS_ADDR_CONFLICT`、`SQ_LDS_UNALIGNED_STALL` 在 CRR 和 RRR **都是 0**。R10 的"LDS pipe contention"假设错了，根本没有 bank 冲突
+- `SQ_LDS_IDX_ACTIVE` CRR 与 RRR **完全相同**（5.03e7 cycles）。LDS unit 实际"忙碌"程度一样。CRR 的 +50% 指令数没让 LDS 单元更忙——`ds_read_b64_tr_b8` 在 LDS 内就是更轻的 op
+- CRR 的 `TCP_PENDING_STALL_CYCLES` -34%，`TA_ADDR_STALLED_BY_TC` -92%，`TCP_TCP_TA_DATA_STALL` -50% —— 访存 backend 比 RRR 更轻
+- CRR 的 `SQ_VALU_MFMA_COEXEC_CYCLES` +61% —— ILP 反而好
+
+**真正瓶颈**：
+- **`SPI_RA_LDS_CU_FULL_CSN +388%`** （CRR 9.80e11 vs RRR 2.01e11）—— wave 启动器在 CU 上被 LDS 占用槽位卡住，下一个 workgroup 等 5× 长才能 launch
+- **`SPI_RA_RES_STALL_CSN +388%`**（同向）
+- **`SQC_DCACHE_BUSY_CYCLES +129%`** —— 标量 cache 偏热
+- 估算：`(9.8e11 − 2.0e11) / (224 CU × launch overhead) ≈ 3-5%` 端到端代价 —— 与 1.43% gate gap 同量级
+
+**机理**：CRR 用 136 KB LDS/block，RCR 用 131 KB（5 KB 差）；2 blocks/CU × 136 KB = 272 KB，把 CU 的 LDS 池吃满，下一 block 等。RRR 因为 LDS 用量更小，新 block 上得快
+
+### R12 dev fan-out 全部 timeout
+
+派了 4 个 dev：
+- **Dev O**（CRR_ROW_SHARED_TRANSPOSE 深度调试 + LDS dump 验证）：worktree 在 42f5407b base，16:51 后静默 1.5h+，**无 commit**。可能在 Step 1 LDS dump 调试卡住
+- **Dev P**（CRR_USE_V3_SWIZZLE）：worktree 在 **stale main base** (b027c06b 无源)，**无 commit**
+- **Dev R**（`-mllvm` 编译 flag sweep）：worktree 在 stale base，从 main checkout 拷源 build .so，**无 commit**
+- **Dev T**（LDS 分配缩减 136→131 KB，**Diagnostic-S 角度**）：worktree 在 42f5407b base，活跃到 18:26（最后 .so build），**无 commit**
+
+R12 唯一产出 = Diagnostic-S 的瓶颈定性更正。R12 commit 只能是文档。
+
+### R12 关键产出
+
+**正确的优化方向（按 SPI launch 假说排序）**：
+1. **缩减 CRR LDS/block**（最直接命中瓶颈）：
+   - 单缓冲 A 或 B（如果 PIPELINE_SCALE 允许）
+   - 把 A 和 B staging 通过 union/手动 offset 重叠（生命周期不重叠时可行）
+   - Scale staging area 复用
+   - 目标：从 136 KB 降到 ≤131 KB（RCR 等量），让 SPI 占用槽位降到 RRR 水平
+2. **`__launch_bounds__(512, 3)`**：尝试提示 SPI 预留 3 blocks/CU。需先确认 LDS 是否能容（≤ 64 KB hard 还是 160 KB？需查 gfx950 spec 或 occupancy 实测）
+3. **减少 SQC_DCACHE 压力**：per-CTA 常量改 `s_load_b256` 单次加载，而不是每 iter `s_load`
+
+**已死的方向（R12 证伪，下轮不要再投资）**：
+- LDS bank conflict / address conflict 修复 —— 已证 0 个 conflict
+- LDS pipe issue rate 优化 —— LDS unit 利用率 CRR=RRR
+- TCP/TA 缓存 prefetch —— CRR 已经更轻
+- MFMA-VALU 调度重排 —— CRR 已经 +61% coexec
+
+### 新会话建议
+
+1. **不要重派 R7-R11 类型的微调**（HOIST_HI、KPAIR、scale prefetch 等）—— 都已 saturated
+2. **优先派 1 个深 dev 做 LDS pack/shrink** —— Diagnostic-S 的发现需要被实测验证
+3. 保留 1 个 reviewer agent 做 A/B Welch-t formal
+4. 全部用同一个 base（42f5407b），不要让 worktree 落在 stale main 上
+
 ## 第十一轮评审结果 (2026-04-17) — A LDS 布局 transpose 两条路径全 BROKEN，B 也是窄读
 
 主 agent 派 2 个 scout 调研可行性 → 选定两条并行 dev：

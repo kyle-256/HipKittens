@@ -196,6 +196,23 @@ CRR PQ：**2737.94 TFLOPS** (93.55% of RCR) → 差 **42.34 TFLOPS (1.55%)** 才
   - **R10 Dev K — `>>16` shift coalesce + `wn*RBN` precompute**：MARGINAL，Δ ≈ 0%（VGPR 不变 232/0 spills）。关键发现：**编译器已经自动 hoist 了 `wn*RBN`**——profiler 报告的 "32 v_add per body" 是 pre-hoist 静态分析，不是最终 ISA。`v_alignbit_b32` 与 `v_lshrrev_b32` 占同一 issue pipe，替换无效
   - **R10 Dev L — load reordering (b1 pre-issue + scale hoist)**：FAIL，sub-A −0.49% / sub-B −1.78% / combined −3.14%。关键发现：**`lgkmcnt` 等待同时覆盖 LDS + scalar/VMEM scope**——重排不能让 scale buffer_load 与 A/B LDS 真正并行；反而把 scale dest VGPR live range 撑过 A/B 读寄存器期，VGPR 232→254（差点爆）
   - **真实瓶颈定性（已三角验证）**：CRR 受限于 LDS 管道争用，不是 MFMA、不是 v_lshr、不是 opsel 计算、不是 cache miss、不是 VMEM。要破 gate 必须改 A 的 LDS 布局（global→LDS 阶段做 transpose 让 A 侧用 b128 宽读），这是大型重写不在本 sprint scope
+- **第十二轮评审 (2026-04-17) — Diagnostic-S 推翻 R10 LDS-pipe 假设；新瓶颈：SPI 启动器 stall**
+  - **Diagnostic-S 用 rocprofv3 测了 33 个 cycle-level counter（5 PMC chunk）**，关键发现：
+    - `SQ_LDS_BANK_CONFLICT = 0`，`SQ_LDS_ADDR_CONFLICT = 0`，`SQ_LDS_UNALIGNED_STALL = 0`（CRR 和 RRR 都是）—— **R10 的"LDS pipe contention"假设错了**，根本没有 LDS bank 冲突
+    - `SQ_LDS_IDX_ACTIVE` CRR 与 RRR **完全相同**（5.03e7 cycles）—— LDS unit 的实际"忙碌"程度一样。CRR 的 +50% LDS 指令数没让 LDS unit 更忙，因为 `ds_read_b64_tr_b8` 比 `ds_read_b128` 在 LDS 单元里就是更轻的 op
+    - CRR 的 `TCP_PENDING_STALL_CYCLES` 比 RRR 低 34%，`TA_ADDR_STALLED_BY_TC` 低 92%，`TCP_TCP_TA_DATA_STALL` 低 50% —— CRR 的访存 backend 反而更轻
+    - CRR 的 `SQ_VALU_MFMA_COEXEC_CYCLES` 比 RRR 高 61% —— ILP 反而好
+    - **`SPI_RA_LDS_CU_FULL_CSN +388%`** 和 **`SPI_RA_RES_STALL_CSN +388%`**（CRR 9.80e11 / 1.23e11 vs RRR 2.01e11 / 2.51e10）—— **wave 启动器在 CU 上被 LDS 占用槽位卡住**，下一个 workgroup 等 5× 长才能 launch。`SQC_DCACHE_BUSY_CYCLES +129%` 也偏高（标量 cache pressure）
+    - 估算：`(9.8e11 − 2.0e11) / (224 CU × launch overhead) ≈ 3-5%` 端到端代价 —— 与 1.43% gate gap 同量级
+  - **真正瓶颈定性纠正**：CRR 受限于 **SPI launch-allocator pressure**（CU 上 LDS 分配槽位被 CRR 的 136 KB/block 占满，新 workgroup 排队），**不是** LDS bank conflict、**不是** LDS pipe issue rate、**不是** TCP/TA backend、**不是** MFMA-VALU coexec
+  - **R12 派 4 个 dev（Dev O/P/R/T）+ 1 个 diagnostic（Diagnostic-S）**：
+    - Dev O（CRR_ROW_SHARED_TRANSPOSE 深度调试）：worktree 在 42f5407b base，建了 7 个 build log + diag_load_transpose.py（小尺寸 LDS dump），16:51 后静默 1.5h，**timeout 无 commit**
+    - Dev P（CRR_USE_V3_SWIZZLE）：worktree 在 b027c06b（**stale main base**，无源代码），最近活动 17:02，**timeout 无 commit**
+    - Dev R（-mllvm 编译 flag sweep）：worktree 在 b027c06b（stale base），从 main checkout 拷贝源建了 .so，17:31 后静默，**timeout 无 commit**
+    - Dev T（LDS 分配缩减 136→131 KB）：worktree 在 42f5407b base，活跃到 18:26（最后 .so build），**timeout 无 commit**
+    - Diagnostic-S：完成（paradigm-shift 发现，见上）
+  - **R12 行动结论**：4 个 dev 全 timeout 无 commit；唯一产出是 Diagnostic-S 的瓶颈定性更正。要 commit 代码必须重派 dev，**强烈建议下轮按 Diagnostic-S 的 SPI 启动器假说派活**：(1) 缩减 CRR LDS/block（单缓冲 A 或 B，packing 重叠）、(2) `__launch_bounds__(512, 3)` 提示 SPI 预留更多 slots、(3) 减少 SQC_DCACHE 压力（per-CTA 常量改 s_load_b256 单次加载）。**不要** 再投资 LDS bank conflict / LDS pipe / re-stripe stride 方向（已证 0 conflict，无收益）
+
 - **第十一轮评审 (2026-04-17)**：A LDS 布局重写两条路径全部 BROKEN；同时 ISA census 揭示 **B 也是窄读**，A-only 修复无法到 gate
   - **R11 Dev M — 直接把 `ST_crr_a` 从 `st_16x128_v2a` 改成 `st_16x128_s` (RRR 行优先) + 寄存器侧 `transpose(A_col_reg, A_row_reg)`**：编译过 (VGPR 248 / 0 spills / occ 2)，但**正确性失败** SNR=−2.71 dB 在 8192³ (1340 TFLOPS)。根因（未完成验证）：`load_transpose` 写出的 LDS 布局与通用 `load(A_row_reg, subtile)` 期望的 row-major 消费模式不匹配；`CRR_ROW_SHARED_TRANSPOSE` 参考路径自己就被 fastpath `static_assert` 关掉，无 known-good baseline 可对比。要修通需要：(a) 在 gemm_kernel 非-fastpath 把 `CRR_ROW_SHARED_TRANSPOSE` 跑通做对照，或 (b) instrumented LDS dump 比对预期与实际 M-major 排序。Worktree 已删
   - **R11 Dev N — 启用现成的 `CRR_A_LDS_REENCODE=1` 作为 stepping-stone 实验**：BROKEN，1017 TFLOPS / SNR=1 dB。被迫关掉 8-wave fastpath（`crr_mxfp8_exact_8wave_fastpath.inc:32` 硬 `#error`），走 generic kernel（基线就慢 2.7×）。REENCODE 分支调用未-scaled `mma_AB(...)` 而不是宏 `CRR_DO_MMA(...)`，**MXFP8 scale 通路根本没接进 REENCODE**——这条路径是为非 MX FP8 旧 kernel 写的。但是 **ISA 验证 wide read 原理正确**：基线 0× ds_read_b128 + 144× ds_read_b64_tr_b8 → REENCODE 48× ds_read_b128 + 144× ds_read_b64_tr_b8（A 侧确实换成 b128）。Worktree 已删
