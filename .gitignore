@@ -28,5 +28,27 @@ utils/__pycache__/
 *amd-amdhsa-gfx950.hipi
 *amd-amdhsa-gfx950.bc
 
+# GEMM tuning workspace (analysis/fp8_gemm/mi350x) generated artifacts
+# Device / rewritten assembly dumps — never check in
+analysis/fp8_gemm/**/*.s
+# Per-run benchmark JSON (overwritten on every run)
+analysis/fp8_gemm/**/*_layout_results_*.json
+analysis/fp8_gemm/**/mxfp*_results_*.json
+# GPU core dumps and probe workspaces
+analysis/fp8_gemm/**/gpucore.*
+analysis/fp8_gemm/**/build_probe_*/
+analysis/fp8_gemm/**/work_probe_*/
+analysis/fp8_gemm/**/build_target_*/
+analysis/fp8_gemm/**/work_target_*/
+analysis/fp8_gemm/**/build_step*/
+analysis/fp8_gemm/**/work_step*/
+analysis/fp8_gemm/**/build_ab_*/
+analysis/fp8_gemm/**/work_ab_*/
+analysis/fp8_gemm/**/build_all*/
+analysis/fp8_gemm/**/work_all*/
+analysis/fp8_gemm/**/pmc_*/
+
+# Local venvs
+.venv*/
 
 !CMakeLists.txt

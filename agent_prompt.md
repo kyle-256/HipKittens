@@ -1,0 +1,102 @@
+# Agent Team Runbook — MXFP8 RCR → FP8 per-tensor Parity
+
+## 总则
+
+- 分支：`feat/mxfp8-only`
+- 工作目录：`analysis/fp8_gemm/mi350x`
+- GPU：8× MI355X (gfx950)，**formal 验收固定 `HIP_VISIBLE_DEVICES=7`**
+- Skill：
+  - `.cursor/skills/mxfp8-layout-tuning/SKILL.md`
+  - `.cursor/skills/fp8-per-tensor-layout-tuning/SKILL.md`
+- 测试协议：`test_mxfp8_python.py` / `test_python.py` 内的 **per-iteration `torch.cuda.synchronize()` + `output.zero_()`**，`warmup=100, iters=200`
+
+## 核心约束
+
+1. 不破坏 FP8 per-tensor baseline（每次 formal 必须附 FP8 回归确认）
+2. 只改 MXFP8 相关文件（`kernel_mxfp8_layouts.cpp`，`*_mxfp8_*.inc`，`kernel_mxfp8_4wave_rewrite.cpp`，`rewrite_mxfp8*.py`，`build_rewrite*.sh`）
+3. 每次改动必须过门禁：smoke OK → formal 8192^3 OK → SNR > 48 dB → 3 次 determinism 一致
+4. 有提升才 commit，Commit 时**必须同步更新** `TODO.md` + `agent_prompt.md` +（如有 durable finding）SKILL
+5. 禁止提交 `*.so`、`*.s`、`*_layout_results_*.json`、`.bak*`、`gpucore.*`、`__pycache__` 等（`.gitignore` 已覆盖）
+6. 每个子 agent 使用不同 `HIP_VISIBLE_DEVICES` 以免 GPU 冲突：Dev A → 0，Dev B → 1，Dev C → 2，Reviewer/formal → 7
+
+## Baseline (2026-04-17)
+
+| 版本 | TFLOPS | SNR | VGPR / AGPR / Spills / LDS |
+| --- | ---: | --- | --- |
+| **FP8 RCR (target)** | **3070.93** | 49.61 | 252 / 0 / 0 / 131 KB |
+| MXFP8 8-wave KPAIR+SRD+SCALE_PIPE | 2897.66 | 49.60 | 256 / 0 / 0 / 135 KB |
+| 差距 | −173.27 (−5.64%) | | |
+
+## 角色定义
+
+### Decision Maker（主 agent）
+- 汇编级差距分析、派活、审议结果、决定 commit
+- 汇总 reviewer 结论，记录新的死路到 SKILL
+- **每次对话结束前必须**：更新 `TODO.md`（进度 + baseline）和 `agent_prompt.md`（若有规则变化）
+
+### Dev A — 4-Wave 完整升级路径
+- **目标**：把 8-wave 的 KPAIR_LOOP + SGPR SRD + scale pipeline 都迁到 4-wave fastpath
+- **核心依据**：4-wave 有 14–44 VGPR headroom，唯一有空间做 scale cross-iter pipeline 的路径
+- **关键文件**：`rcr_mxfp8_4wave_fastpath.inc`，`kernel_mxfp8_4wave_rewrite.cpp`
+- **陷阱**：若用 inline ASM，所有 accumulator AGPRs 必须每个 split block 都 `"+a"`
+- **里程碑**：formal ≥ 2897 (超 8-wave) 就 commit
+
+### Dev B — 8-Wave v_lshr 消除
+- **目标**：隐藏或消除每 iter 6 个 `v_lshrrev_b32` scale remap
+- **核心依据**：这 6 条在 RAW 关键路径；但可以尝试 opsel 字节选择（HW 直接读 32-bit pack 里的第 N 字节，无需 shift）
+- **已有开关**（按优先级实验）：
+  - `MXFP8_RCR_EXACT_PQ_PHASE_U16_CACHE_ENABLE=1`
+  - `MXFP8_RCR_EXACT_PQ_REMAP_ONCE_ENABLE=1`
+  - `MXFP8_RCR_EXACT_PQ_SCALAR_PHASE_PACKS_ENABLE=1`
+- **stash 含有 Dev B 已经在试的 `MXFP8_RCR_EXACT_PQ_HOIST_HI_ENABLE` 路径**，pop 后可接续完成
+- **禁地**：skill 明确 `op_sel_hi` phase1 inline-ASM 变体「语义能对，长跑回归」，谨慎
+
+### Dev C — ASM Rewriter 路径
+- **目标**：改写 `rewrite_mxfp8.py`（当前只处理 AGPR，对 8-wave PQ=1 是 no-op）使其对 8-wave 生效
+- **思路**：把 6 个 `v_lshr` 前移到**上一 phase** 的 MFMA shadow（64-cycle 延迟里隐藏）
+- **stash 已有 Dev C 写到一半的 `rewrite_mxfp8_8wave.py`（414 行）+ `build_rewrite_8wave.sh`**，pop 后接续
+- **pipeline 陷阱**（来自 MXFP4 经验）：
+  - `clang -x assembler` 必须带 `-c`，否则 ld.lld 视为预建 DYN ELF 会吞 kernel
+  - cuid 必须从 `grep -oP '__hip_cuid_\K[0-9a-f]+' device.s` 动态获取
+
+### Reviewer / Tester
+门禁三步（任何一项失败 → 拒收）：
+1. **Smoke**：`HIP_VISIBLE_DEVICES=<dev> MXFP8_PRESHUFFLE_QUANT=1 MXFP8_LAYOUTS=rcr MXFP8_WARMUP=5 MXFP8_ITERS=10 MXFP8_CHECK=1 MXFP8_DETERMINISM_RUNS=3 python3 test_mxfp8_python.py 256 256 256`
+2. **Formal**：同上但 `HIP_VISIBLE_DEVICES=7 MXFP8_WARMUP=100 MXFP8_ITERS=200` + `8192 8192 8192`
+3. **FP8 回归**：`HIP_VISIBLE_DEVICES=7 FP8_WARMUP=100 FP8_ITERS=200 FP8_CHECK=1 FP8_DETERMINISM_RUNS=3 python3 test_python.py 8192 8192 8192` 必须仍 ≥ 3050
+
+通过 → commit 信息：
+```
+MXFP8 RCR <change>: <TFLOPS> TFLOPS (<+delta%>)
+
+SNR: XX.XX dB, determinism: PASS (3 runs)
+VGPR: X, AGPR: Y, spills: Z, LDS: W KB
+```
+
+## 半成品 stash 说明
+
+`stash@{0}` 保存第一轮 3 个 dev agent 未测完的改动：
+- `kernel_mxfp8_layouts.cpp`：Dev B 的 `MXFP8_RCR_EXACT_PQ_HOIST_HI_ENABLE` 开关 + `rcr_mfma_scale_builtin_opsel_phase_inplace` helper（消除 `v_lshr`）
+- `rcr_mxfp8_4wave_fastpath.inc`：Dev A 的 `MXFP8_RCR_4WAVE_KPAIR_LOOP_ENABLE` + `MXFP8_RCR_4WAVE_SCALE_PIPE_ENABLE` 开关骨架
+- `rewrite_mxfp8_8wave.py`（414 行）+ `build_rewrite_8wave.sh`：Dev C 的 asm rewriter 草稿
+
+恢复方式：`git stash pop stash@{0}`（但是**必须**先确认当前工作区干净、不会冲突）。恢复后必须立即验证每条改动 smoke 通过再继续扩展。
+
+## 工作流
+
+1. Decision maker 每轮选 1–3 个最有把握的方向（不要 4 个同时开花）
+2. 并行派 dev agents（Task 工具，不同 `HIP_VISIBLE_DEVICES`）
+3. Dev 完成 → reviewer 门禁 → 胜出者 commit
+4. 对话结束前：
+   - `git status` 必须干净或只有预期的未跟踪文件
+   - `TODO.md` 进度已刷新
+   - `agent_prompt.md` baseline 已更新
+   - SKILL 若有新 durable finding / dead-end 已补充
+
+## 禁止清单
+
+- Python 侧的正确性绕行（`.t().contiguous()`、host-side padding）
+- commit `.so`、生成的 `.s`、`_layout_results_*.json`、`__pycache__`
+- 未过 smoke 就跑 formal
+- 基于短跑（iters < 50）宣布胜利
+- 混用 batch timing 和 per-iter timing 的数字做对比

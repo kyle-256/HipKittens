@@ -11,7 +11,7 @@ description: Tune HipKittens FP8 per-tensor strict-layout GEMM kernels on gfx950
 
 ## First Read
 - Read `analysis/fp8_gemm/mi350x/README.md` for the current task state.
-- For MXFP8/MXFP4 work, use the `mxfp8-mxfp4-layout-tuning` skill instead.
+- For MXFP8 work, use the `mxfp8-layout-tuning` skill instead.
 
 ## Hard Rules
 - Formal FP8 acceptance runs use `HIP_VISIBLE_DEVICES=7`.
@@ -19,7 +19,7 @@ description: Tune HipKittens FP8 per-tensor strict-layout GEMM kernels on gfx950
 - Keep layout handling native. No Python `.t().contiguous()` workaround. No host-side padding workaround.
 - After every substantial kernel change: compile, run, then inspect bank conflict, MFMA utilization, and cache utilization before continuing.
 - Do not claim a win from short runs alone.
-- Do not commit `.tmp_*.json`, `gpucore.*`, `pmc_*`, `.bak*`, generated ISA, benchmark dumps, or ad-hoc profiling scripts.
+- Do not commit `*.s`, `*.so`, `*_layout_results_*.json`, `gpucore.*`, `pmc_*/`, `.bak*`, generated ISA, or scratch profiling scripts (`.gitignore` enforces most of this — don't weaken it).
 - Only create a git commit when the user explicitly asks.
 
 ## Primary Files
@@ -57,8 +57,13 @@ HIP_VISIBLE_DEVICES=7 FP8_WARMUP=50 FP8_ITERS=200 FP8_LAYOUTS=rcr,rrr,crr FP8_CH
 - `CRR >= 95% of RCR`
 
 ## Current Status
-- FP8 RCR achieves ~3335 TFLOPS (batch timing, 8192^3, gfx950).
+- FP8 RCR ~3335 TFLOPS under **batch timing** (`warmup=500, iters=100`, no per-iter `torch.cuda.synchronize()`).
+- FP8 RCR ~3070.93 TFLOPS under the harness's default **per-iteration sync + `output.zero_()`** protocol (`test_python.py` as-is).
 - All three layouts (RCR, RRR, CRR) pass SNR and determinism gates.
+- MXFP8 RCR currently trails at 2897.66 TFLOPS under the same per-iter protocol (see `mxfp8-layout-tuning` skill).
+
+### Protocol lock
+Don't mix batch and per-iter numbers in one comparison. The per-iter protocol is the one the MXFP8 harness uses, so when comparing MXFP8 vs FP8 use the per-iter numbers.
 
 ## Durable Debugging Priors
 - The FP8 col-loader bug was real. Keep the `ds_read_b64_tr_b8` path in the corrected single-address form with early-clobber `=&v` outputs.
@@ -78,3 +83,18 @@ HIP_VISIBLE_DEVICES=7 FP8_WARMUP=50 FP8_ITERS=200 FP8_LAYOUTS=rcr,rrr,crr FP8_CH
 - Backend selection via `PRIMUS_TURBO_GEMM_BACKEND=HIPKITTENS`.
 - Tensorwise scale should stay fused as `a_scale_inv * b_scale_inv`.
 - Compare against `HIPBLASLT` and `TRITON` on the same benchmark shape and settings.
+
+## Commit-Time Workflow
+Changes that affect FP8 performance must also refresh the running state:
+1. `TODO.md` (if the work lives in an MXFP8 parity sprint, update MXFP8 baseline + FP8 regression row)
+2. `agent_prompt.md` (if any rule / runbook detail changed)
+3. This SKILL (only for durable findings or new dead-ends)
+4. The code change itself
+
+Commit message template:
+```
+FP8 <layout> <what changed>: <TFLOPS> TFLOPS (<+delta%>)
+
+SNR: XX.XX dB, determinism: PASS (N runs)
+VGPR: X, AGPR: Y, spills: Z, LDS: W KB
+```
