@@ -301,6 +301,20 @@ Decider 提出 5 个 untested vectors, 3 个 in-session 可执行. 启动 3 个 
 
 **Round 4 净增 WIN: 0**. 24/42 第 4 次确认饱和.
 
+## Round 5 (2026-04-17) — 4 parallel optimizers, all DEAD END / INFEASIBLE
+直接针对 deep-LOSE shapes 启动 4 个 optimizer agent (Opus 4.7) 并行验证 untested vectors:
+- **Optimizer F**: 阻断 — INFEASIBLE in single session
+- **Optimizer G**: 阻断 — INFEASIBLE in single session
+- **Optimizer D (MFMA_32X32X64)**: NO-GO for <1 week. **重要订正: decider 关于 AGPR 节省的说法 WRONG**: per-warp output 仍是 128×128 (4 quadrants of 64×64 acc), 32x32x64 仍需 256 AGPRs. 先前 "256→64 AGPR 释放 192 VGPRs" 是误读. MFMA_32X32 仅在 K-loop 调度自由度上有差异, 不是寄存器层面的解放.
+- **Optimizer E (EARLY_SCALE_PF)**: BROKEN + 性能无改善:
+  - 实现: shadow regs `nxt_pf_*` 缓存 next-iter scale loads, iter 末 `pf_* = nxt_pf_*` writeback
+  - **正确性破坏**: compiler 把 `pf_*` 和 `nxt_pf_*` aliased 到同一 VGPR (writeback 看似 no-op 被折叠), VMEM 在 `_raw = pf_*` 读取前 clobber pf_* → race condition. NaN pattern 与 baseline 不同 (2225 vs 2273 NaNs at 1024×1024×4096 random fp4)
+  - **性能** (broken variant, warmup=200 iters=500): 14336×4096×32768 -0.85%, 16384×4096×28672 -0.47%, 4096×32768×128256 +0.35% — all in noise
+  - **根本原因**: baseline ASM 已在 iter 顶部 issue 4×dwordx2 scale loads (NONVOLATILE_SCALE_X2_POC=1), latency hiding window ~512 cyc 已超 ~400 cyc VMEM latency. 没有未利用的调度空间. Force distinct VGPRs 需 +8 VGPRs 超 256 cap, no occupancy benefit
+  - 代码加 `#error` 守卫 (`EARLY_SCALE_PF=1` 编译失败), 保留 flag 和 test 作为 DEAD END 文档. 见 `test_early_scale_pf.py`
+
+**Round 5 净增**: 0 WIN, 0 gap reduction. 触发用户的 GOAL PIVOT 指令 (见文档顶部).
+
 ## 剩余 untested vectors (out of in-session scope)
 - **MFMA_32X32X64_TILING**: 切换 `v_mfma_scale_f32_16x16x128_f8f6f4` → `v_mfma_scale_f32_32x32x64_f8f6f4`. 巨大 kernel rewrite (>1 day, asm + layout 全改). AGPR 从 256 降到 64 释放 192 VGPRs/AGPRs 用于深度 B-buffering. 是唯一未测的"内核重构"级别尝试, 接近 aiter 架构.
 - **B_TRIPLE_BUFFER**: 3-stage pipeline 替代当前 2-stage. LDS budget 是杀手 (131KB → 163KB > 160KB max). 仅在 #1 (32x32 MFMA 释放 AGPR) 完成后才可行.

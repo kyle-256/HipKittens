@@ -91,6 +91,31 @@ using namespace kittens;
 #error "EARLY_BL_PF requires DIRECT_BL=1"
 #endif
 
+// EARLY_SCALE_PF: hoist next-iter scale buffer_load_dwordx2 to before _raw copy
+// using shadow regs nxt_pf_* with writeback at iter end.
+//
+// ⚠ BROKEN — DO NOT ENABLE. The compiler aliases pf_* and nxt_pf_* to the same
+// VGPRs (since `pf_* = nxt_pf_*` writeback looks like a no-op assignment), so the
+// outstanding VMEM clobbers pf_* before _raw reads it → race condition (different
+// NaN pattern vs baseline; torch.equal == False on 1024×1024×4096 corr test).
+//
+// Tried fixes that don't work: (a) volatile asm + 8 extra VGPRs → exceeds 256-VGPR
+// cap, no occupancy gain; (b) restructure pf_* as [2] array → invasive AND
+// no perf benefit since baseline ASM already issues scale loads at iter top
+// (NONVOLATILE_SCALE_X2_POC=1 lets the compiler schedule them ~512 cyc before use).
+//
+// Round 5 dead-end (2026-04-17). Bench (broken variant, for completeness):
+//   14336x4096x32768   baseline 4742.6 → early_scale 4702.3  (-0.85%)
+//   16384x4096x28672   baseline 5005.9 → early_scale 4982.3  (-0.47%)
+//   4096x32768x128256  baseline 5105.9 → early_scale 5123.9  (+0.35%)
+// All deltas within run-to-run noise. See test_early_scale_pf.py for repro.
+#ifndef EARLY_SCALE_PF
+#define EARLY_SCALE_PF 0
+#endif
+#if EARLY_SCALE_PF
+#error "EARLY_SCALE_PF is BROKEN (compiler aliases shadow regs → race)."
+#endif
+
 #ifndef NT_STORE
 #define NT_STORE 0
 #endif
@@ -1962,12 +1987,27 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 #endif
         tile_pf_params pf_br_p = make_pf_params(Br_db[cur], g.b, coord<ST_tile>(0,0,bc*2+1,   pf_bt), so_b, srd_b, base_b, lb_br[cur]);
 
+#if EARLY_SCALE_PF
+        // Hoist scale loads ABOVE the _raw copy: write to shadow regs nxt_pf_* so the
+        // outstanding VMEM does not collide with the current pf_* (still being copied
+        // to _raw). pf_* is updated from nxt_pf_* at end of iteration after vmcnt.
+        fp8e8m0_4 nxt_pf_a0[a_packs], nxt_pf_a1[a_packs], nxt_pf_bl[b_packs], nxt_pf_br[b_packs];
+        {
+            const uint32_t nxt_scale = static_cast<uint32_t>(bt + 1) << 9;
+            load_pq_scale_x2_async(a0_srd, lane_soff_x2, nxt_scale, nxt_pf_a0[0], nxt_pf_a0[1]);
+            load_pq_scale_x2_async(a1_srd, lane_soff_x2, nxt_scale, nxt_pf_a1[0], nxt_pf_a1[1]);
+            load_pq_scale_x2_async(bl_srd, lane_soff_x2, nxt_scale, nxt_pf_bl[0], nxt_pf_bl[1]);
+            load_pq_scale_x2_async(br_srd, lane_soff_x2, nxt_scale, nxt_pf_br[0], nxt_pf_br[1]);
+        }
+#endif
+
         fp8e8m0_4 a0_raw[a_packs], a1_raw[a_packs], bl_raw[b_packs], br_raw[b_packs];
         #pragma unroll
         for (int p = 0; p < a_packs; ++p) { a0_raw[p] = pf_a0[p]; a1_raw[p] = pf_a1[p]; }
         #pragma unroll
         for (int p = 0; p < b_packs; ++p) { bl_raw[p] = pf_bl[p]; br_raw[p] = pf_br[p]; }
 
+#if !EARLY_SCALE_PF
         {
             const uint32_t nxt_scale = static_cast<uint32_t>(bt + 1) << 9;
             load_pq_scale_x2_async(a0_srd, lane_soff_x2, nxt_scale, pf_a0[0], pf_a0[1]);
@@ -1975,6 +2015,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
             load_pq_scale_x2_async(bl_srd, lane_soff_x2, nxt_scale, pf_bl[0], pf_bl[1]);
             load_pq_scale_x2_async(br_srd, lane_soff_x2, nxt_scale, pf_br[0], pf_br[1]);
         }
+#endif
 
         float4 nxt_bl_d[8];
 #if DIRECT_BL && EARLY_BL_PF
@@ -2045,6 +2086,14 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 #endif
         extract_tile(nxt_a0_d, tA0);
         extract_tile(nxt_bl_d, tBl);
+
+#if EARLY_SCALE_PF
+        // Writeback shadow scales → pf_* (compiler inserts vmcnt as needed before next-iter use)
+        #pragma unroll
+        for (int p = 0; p < a_packs; ++p) { pf_a0[p] = nxt_pf_a0[p]; pf_a1[p] = nxt_pf_a1[p]; }
+        #pragma unroll
+        for (int p = 0; p < b_packs; ++p) { pf_bl[p] = nxt_pf_bl[p]; pf_br[p] = nxt_pf_br[p]; }
+#endif
     }
 
     {
@@ -2130,12 +2179,24 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 #endif
         tile_pf_params pf_br_p = make_pf_params(Br_db[cur], g.b, coord<ST_tile>(0,0,bc*2+1,   pf_bt), so_b, srd_b, base_b, lb_br[cur]);
 
+#if EARLY_SCALE_PF
+        fp8e8m0_4 nxt_pf_a0[a_packs], nxt_pf_a1[a_packs], nxt_pf_bl[b_packs], nxt_pf_br[b_packs];
+        {
+            const uint32_t nxt_scale = static_cast<uint32_t>(bt + 1) << 9;
+            load_pq_scale_x2_async(a0_srd, lane_soff_x2, nxt_scale, nxt_pf_a0[0], nxt_pf_a0[1]);
+            load_pq_scale_x2_async(a1_srd, lane_soff_x2, nxt_scale, nxt_pf_a1[0], nxt_pf_a1[1]);
+            load_pq_scale_x2_async(bl_srd, lane_soff_x2, nxt_scale, nxt_pf_bl[0], nxt_pf_bl[1]);
+            load_pq_scale_x2_async(br_srd, lane_soff_x2, nxt_scale, nxt_pf_br[0], nxt_pf_br[1]);
+        }
+#endif
+
         fp8e8m0_4 a0_raw[a_packs], a1_raw[a_packs], bl_raw[b_packs], br_raw[b_packs];
         #pragma unroll
         for (int p = 0; p < a_packs; ++p) { a0_raw[p] = pf_a0[p]; a1_raw[p] = pf_a1[p]; }
         #pragma unroll
         for (int p = 0; p < b_packs; ++p) { bl_raw[p] = pf_bl[p]; br_raw[p] = pf_br[p]; }
 
+#if !EARLY_SCALE_PF
         {
             const uint32_t nxt_scale = static_cast<uint32_t>(bt + 1) << 9;
             load_pq_scale_x2_async(a0_srd, lane_soff_x2, nxt_scale, pf_a0[0], pf_a0[1]);
@@ -2143,6 +2204,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
             load_pq_scale_x2_async(bl_srd, lane_soff_x2, nxt_scale, pf_bl[0], pf_bl[1]);
             load_pq_scale_x2_async(br_srd, lane_soff_x2, nxt_scale, pf_br[0], pf_br[1]);
         }
+#endif
 
         // Steps 1+2 merged: A0*Bl (32 MFMAs) + ds_read Br + A0*Br (32 MFMAs) + ds_read A1
         float4 br_d[8], a1_d[8];
@@ -2216,6 +2278,13 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 #endif
         extract_tile(nxt_a0_d, tA0);
         extract_tile(nxt_bl_d, tBl);
+
+#if EARLY_SCALE_PF
+        #pragma unroll
+        for (int p = 0; p < a_packs; ++p) { pf_a0[p] = nxt_pf_a0[p]; pf_a1[p] = nxt_pf_a1[p]; }
+        #pragma unroll
+        for (int p = 0; p < b_packs; ++p) { pf_bl[p] = nxt_pf_bl[p]; pf_br[p] = nxt_pf_br[p]; }
+#endif
     }
 
     // ── Tail iteration: no prefetch, no next-iter scale/LDS loads ──
@@ -2291,12 +2360,24 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 #endif
         tile_pf_params pf_br_p = make_pf_params(Br_db[cur], g.b, coord<ST_tile>(0,0,bc*2+1,   pf_bt), so_b, srd_b, base_b, lb_br[cur]);
 
+#if EARLY_SCALE_PF
+        fp8e8m0_4 nxt_pf_a0[a_packs], nxt_pf_a1[a_packs], nxt_pf_bl[b_packs], nxt_pf_br[b_packs];
+        {
+            const uint32_t nxt_scale = static_cast<uint32_t>(bt + 1 < k_byte_iters ? bt + 1 : bt) << 9;
+            load_pq_scale_x2_async(a0_srd, lane_soff_x2, nxt_scale, nxt_pf_a0[0], nxt_pf_a0[1]);
+            load_pq_scale_x2_async(a1_srd, lane_soff_x2, nxt_scale, nxt_pf_a1[0], nxt_pf_a1[1]);
+            load_pq_scale_x2_async(bl_srd, lane_soff_x2, nxt_scale, nxt_pf_bl[0], nxt_pf_bl[1]);
+            load_pq_scale_x2_async(br_srd, lane_soff_x2, nxt_scale, nxt_pf_br[0], nxt_pf_br[1]);
+        }
+#endif
+
         fp8e8m0_4 a0_raw[a_packs], a1_raw[a_packs], bl_raw[b_packs], br_raw[b_packs];
         #pragma unroll
         for (int p = 0; p < a_packs; ++p) { a0_raw[p] = pf_a0[p]; a1_raw[p] = pf_a1[p]; }
         #pragma unroll
         for (int p = 0; p < b_packs; ++p) { bl_raw[p] = pf_bl[p]; br_raw[p] = pf_br[p]; }
 
+#if !EARLY_SCALE_PF
         {
             const uint32_t nxt_scale = static_cast<uint32_t>(bt + 1 < k_byte_iters ? bt + 1 : bt) << 9;
             load_pq_scale_x2_async(a0_srd, lane_soff_x2, nxt_scale, pf_a0[0], pf_a0[1]);
@@ -2304,6 +2385,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
             load_pq_scale_x2_async(bl_srd, lane_soff_x2, nxt_scale, pf_bl[0], pf_bl[1]);
             load_pq_scale_x2_async(br_srd, lane_soff_x2, nxt_scale, pf_br[0], pf_br[1]);
         }
+#endif
 
         float4 nxt_bl_d[8];
 #if DIRECT_BL && EARLY_BL_PF
@@ -2395,6 +2477,13 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 #endif
         extract_tile(nxt_a0_d, tA0);
         extract_tile(nxt_bl_d, tBl);
+
+#if EARLY_SCALE_PF
+        #pragma unroll
+        for (int p = 0; p < a_packs; ++p) { pf_a0[p] = nxt_pf_a0[p]; pf_a1[p] = nxt_pf_a1[p]; }
+        #pragma unroll
+        for (int p = 0; p < b_packs; ++p) { pf_bl[p] = nxt_pf_bl[p]; pf_br[p] = nxt_pf_br[p]; }
+#endif
     }
 
 #endif // TAIL_SPLIT

@@ -214,6 +214,11 @@
   - LDS_XOR_SWIZZLE_B → DUPLICATE (already in `st_16x128_s::swizzle()`, perfect 8 acc/bank uniform)
   - PERSISTENT_XCD_QUEUE → DEAD END (3.9% slower; XCD-locality loss + atomic overhead; mega-M shape is reg-pressure bound, not launch-bound)
   Net: 0/3 WIN gain. **24/42 ceiling re-confirmed for 4th time.**
+- **Round 5 (2026-04-17)**: 4 parallel optimizers — all DEAD END / INFEASIBLE:
+  - **MFMA_32X32X64 (D)**: NO-GO for <1 week. **AGPR 节省 claim WRONG**: per-warp output is 128×128 (4 quadrants), 32x32x64 still needs 256 AGPRs. Decider misread layout.
+  - **EARLY_SCALE_PF (E)**: **BROKEN + no perf gain**. Compiler aliases `pf_*` and shadow `nxt_pf_*` to same VGPRs → race; baseline ASM already issues scale loads at iter top with ~512 cyc hiding > ~400 cyc VMEM latency, no untapped scheduling room. Code has `#error` guard if enabled. See `test_early_scale_pf.py`.
+  - **F, G**: INFEASIBLE in single session.
+  Triggered the user's GOAL PIVOT directive at the top of this file.
 
 ## Benchmark 规则
 - **warmup=200, iters=500**, trimmed mean 10%
