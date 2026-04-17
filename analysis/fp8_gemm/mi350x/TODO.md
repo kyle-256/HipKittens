@@ -315,6 +315,54 @@ Decider 提出 5 个 untested vectors, 3 个 in-session 可执行. 启动 3 个 
 
 **Round 5 净增**: 0 WIN, 0 gap reduction. 触发用户的 GOAL PIVOT 指令 (见文档顶部).
 
+## Round 13 (2026-04-17) — alt-scheduler exhaustion sweep, all DEAD END (committed `75d5e305`)
+3 parallel optimizers extending R10/R11/R12 iterative-ilp space. **0 new wins**, 3 critical findings:
+
+- **Optimizer A (alt iterative schedulers on 4 R12-broken shapes DLA1/DLA2/DLA7/WIN2)**: 0/12 candidates survived smoke.
+  - `iterative-minreg` triggers SAME SGPR-clobber bug on all 4 shapes (NaN output / aperture violation).
+  - `max-ilp` triggers SAME bug on all 4 shapes.
+  - `iterative-maxocc` triggers same bug on DLA1; collapses to default (.text byte-identical) on DLA2/DLA7/WIN2.
+  - `max-occupancy` and `iterative-max-occupancy-experimental` are silently NO-OP (not in LLVM 20 enum).
+  - **VALID un-prefixed enum names** (verified via `strings` on libLLVMAMDGPUCodeGen.a): `iterative-ilp`, `iterative-maxocc`, `iterative-minreg`, `max-ilp`, `max-memory-clause`. All others silent no-op.
+  - **The compiler bug is not iterative-ilp-specific** — it's a general non-default-machinescheduler bug. The 4 broken shapes are sched-strategy-EXHAUSTED; future work must move to kernel-source changes or non-scheduler LLVM flags.
+
+- **Optimizer B (full sched sweep on last untested-not-broken P1 shape 28672×4096×16384)**: 0 wins.
+  - `iterative-ilp` shows mean +0.11pp (gate FAIL by 2.6 TFLOPS); 5-run replication confirms no real signal.
+  - `max-ilp` triggers SGPR-clobber bug here too (cross-parent confirmation: bug is shape-driven, not parent-driven).
+  - All 12 sched-strategy variants (5 strategies × 2 parents + 2 stacking orders) regressed or no-op.
+  - **28672×4096×16384 is sched-strategy EXHAUSTED** (R8 + R10A + R13B = 3-round confirmation).
+
+- **Optimizer C (stack alt strategies on 5 R10/R11 verified-working shapes)**: 0 wins.
+  - **LOAD-BEARING METHODOLOGICAL FINDING**: `-mllvm -amdgpu-sched-strategy=` is **LAST-SPEC-WINS** in this LLVM. ASM-diff proof:
+    - `parent (memc only)`: .s size 224583, memc active.
+    - `iterilp + memc-appended-last`: 224583, memc wins, iterilp silently overridden.
+    - `memc + iterilp-appended-last`: 223905, iterilp wins, memc silently overridden.
+    - **Existing `_*_memc_r1X_iterilp` WIN variants are PURE iterilp** (parent's memc was overridden by appended iterilp flag). Naming misleading but substance correct.
+  - `iterative-minreg` triggers SGPR-clobber on 4/5 working shapes (only S5 with smallest K=14336 survived).
+  - `iterative-max-occupancy-experimental`: -1.06 to -2.02pp regressions across all 5 shapes.
+  - `amdgpu-mfma-padding-ratio=10/25` on top of iterilp: byte-identical no-op (true no-op, not within-noise).
+  - `STEP12_BR_LGKMCNT=4` on iterilp: catastrophic on S1 (-1710 TFLOPS smoke), neutral elsewhere.
+  - `STEP3_BARRIER_VMCNT=24` on iterilp: +0.01 to +0.37pp single-shot (sub-threshold; 5-run verify failed gate).
+  - **iterilp WIN ridge is locally optimal** — surrounding flag/scheduler space dominated by it.
+
+**Round 13 净增**: 0 WIN, 0 gap reduction, but **3 critical findings** added to dead-end registry. **9 saturation rounds** total (R2/R4/R5/R6/R7/R8/R9/R12/R13), R10/R11 the only break-out rounds (5 verified deep-LOSE wins).
+
+**新 dead-end vectors (Round 13)**:
+- `iterative-minreg` on R12-broken shapes (4 shapes) — same SGPR-clobber bug
+- `iterative-minreg` on R10/R11 working shapes (4/5) — same bug
+- `max-ilp` on R12-broken shapes — same bug; cross-parent confirmed
+- `iterative-max-occupancy-experimental` — works but consistent regress -1~-2pp
+- `max-occupancy` strategy name — silently no-op (not in enum)
+- `amdgpu-mfma-padding-ratio` on top of iterilp — true no-op
+- `STEP12_BR_LGKMCNT` / `STEP3_BARRIER_VMCNT` stacked on iterilp — sub-threshold
+- 28672×4096×16384 sched-strategy exhausted (3rd round)
+- `memc + iterilp` flag combo — STRUCTURALLY IMPOSSIBLE (single LLVM option, last-wins)
+
+**Frontier remaining (post-R13)**:
+- 4 deep-LOSE shapes still at original ratios with no scheduler-level lever: DLA1 (4096×32768×128256, 88.3%), DLA2 (128256×32768×4096, 92.9%), DLA7 (28672×32768×4096, 94.5%), 28672×4096×16384 (93.7%).
+- 1 WIN shape at risk if iterative-ilp ever defaulted on: WIN2 (32768×6144×2048, 103.9%) — but it's not.
+- Future work must be **kernel-source level** (tile reshape, K-split rewrite, SLM relayout, MFMA op switch) or **non-scheduler LLVM flags** (`-amdgpu-membound-threshold`, regalloc, etc.).
+
 ## Round 12 (2026-04-17) — iterative-ilp bisect + generalization probe (committed `4c4000eb`)
 2 parallel optimizers extending Round 10/11 BREAKTHROUGH discovery:
 

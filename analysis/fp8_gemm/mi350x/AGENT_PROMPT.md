@@ -225,6 +225,42 @@
   - **EARLY_SCALE_PF (E)**: **BROKEN + no perf gain**. Compiler aliases `pf_*` and shadow `nxt_pf_*` to same VGPRs → race; baseline ASM already issues scale loads at iter top with ~512 cyc hiding > ~400 cyc VMEM latency, no untapped scheduling room. Code has `#error` guard if enabled. See `test_early_scale_pf.py`.
   - **F, G**: INFEASIBLE in single session.
   Triggered the user's GOAL PIVOT directive at the top of this file.
+- **Round 13 (2026-04-17, alt-scheduler exhaustion sweep)**: 3 parallel optimizers, **0 new WINs** but 3 critical findings (committed `75d5e305`):
+  - **A (alt iterative schedulers on 4 R12-broken shapes DLA1/DLA2/DLA7/WIN2)**: 0/12 candidates survived smoke.
+    - `iterative-minreg`, `max-ilp`, `iterative-maxocc` ALL trigger SAME SGPR-clobber bug as `iterative-ilp`.
+    - `max-occupancy` and `iterative-max-occupancy-experimental` are silently NO-OP (not in LLVM 20 un-prefixed enum table).
+    - **Confirmed valid un-prefixed enum names** (via `strings` on libLLVMAMDGPUCodeGen.a): `iterative-ilp`, `iterative-maxocc`, `iterative-minreg`, `max-ilp`, `max-memory-clause`. Everything else silent no-op.
+    - **Bug is general non-default-machinescheduler bug, NOT iterative-ilp-specific** — generalizes the R12 finding. The 4 broken shapes are sched-strategy EXHAUSTED.
+  - **B (full sched sweep on last untested-not-broken P1 shape 28672×4096×16384)**: 0 wins.
+    - `iterative-ilp` mean +0.11pp, gate FAIL by 2.6 TFLOPS.
+    - `max-ilp` triggers SGPR-clobber bug here too (cross-parent confirmed: bug is shape-driven, not parent-driven).
+    - All 12 sched-strategy variants regressed or no-op.
+    - **28672×4096×16384 sched-strategy EXHAUSTED** (R8 + R10A + R13B = 3-round confirmation).
+  - **C (stack alt strategies on 5 R10/R11 working shapes)**: 0 wins, but **LOAD-BEARING METHODOLOGY FINDING**:
+    - **`-mllvm -amdgpu-sched-strategy=` is LAST-SPEC-WINS in this LLVM**. ASM-diff proof:
+      - `parent (memc only)`: 224583 bytes
+      - `iterilp + memc-appended-last`: 224583 bytes (memc wins, iterilp silently overridden)
+      - `memc + iterilp-appended-last`: 223905 bytes (iterilp wins, memc silently overridden)
+    - **Existing `_*_memc_r1X_iterilp` WIN variants are PURE iterilp** (parent's memc was overridden by appended iterilp flag). Naming misleading but substance correct — those 5 wins are real, just not "memc + iterilp" combos.
+    - `iterative-minreg` triggers SGPR-clobber on 4/5 working shapes (only S5 K=14336 survived).
+    - `iterative-max-occupancy-experimental`: -1.06 to -2.02pp regressions across all 5 shapes.
+    - `amdgpu-mfma-padding-ratio` on top of iterilp: true no-op (byte-identical .text).
+    - `STEP12_BR_LGKMCNT=4` / `STEP3_BARRIER_VMCNT=24` stacked on iterilp: sub-threshold (+0.01~+0.37pp single-shot).
+    - **iterilp WIN ridge is locally optimal** in surrounding flag/scheduler space.
+
+  **Round 13 net**: 0 WIN, 0 gap reduction. **9 saturation rounds** total.
+
+  **新 dead-end vectors (Round 13)**:
+  - `iterative-minreg` / `iterative-maxocc` / `max-ilp` — same SGPR-clobber bug class as iterative-ilp (cross-shape, cross-parent confirmed)
+  - `iterative-max-occupancy-experimental` — works but regresses -1~-2pp
+  - `max-occupancy` strategy name — silently no-op (not in LLVM enum)
+  - `amdgpu-mfma-padding-ratio` on top of iterilp — true no-op
+  - `STEP12_BR_LGKMCNT` / `STEP3_BARRIER_VMCNT` stacked on iterilp — sub-threshold
+  - `memc + iterilp` flag combo — STRUCTURALLY IMPOSSIBLE (single LLVM option, last-spec-wins)
+  - 28672×4096×16384 — sched-strategy exhausted (3rd-round confirmation)
+
+  **Frontier remaining post-R13**: 4 deep-LOSE shapes (DLA1/DLA2/DLA7/28672×4096×16384) have NO scheduler-level lever. Future work must be (a) kernel-source level (tile reshape, K-split rewrite, SLM relayout, MFMA op switch) or (b) non-scheduler LLVM flags (`-amdgpu-membound-threshold`, regalloc, etc.).
+
 - **Round 12 (2026-04-17, BISECT + GENERALIZATION)**: 2 parallel optimizers, **0 new WINs** but 2 critical findings (committed `4c4000eb`):
   - **A (bisect aperture violations)**: CONFIRMED real LLVM compiler bug in un-prefixed `iterative-ilp`.
     - Fresh-rebuild bisect: parent flags WITHOUT iterative-ilp = byte-identical to baseline; WITH iterative-ilp = byte-identical to R11 broken kernel. iterative-ilp is the SOLE differing input.
