@@ -1,0 +1,49 @@
+Round 10 OptA verification (5-run). GPU=5 warmup=200 iters=500
+====================================================================================================
+
+S1_14336x4096x32768 parent=_v16_wpe2 candidate=_v16_wpe2_r10a_iterilp comp=5245.4
+  baseline  run1: 4728.35 TFLOPS
+  baseline  run2: 4723.89 TFLOPS
+  baseline  run3: 4720.96 TFLOPS
+  baseline  run4: 4705.67 TFLOPS
+  baseline  run5: 4738.12 TFLOPS
+  candidate run1: 4803.84 TFLOPS
+  candidate run2: 4836.72 TFLOPS
+  candidate run3: 4812.61 TFLOPS
+  candidate run4: 4823.36 TFLOPS
+  candidate run5: 4806.70 TFLOPS
+  baseline   mean=4723.40 max=4738.12
+  candidate  mean=4816.65 max=4836.72
+  delta_mean=+93.25 TFLOPS  +1.78pp  gate(mean>=base.max)=PASS
+
+S2_16384x4096x28672 parent=_u8 candidate=_u8_r10a_iterilp comp=5525.3
+  baseline  run1: 5008.28 TFLOPS
+  baseline  run2: 5007.61 TFLOPS
+  baseline  run3: 5027.73 TFLOPS
+  baseline  run4: 5018.11 TFLOPS
+  baseline  run5: 5026.44 TFLOPS
+  candidate run1: 5130.52 TFLOPS
+  candidate run2: 5127.04 TFLOPS
+  candidate run3: 5101.03 TFLOPS
+  candidate run4: 5122.28 TFLOPS
+  candidate run5: 5109.95 TFLOPS
+  baseline   mean=5017.63 max=5027.73
+  candidate  mean=5118.16 max=5130.52
+  delta_mean=+100.53 TFLOPS  +1.82pp  gate(mean>=base.max)=PASS
+
+S3_28672x4096x16384 parent=_ts_gm8 candidate=_ts_gm8_r10a_iterilp comp=5350.6
+  baseline  run1: 5028.39 TFLOPS
+  baseline  run2: 5026.04 TFLOPS
+  baseline  run3: 5037.73 TFLOPS
+  baseline  run4: 5023.80 TFLOPS
+  baseline  run5: 5033.69 TFLOPS
+  candidate run1: 5043.68 TFLOPS
+  candidate run2: 5033.97 TFLOPS
+  candidate run3: 5018.51 TFLOPS
+  candidate run4: 5006.27 TFLOPS
+  candidate run5: 5051.27 TFLOPS
+  baseline   mean=5029.93 max=5037.73
+  candidate  mean=5030.74 max=5051.27
+  delta_mean=+0.81 TFLOPS  +0.02pp  gate(mean>=base.max)=FAIL
+
+Saved bench_round10_optA_verify.json

@@ -1,0 +1,113 @@
+{
+  "warmup": 200,
+  "iters": 500,
+  "trim": 0.1,
+  "gpu": 5,
+  "shapes": [
+    {
+      "label": "S1_14336x4096x32768",
+      "M": 14336,
+      "N": 4096,
+      "K": 32768,
+      "comp": 5245.4,
+      "parent": "_v16_wpe2",
+      "rows": [
+        {
+          "variant": "_v16_wpe2",
+          "tflops": 4733.76,
+          "ratio": 90.25
+        },
+        {
+          "variant": "_v16_wpe2_r10a_baseline",
+          "tflops": 4709.58,
+          "ratio": 89.78
+        },
+        {
+          "variant": "_v16_wpe2_r10a_maxilp",
+          "tflops": 4691.59,
+          "ratio": 89.44
+        },
+        {
+          "variant": "_v16_wpe2_r10a_iterilp",
+          "tflops": 4800.35,
+          "ratio": 91.52
+        },
+        {
+          "variant": "_v16_wpe2_r10a_iterminreg",
+          "tflops": null,
+          "error": "rc=-6"
+        }
+      ]
+    },
+    {
+      "label": "S2_16384x4096x28672",
+      "M": 16384,
+      "N": 4096,
+      "K": 28672,
+      "comp": 5525.3,
+      "parent": "_u8",
+      "rows": [
+        {
+          "variant": "_u8",
+          "tflops": 5030.78,
+          "ratio": 91.05
+        },
+        {
+          "variant": "_u8_r10a_baseline",
+          "tflops": 5016.68,
+          "ratio": 90.79
+        },
+        {
+          "variant": "_u8_r10a_maxilp",
+          "tflops": 4970.17,
+          "ratio": 89.95
+        },
+        {
+          "variant": "_u8_r10a_iterilp",
+          "tflops": 5134.59,
+          "ratio": 92.93
+        },
+        {
+          "variant": "_u8_r10a_iterminreg",
+          "tflops": null,
+          "error": "rc=-6"
+        }
+      ]
+    },
+    {
+      "label": "S3_28672x4096x16384",
+      "M": 28672,
+      "N": 4096,
+      "K": 16384,
+      "comp": 5350.6,
+      "parent": "_ts_gm8",
+      "rows": [
+        {
+          "variant": "_ts_gm8",
+          "tflops": 5028.14,
+          "ratio": 93.97
+        },
+        {
+          "variant": "_ts_gm8_r10a_baseline",
+          "tflops": 5025.72,
+          "ratio": 93.93
+        },
+        {
+          "variant": "_ts_gm8_r10a_maxilp",
+          "tflops": null,
+          "error": "rc=-6"
+        },
+        {
+          "variant": "_ts_gm8_r10a_iterilp",
+          "tflops": 5052.12,
+          "ratio": 94.42
+        },
+        {
+          "variant": "_ts_gm8_r10a_iterminreg",
+          "tflops": 4969.79,
+          "ratio": 92.88
+        }
+      ]
+    }
+  ]
+}
