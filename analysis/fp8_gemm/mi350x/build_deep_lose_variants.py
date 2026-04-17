@@ -90,15 +90,6 @@ DEEP_LOSE_VARIANTS = [
     ("_ts_lgk2_v20_u8",          "-DTAIL_SPLIT=1 -DSTEP12_BR_LGKMCNT=2 -DSTEP3_BARRIER_VMCNT=20 -DUNROLL_K=8"),
     ("_ts_v16_u8",               "-DTAIL_SPLIT=1 -DSTEP3_BARRIER_VMCNT=16 -DUNROLL_K=8"),
     ("_ts_v16_u16",              "-DTAIL_SPLIT=1 -DSTEP3_BARRIER_VMCNT=16 -DUNROLL_K=16"),
-
-    # ── Group F: Round 6 Optimizer B winners (UNROLL_K × _v16_wpe2 baseline) ──
-    # Target shape 14336x4096x32768: baseline _v16_wpe2 = 4591 TFLOPS (87.5%);
-    # u8_v16_wpe2_memc = 4750 (90.6%) +3.04pp, deep-LOSE mean +0.23pp (best overall).
-    # u16_v16_wpe2     = 4757 (90.7%) +3.16pp, deep-LOSE mean -0.06pp.
-    # All build with VGPR=253, AGPR=256, 0 spill, 0 scratch.
-    ("_optB_r6_u8_v16_wpe2_memc",        "-DUNROLL_K=8 -DSTEP3_BARRIER_VMCNT=16 -DWAVES_PER_EU_2=1 -mllvm -amdgpu-sched-strategy=max-memory-clause"),
-    ("_optB_r6_u16_v16_wpe2",            "-DUNROLL_K=16 -DSTEP3_BARRIER_VMCNT=16 -DWAVES_PER_EU_2=1"),
-    ("_optB_r6_u16_lgk2_dc_v16_wpe2",    "-DUNROLL_K=16 -DSTEP3_BARRIER_VMCNT=16 -DWAVES_PER_EU_2=1 -DSTEP12_BR_LGKMCNT=2 -mllvm -amdgpu-disable-clustered-low-occupancy-reschedule"),
 ]
 
 BASE = (
