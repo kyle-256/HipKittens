@@ -1,0 +1,75 @@
+=== Round 6 Reviewer validation (GPU=5) ===
+warmup=200 iters=500 trim=0.1
+
+--- Phase 1: 5-run replication on 14336x4096x32768 ---
+  run 1/5:
+    _v16_wpe2                               4709.43 TFLOPS  (89.78%)
+    _optB_r6_u16_v16_wpe2                   4702.82 TFLOPS  (89.66%)
+    _optB_r6_u8_v16_wpe2_memc               4724.82 TFLOPS  (90.08%)
+    _optB_r6_u16_lgk2_dc_v16_wpe2           4721.34 TFLOPS  (90.01%)
+  run 2/5:
+    _v16_wpe2                               4722.01 TFLOPS  (90.02%)
+    _optB_r6_u16_v16_wpe2                   4730.30 TFLOPS  (90.18%)
+    _optB_r6_u8_v16_wpe2_memc               4732.75 TFLOPS  (90.23%)
+    _optB_r6_u16_lgk2_dc_v16_wpe2           4740.93 TFLOPS  (90.38%)
+  run 3/5:
+    _v16_wpe2                               4741.06 TFLOPS  (90.39%)
+    _optB_r6_u16_v16_wpe2                   4735.90 TFLOPS  (90.29%)
+    _optB_r6_u8_v16_wpe2_memc               4720.87 TFLOPS  (90.00%)
+    _optB_r6_u16_lgk2_dc_v16_wpe2           4722.77 TFLOPS  (90.04%)
+  run 4/5:
+    _v16_wpe2                               4738.31 TFLOPS  (90.33%)
+    _optB_r6_u16_v16_wpe2                   4740.01 TFLOPS  (90.37%)
+    _optB_r6_u8_v16_wpe2_memc               4735.29 TFLOPS  (90.28%)
+    _optB_r6_u16_lgk2_dc_v16_wpe2           4738.63 TFLOPS  (90.34%)
+  run 5/5:
+    _v16_wpe2                               4725.30 TFLOPS  (90.08%)
+    _optB_r6_u16_v16_wpe2                   4742.25 TFLOPS  (90.41%)
+    _optB_r6_u8_v16_wpe2_memc               4694.48 TFLOPS  (89.50%)
+    _optB_r6_u16_lgk2_dc_v16_wpe2           4754.16 TFLOPS  (90.63%)
+
+--- 5-run summary on 14336x4096x32768 (comp=5245.4) ---
+variant                                      mean      min      max    std   mean%
+  _v16_wpe2                                 4727.22  4709.43  4741.06  12.86   90.12
+  _optB_r6_u16_v16_wpe2                     4730.26  4702.82  4742.25  16.00   90.18
+  _optB_r6_u8_v16_wpe2_memc                 4721.64  4694.48  4735.29  16.26   90.01
+  _optB_r6_u16_lgk2_dc_v16_wpe2             4735.57  4721.34  4754.16  13.69   90.28
+
+--- Phase 2: WIN-sample regression (1 run each) ---
+  16384x4096x2048           _v16_wpe2                               3113.58 (103.96%)
+  16384x4096x2048           _optB_r6_u16_v16_wpe2                   3108.31 (103.78%)
+  16384x4096x2048           _optB_r6_u8_v16_wpe2_memc               3149.62 (105.16%)
+  16384x4096x2048           _optB_r6_u16_lgk2_dc_v16_wpe2           3111.59 (103.89%)
+  4096x128256x32768         _v16_wpe2                               5140.11 (160.86%)
+  4096x128256x32768         _optB_r6_u16_v16_wpe2                   5133.70 (160.66%)
+  4096x128256x32768         _optB_r6_u8_v16_wpe2_memc               5145.62 (161.04%)
+  4096x128256x32768         _optB_r6_u16_lgk2_dc_v16_wpe2           5133.85 (160.67%)
+  4096x4096x8192            _v16_wpe2                               4171.28 (105.34%)
+  4096x4096x8192            _optB_r6_u16_v16_wpe2                   4151.72 (104.84%)
+  4096x4096x8192            _optB_r6_u8_v16_wpe2_memc               4157.86 (105.00%)
+  4096x4096x8192            _optB_r6_u16_lgk2_dc_v16_wpe2           4142.62 (104.61%)
+
+--- Phase 3: Deep-LOSE neighbor regression (1 run each) ---
+  4096x32768x128256         _v16_wpe2                               5033.47 (87.07%)
+  4096x32768x128256         _optB_r6_u16_v16_wpe2                   5034.51 (87.09%)
+  4096x32768x128256         _optB_r6_u8_v16_wpe2_memc               5036.52 (87.12%)
+  4096x32768x128256         _optB_r6_u16_lgk2_dc_v16_wpe2           5019.13 (86.82%)
+  16384x4096x28672          _v16_wpe2                               4995.37 (90.41%)
+  16384x4096x28672          _optB_r6_u16_v16_wpe2                   5004.40 (90.57%)
+  16384x4096x28672          _optB_r6_u8_v16_wpe2_memc               5005.98 (90.60%)
+  16384x4096x28672          _optB_r6_u16_lgk2_dc_v16_wpe2           5014.46 (90.75%)
+  28672x4096x16384          _v16_wpe2                               4951.75 (92.55%)
+  28672x4096x16384          _optB_r6_u16_v16_wpe2                   4941.59 (92.36%)
+  28672x4096x16384          _optB_r6_u8_v16_wpe2_memc               4972.85 (92.94%)
+  28672x4096x16384          _optB_r6_u16_lgk2_dc_v16_wpe2           4959.26 (92.69%)
+  4096x32768x28672          _v16_wpe2                               5185.84 (93.13%)
+  4096x32768x28672          _optB_r6_u16_v16_wpe2                   5179.24 (93.01%)
+  4096x32768x28672          _optB_r6_u8_v16_wpe2_memc               5198.36 (93.36%)
+  4096x32768x28672          _optB_r6_u16_lgk2_dc_v16_wpe2           5183.23 (93.09%)
+
+--- Decision check ---
+  _optB_r6_u16_v16_wpe2                    mean_pp_over_base=+0.06  mean-baseMax=-0.21  min-baseMax=-0.73
+  _optB_r6_u8_v16_wpe2_memc                mean_pp_over_base=-0.11  mean-baseMax=-0.37  min-baseMax=-0.89
+  _optB_r6_u16_lgk2_dc_v16_wpe2            mean_pp_over_base=+0.16  mean-baseMax=-0.10  min-baseMax=-0.38
+
+Results saved: /shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/spot_optB_r6_validation_results.json

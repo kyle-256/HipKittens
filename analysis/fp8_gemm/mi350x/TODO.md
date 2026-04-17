@@ -315,6 +315,24 @@ Decider 提出 5 个 untested vectors, 3 个 in-session 可执行. 启动 3 个 
 
 **Round 5 净增**: 0 WIN, 0 gap reduction. 触发用户的 GOAL PIVOT 指令 (见文档顶部).
 
+## Round 6 (2026-04-17) — 3 parallel optimizers, all DEAD END / MARGINAL (REVERTED)
+GOAL PIVOT 后第一轮, 直接攻 deep-LOSE shapes:
+- **Optimizer A** (4096×32768×128256 / compiler flags + L2 prefetch): **DEAD END**. gfx950 无 L2 prefetch instruction; igroup-lp 不可用; 单次 +0.29pp, 5-run 中位 -0.5pp (in noise).
+- **Optimizer B** (14336×4096×32768 / UNROLL_K sweep): **claimed +3.16pp WIN (commit 198bb3a4) → REJECTED by Reviewer**.
+  - Optimizer B 的 baseline 测量 4591 TFLOPS 是**假低**: 单 GPU 5-run replication 验证 baseline 实际 4727±13 TFLOPS (不是 4591). 真实 delta:
+    | variant | mean TFLOPS | mean pp over base | min vs base max |
+    |---------|-------------|-------------------|-----------------|
+    | _v16_wpe2 (baseline) | 4727.22 | 0.00 | 0.00 |
+    | _optB_r6_u16_v16_wpe2 | 4730.26 | +0.06 | -0.73 |
+    | _optB_r6_u8_v16_wpe2_memc | 4721.64 | -0.11 | -0.89 |
+    | _optB_r6_u16_lgk2_dc_v16_wpe2 | 4735.57 | +0.16 | -0.38 |
+  - 全部三个变体 mean Δ 均 <+1pp 阈值, 全部 worst-case (min vs baseline max) 为负. WIN-sample 与其余 deep-LOSE neighbor 也无显著 gain (±0.5pp 内)
+  - 教训: Optimizer B 在 GPU 4 上测的 baseline 与之前 baseline (GPU 不同) 比较, 触发了 **GPU bias 50-100 TFLOPS** + per-run noise ±0.6pp 的合成假象
+  - **Action**: `git revert 198bb3a4` (commit 4c11f8bb). 验证脚本保留: `spot_optB_r6_validation.py` + `spot_optB_r6_validation.log` + `spot_optB_r6_validation_results.json`
+- **Optimizer C** (16384×4096×28672 / TAIL_SPLIT epilogue tuning): **DEAD END**. TAIL_SPLIT=1 在 K≥7168 上更差; best variant +0.19pp, 远低于 +1pp 阈值
+
+**Round 6 净增**: 0 WIN, 0 gap reduction. **新教训**: 跨 GPU 比较 baseline 不可靠 (GPU bias ~2pp), 任何 deep-LOSE 改进 claim **必须** single-GPU 5-run replication 验证, 且 best mean 必须 ≥ baseline max.
+
 ## 剩余 untested vectors (out of in-session scope)
 - **MFMA_32X32X64_TILING**: 切换 `v_mfma_scale_f32_16x16x128_f8f6f4` → `v_mfma_scale_f32_32x32x64_f8f6f4`. 巨大 kernel rewrite (>1 day, asm + layout 全改). AGPR 从 256 降到 64 释放 192 VGPRs/AGPRs 用于深度 B-buffering. 是唯一未测的"内核重构"级别尝试, 接近 aiter 架构.
 - **B_TRIPLE_BUFFER**: 3-stage pipeline 替代当前 2-stage. LDS budget 是杀手 (131KB → 163KB > 160KB max). 仅在 #1 (32x32 MFMA 释放 AGPR) 完成后才可行.
