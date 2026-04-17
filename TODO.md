@@ -76,16 +76,20 @@ Main loop 已无 v_lshr，结构上与 FP8 几乎一致（仅多 6 个 scale buf
 
 **关键纠错**：真实 8-wave PQ scaled kernel = **VGPR 254 / LDS 131 KB**（不是之前决策者读错的 212 VGPR / 139 KB，那是 outer dispatcher）。headroom 仅 ~2 VGPR。
 
+**第四轮评审 (2026-04-17) — 两条路径 REJECT**
+
+| 路径 | 结果 | 采纳？ |
+|---|---|---|
+| Dev D — LDS-cached scales `MXFP8_RCR_EXACT_PQ_SCALE_LDS_ENABLE` 实测 | 编译过，VGPR 243 / LDS 132 KB / occ 2；smoke 256 PASS；但 8192 formal A/B −0.76%（5 runs 全 slower）且 **determinism FAIL**（max abs 1.43）。SCALE_LDS 设计是替代 PIPELINE_SCALE，叠加反而在 tail 加 ds_write/s_barrier 拖慢；LDS 同步仅靠 compiler fence 不足 | **拒绝（regression + det fail）** |
+| Dev E — sched V2 松 `TK_WAIT_VMCNT(6→8)` 在 HOIST_HI 之上 | 正确 / 资源不变；GPU1 A/B 10 runs Δ +0.11%，Welch-t 0.58，纯噪声 | **拒绝（marginal）** |
+
 ### 下一轮方向（按优先级）
 
-- [ ] **降低 baseline VGPR 压力**：accumulator reshape 或主动下调到 occupancy=1 换更深软流水 —— 这是 KPAIR-unroll / scale-prefetch / 任何 cross-iter pipeline 的先决条件
-- [ ] **LDS 缓存 scale 可行性**：开关 `MXFP8_RCR_EXACT_PQ_SCALE_LDS_ENABLE` 已在代码里但未走过；研究把 6 scale buffer_load 换成 1 次批量 LDS store + ds_read
-- [ ] **`sched_barrier` 手工编排 main loop**：在 HOIST_HI 基础上尝试改变 buffer_load / ds_read / MFMA 交错（不加 VGPR，不加 spill）
-- [ ] **试探 CU-level L2 prefetch / tile routing**：绕开 VGPR 瓶颈从存储端吃胜
-- ~~Dev A scale prefetch (n+1 ring)~~ — 已关闭，VGPR 不够
-- ~~Dev B tail dispatch~~ — 已关闭，收益噪声级
-- ~~Dev C KPAIR 2× unroll~~ — 已关闭，VGPR 爆
-- ~~Dev C `.s` rewriter~~ — 第二轮关闭，HOIST_HI 已覆盖
+- [ ] **降低 baseline VGPR 压力**（accumulator reshape / 主动 occ=1 换更深流水）—— 所有 cross-iter pipeline 的先决条件
+- [ ] **替代式 SCALE_LDS**（不是叠加）：若要走 LDS 缓存 scale，必须替换 `PIPELINE_SCALE` 的 SGPR-SRD path；同时用真正的 `__builtin_amdgcn_s_barrier()` 前后包 ds_write/ds_read 解决 determinism；不是 < 20 行改动
+- [ ] **多个 sched 调整组合 A/B 扫描**（单点 +0.11% 是噪声，但 2-3 个独立点叠加可能累积到 >0.3%）—— 需要自动化扫描不是手工
+- [ ] **bank conflict hunt on LDS**（profile `SQ_WAIT_INST_LDS`）—— MXFP8 13 KB 多 LDS 是否有隐性 bank 冲突
+- ~~所有已关闭路径~~（见上面两轮 reject 表）
 
 ## 成功条件
 
@@ -100,3 +104,5 @@ Main loop 已无 v_lshr，结构上与 FP8 几乎一致（仅多 6 个 scale buf
 - `bc0081e5` Tidy repo: skills, gitignore, agent team runbook
 - `f943af92` HOIST_HI opsel 消除 main-loop v_lshr（reviewer GPU7 验收 2925.64，A/B +17.80；GPU1 head-to-head +25.67）。main-loop `v_lshr` 0，spills 0，VGPR 256→254，occupancy 2。构建 flag 加 `-DMXFP8_RCR_EXACT_PQ_HOIST_HI_ENABLE=1`。
 - **第三轮 (2026-04-17)**：三条路径（scale prefetch n+1 / tail compile-time dispatch / KPAIR 2× unroll）全 reject。Baseline 稳定在 2917–2932 TFLOPS。无代码 commit，仅文档修正 baseline VGPR 数字（254，不是 212）+ 写入三条新 dead-end。
+- `b964c110` Round-3 dead-ends: correct baseline VGPR = 254, not 212（仅文档 commit，code 不变）
+- **第四轮 (2026-04-17)**：两条路径全 reject。Dev D 实测 SCALE_LDS 叠加：−0.76% 且 determinism FAIL（此前仅"未验证"，现有硬数据）。Dev E 实测 sched_barrier v2 `vmcnt(6→8)`：+0.11% 噪声级。写入 SKILL dead-ends，不 commit 代码。

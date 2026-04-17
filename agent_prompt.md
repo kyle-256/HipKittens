@@ -103,6 +103,19 @@ stash@{0} 已 pop 并逐条评审。三条路径：
 
 下一轮必须先解决 **baseline VGPR 压力** 才能再动 cross-iter pipeline / deeper unroll；否则任何需要额外寄存器的方案都会直接 spill。
 
+## 第四轮评审结果 (2026-04-17)
+
+两条路径，都是**不加 VGPR 不加 LDS** 的尝试，仍全 reject：
+
+| 路径 | flag | 结果 | 采纳？ |
+|---|---|---|---|
+| Dev D — SCALE_LDS 叠加 PIPELINE_SCALE | `MXFP8_RCR_EXACT_PQ_SCALE_LDS_ENABLE` | VGPR 243 / LDS 132 KB / occ 2 / smoke PASS；但 8192 formal A/B −0.76%（5 runs 全输）**且 determinism FAIL**（max abs 1.43）。这个 flag 以前只是「未验证」，现在有硬数据 | **拒绝（regression + det fail）** |
+| Dev E — sched V2 `TK_WAIT_VMCNT(6→8)` | `MXFP8_RCR_EXACT_PQ_SCHED_V2_ENABLE` | 正确+资源不变；GPU1 A/B 10 runs Δ +0.11%，Welch-t 0.58，纯噪声 | **拒绝（marginal）** |
+
+关键新 dead-end 已写入 SKILL：SCALE_LDS 叠加现有 PIPELINE_SCALE 是不可走通的，只能**替换**（且需解决 LDS 同步 determinism），非小改动。
+
+**本轮再次无代码 commit，仅 SKILL / TODO / agent_prompt 更新**。剩余差距仍是 145 TFLOPS / 4.73%。下一轮建议的高收益方向只剩**降低 baseline VGPR 压力**（accumulator reshape 或主动下调到 occupancy=1），因为任何 VGPR-neutral 的调度优化都已被压到噪声之下。
+
 ## 工作流
 
 1. Decision maker 每轮选 1–3 个最有把握的方向（不要 4 个同时开花）
