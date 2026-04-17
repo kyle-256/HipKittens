@@ -9,21 +9,25 @@
 
 **改为**: 缩小 deep-LOSE shape 的 gap. 即使 88% → 92% 也算真实进步, **+1pp 即可 commit**.
 
-### 重点 shape (P0 优先, single-GPU verified ratios from Round 6)
-**注意**: 之前 TODO.md 的 ratio (88.3/89.6/90.1) 是跨 GPU 平均, 实际单 GPU 5-run 测量更高. Round 6 reviewer 确认 14336×4096×32768 真实 baseline ratio 是 90.12% (不是 89.66%), 测量 4727±13 TFLOPS. 类似偏差可能存在于其他 shapes — 任何 +1pp 改进 claim **必须 single-GPU 5-run replication 验证**.
+### 重点 shape (R10/R11 部分突破, R12 generalization 失败)
+**关键发现 (R10-R12)**: un-prefixed `iterative-ilp` LLVM sched-strategy 在 5 个 deep-LOSE shapes 上验证有效 (+1.78~+2.00pp, 5-run mean ≥ baseline.max gate), 但**有 LLVM 编译器 bug**: deterministic SGPR clobber 在 ≥10 个 shape categories 上触发 HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION. **不可作为 default flag**. 仅 whitelist 已验证 5 个 shape parents.
 
-| 优先级 | Shape | 当前 Ratio (单GPU) | 当前 Best | 类别 |
-|-------|-------|------------------|-----------|------|
-| **P0** | 4096×32768×128256 | ~90.1% (was 88.3%) | _ts_pf6_6_v12_memc | mega-K + 大N |
-| **P0** | 14336×4096×32768 | **90.12%** (verified) | _v16_wpe2 | 大K + 大M |
-| **P0** | 16384×4096×28672 | ~90.5% | _u8 | 大K + 大M |
-| P1 | 128256×32768×4096 | 92.9% | ts_gm2_v12_memc_dc | mega-M+N (reg-pressure bound) |
-| P1 | 4096×32768×28672 | 93.7% | v20_memc | 大K + 大N |
-| P1 | 28672×4096×16384 | 93.7% | ts_gm8 | 大K + 大M |
-| P2 | 4096×28672×32768 | 94.1% | u16 | 大K + 大N |
-| P2 | 32768×4096×14336 | 94.1% | ts_gm8_v12 | 大K + 大M |
-| P2 | 4096×32768×14336 | 94.5% | ts_lgk2_memc | 大K + 大N |
-| P2 | 28672×32768×4096 | 94.5% | ts_lgk2_v12_memc | 大M+N |
+| 优先级 | Shape | 当前 Ratio | 当前 Best | 类别 | iterative-ilp |
+|-------|-------|-----------|-----------|------|----------------|
+| **P0** | 4096×32768×128256 | 88.3% | _ts_pf6_6_v12_memc | mega-K + 大N | **BROKEN (compiler bug)** |
+| **P0 → P2** | 14336×4096×32768 | **91.4%** | **_lgk2_dc_r10_iterilp** ✓ | 大K + 大M | R10 +1.78pp WIN |
+| **P0 → P2** | 16384×4096×28672 | **91.9%** | **_u32_r10_iterilp** ✓ | 大K + 大M | R10 +1.82pp WIN |
+| P1 | 128256×32768×4096 | 92.9% | ts_gm2_v12_memc_dc | mega-M+N | **BROKEN (compiler bug)** |
+| P1 → P2 | 4096×32768×28672 | **94.8%** | **_v20_memc_r11_iterilp** ✓ | 大K + 大N | R11 +1.84pp WIN |
+| P1 | 28672×4096×16384 | 93.7% | ts_gm8 | 大K + 大M | UNTESTED (R13 候选) |
+| P2 → P2+ | 4096×28672×32768 | **95.4%** | **_u16_r11_iterilp** ✓ | 大K + 大N | R11 +2.00pp WIN |
+| P2 | 32768×4096×14336 | 94.6% | _ts_gm8_v12_r11_iterilp (UNVERIFIED) | 大K + 大M | R11 +0.74pp 未到 gate |
+| P2 → P2+ | 4096×32768×14336 | **95.3%** | **_ts_lgk2_memc_r11_iterilp** ✓ | 大K + 大N | R11 +1.80pp WIN |
+| P2 | 28672×32768×4096 | 94.5% | ts_lgk2_v12_memc | 大M+N | **BROKEN (compiler bug)** |
+
+**Cumulative R10+R11 deep-LOSE gap reduction**: 5/10 shapes, 平均 +1.85pp (toward GOAL PIVOT goal). 10-shape deep-LOSE 平均从 ~92% → ~93.4%.
+
+**仍未试**: 28672×4096×16384 — 唯一 untested-not-broken shape. R13 候选.
 
 ### 工作准则
 - **每轮锁定 1-3 个 P0/P1 shape** 专项优化, 不再全 42 跑.
@@ -221,6 +225,49 @@
   - **EARLY_SCALE_PF (E)**: **BROKEN + no perf gain**. Compiler aliases `pf_*` and shadow `nxt_pf_*` to same VGPRs → race; baseline ASM already issues scale loads at iter top with ~512 cyc hiding > ~400 cyc VMEM latency, no untapped scheduling room. Code has `#error` guard if enabled. See `test_early_scale_pf.py`.
   - **F, G**: INFEASIBLE in single session.
   Triggered the user's GOAL PIVOT directive at the top of this file.
+- **Round 12 (2026-04-17, BISECT + GENERALIZATION)**: 2 parallel optimizers, **0 new WINs** but 2 critical findings (committed `4c4000eb`):
+  - **A (bisect aperture violations)**: CONFIRMED real LLVM compiler bug in un-prefixed `iterative-ilp`.
+    - Fresh-rebuild bisect: parent flags WITHOUT iterative-ilp = byte-identical to baseline; WITH iterative-ilp = byte-identical to R11 broken kernel. iterative-ilp is the SOLE differing input.
+    - **Deterministic 0/3 fail** on DLA1 (4096×32768×128256), DLA2 (128256×32768×4096), DLA7 (28672×32768×4096), WIN2 (32768×6144×2048).
+    - WIN1 (16384×4096×7168) was a 1-in-N flaky launch glitch (3/3 OK in retry); NOT a real iterative-ilp bug on that shape.
+    - Failure addr `0xff9010f50000` page-aligned + high bits set → C-output base SGPR pair clobbered (not just per-thread offset). "Read-only page" → SRD/base lands in code/rodata mapping.
+    - ASM diff ~1152 buffer_load reschedule diffs, no single-line miscompile. Reproducer in `build_round12_optA_bisect.py` if filing upstream LLVM bug.
+  - **B (generalization to NT/MID-LOSE)**: ZERO new WINs on 8 untested NEAR-THRESHOLD/MID-LOSE shapes.
+    - 5 of 8 candidates triggered HSA aperture violation (16384×28672×2048, 4096×32768×6144, 16384×28672×4096, 28672×4096×8192, 32768×4096×7168) — same compiler bug, generalizes broadly.
+    - 2 regressions: 6144×4096×16384 -0.77pp, 14336×32768×4096 -0.91pp.
+    - 1 marginal: 4096×14336×16384 +0.05pp (sub-threshold).
+    - 0 candidates passed +0.5pp single-shot gate → 5-run verify skipped.
+    - **Conclusion**: iterative-ilp does NOT generalize beyond R10/R11's 5 verified deep-LOSE shapes. Specific phenomenon, not universal optimization.
+    - Note: several baselines drifted vs Round 2 (cross-GPU bias) — full re-baselining advisable, doesn't change conclusion.
+
+  **Round 12 net**: 0 new WIN, 0 new gap reduction. **8 saturation rounds** total (R2/R4/R5/R6/R7/R8/R9/R12), but R10/R11 broke the streak with 5 verified deep-LOSE wins.
+
+  **新 dead-end vectors (Round 12)**:
+  - iterative-ilp on near-threshold shapes (32768×4096×7168, 4096×14336×16384, 6144×4096×16384) — 1 errors, 1 regress, 1 marginal
+  - iterative-ilp on mid-LOSE shapes (5 shapes) — 4 errors, 1 regress
+  - **iterative-ilp as default global flag**: UNSAFE (deterministic compiler bug on ≥10 shape categories).
+
+  **R12 action items**:
+  1. KEEP existing 5 verified iterative-ilp WINs from R10/R11 (already committed).
+  2. DO NOT enable iterative-ilp as default flag in build_all42_parallel.py.
+  3. bench_all_42.py dispatcher should register the 5 `_r1X_iterilp` variants ONLY for the 5 specific shapes.
+  4. (Optional R13) try `iterative-minreg` or `iterative-gcn-max-occupancy` on DLA1/DLA2/DLA7/WIN2 — different iterative scheduler may avoid the SGPR clobber bug. Lower priority than 5-shape WIN consolidation.
+
+- **Round 11 (2026-04-17, deep-LOSE iterative-ilp extension)**: 3 more verified WINs (committed `31f03996`):
+  - 5-run mean ≥ baseline.max gate PASS:
+    - 4096×32768×28672: parent `_v20_memc` 92.98% → 94.82% (+1.84pp)
+    - 4096×28672×32768: parent `_u16` 93.35% → 95.35% (+2.00pp)
+    - 4096×32768×14336: parent `_ts_lgk2_memc` 93.83% → 95.30% (+1.80pp)
+    - 4096×128256×32768 (regression check): 161.23% → 163.89% (+2.46pp, no regress)
+  - Sub-threshold (single-shot only, not validated): 32768×4096×14336 +0.74pp.
+  - 5 of 10 produced HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION — Round 12A confirmed real compiler bug.
+
+- **Round 10 (2026-04-17, BREAKTHROUGH)**: Acted on Round 9 verifier reversal — tested REAL un-prefixed sched-strategies on deep-LOSE (committed `091d3baa`). 5-run on GPU 5:
+  - 14336×4096×32768: parent `_lgk2_dc` 89.6% → +1.78pp (mean ≥ baseline.max PASS)
+  - 16384×4096×28672: parent `_u32` 90.1% → +1.82pp (mean ≥ baseline.max PASS)
+  - ASM dumps in `asm_verify_r10/` confirm un-prefixed values produce distinct ASM (refute Round 8 A latent finding).
+  - Broke the 6-round saturation streak; first real perf gain since Round 1.
+
 - **Round 9 (2026-04-17, focused probe round)**: Verifier reversal + 8 codegen flag dead-ends + SNR fix committed:
   - **Verifier**: REVERSED Round 8 A's latent finding. Reality:
     - **`gcn-`-prefixed sched-strategy names (`gcn-max-memory-clause`, `gcn-max-ilp`, etc.) are silently NO-OP** — produce ASM byte-identical to default (size 301977, MD5 only differs in random hip_cuid hash).
