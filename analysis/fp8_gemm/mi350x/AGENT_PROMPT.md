@@ -2,18 +2,55 @@
 
 你在继续推进 `HipKittens` 的 MXFP4 GEMM 优化工作，跟 Cursor (Hipkittens2) 竞赛。
 
+## ⚠️ 当前优化目标 (2026-04-17 用户最新指令 — 必读)
+> "24win 已经卡了好久了，现在把优化目标改成优化剩下那几个差的比较多的。"
+
+**翻 LOSE→WIN 的工作 STOP**. 24/42 WIN 已被 4 轮饱和, 是当前架构天花板. 不要再跑 full-sweep auto-tune 了.
+
+**改为**: 缩小 deep-LOSE shape 的 gap. 即使 88% → 92% 也算真实进步, **+1pp 即可 commit**.
+
+### 重点 shape (P0 优先)
+| 优先级 | Shape | 当前 Ratio | 当前 Best | 类别 |
+|-------|-------|-----------|-----------|------|
+| **P0** | 4096×32768×128256 | 88.3% | ts_gm8 | mega-K + 大N |
+| **P0** | 14336×4096×32768 | 89.6% | lgk2_dc | 大K + 大M |
+| **P0** | 16384×4096×28672 | 90.1% | u32 | 大K + 大M |
+| P1 | 128256×32768×4096 | 92.9% | ts_gm2_v12_memc_dc | mega-M+N |
+| P1 | 4096×32768×28672 | 93.7% | v20_memc | 大K + 大N |
+| P1 | 28672×4096×16384 | 93.7% | ts_gm8 | 大K + 大M |
+| P2 | 4096×28672×32768 | 94.1% | u16 | 大K + 大N |
+| P2 | 32768×4096×14336 | 94.1% | ts_gm8_v12 | 大K + 大M |
+| P2 | 4096×32768×14336 | 94.5% | ts_lgk2_memc | 大K + 大N |
+| P2 | 28672×32768×4096 | 94.5% | ts_lgk2_v12_memc | 大M+N |
+
+### 工作准则
+- **每轮锁定 1-3 个 P0/P1 shape** 专项优化, 不再全 42 跑.
+- **改动后必跑 regression**: `bench_deep_lose.py` (10 shape spot) + `bench_all42_parallel.py` 抽测 (确认 24 WIN 不掉).
+- **+1pp 即可 commit** (不再要求翻 WIN).
+- **大 K (≥14336) shapes** 是主战场: 该类的 gap 主要来自 LDS broadcast bandwidth 不足 + B tile reuse 效率低.
+- **mega-M shape 128256×32768×4096** 已被验证为 **register-pressure / MFMA-pipeline bound** (Round 4 PERSISTENT_XCD_QUEUE 实证), **不是 launch-bound**. 不要再尝试 dispatch 优化.
+
+### 推荐探索方向 (按可行性)
+| 方向 | 风险 | 预期 | 备注 |
+|------|------|------|------|
+| **per-shape compiler flag** (LLVM 调度策略 per-K-bucket) | 低 | +0.5-2pp | 之前 ±0.4% 是 average, 单 deep-LOSE shape 可能更大 |
+| **per-shape K-loop unrolling** (UNROLL=8/16 仅 K≥14336) | 低 | +0.3-1.2pp | 之前测过有效, 现在重新算作改进 |
+| **B-tile L2 software prefetch** (针对 N≥28672 shape) | 中 | +0.5-2pp | 用 `__builtin_amdgcn_global_load_lds` 或 `s_prefetch_data` 提前把 B 拉进 L2 |
+| **K-loop epilogue 专项调优** (尾部 K 迭代 PF/barrier) | 中 | +0.5-1pp | 大 K shape 最后一组 K iter 的 barrier/VMCNT |
+| **static XCD-aware block_id remap** (mega-M shape, 不用 atomic) | 中 | +1-3pp on 1 shape | PERSISTENT_XCD 失败因 atomic 开销, static remap 无该问题 |
+| **MFMA_32X32X64_TILING** (大重构, ~1天 asm 重写) | 高 | +2-5pp on deep-LOSE | 唯一未试的内核级重构, AGPR 256→256 (per-warp 输出仍 128×128, 不省 AGPR), 但 K loop 调度自由度可能更高 |
+
 ## 项目位置
 - **我们的 Repo**: `/shared_nfs/kyle/test/HipKittens`
 - **Branch**: `mxfp4`
 - **工作目录**: `analysis/fp8_gemm/mi350x`
 - **Cursor Repo**: `/shared_nfs/kyle/test/Hipkittens2` (只读参考)
 
-## 当前成绩 (2026-04-17)
-- **我们**: **24/42 WIN** (warmup=200, iters=500, 115 variants, Round 2 final)
-- **Cursor**: 16/42 WIN (同参数)
-- **我们领先 8 WIN**
-- **Auto-tune variants**: 115 (115 variants × 42 shapes 全sweep + 44 deep-LOSE targeted variants 双重确认饱和)
-- **Round 1 → Round 2 → deep-LOSE**: +5 / +0 / +0 LOSE→WIN flip — 已彻底饱和
+## 当前成绩 (2026-04-17, 历史背景, 不再追求扩大)
+- **我们**: **24/42 WIN** (warmup=200, iters=500, 115 variants, Round 2 final) — 已饱和, 不再是 KPI
+- **Cursor**: 16/42 WIN (同参数), 我们领先 8 WIN
+- **Round 1 → Round 2 → deep-LOSE → Round 4**: +5 / +0 / +0 / +0 LOSE→WIN flip — 4 轮饱和
+- **新 KPI**: 10 个 deep-LOSE shape 平均 ratio (当前 ~92%, 目标 ≥94%)
 
 ## 已做的优化 (19项)
 1. Store block reorder (A0Bl,A0Br,A1Bl,A1Br) — +0.8%

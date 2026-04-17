@@ -1,9 +1,54 @@
 # MXFP4 GEMM Optimization TODO
 
+## ⚠️ GOAL PIVOT (2026-04-17, 用户最新指令)
+> "24win 已经卡了好久了，现在把优化目标改成优化剩下那几个差的比较多的。"
+
+**新目标**: **不再追求翻 LOSE→WIN**. 24/42 WIN 已被 4 轮饱和验证, 是当前架构天花板.
+**改为**: **缩小 deep-LOSE shape 的 gap**. 即使无法 flip 到 WIN, 把 88% → 92% 也是真实进步.
+
+### 新成功度量 (按优先级)
+1. **降低 worst-shape gap**: 4096×32768×128256 (88.3%), 14336×4096×32768 (89.6%), 16384×4096×28672 (90.1%)
+2. **提高 deep-LOSE shape 平均 ratio**: 当前 10 shapes 平均 ~92%, 目标 → ≥94%
+3. **不允许 regression**: 现有 24 WIN 必须保住, 不能为了拉 deep-LOSE 牺牲 WIN
+4. WIN count 不再是首要 KPI (可继续涨, 但不再是焦点)
+
+### 重点 shape (按 gap 大小排序, 越靠前越优先)
+| 优先级 | Shape | 当前 Ratio | 当前 Best Variant | 类别 |
+|-------|-------|-----------|------------------|------|
+| **P0** | 4096×32768×128256 | 88.3% | ts_gm8 | mega-K + 大N |
+| **P0** | 14336×4096×32768 | 89.6% | lgk2_dc | 大K + 大M |
+| **P0** | 16384×4096×28672 | 90.1% | u32 | 大K + 大M |
+| P1 | 128256×32768×4096 | 92.9% | ts_gm2_v12_memc_dc | mega-M+N (reg-pressure bound, 难) |
+| P1 | 4096×32768×28672 | 93.7% | v20_memc | 大K + 大N |
+| P1 | 28672×4096×16384 | 93.7% | ts_gm8 | 大K + 大M |
+| P2 | 4096×28672×32768 | 94.1% | u16 | 大K + 大N |
+| P2 | 32768×4096×14336 | 94.1% | ts_gm8_v12 | 大K + 大M |
+| P2 | 4096×32768×14336 | 94.5% | ts_lgk2_memc | 大K + 大N |
+| P2 | 28672×32768×4096 | 94.5% | ts_lgk2_v12_memc | 大M+N |
+
+### 应当探索的方向 (缩 gap, 非翻 WIN)
+所有这些都已知**不会翻 WIN**, 但**可能缩 gap 1-3pp**:
+- **MFMA_32X32X64_TILING** (重大重构, ~1天 asm 重写) — 唯一未试的"内核重构"级别尝试. 即使不翻 WIN, deep-LOSE 上若得 +2-5pp 即算成功.
+- **per-shape 专属 K-loop unrolling** (UNROLL_K=8/16 仅对大K shape) — 之前测得 +0.3-1.2pp 但是被"不翻 WIN"否决, 现在重新算作有效改进.
+- **cluster-launch / cooperative-grid** for mega-M shape (128256×32768×4096) — 即使不翻 WIN, 拉到 95%+ 即算成功.
+- **per-shape compiler flag tuning** (按 shape 分类调 -mllvm 调度策略) — 之前 ±0.4% noise 是平均, 单 deep-LOSE shape 上可能更大.
+- **K-loop epilogue 优化** for K=128256, K=32768 (尾部 K 迭代专属调优, TAIL_BARRIER_VMCNT 之外的方向).
+- **B-tile L2 prefetch** for 大N shapes — 软件 prefetch hint 提前把 B tile 拉进 L2, 利用 L2 bandwidth 弥补 LDS 瓶颈.
+- **block_id 重映射** for mega-M shape — 不用 atomic 的 static XCD-aware re-mapping, 改善 L2 hit rate without atomic overhead.
+
+### Agent-team 新工作流 (per-shape gap-reduction)
+- **不再**跑 42-shape full-sweep auto-tune (饱和过 4 次).
+- **改为**: 每轮锁定 1-3 个 P0/P1 shape, 让 optimizer team 在该 shape 上专项优化, 接受 +1pp 增益.
+- 提交标准: deep-LOSE shape 上 +1pp 即可 commit (而不是必须翻 WIN).
+- 必跑 regression check: 改动后用 `bench_deep_lose.py` 验证不退化, 然后用 `bench_all42_parallel.py` 抽测确认 24 WIN 未掉.
+
+---
+
 ## Current State (2026-04-17)
 - **Repo**: `/shared_nfs/kyle/test/HipKittens`
 - **Branch**: `mxfp4`
-- **42-shape result**: **24/42 WIN** (warmup=200, iters=500, 4-GPU parallel, 115 variants)
+- **42-shape result**: **24/42 WIN** (warmup=200, iters=500, 4-GPU parallel, 115 variants) — 已饱和, 不再是优化目标
+- **Deep-LOSE 10 shapes 平均 ratio**: ~92%, 新目标 → ≥94%
 - **上一轮**: 19/42 WIN → 24/42 WIN (+5 LOSE→WIN flip in Round 1, 0 regressions)
 - **Cursor (Hipkittens2)**: 16/42 WIN (同参数, 2026-04-16T06:26)
 - **我们领先**: **8 WIN**
