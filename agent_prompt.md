@@ -116,6 +116,24 @@ stash@{0} 已 pop 并逐条评审。三条路径：
 
 **本轮再次无代码 commit，仅 SKILL / TODO / agent_prompt 更新**。剩余差距仍是 145 TFLOPS / 4.73%。下一轮建议的高收益方向只剩**降低 baseline VGPR 压力**（accumulator reshape 或主动下调到 occupancy=1），因为任何 VGPR-neutral 的调度优化都已被压到噪声之下。
 
+## 第五轮评审结果 (2026-04-17)
+
+三条路径，全 reject：
+
+| 路径 | flag | 结果 | 采纳？ |
+|---|---|---|---|
+| Dev F — AGPR accumulator 重新绑定（per-MFMA `"+a"` inline asm） | `MXFP8_RCR_EXACT_PQ_AGPR_ACC_ENABLE` | VGPR 254→128, AGPR 0→128；但 Spills 0→13, Scratch 56 B/lane；141+144 V↔A shuffle；GPU3 A/B 10 runs Δ −2.19% | **拒绝（regression）** |
+| Dev G — scale L2 cache-policy hint (sc0) | `MXFP8_RCR_EXACT_PQ_SCALE_L2_HINT_ENABLE` | 12 scale buffer_load 用 sc0，正确+资源不变；GPU4 A/B 15/20 runs Δ +0.066% Welch-t 0.20 | **拒绝（marginal）** |
+| Dev G2 — scale buffer_load_b32 × 2 → b64 合并 | `MXFP8_RCR_EXACT_PQ_SCALE_LOAD_B64_ENABLE` | **结构不可行**：6 scale dwords 来自 6 独立 SRD，最小间距 8192 B；b64 要 X 与 X+4 同 SRD → 无法合并 | **拒绝（broken）** |
+
+**5 轮 7 个 dev 全 reject**。MXFP8 在当前结构下的微调空间已饱和。剩余 145 TFLOPS 差距只能靠高风险结构重构：
+- AGPR accumulator **fused-asm block**（8-32 MFMA 打包一个 asm，重写 `_row`/`_impl`，破坏 HOIST_HI 约定）
+- SCALE_LDS **完全替代** PIPELINE_SCALE（不是叠加）+ 解 determinism 问题
+- `preshuffle_scale_matrix_mfma16` **layout 重设计**让 scale 可 b64 合并（影响所有 MXFP8 kernel + Python 参考）
+- 主动下调 **occupancy=1** 换更深 cross-iter pipeline
+
+下一轮建议**不再并行派 3 dev**，选 1 条结构路径深入做 1-2 周。本轮所有 dead-ends 已写入 SKILL。
+
 ## 工作流
 
 1. Decision maker 每轮选 1–3 个最有把握的方向（不要 4 个同时开花）

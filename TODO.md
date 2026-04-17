@@ -83,13 +83,24 @@ Main loop 已无 v_lshr，结构上与 FP8 几乎一致（仅多 6 个 scale buf
 | Dev D — LDS-cached scales `MXFP8_RCR_EXACT_PQ_SCALE_LDS_ENABLE` 实测 | 编译过，VGPR 243 / LDS 132 KB / occ 2；smoke 256 PASS；但 8192 formal A/B −0.76%（5 runs 全 slower）且 **determinism FAIL**（max abs 1.43）。SCALE_LDS 设计是替代 PIPELINE_SCALE，叠加反而在 tail 加 ds_write/s_barrier 拖慢；LDS 同步仅靠 compiler fence 不足 | **拒绝（regression + det fail）** |
 | Dev E — sched V2 松 `TK_WAIT_VMCNT(6→8)` 在 HOIST_HI 之上 | 正确 / 资源不变；GPU1 A/B 10 runs Δ +0.11%，Welch-t 0.58，纯噪声 | **拒绝（marginal）** |
 
-### 下一轮方向（按优先级）
+**第五轮评审 (2026-04-17) — 三条路径 REJECT**
 
-- [ ] **降低 baseline VGPR 压力**（accumulator reshape / 主动 occ=1 换更深流水）—— 所有 cross-iter pipeline 的先决条件
-- [ ] **替代式 SCALE_LDS**（不是叠加）：若要走 LDS 缓存 scale，必须替换 `PIPELINE_SCALE` 的 SGPR-SRD path；同时用真正的 `__builtin_amdgcn_s_barrier()` 前后包 ds_write/ds_read 解决 determinism；不是 < 20 行改动
-- [ ] **多个 sched 调整组合 A/B 扫描**（单点 +0.11% 是噪声，但 2-3 个独立点叠加可能累积到 >0.3%）—— 需要自动化扫描不是手工
-- [ ] **bank conflict hunt on LDS**（profile `SQ_WAIT_INST_LDS`）—— MXFP8 13 KB 多 LDS 是否有隐性 bank 冲突
-- ~~所有已关闭路径~~（见上面两轮 reject 表）
+| 路径 | 结果 | 采纳？ |
+|---|---|---|
+| Dev F — AGPR accumulator per-MFMA `"+a"` (MXFP8_RCR_EXACT_PQ_AGPR_ACC_ENABLE) | VGPR 254→128 / AGPR 0→128 但 **Spills 0→13 / Scratch 56 B/lane**；285 V↔A shuffles per kpair；GPU3 A/B 10 runs Δ −2.19%。要破局需重写 `_row`/`_impl` 为单 asm 块 fuse 8-32 MFMA，不是本轮 scope | **拒绝（regression）** |
+| Dev G — scale L2 cache-policy hint sc0 (MXFP8_RCR_EXACT_PQ_SCALE_L2_HINT_ENABLE) | 12/238 buffer_load 用 sc0，正确+资源不变；GPU4 A/B 15/20 清理后 Δ +0.066% Welch-t 0.20。sc1/nt 更差。cache-policy 轴已饱和 | **拒绝（marginal）** |
+| Dev G2 — scale buffer_load b32×2 → b64 合并 (MXFP8_RCR_EXACT_PQ_SCALE_LOAD_B64_ENABLE) | 6 scale dwords 分布在 6 个独立 SRD，最小间距 8192 B，b64 需要 X 与 X+4 同 SRD → **结构不可行**；需重设计 `preshuffle_scale_matrix_mfma16` 影响所有 MXFP8 变体 | **拒绝（broken）** |
+
+### 还没被验证为死路的方向（下一轮唯一剩余）
+
+- [ ] **SCALE_LDS 替代式实现**（非叠加）：彻底替代 PIPELINE_SCALE 的 SGPR-SRD path；用真正的 `__builtin_amdgcn_s_barrier()` 前后包 ds_write/ds_read 解决 determinism；<100 行改不完，高风险结构改造
+- [ ] **AGPR accumulator fused asm block**（8-32 MFMA 融进单 asm）：破 Dev F 的 per-MFMA 边界开销；改写 `rcr_mma_scaled_from_packs_opsel_phase_{row,impl}`；会破坏 HOIST_HI 的 templated-lambda 约定；高风险大改造
+- [ ] **preshuffle_scale_matrix_mfma16 layout 重设计**：让 6 scale dwords 相邻 8-byte 组装载入 → `buffer_load_b64` 可用；影响 RRR/CRR/4-wave + Python 参考
+- [ ] **主动下调到 occupancy=1**：160 KB LDS 允许 ≥128 KB 留给一个 wave；释放所有 register/LDS 压力做更深 cross-iter pipeline
+- [ ] **bank conflict / MFMA utilization profiling**（`rocprofv3 -i`）：145 TFLOPS 里有多少是 MFMA 利用率，多少是 latency stall
+
+### 本轮结论
+MXFP8 从 `feat/mxfp8-only` 分支的起点 2737 TFLOPS 一路推到 2925.64 TFLOPS，**已达到当前结构约束下可微调的上限**。剩余 145 TFLOPS 差距只能靠**结构性重构**（任选一条高风险大改造）去摸。非结构性的调度/cache/小 flag 尝试全部饱和。建议下一轮只选 1 条结构路径深入，不再并行派多 dev。
 
 ## 成功条件
 
@@ -106,3 +117,5 @@ Main loop 已无 v_lshr，结构上与 FP8 几乎一致（仅多 6 个 scale buf
 - **第三轮 (2026-04-17)**：三条路径（scale prefetch n+1 / tail compile-time dispatch / KPAIR 2× unroll）全 reject。Baseline 稳定在 2917–2932 TFLOPS。无代码 commit，仅文档修正 baseline VGPR 数字（254，不是 212）+ 写入三条新 dead-end。
 - `b964c110` Round-3 dead-ends: correct baseline VGPR = 254, not 212（仅文档 commit，code 不变）
 - **第四轮 (2026-04-17)**：两条路径全 reject。Dev D 实测 SCALE_LDS 叠加：−0.76% 且 determinism FAIL（此前仅"未验证"，现有硬数据）。Dev E 实测 sched_barrier v2 `vmcnt(6→8)`：+0.11% 噪声级。写入 SKILL dead-ends，不 commit 代码。
+- `3fe9c759` Round-4 dead-ends: SCALE_LDS measured (regression + det fail), SCHED V2 noise（仅文档 commit）
+- **第五轮 (2026-04-17)**：三条路径全 reject。Dev F 实测 AGPR per-MFMA `"+a"`：−2.19%（per-MFMA 边界 V↔A 切换爆 285 次 shuffle + 13 spills）。Dev G 实测 sc0 cache hint：+0.066% 噪声。Dev G2 证明 `buffer_load_b64` 合并在当前 scale layout 下**结构不可行**（6 SRD 间距 8192 B）。剩余只能靠结构性重构。
