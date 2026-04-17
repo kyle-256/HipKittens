@@ -1,0 +1,141 @@
+================================================================================
+Round 6 Optimizer B — UNROLL_K sweep on 14336x4096x32768
+warmup=200 iters=500 trim=0.1 GPUs=[2, 3]
+================================================================================
+
+--- Phase 1: build 11 variants for (n=4096, k=32768) ---
+  building _optB_r6_u4_v16_wpe2... ok (4.5s) VGPR=253 AGPR=256 SGPR=91 SpillS=0 SpillV=0 Scratch=0 Occ=1
+  building _optB_r6_u4_v16_wpe2_memc... ok (4.5s) VGPR=253 AGPR=256 SGPR=91 SpillS=0 SpillV=0 Scratch=0 Occ=1
+  building _optB_r6_u4_lgk2_dc_v16_wpe2... ok (4.5s) VGPR=253 AGPR=256 SGPR=91 SpillS=0 SpillV=0 Scratch=0 Occ=1
+  building _optB_r6_u8_v16_wpe2... ok (4.6s) VGPR=253 AGPR=256 SGPR=91 SpillS=0 SpillV=0 Scratch=0 Occ=1
+  building _optB_r6_u8_v16_wpe2_memc... ok (4.6s) VGPR=253 AGPR=256 SGPR=91 SpillS=0 SpillV=0 Scratch=0 Occ=1
+  building _optB_r6_u8_lgk2_dc_v16_wpe2... ok (4.6s) VGPR=253 AGPR=256 SGPR=91 SpillS=0 SpillV=0 Scratch=0 Occ=1
+  building _optB_r6_u16_v16_wpe2... ok (4.9s) VGPR=253 AGPR=256 SGPR=91 SpillS=0 SpillV=0 Scratch=0 Occ=1
+  building _optB_r6_u16_v16_wpe2_memc... ok (4.8s) VGPR=253 AGPR=256 SGPR=91 SpillS=0 SpillV=0 Scratch=0 Occ=1
+  building _optB_r6_u16_lgk2_dc_v16_wpe2... ok (4.8s) VGPR=253 AGPR=256 SGPR=91 SpillS=0 SpillV=0 Scratch=0 Occ=1
+  building _optB_r6_u32_v16_wpe2_memc... ok (5.4s) VGPR=253 AGPR=256 SGPR=81 SpillS=0 SpillV=0 Scratch=0 Occ=1
+  building _optB_r6_u2_v16_wpe2... ok (4.5s) VGPR=253 AGPR=256 SGPR=82 SpillS=0 SpillV=0 Scratch=0 Occ=1
+
+--- Phase 2: baseline-compare at 4096x32768 (variant vs _v16_wpe2) ---
+  _optB_r6_u4_v16_wpe2                   exact=False nan_match=False inf_match=False max_diff=3.3909852323719252e+38 → FAIL
+  _optB_r6_u4_v16_wpe2_memc              exact=False nan_match=False inf_match=False max_diff=inf → FAIL
+  _optB_r6_u4_lgk2_dc_v16_wpe2           exact=False nan_match=False inf_match=False max_diff=3.3895313892515355e+38 → FAIL
+  _optB_r6_u8_v16_wpe2                   exact=False nan_match=False inf_match=False max_diff=inf → FAIL
+  _optB_r6_u8_v16_wpe2_memc              exact=False nan_match=False inf_match=False max_diff=inf → FAIL
+  _optB_r6_u8_lgk2_dc_v16_wpe2           exact=False nan_match=False inf_match=False max_diff=inf → FAIL
+  _optB_r6_u16_v16_wpe2                  exact=False nan_match=False inf_match=False max_diff=inf → FAIL
+  _optB_r6_u16_v16_wpe2_memc             exact=False nan_match=False inf_match=False max_diff=inf → FAIL
+  _optB_r6_u16_lgk2_dc_v16_wpe2          exact=False nan_match=False inf_match=False max_diff=inf → FAIL
+  _optB_r6_u32_v16_wpe2_memc             exact=False nan_match=False inf_match=False max_diff=inf → FAIL
+  _optB_r6_u2_v16_wpe2                   exact=False nan_match=False inf_match=False max_diff=inf → FAIL
+
+--- Phase 3: bench 14336x4096x32768 (target) ---
+  _v16_wpe2                               4591.0 TFLOPS (87.52%)
+  _optB_r6_u4_v16_wpe2                    4679.4 TFLOPS (89.21%)
+  _optB_r6_u4_v16_wpe2_memc               4569.1 TFLOPS (87.11%)
+  _optB_r6_u4_lgk2_dc_v16_wpe2            4696.5 TFLOPS (89.54%)
+  _optB_r6_u8_v16_wpe2                    4607.9 TFLOPS (87.85%)
+  _optB_r6_u8_v16_wpe2_memc               4750.5 TFLOPS (90.57%)
+  _optB_r6_u8_lgk2_dc_v16_wpe2            4598.2 TFLOPS (87.66%)
+  _optB_r6_u16_v16_wpe2                   4756.9 TFLOPS (90.69%)
+  _optB_r6_u16_v16_wpe2_memc              4615.3 TFLOPS (87.99%)
+  _optB_r6_u16_lgk2_dc_v16_wpe2           4724.2 TFLOPS (90.06%)
+  _optB_r6_u32_v16_wpe2_memc              4519.7 TFLOPS (86.17%)
+  _optB_r6_u2_v16_wpe2                    4694.0 TFLOPS (89.49%)
+
+Baseline _v16_wpe2 measured: 4591.0 TFLOPS (87.52%)
+
+Winners on target (>= 4643.5 TFLOPS, +1pp over 4591.0):
+  _optB_r6_u16_v16_wpe2 = 4756.9 TFLOPS (90.69%) [+3.16pp]
+  _optB_r6_u8_v16_wpe2_memc = 4750.5 TFLOPS (90.57%) [+3.04pp]
+  _optB_r6_u16_lgk2_dc_v16_wpe2 = 4724.2 TFLOPS (90.06%) [+2.54pp]
+  _optB_r6_u4_lgk2_dc_v16_wpe2 = 4696.5 TFLOPS (89.54%) [+2.01pp]
+  _optB_r6_u2_v16_wpe2 = 4694.0 TFLOPS (89.49%) [+1.96pp]
+  _optB_r6_u4_v16_wpe2 = 4679.4 TFLOPS (89.21%) [+1.69pp]
+
+--- Phase 4: build winners for regression-shape (N,K) pairs ---
+  building n=4096 k=2048 _optB_r6_u16_v16_wpe2... ok
+  building n=4096 k=2048 _optB_r6_u8_v16_wpe2_memc... ok
+  building n=4096 k=2048 _optB_r6_u16_lgk2_dc_v16_wpe2... ok
+  building n=4096 k=8192 _optB_r6_u16_v16_wpe2... ok
+  building n=4096 k=8192 _optB_r6_u8_v16_wpe2_memc... ok
+  building n=4096 k=8192 _optB_r6_u16_lgk2_dc_v16_wpe2... ok
+  building n=4096 k=14336 _optB_r6_u16_v16_wpe2... ok
+  building n=4096 k=14336 _optB_r6_u8_v16_wpe2_memc... ok
+  building n=4096 k=14336 _optB_r6_u16_lgk2_dc_v16_wpe2... ok
+  building n=4096 k=16384 _optB_r6_u16_v16_wpe2... ok
+  building n=4096 k=16384 _optB_r6_u8_v16_wpe2_memc... ok
+  building n=4096 k=16384 _optB_r6_u16_lgk2_dc_v16_wpe2... ok
+  building n=4096 k=28672 _optB_r6_u16_v16_wpe2... ok
+  building n=4096 k=28672 _optB_r6_u8_v16_wpe2_memc... ok
+  building n=4096 k=28672 _optB_r6_u16_lgk2_dc_v16_wpe2... ok
+  building n=28672 k=32768 _optB_r6_u16_v16_wpe2... ok
+  building n=28672 k=32768 _optB_r6_u8_v16_wpe2_memc... ok
+  building n=28672 k=32768 _optB_r6_u16_lgk2_dc_v16_wpe2... ok
+  building n=32768 k=4096 _optB_r6_u16_v16_wpe2... ok
+  building n=32768 k=4096 _optB_r6_u8_v16_wpe2_memc... ok
+  building n=32768 k=4096 _optB_r6_u16_lgk2_dc_v16_wpe2... ok
+  building n=32768 k=14336 _optB_r6_u16_v16_wpe2... ok
+  building n=32768 k=14336 _optB_r6_u8_v16_wpe2_memc... ok
+  building n=32768 k=14336 _optB_r6_u16_lgk2_dc_v16_wpe2... ok
+  building n=32768 k=28672 _optB_r6_u16_v16_wpe2... ok
+  building n=32768 k=28672 _optB_r6_u8_v16_wpe2_memc... ok
+  building n=32768 k=28672 _optB_r6_u16_lgk2_dc_v16_wpe2... ok
+  building n=32768 k=128256 _optB_r6_u16_v16_wpe2... ok
+  building n=32768 k=128256 _optB_r6_u8_v16_wpe2_memc... ok
+  building n=32768 k=128256 _optB_r6_u16_lgk2_dc_v16_wpe2... ok
+  building n=128256 k=32768 _optB_r6_u16_v16_wpe2... ok
+  building n=128256 k=32768 _optB_r6_u8_v16_wpe2_memc... ok
+  building n=128256 k=32768 _optB_r6_u16_lgk2_dc_v16_wpe2... ok
+
+--- Phase 4b: bench regression shapes ---
+         16384x4096x2048 _v16_wpe2                              FAILED/skipped
+         16384x4096x2048 _optB_r6_u8_v16_wpe2_memc               3255.8 (108.7%)
+         16384x4096x2048 _optB_r6_u16_v16_wpe2                   3216.8 (107.4%)
+       4096x128256x32768 _v16_wpe2                              FAILED/skipped
+         16384x4096x2048 _optB_r6_u16_lgk2_dc_v16_wpe2            281.4 (9.4%)
+       4096x128256x32768 _optB_r6_u16_v16_wpe2                   5174.8 (162.0%)
+       4096x128256x32768 _optB_r6_u8_v16_wpe2_memc               5186.5 (162.3%)
+          4096x4096x8192 _v16_wpe2                              FAILED/skipped
+          4096x4096x8192 _optB_r6_u16_v16_wpe2                    713.0 (18.0%)
+       4096x128256x32768 _optB_r6_u16_lgk2_dc_v16_wpe2           5155.7 (161.4%)
+          4096x4096x8192 _optB_r6_u8_v16_wpe2_memc               4197.5 (106.0%)
+          4096x4096x8192 _optB_r6_u16_lgk2_dc_v16_wpe2           4390.9 (110.9%)
+       4096x32768x128256 _v16_wpe2                               4986.5 (86.3%)
+       4096x32768x128256 _optB_r6_u16_v16_wpe2                   5008.9 (86.6%)
+       4096x32768x128256 _optB_r6_u8_v16_wpe2_memc               4981.2 (86.2%)
+       4096x32768x128256 _optB_r6_u16_lgk2_dc_v16_wpe2           5002.8 (86.5%)
+        16384x4096x28672 _v16_wpe2                               4970.7 (90.0%)
+        16384x4096x28672 _optB_r6_u16_v16_wpe2                   5008.3 (90.6%)
+        16384x4096x28672 _optB_r6_u8_v16_wpe2_memc               4958.3 (89.7%)
+        16384x4096x28672 _optB_r6_u16_lgk2_dc_v16_wpe2           5001.9 (90.5%)
+       128256x32768x4096 _v16_wpe2                               4109.7 (90.6%)
+       128256x32768x4096 _optB_r6_u16_v16_wpe2                   4071.1 (89.7%)
+       128256x32768x4096 _optB_r6_u8_v16_wpe2_memc               4087.5 (90.1%)
+       128256x32768x4096 _optB_r6_u16_lgk2_dc_v16_wpe2           4053.4 (89.4%)
+        4096x32768x28672 _v16_wpe2                               5189.0 (93.2%)
+        4096x32768x28672 _optB_r6_u16_v16_wpe2                   5192.8 (93.3%)
+        4096x32768x28672 _optB_r6_u8_v16_wpe2_memc               5187.0 (93.2%)
+        4096x32768x28672 _optB_r6_u16_lgk2_dc_v16_wpe2           5201.7 (93.4%)
+        28672x4096x16384 _v16_wpe2                               4885.0 (91.3%)
+        28672x4096x16384 _optB_r6_u16_v16_wpe2                   4924.1 (92.0%)
+        28672x4096x16384 _optB_r6_u8_v16_wpe2_memc               4880.3 (91.2%)
+        28672x4096x16384 _optB_r6_u16_lgk2_dc_v16_wpe2           4913.2 (91.8%)
+        4096x28672x32768 _v16_wpe2                               5269.0 (93.3%)
+        4096x28672x32768 _optB_r6_u16_v16_wpe2                   5314.7 (94.1%)
+        4096x28672x32768 _optB_r6_u16_lgk2_dc_v16_wpe2           5294.2 (93.7%)
+        4096x28672x32768 _optB_r6_u8_v16_wpe2_memc               5240.7 (92.8%)
+        28672x32768x4096 _v16_wpe2                               4106.8 (91.9%)
+        28672x32768x4096 _optB_r6_u16_v16_wpe2                   4086.3 (91.5%)
+        28672x32768x4096 _optB_r6_u8_v16_wpe2_memc               4066.2 (91.0%)
+        28672x32768x4096 _optB_r6_u16_lgk2_dc_v16_wpe2           4084.5 (91.4%)
+        32768x4096x14336 _v16_wpe2                               4835.6 (92.6%)
+        32768x4096x14336 _optB_r6_u16_v16_wpe2                   4811.0 (92.1%)
+        32768x4096x14336 _optB_r6_u8_v16_wpe2_memc               4832.8 (92.5%)
+        32768x4096x14336 _optB_r6_u16_lgk2_dc_v16_wpe2           4828.5 (92.4%)
+        4096x32768x14336 _v16_wpe2                               4891.5 (92.4%)
+        4096x32768x14336 _optB_r6_u16_v16_wpe2                   4901.6 (92.6%)
+        4096x32768x14336 _optB_r6_u16_lgk2_dc_v16_wpe2           4863.6 (91.8%)
+        4096x32768x14336 _optB_r6_u8_v16_wpe2_memc               4901.9 (92.6%)
+
+Results saved to /shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/spot_optB_r6_unroll_results.json
