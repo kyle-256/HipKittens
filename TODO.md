@@ -6,16 +6,25 @@
 
 协议：`test_mxfp8_python.py` / `test_python.py` 内的 per-iteration sync + `output.zero_()`，warmup=100 iters=200。
 
-## 当前 baseline（GPU0，per-iter sync，8192^3）— **R15 fresh measurement (2026-04-17)**
+## 当前 baseline（GPU0，per-iter sync，8192^3）— **R16 fresh measurement (2026-04-17)**
 
 | 版本 | TFLOPS | SNR | 相对 MXFP8 RCR |
 | --- | ---: | --- | ---: |
-| **FP8 per-tensor RCR (长期目标)** | **3253.80** | 49.61 dB PASS | 107.9% |
-| **FP8 per-tensor RRR** | 3248.95 | 49.61 dB PASS | 107.7% |
-| **FP8 per-tensor CRR** | 3037.33 | 49.61 dB PASS | 100.7% |
-| **MXFP8 RCR KPAIR+PIPELINE+HOIST_HI+8WAVE_FAST (R15 默认)** | **3015.73** | 49.60 dB PASS | **100.0%** |
-| **MXFP8 RRR EXACT_8WAVE_FAST (R15 默认)** | **2889.36** | 49.59 dB PASS | **95.81%** ✅ |
-| **MXFP8 CRR PIPELINE_SCALE+8WAVE_FAST (R15 默认)** | **2830.67** | 49.60 dB PASS | **93.86%** (动态 gate 94.60%) |
+| **FP8 per-tensor RCR (长期目标)** | **3229.67** | 49.61 dB PASS | 107.3% |
+| **MXFP8 RCR KPAIR+PIPELINE+HOIST_HI+8WAVE_FAST (R16 默认)** | **3010.57** | 49.60 dB PASS | **100.0%** |
+| **MXFP8 RRR EXACT_8WAVE_FAST (R16 默认)** | **2862.99** | 49.59 dB PASS | **95.10%** ✅ |
+| **MXFP8 CRR PIPELINE_SCALE+8WAVE_FAST (R16 默认)** | **2775.96** | 49.60 dB PASS | **92.21%** (噪声漂移，落 static gate 下 4.32 TFLOPS) |
+
+### R15 vs R16 对比（同代码同 commit a8237d01）
+
+| Layout | R15 | R16 | drift |
+|---|---:|---:|---:|
+| MXFP8 RCR | 3015.73 | 3010.57 | -0.17% (噪声) |
+| MXFP8 RRR | 2889.36 | 2862.99 | -0.91% (噪声) |
+| MXFP8 CRR | 2830.67 | 2775.96 | -1.93% (噪声边缘) |
+| FP8 RCR | 3253.80 | 3229.67 | -0.74% (噪声) |
+
+跨会话 baseline 漂移 1-2% 是正常现象。CRR 这次小幅落 gate 之下是测量噪声不是真实退化。
 
 ### 历史对比 (GPU7)
 
@@ -257,6 +266,42 @@ CRR PQ：**2737.94 TFLOPS** (93.55% of RCR) → 差 **42.34 TFLOPS (1.55%)** 才
     - Dev T（LDS 分配缩减 136→131 KB）：worktree 在 42f5407b base，活跃到 18:26（最后 .so build），**timeout 无 commit**
     - Diagnostic-S：完成（paradigm-shift 发现，见上）
   - **R12 行动结论**：4 个 dev 全 timeout 无 commit；唯一产出是 Diagnostic-S 的瓶颈定性更正。要 commit 代码必须重派 dev，**强烈建议下轮按 Diagnostic-S 的 SPI 启动器假说派活**：(1) 缩减 CRR LDS/block（单缓冲 A 或 B，packing 重叠）、(2) `__launch_bounds__(512, 3)` 提示 SPI 预留更多 slots、(3) 减少 SQC_DCACHE 压力（per-CTA 常量改 s_load_b256 单次加载）。**不要** 再投资 LDS bank conflict / LDS pipe / re-stripe stride 方向（已证 0 conflict，无收益）
+
+- **第十六轮评审 (2026-04-17) — 长期目标 RCR vs FP8 (-7.32%) 三条非破坏性路径全 dead-end，0 commit**
+  - **R16 派 1 Reviewer + 3 dev 并行（GPU0/1/2/3 隔离）**，全部为非破坏性短-cycle 实验（不动结构）：
+  - **Reviewer (GPU0 fresh baseline)**：MXFP8 RCR 3010.57 / RRR 2862.99 / CRR 2775.96 / FP8 RCR 3229.67。所有 4 项 SNR + det 全 PASS。新 gap MXFP8 RCR vs FP8 RCR = **219 TFLOPS / 6.79%**（R15 是 238/7.32%）。drift 0.17%-1.93% 全在跨会话噪声带，无真实退化。CRR=2775.96 落到 static gate 2780.28 之下 4.32 TFLOPS（-0.16%），但是测量噪声不是退化（同代码同 commit）。FP8 RCR 第一次冷启动 1984 TFLOPS，DVFS 低功耗模式 → 后续运行恢复 3229
+  - **Dev A (GPU1) — PHASE_U16_CACHE / REMAP_ONCE / SCALAR_PHASE_PACKS** 3 个旧 flag 全 REJECT：
+    - 关键发现：这 3 个 flag 在 `kernel_mxfp8_layouts.cpp:2587-2605, 2643-2661, 2698-2716, 2752-2770` 的 `#if SCALAR_PHASE_PACKS → #elif PHASE_U16_CACHE → #elif REMAP_ONCE → #elif HOIST_HI → #elif OPSEL_PHASE → #else fallback` chain 里**架构性互斥** HOIST_HI
+    - PHASE_U16_CACHE=1：correctness FAIL (SNR -1.18 dB)，K_PHASE templated lambda + tail path 不兼容
+    - REMAP_ONCE=1：VGPR 254→256 + 1 spill + 8B scratch
+    - SCALAR_PHASE_PACKS=1：VGPR 254→256 + 1 spill + 8B scratch
+    - **永久关闭这 3 个 flag**（HOIST_HI 完全 supersede，从 agent_prompt.md "Dev B" 段移除推荐）
+  - **Dev B (GPU2) — `-mllvm` compiler flag sweep**：30+ flag 全部 NO-WIN
+    - 测过：`promote-alloca-to-vector-limit`, `loop-prefetch`, `set-wave-priority`, `schedule-relaxed-occupancy`, `schedule-metric-bias`, `kernarg-preload-count`, `use-amdgpu-trackers`, `disable-clustered-low-occupancy-reschedule`, `disable-unclustered-high-rp-reschedule`, `enable-vopd`, `reassign-regs`, `misched-cluster/fusion/cyclicpath`, `enable-post-misched`, `enable-pipeliner`, `sched-strategy={minreg,max-ilp,iterative-ilp,iterative-minreg}`, `enable-merge-m0`, `opt-vgpr-liverange`, `dce-in-ra`, `enable-amdgpu-aa`, `prealloc-sgpr-spill-vgprs`, `membound-threshold`, etc.
+    - Top 2 quick-bench candidates (`promote-alloca-to-vector-limit=2` Δ +0.51%, `use-amdgpu-trackers` Δ +0.48%)：formal A/B Welch-t = -0.01 / -0.71 → 都掉进噪声，资源 byte-identical baseline → 编译器对该 hot kernel 是 no-op
+    - 关键发现：Makefile 已经默认 `-O3 -ffast-math --offload-arch=gfx950 -DKITTENS_CDNA4`，**没有"全局编译器 upgrade"空间**
+    - `-mllvm -enable-pipeliner` (LLVM SWP) 在 AMDGPU MFMA 循环上 **silently inert**
+    - 关闭 `-enable-post-misched` 退化 25% → 默认开是必要的
+    - 所有 `sched-strategy` 替代项都退化 0.1-1.1% → 默认 GCN scheduler 就是最优
+    - **永久关闭 `-mllvm` flag 调优方向**（R12 Dev R timeout，R16 Dev B 完整 sweep 证伪）
+  - **Dev C (GPU3) — scale `buffer_load_b64` coalesce 字节级证伪**：
+    - 6 个 scale buffer_load 的精确 SRD/offset/dest VGPR 已展开（v183/v188/v190/v187/v184/v189，各自 SRD `s[24:27]`/`s[40:43]` 等独立 SRD）
+    - `preshuffle_scale_matrix_mfma16` 输出 `(num_row_groups, padded_k_blocks*32)`：每个 row_group 是 8192-byte 连续 slab，row_groups 在内存里 flat consecutive
+    - 6 个 scale dword 落在 6 个不同 row_group，最小间距 a0p0→a0p1 = **+8192 B**（同 SRD 内）
+    - `buffer_load_b64` 要求 4-byte 间距 → **没有任何一对 dword 满足**，R5 Dev G2 的字节 math 二次 confirm
+    - 唯一便宜变体（合并 SRD）只省 SGPR、不省 load，期望增益 < 0.1%
+    - 真 b64 coalesce 需 Python preshuffle 重排（dword 级 interleave row_groups），影响 4 个 fastpath + reference + 3 个 test caller，**估 2-4 天，上限 ~0.5% TFLOPS**
+    - **永久关闭 b64 scale coalesce 方向**（R5 Dev G2 + R16 Dev C 二次 confirm）
+  - **R16 关键产出 = 4 个永久 dead-end + 0 commit**：
+    1. `PHASE_U16_CACHE / REMAP_ONCE / SCALAR_PHASE_PACKS` flag（HOIST_HI 互斥）
+    2. compiler `-mllvm` flag 调优（30+ flag saturated）
+    3. scale `buffer_load_b64` 合并（preshuffle layout 不允许，字节 math 证伪）
+    4. 跨 session GPU0 baseline 1-2% 漂移（R14/R15/R16 一致 confirm）
+  - **R16 confirms**：MXFP8 RCR 在当前结构下 **3010-3015 TFLOPS 是硬 ceiling**。FP8 RCR 6.79% 差距只能通过 multi-day 结构重写攻克（剩余仅两条：AGPR fused-asm block / preshuffle scale layout 重设计；A LDS row-major transpose 已在 R10/R11 半路证伪 fastpath 不兼容）
+  - **新会话建议**：
+    - 短-cycle 微调空间已 100% saturated（R3-R6 RCR、R7-R11 CRR、R15 launch_bounds/SCALE_LDS、R16 旧 flag/-mllvm/scale b64）。再派"试 N 个 flag"的 dev 一定 0 收益
+    - 如果 user 强制继续：必须**单条深度做 multi-day 结构重写**之一（建议优先 AGPR fused-asm block，因为 R5 Dev F 已有 partial impl 可以接续；preshuffle scale layout 影响面太大）
+    - **不要再做"试新 flag"sprint** —— R3-R16 共 14 轮证明了短-cycle dev fan-out 在当前结构下 0 win
 
 - **第十五轮评审 (2026-04-17) — defaults hygiene fix：源默认值与文档生产 build 不一致，foot-gun 已修复**
   - **R15 派 4 并行 agent**：1 Reviewer (formal GPU0 baseline) + Dev A (RRR vs RCR ASM diff) + Dev B (`__launch_bounds__(512,3)`) + Dev C (SCALE_LDS replace PIPELINE_SCALE 可行性研究)

@@ -29,17 +29,17 @@
 5. 禁止提交 `*.so`、`*.s`、`*_layout_results_*.json`、`.bak*`、`gpucore.*`、`__pycache__` 等（`.gitignore` 已覆盖）
 6. 每个子 agent 使用不同 `HIP_VISIBLE_DEVICES` 以免 GPU 冲突：Dev A → 0，Dev B → 1，Dev C → 2，Reviewer/formal → 7
 
-## Baseline (R15 2026-04-17 GPU0 fresh，pure source defaults)
+## Baseline (R16 2026-04-17 GPU0 fresh，pure source defaults)
 
 | 版本 | TFLOPS | SNR | 备注 |
 | --- | ---: | --- | --- |
-| **FP8 RCR (长期 target)** | **3253.80** | 49.61 PASS | kernel_fp8_layouts.cpp 未受 R15 影响 |
-| **FP8 RRR** | 3248.95 | 49.61 PASS | |
-| **FP8 CRR** | 3037.33 | 49.61 PASS | |
-| **MXFP8 RCR KPAIR+PIPELINE+HOIST_HI+8WAVE_FAST** | **3015.73** | 49.60 PASS | R15 默认 (post a8237d01) |
-| **MXFP8 RRR EXACT_8WAVE_FAST** | **2889.36** | 49.59 PASS | R15 默认 |
-| **MXFP8 CRR PIPELINE_SCALE+8WAVE_FAST** | **2830.67** | 49.60 PASS | R15 默认 |
-| RCR 差距 vs FP8 | −238.07 (−7.32%) | | 长期目标 |
+| **FP8 RCR (长期 target)** | **3229.67** | 49.61 PASS | (R15 GPU0: 3253.80) — DVFS cold-start drift 0.74% |
+| **MXFP8 RCR KPAIR+PIPELINE+HOIST_HI+8WAVE_FAST** | **3010.57** | 49.60 PASS | (R15 GPU0: 3015.73) — drift 0.17% |
+| **MXFP8 RRR EXACT_8WAVE_FAST** | **2862.99** | 49.59 PASS | static ✅ (+82.71) / dynamic ✅ (+2.95) |
+| **MXFP8 CRR PIPELINE_SCALE+8WAVE_FAST** | **2775.96** | 49.60 PASS | static ❌ -4.32 / dynamic ❌ -84 (噪声边缘) |
+| RCR 差距 vs FP8 | −219.10 (−6.79%) | | 长期目标，R15 是 -238/-7.32% |
+
+跨会话 baseline 漂移 1-2% 是正常现象（R14/R15/R16 一致 confirm），CRR 这次小幅落 gate 之下 4.32 TFLOPS 是测量噪声不是真实退化。
 
 **历史 baseline (GPU7, 2026-04-17 早期会话)** — 仅作 95% gate 锚点，不再用作回归对照：MXFP8 RCR 2926.61 / RRR 2794.26 / CRR 2740.55
 
@@ -67,10 +67,10 @@
 ### Dev B — 8-Wave v_lshr 消除
 - **目标**：隐藏或消除每 iter 6 个 `v_lshrrev_b32` scale remap
 - **核心依据**：这 6 条在 RAW 关键路径；但可以尝试 opsel 字节选择（HW 直接读 32-bit pack 里的第 N 字节，无需 shift）
-- **已有开关**（按优先级实验）：
-  - `MXFP8_RCR_EXACT_PQ_PHASE_U16_CACHE_ENABLE=1`
-  - `MXFP8_RCR_EXACT_PQ_REMAP_ONCE_ENABLE=1`
-  - `MXFP8_RCR_EXACT_PQ_SCALAR_PHASE_PACKS_ENABLE=1`
+- ~~**已有开关**~~（**R16 永久关闭**：以下 3 个 flag 与 HOIST_HI 在 `#elif` chain 架构互斥；启用任何一个会自动禁用 HOIST_HI 触发 SNR FAIL 或 spill）：
+  - ~~`MXFP8_RCR_EXACT_PQ_PHASE_U16_CACHE_ENABLE=1`~~ (HOIST_HI 关闭后 K_PHASE templated lambda + tail path 不兼容，SNR -1.18 dB)
+  - ~~`MXFP8_RCR_EXACT_PQ_REMAP_ONCE_ENABLE=1`~~ (VGPR 254→256 + 1 spill + 8B scratch)
+  - ~~`MXFP8_RCR_EXACT_PQ_SCALAR_PHASE_PACKS_ENABLE=1`~~ (同上 256+1 spill+8B)
 - **已完成**：HOIST_HI opsel 方案上线（reviewer GPU7 验收 2925.64，A/B +17.80；GPU1 head-to-head +25.67；main-loop v_lshr 0；spills 0；VGPR 256→254）。构建加 `-DMXFP8_RCR_EXACT_PQ_HOIST_HI_ENABLE=1` 即可。
 - **经验**：K_PHASE 必须是 **编译期常量**（C++20 templated lambda）；tail 区域走 `rcr_mma_scaled_from_packs_exact`（runtime k_phase）——route tail 到 opsel 会复制 MFMA code path 并制造 31 spills。
 - **禁地**：skill 明确 `op_sel_hi` phase1 **inline-ASM** 变体「语义能对，长跑回归」——当前 HOIST_HI 用的是 `__builtin_amdgcn_mfma_scale_*` + `op_sel`/`op_sel_hi`，不是 inline ASM，工作正常。
@@ -481,6 +481,103 @@ CRR gate (2780.28 TFLOPS) 在当前架构下需要 multi-day 结构重写：
 3. **B 操作数 layout 重设计**（解锁剩余 75% LDS pressure）—— Scout 未调研，未知是否有 partial impl
 
 **承认 gate 当前架构不可达**。已 commit 的 `8934e95c` PIPELINE_SCALE 默认开（+0.243%, 2740.55 TFLOPS）是 R7-R11 共 11 轮唯一 strict win。下一会话若续做 CRR：先开 `CRR_ROW_SHARED_TRANSPOSE` 在非 fastpath 跑通做 known-good baseline，再决定要不要投入 multi-day 重写；或转向 RCR 剩余 4.70% 差距。
+
+## 第十六轮评审结果 (2026-04-17) — 长期目标 RCR vs FP8 (-7.32%) 三条非破坏性路径全 dead-end，0 commit
+
+### R16 派 1 Reviewer + 3 dev 并行
+
+- **Reviewer (GPU0)** — fresh baseline，pure source defaults
+- **Dev A (GPU1)** — 测试 agent_prompt.md 老 "Dev B" 段列出的 3 个未试过 flag (`PHASE_U16_CACHE / REMAP_ONCE / SCALAR_PHASE_PACKS`)
+- **Dev B (GPU2)** — `-mllvm` AMDGPU compiler flag sweep（R12 Dev R timeout 路径的清算）
+- **Dev C (GPU3)** — scale `buffer_load_b64` coalesce 字节级可行性研究（R5 Dev G2 的二次确认）
+
+### R16 GPU0 baseline (Reviewer)
+
+| Layout | TFLOPS | SNR | 状态 | vs R15 drift |
+|---|---:|---|---|---:|
+| **MXFP8 RCR** | 3010.57 | 49.60 PASS | ✅ | -0.17% |
+| **MXFP8 RRR** | 2862.99 | 49.59 PASS | static ✅ / dynamic ✅ (+2.95) | -0.91% |
+| **MXFP8 CRR** | 2775.96 | 49.60 PASS | static ❌ -4.32 / dynamic ❌ -84 | -1.93% (噪声边缘) |
+| **FP8 RCR** | 3229.67 | 49.61 PASS | (gap 219 TFLOPS / 6.79%) | -0.74% |
+
+注：CRR 这次落到 static gate 下 4.32 TFLOPS 是跨会话漂移，**非真实退化**（同代码同 commit）。FP8 RCR 第一次冷启动 1984 TFLOPS（DVFS 低功耗），后续恢复 3229。
+
+### Dev A 结果 — 3 个老 flag 全 REJECT (架构互斥)
+
+源码 `kernel_mxfp8_layouts.cpp:2587-2605, 2643-2661, 2698-2716, 2752-2770` 的 dispatch chain：
+```
+#if SCALAR_PHASE_PACKS
+#elif PHASE_U16_CACHE
+#elif REMAP_ONCE
+#elif HOIST_HI       ← 当前 production
+#elif OPSEL_PHASE
+#else fallback
+```
+
+- `PHASE_U16_CACHE=1` —— 关 HOIST_HI → SNR -1.18 dB FAIL（K_PHASE templated lambda + tail path 不兼容）
+- `REMAP_ONCE=1` —— VGPR 254→256 + 1 spill + 8B scratch
+- `SCALAR_PHASE_PACKS=1` —— VGPR 254→256 + 1 spill + 8B scratch
+
+**永久关闭这 3 个 flag**。HOIST_HI 是它们的 successor。已从下方 "Dev B 已有开关" 段删除。
+
+### Dev B 结果 — `-mllvm` 30+ flag sweep 全 NO-WIN
+
+测过：`promote-alloca-to-vector-limit`, `loop-prefetch`, `set-wave-priority`, `schedule-relaxed-occupancy`, `schedule-metric-bias={50,100}`, `kernarg-preload-count={2,4,8,16}`, `use-amdgpu-trackers`, `disable-clustered-low-occupancy-reschedule`, `disable-unclustered-high-rp-reschedule`, `enable-vopd`, `reassign-regs`, `misched-{cluster,fusion,cyclicpath}`, `enable-post-misched={true,false}`, `enable-pipeliner`, `sched-strategy={minreg,max-ilp,iterative-ilp,iterative-minreg}`, `enable-merge-m0`, `opt-vgpr-liverange`, `dce-in-ra`, `enable-amdgpu-aa`, `prealloc-sgpr-spill-vgprs`, `membound-threshold`, `disable-loop-alignment`
+
+Top-2 quick-bench candidate formal A/B：
+| Flag | Quick Δ% | Formal Welch-t | Verdict |
+|---|---:|---:|---|
+| `promote-alloca-to-vector-limit=2` | +0.51% | -0.01 | noise |
+| `use-amdgpu-trackers` | +0.48% | -0.71 | noise |
+
+资源 byte-identical baseline → 编译器对该 hot kernel 是 no-op。Makefile 已经默认 `-O3 -ffast-math --offload-arch=gfx950 -DKITTENS_CDNA4`。**永久关闭 `-mllvm` 调优方向**。
+
+关键发现：
+- `-enable-pipeliner` (LLVM SWP) 在 AMDGPU MFMA 循环上 silently inert
+- `-enable-post-misched=false` 退化 25% → 默认开是必要的
+- 所有 `sched-strategy` 替代项都退化 → 默认 GCN scheduler 是最优
+
+### Dev C 结果 — scale b64 coalesce 字节级证伪
+
+6 个 scale `buffer_load` 的精确映射（生产 ASM 内部循环 `.LBB16_4`）：
+
+| Dest VGPR | SRD | 角色 |
+|---|---|---|
+| v183 | s[24:27] | A scale half=0 pack=0 |
+| v188 | s[40:43] | A scale half=1 pack=0 |
+| v190 | s[48:51] | A scale half=0 pack=1 |
+| v187 | s[52:55] | A scale half=1 pack=1 |
+| v184 | s[36:39] | B scale half=0 pack=0 |
+| v189 | s[44:47] | B scale half=1 pack=0 |
+
+`preshuffle_scale_matrix_mfma16` 输出 `(num_row_groups, padded_k_blocks*32)`，每个 row_group 是 8192-byte 连续 slab。6 个 scale dword 落 6 个不同 row_group，最小 dword 间距 a0p0→a0p1 = **+8192 B**（同 SRD 内）。
+
+`buffer_load_b64` 要求 4-byte 间距 → **没有任何一对 dword 满足**。R5 Dev G2 字节 math 二次 confirm。真 b64 coalesce 需 Python preshuffle 重排（dword 级 interleave row_groups），影响 4 个 fastpath + reference + 3 个 test caller，**估 2-4 天，上限 ~0.5% TFLOPS**。**永久关闭**。
+
+### R16 综合产出 = 4 个永久 dead-end + 0 commit
+
+1. `PHASE_U16_CACHE / REMAP_ONCE / SCALAR_PHASE_PACKS` flag（HOIST_HI 互斥）
+2. compiler `-mllvm` flag 调优（30+ flag saturated）
+3. scale `buffer_load_b64` 合并（preshuffle layout 不允许，字节 math 证伪）
+4. 跨 session GPU0 baseline 1-2% 漂移（R14/R15/R16 一致 confirm）
+
+### R16 confirms
+
+MXFP8 RCR 在当前结构下 **3010-3015 TFLOPS 是硬 ceiling**。FP8 RCR 6.79% 差距只能通过 multi-day 结构重写攻克：
+
+**剩余仅两条结构性方向**：
+- AGPR fused-asm block（R5 Dev F 有 partial impl 可接续，破坏 HOIST_HI）
+- preshuffle scale layout 重设计（影响 4 fastpath + reference + 3 test caller）
+
+A LDS row-major transpose 在 R10/R11 已半路证伪 fastpath 不兼容（pipeline ordering bug），第三条结构方向可视为 also dead unless 重写整个 LDS 同步层。
+
+### 新会话规范（R16 起）
+
+1. **不要再派"试新 flag"sprint** —— R3-R16 共 14 轮证明了短-cycle dev fan-out 在当前结构下 0 win
+2. 如果 user 强制继续：必须**单条深度做 multi-day 结构重写**之一
+3. 优先 AGPR fused-asm block（接续 R5 Dev F 的 256V→128V/128A 分配框架，但需要重写 fused asm 让 ALL MFMAs 在 1 个 asm block 内避免 V↔A shuffle 开销）
+4. preshuffle scale layout 影响面太大，risk 高，benefit 上限 0.5% — 不优先
+5. 仍坚持 R15 规范：每会话必须 GPU0 baseline 重测；commit author 用 "MXFP8 Decision Maker"
 
 ## 第十五轮评审结果 (2026-04-17) — defaults hygiene fix：源默认值终于匹配生产 build；R14 倒置反转
 
