@@ -164,6 +164,45 @@ using namespace kittens;
 #define MXFP4_STR_IMPL(x) #x
 #define MXFP4_STR(x) MXFP4_STR_IMPL(x)
 
+// ───── R18A-P3: replace inner-loop s_barrier with cheaper s_waitcnt lgkmcnt(0) ─────
+// The inner-loop `s_waitcnt vmcnt(N) s_barrier` synchronizes the producer chain
+// (buffer_load_to_lds → LDS) with the consumer (Step3 ds_read). The s_barrier
+// also provides cross-wave LDS visibility. If wave-private LDS partitions allow
+// safe drop of cross-wave sync (each wave only reads what it wrote), we can drop
+// the barrier and only wait for in-wave LDS+VMEM completion via lgkmcnt+vmcnt.
+//
+// SAFETY: drop only via SNR check at M=N=K=4096. If output diverges, the cross-
+// wave barrier IS load-bearing — discard variant.
+#ifndef BARRIER_TO_WAITCNT_STEP3
+#define BARRIER_TO_WAITCNT_STEP3 0
+#endif
+#ifndef BARRIER_TO_WAITCNT_STEP12
+#define BARRIER_TO_WAITCNT_STEP12 0
+#endif
+#ifndef BARRIER_TO_WAITCNT_ALL
+#define BARRIER_TO_WAITCNT_ALL 0
+#endif
+#if BARRIER_TO_WAITCNT_ALL
+#undef BARRIER_TO_WAITCNT_STEP3
+#define BARRIER_TO_WAITCNT_STEP3 1
+#undef BARRIER_TO_WAITCNT_STEP12
+#define BARRIER_TO_WAITCNT_STEP12 1
+#endif
+
+#if BARRIER_TO_WAITCNT_STEP3
+// Drop s_barrier from STEP3 producer→consumer sync — wait only for VMEM + LDS.
+#define MXFP4_STEP3_BARRIER_INST "s_waitcnt vmcnt(" MXFP4_STR(STEP3_BARRIER_VMCNT) ") lgkmcnt(0)\n"
+#else
+#define MXFP4_STEP3_BARRIER_INST "s_waitcnt vmcnt(" MXFP4_STR(STEP3_BARRIER_VMCNT) ")\ns_barrier\n"
+#endif
+
+#if BARRIER_TO_WAITCNT_STEP12
+// Drop s_barrier from TAIL_BARRIER (last-iter sync before tail Step3/4).
+#define MXFP4_TAIL_BARRIER_INST "s_waitcnt vmcnt(" MXFP4_STR(TAIL_BARRIER_VMCNT) ") lgkmcnt(0)\n"
+#else
+#define MXFP4_TAIL_BARRIER_INST "s_waitcnt vmcnt(" MXFP4_STR(TAIL_BARRIER_VMCNT) ")\ns_barrier\n"
+#endif
+
 constexpr int BLK = 256;
 constexpr int BK  = 128;
 constexpr int WARPS_M = 2, WARPS_N = 2;
@@ -980,7 +1019,7 @@ __device__ __forceinline__ void kpair_64mfma_step34(
     unsigned sbr1 = std::bit_cast<unsigned>(br_raw[1]);
 
     // Barrier emitted separately (with memory clobber) so the MFMAs block stays lightweight
-    asm volatile("s_waitcnt vmcnt(" MXFP4_STR(STEP3_BARRIER_VMCNT) ")\ns_barrier\n" ::: "memory");
+    asm volatile(MXFP4_STEP3_BARRIER_INST ::: "memory");
 
     asm volatile(
         // ═══ STEP 3: A1×Bl (32 MFMAs) + 8 ds_reads for nxt_a0 ═══
@@ -1217,7 +1256,7 @@ __device__ __forceinline__ void kpair_32mfma_with_lds_and_pf(
     // Row 0: 8 MFMAs + ALL 8 ds_reads front-loaded (1:1 interleave)
     // When EMIT_BARRIER: vmcnt+barrier at top, MFMAs overlap with any stall
     if constexpr (EMIT_BARRIER) {
-        asm volatile("s_waitcnt vmcnt(" MXFP4_STR(STEP3_BARRIER_VMCNT) ")\ns_barrier\n" ::: "memory");
+        asm volatile(MXFP4_STEP3_BARRIER_INST ::: "memory");
     }
     asm volatile(
         "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %24, %32, %0,  %40, %42 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
@@ -1410,7 +1449,7 @@ __device__ __forceinline__ void kpair_32mfma_with_lds_rowspread_pf(
 {
     KPAIR_SETUP();
     if constexpr (EMIT_BARRIER) {
-        asm volatile("s_waitcnt vmcnt(" MXFP4_STR(STEP3_BARRIER_VMCNT) ")\ns_barrier\n" ::: "memory");
+        asm volatile(MXFP4_STEP3_BARRIER_INST ::: "memory");
     }
     // Row 0: 8 MFMAs + 2 ds_reads (d0, d4)
     {
@@ -1635,7 +1674,7 @@ __device__ __forceinline__ void kpair_32mfma_with_lds_and_pf_swapped_sel(
 {
     KPAIR_SETUP();
     if constexpr (EMIT_BARRIER) {
-        asm volatile("s_waitcnt vmcnt(" MXFP4_STR(STEP3_BARRIER_VMCNT) ")\ns_barrier\n" ::: "memory");
+        asm volatile(MXFP4_STEP3_BARRIER_INST ::: "memory");
     }
     asm volatile(
         "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %32, %24, %0,  %42, %40 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
@@ -2085,7 +2124,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         extract_tile(a1_d, tA1);
 
 #if !STEP3_EMBED_BARRIER
-        asm volatile("s_waitcnt vmcnt(" MXFP4_STR(STEP3_BARRIER_VMCNT) ")\ns_barrier\n" ::: "memory");
+        asm volatile(MXFP4_STEP3_BARRIER_INST ::: "memory");
 #endif
 
         float4 nxt_a0_d[8];
@@ -2171,7 +2210,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         extract_tile(a1_d, tA1);
 
         // Tail: always emit barrier (no embedded barrier in pure-MFMA Step3/4)
-        asm volatile("s_waitcnt vmcnt(" MXFP4_STR(TAIL_BARRIER_VMCNT) ")\ns_barrier\n" ::: "memory");
+        asm volatile(MXFP4_TAIL_BARRIER_INST ::: "memory");
 
         tile_pf_params dummy_pf = {};
         kpair_32mfma_with_pf_swapped_sel<0>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw, dummy_pf, dummy_pf);
@@ -2272,7 +2311,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         emit_pf_tail<0>(pf_bl_p, pf_br_p);
 #else
 #if !STEP3_EMBED_BARRIER
-        asm volatile("s_waitcnt vmcnt(" MXFP4_STR(STEP3_BARRIER_VMCNT) ")\ns_barrier\n" ::: "memory");
+        asm volatile(MXFP4_STEP3_BARRIER_INST ::: "memory");
 #endif
 
         // Step 3: A1*Bl (32 MFMAs) + ds_read A0[nxt] + prefetch
@@ -2358,7 +2397,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         extract_tile(a1_d, tA1);
 
         // Tail: always emit barrier (no embedded barrier in pure-MFMA Step3/4)
-        asm volatile("s_waitcnt vmcnt(" MXFP4_STR(TAIL_BARRIER_VMCNT) ")\ns_barrier\n" ::: "memory");
+        asm volatile(MXFP4_TAIL_BARRIER_INST ::: "memory");
 
         // Steps 3+4: pure MFMAs, no ds_reads, no prefetches
         tile_pf_params dummy_pf = {};
@@ -2463,7 +2502,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         emit_pf_tail<0>(pf_bl_p, pf_br_p);
 #else
 #if !STEP3_EMBED_BARRIER
-        asm volatile("s_waitcnt vmcnt(" MXFP4_STR(STEP3_BARRIER_VMCNT) ")\ns_barrier\n" ::: "memory");
+        asm volatile(MXFP4_STEP3_BARRIER_INST ::: "memory");
 #endif
 
         float4 nxt_a0_d[8];

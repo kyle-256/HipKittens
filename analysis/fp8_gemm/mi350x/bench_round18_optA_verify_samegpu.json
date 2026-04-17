@@ -1,0 +1,39 @@
+{
+  "gpu": 0,
+  "pairs": [
+    {
+      "lab": "P1",
+      "shape": [
+        28672,
+        4096,
+        16384
+      ],
+      "comp": 5350.6,
+      "parent": "_ts_gm8",
+      "variant": "_r18a_p3_all",
+      "parent_runs": [
+        5079.99,
+        5073.62,
+        5070.33,
+        5077.24,
+        5095.99
+      ],
+      "variant_runs": [
+        5293.86,
+        5299.01,
+        5311.78,
+        5309.92,
+        5296.6
+      ],
+      "parent_max": 5095.99,
+      "parent_mean": 5079.434,
+      "variant_max": 5311.78,
+      "variant_mean": 5302.234,
+      "variant_min": 5293.86,
+      "delta_pp": 4.164,
+      "gate1": true,
+      "gate2": true,
+      "verdict": "WIN"
+    }
+  ]
+}

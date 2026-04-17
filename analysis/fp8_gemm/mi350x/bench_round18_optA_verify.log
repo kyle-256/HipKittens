@@ -1,0 +1,21 @@
+R18 OptA 5-run verify. warmup=200 iters=500 trim=0.1 N_RUNS=5.
+====================================================================================================
+  P1/_r18a_p3_all                run=0 gpu=1 -> 5199.86
+  P1/parent                      run=0 gpu=0 -> 5098.61
+  P1/parent                      run=1 gpu=0 -> 5056.77
+  P1/_r18a_p3_all                run=1 gpu=1 -> 5207.49
+  P1/parent                      run=2 gpu=0 -> 5048.11
+  P1/_r18a_p3_all                run=2 gpu=1 -> 5213.68
+  P1/parent                      run=3 gpu=0 -> 5066.76
+  P1/_r18a_p3_all                run=3 gpu=1 -> 5221.01
+  P1/parent                      run=4 gpu=0 -> 5081.47
+  P1/_r18a_p3_all                run=4 gpu=1 -> 5211.94
+
+====================================================================================================
+
+  P1 _r18a_p3_all  (comp=5350.6)
+    parent  runs: [5098.6, 5056.8, 5048.1, 5066.8, 5081.5]  max=5098.61  mean=5070.34
+    variant runs: [5199.9, 5207.5, 5213.7, 5221.0, 5211.9]  max=5221.01  mean=5210.80  min=5199.86
+    Δmean=+2.62pp  gate1(v_mean>=p_max)=True  gate2(Δ>=+1pp)=True  -> WIN
+
+Elapsed: 0.4 min

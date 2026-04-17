@@ -1,0 +1,16 @@
+Round 18 OptA P3 builds: 12 (4 shapes x 3 variants)
+====================================================================================================
+  P1    _ts_gm8_r18a_p3_step3                                   OK       (18.3s)
+  DLA2  _ts_gm2_v12_memc_dc_r18a_p3_step12                      OK       (18.4s)
+  DLA7  _ts_lgk2_v12_memc_r18a_p3_step12                        OK       (18.8s)
+  DLA7  _ts_lgk2_v12_memc_r18a_p3_all                           OK       (18.8s)
+  P1    _ts_gm8_r18a_p3_step12                                  OK       (18.8s)
+  DLA7  _ts_lgk2_v12_memc_r18a_p3_step3                         OK       (18.8s)
+  DLA1  _ts_pf6_6_v12_memc_r18a_p3_all                          OK       (18.9s)
+  DLA1  _ts_pf6_6_v12_memc_r18a_p3_step12                       OK       (18.9s)
+  P1    _ts_gm8_r18a_p3_all                                     OK       (18.9s)
+  DLA2  _ts_gm2_v12_memc_dc_r18a_p3_all                         OK       (19.6s)
+  DLA2  _ts_gm2_v12_memc_dc_r18a_p3_step3                       OK       (21.3s)
+  DLA1  _ts_pf6_6_v12_memc_r18a_p3_step3                        OK       (23.0s)
+
+Elapsed: 23.0s

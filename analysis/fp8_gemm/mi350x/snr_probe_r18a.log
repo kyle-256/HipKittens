@@ -1,0 +1,53 @@
+=== Phase 1: parent reference (run 1) ===
+  DLA1: M=4096 N=32768 K=128256 on gpu=0
+    {'finite': 0.768125057220459, 'shape': [256, 256]}
+  DLA2: M=128256 N=32768 K=4096 on gpu=0
+    {'finite': 0.9722251296043396, 'shape': [256, 256]}
+  DLA7: M=28672 N=32768 K=4096 on gpu=0
+    {'finite': 0.8447644710540771, 'shape': [256, 256]}
+  P1: M=28672 N=4096 K=16384 on gpu=0
+    {'finite': 0.8684160113334656, 'shape': [256, 256]}
+
+=== Phase 2: parent reference (run 2) — noise floor ===
+  DLA1: rerun parent on gpu=0
+    {'finite': 0.7665866613388062, 'shape': [256, 256]}
+  DLA1: noise-floor SNR = 14.64 dB (ok)
+  DLA2: rerun parent on gpu=0
+    {'finite': 0.9684085845947266, 'shape': [256, 256]}
+  DLA2: noise-floor SNR = -6.92 dB (ok)
+  DLA7: rerun parent on gpu=0
+    {'finite': 0.8762212991714478, 'shape': [256, 256]}
+  DLA7: noise-floor SNR = -4.87 dB (ok)
+  P1: rerun parent on gpu=0
+    {'finite': 0.8680137395858765, 'shape': [256, 256]}
+  P1: noise-floor SNR = 11.78 dB (ok)
+
+=== Phase 3: per-variant SNR ===
+Total checks: 12
+==============================================================================================================
+  DLA1   _r18a_p3_step12           gpu=1  snr=      16.9 dB  noise=14.643146508008568 dB  OK-MARGINAL
+  DLA1   _r18a_p3_step3            gpu=0  snr=      6.81 dB  noise=14.643146508008568 dB  BROKEN-RACE
+  DLA1   _r18a_p3_all              gpu=0  snr=      3.69 dB  noise=14.643146508008568 dB  BROKEN-RACE
+  DLA2   _r18a_p3_step3            gpu=1  snr=     -7.44 dB  noise=-6.922914666163051 dB  BROKEN-RACE
+  DLA2   _r18a_p3_step12           gpu=0  snr=     -2.46 dB  noise=-6.922914666163051 dB  BROKEN-RACE
+  DLA2   _r18a_p3_all              gpu=1  snr=     -7.65 dB  noise=-6.922914666163051 dB  BROKEN-RACE
+  DLA7   _r18a_p3_step12           gpu=1  snr=     -2.25 dB  noise=-4.8723511301636 dB  BROKEN-RACE
+  DLA7   _r18a_p3_step3            gpu=0  snr=     -3.88 dB  noise=-4.8723511301636 dB  BROKEN-RACE
+  DLA7   _r18a_p3_all              gpu=0  snr=     -4.19 dB  noise=-4.8723511301636 dB  BROKEN-RACE
+  P1     _r18a_p3_step3            gpu=1  snr=      4.84 dB  noise=11.781785265628013 dB  BROKEN-RACE
+  P1     _r18a_p3_all              gpu=1  snr=     32.79 dB  noise=11.781785265628013 dB  OK
+  P1     _r18a_p3_step12           gpu=0  snr=     32.94 dB  noise=11.781785265628013 dB  OK
+
+==============================================================================================================
+OK: 3    BROKEN: 9
+BROKEN entries:
+  ['DLA1', '_r18a_p3_step3', 'BROKEN-RACE']
+  ['DLA1', '_r18a_p3_all', 'BROKEN-RACE']
+  ['DLA2', '_r18a_p3_step3', 'BROKEN-RACE']
+  ['DLA2', '_r18a_p3_step12', 'BROKEN-RACE']
+  ['DLA2', '_r18a_p3_all', 'BROKEN-RACE']
+  ['DLA7', '_r18a_p3_step12', 'BROKEN-RACE']
+  ['DLA7', '_r18a_p3_step3', 'BROKEN-RACE']
+  ['DLA7', '_r18a_p3_all', 'BROKEN-RACE']
+  ['P1', '_r18a_p3_step3', 'BROKEN-RACE']
+Saved snr_probe_r18a.json

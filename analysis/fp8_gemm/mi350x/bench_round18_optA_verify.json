@@ -1,0 +1,42 @@
+{
+  "warmup": 200,
+  "iters": 500,
+  "trim": 0.1,
+  "n_runs": 5,
+  "pairs": [
+    {
+      "lab": "P1",
+      "shape": [
+        28672,
+        4096,
+        16384
+      ],
+      "comp": 5350.6,
+      "parent": "_ts_gm8",
+      "variant": "_r18a_p3_all",
+      "parent_runs": [
+        5098.61,
+        5056.77,
+        5048.11,
+        5066.76,
+        5081.47
+      ],
+      "variant_runs": [
+        5199.86,
+        5207.49,
+        5213.68,
+        5221.01,
+        5211.94
+      ],
+      "parent_max": 5098.61,
+      "parent_mean": 5070.344,
+      "variant_max": 5221.01,
+      "variant_mean": 5210.796,
+      "variant_min": 5199.86,
+      "delta_pp": 2.625,
+      "gate1": true,
+      "gate2": true,
+      "verdict": "WIN"
+    }
+  ]
+}

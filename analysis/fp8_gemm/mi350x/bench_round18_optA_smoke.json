@@ -1,0 +1,31 @@
+{
+  "warmup": 200,
+  "iters": 500,
+  "trim": 0.1,
+  "shapes": {
+    "DLA1": {
+      "comp": 5781.1,
+      "parent_tflops": 5228.65,
+      "variants": {
+        "_r18a_p3_step12": {
+          "tflops": 0.0,
+          "delta_pp": -90.44
+        }
+      }
+    },
+    "P1": {
+      "comp": 5350.6,
+      "parent_tflops": 5094.66,
+      "variants": {
+        "_r18a_p3_step12": {
+          "tflops": 4793.13,
+          "delta_pp": -5.64
+        },
+        "_r18a_p3_all": {
+          "tflops": 5307.44,
+          "delta_pp": 3.98
+        }
+      }
+    }
+  }
+}
