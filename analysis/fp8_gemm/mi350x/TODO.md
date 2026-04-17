@@ -315,6 +315,28 @@ Decider 提出 5 个 untested vectors, 3 个 in-session 可执行. 启动 3 个 
 
 **Round 5 净增**: 0 WIN, 0 gap reduction. 触发用户的 GOAL PIVOT 指令 (见文档顶部).
 
+## Round 9 (2026-04-17) — Verifier reversal + 8 codegen flags + SNR bug FIX
+更窄、更聚焦的探针轮 (3 任务: 1 verifier + 1 codegen probe + 1 tooling fix), 在 Round 8 NEW METHODOLOGY ADDENDUM 下:
+- **Verifier** (验证 Round 8 A 的 latent finding "_memc 用 un-prefixed flag 可能 silently default to gcn-max-occupancy"): **REVERSED — Round 8 A 的方向正好搞反**.
+  - 实测发现: `gcn-`-prefixed 形式 (`gcn-max-memory-clause`, `gcn-max-ilp`, `gcn-max-occupancy`, etc.) **是 no-op** — 产生与无 flag 字节相同的 ASM (size 301977, MD5 仅随机 hash 不同).
+  - **un-prefixed 形式 (`max-memory-clause`, `max-ilp`)** 才是真正生效的 — 在真实 mxfp4 kernel 上 7153 行 ASM diff vs default.
+  - **`-mllvm -amdgpu-sched-strategy=` 接受任何字符串** (包括 `NONSENSE_GARBAGE`) 不报错不警告 → silently fallback to default. 这是 ROCm 7.1 LLVM 20 的真实 LLVM/AMDGPU bug, 但**对我们 benchmark 没影响** — 因为 bench_all_42.py:412-461 一直在用 un-prefixed `max-memory-clause`.
+  - **重大方法论反转**: **Round 6 A 和 Round 8 A 测试的 `gcn-`-prefixed 5-strategy sweep 全部是 no-op**. 那些 "all noise/regress" 的结果**毫无意义** — 它们从来没执行过新的调度. 真正 untested 的是 un-prefixed `max-ilp` / `max-occupancy` / `iterative-ilp` / `iterative-minreg` 在 deep-LOSE shapes 上的效果. 已 deployed: un-prefixed `max-memory-clause` (在 14/24 WIN best variants).
+  - Verifier dummy test 仅确认 un-prefixed `max-memory-clause` 和 un-prefixed `max-ilp` 产生不同 ASM. 其他 un-prefixed 是否生效未确认.
+- **Optimizer B** (8 个从未测过的 LLVM codegen 微 flag on `14336×4096×32768` best `_v16_wpe2`): **全部 DEAD END**. flag list: loop-prefetch, schedule-metric-bias=80/100, mfma-padding-ratio=10/25, disable-loop-alignment, disable-clustered-low-occupancy-reschedule, disable-unclustered-high-rp-reschedule, use-aa-in-codegen, enable-pre-ra-optimizations. 全部 [-0.85, -0.03] pp (轻微 regress 或 noise tied). 最差 `disloopalign` -0.85pp. 没有触发 +0.8pp 复测. 11 variants 加入 dead-end list.
+- **Optimizer C** (修复 documented SNR false-OK NaN bug): **FIXED, committed `b46834a0`**.
+  - bug 实际不在 `bench_deep_lose.py` (该文件无 SNR gate, 是 perf-only spot bench) 而在 `bench_optC_round6.py:175` (`if snr_db < 25` mis-classify NaN as OK) 和 `bench_round6_optA.py` (NaN-tainted output → `noi>0` short-circuit → snr=+Inf 通过).
+  - Fix: 新建 `snr_check.py` (NaN-safe `is_snr_ok` / `classify_snr` / `compute_snr_db`); 两个 bench 文件均拒绝 NaN/None/-Inf SNR.
+  - **重要发现**: Round 6 OptC 的 `_ts_u8*` 5 个 variants 全部 NaN output 但 silently 通过 SNR gate, 任何 "wins" 都是无意义的. Future agents 用 bench_optC_round6.py 都需要重新验证.
+
+**Round 9 净增**: 0 WIN, 0 gap reduction, 但 **1 real commit (SNR fix)** + **1 critical methodology reversal (sched-strategy prefix)**. 继续 6 → 7 saturation rounds.
+
+**新 dead-end vectors (Round 9)**:
+- 8 LLVM codegen 微 flags (loop-prefetch, sched-metric-bias, mfma-padding, disloopalign, etc.) — 全部 noise/regress
+- `gcn-`-prefixed sched-strategy 名 (`gcn-max-memory-clause` etc.) — 全部 silently no-op, 等于 default
+
+**新 untested vector (Round 10 候选)**: un-prefixed `max-ilp` (verified 工作的) 在 deep-LOSE shapes 上 — 真正未测.
+
 ## Round 8 (2026-04-17) — 3 parallel optimizers, all DEAD END / NO-OP
 GOAL PIVOT 第三轮, 在 Round 6 methodology rule 下, 攻击真正未测的窄向量:
 - **Optimizer A** (per-shape `-mllvm -amdgpu-sched-strategy=` bucketing on 4 untested deep-LOSE shapes 4096×32768×28672 / 28672×4096×16384 / 4096×28672×32768 / 32768×4096×14336): **DEAD END**. 19 variants × 4 shapes × 4-5 strategies (`gcn-max-occupancy`, `gcn-max-ilp`, `gcn-iterative-ilp`, `gcn-iterative-minreg`). 全部 [-0.81, +0.09] pp 区间, 最大 +0.09pp `_ts_gm8_sched_memc` on 28672×4096×16384 (远低于 +0.8pp 触发). 加上 R6 A 的 4096×32768×128256 + R6 B 的 14336×4096×32768 + R6 C 的 16384×4096×28672, sched-strategy vector 现已覆盖 7/10 deep-LOSE shapes, **vector 完全 exhausted**.

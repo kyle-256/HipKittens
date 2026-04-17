@@ -221,6 +221,23 @@
   - **EARLY_SCALE_PF (E)**: **BROKEN + no perf gain**. Compiler aliases `pf_*` and shadow `nxt_pf_*` to same VGPRs → race; baseline ASM already issues scale loads at iter top with ~512 cyc hiding > ~400 cyc VMEM latency, no untapped scheduling room. Code has `#error` guard if enabled. See `test_early_scale_pf.py`.
   - **F, G**: INFEASIBLE in single session.
   Triggered the user's GOAL PIVOT directive at the top of this file.
+- **Round 9 (2026-04-17, focused probe round)**: Verifier reversal + 8 codegen flag dead-ends + SNR fix committed:
+  - **Verifier**: REVERSED Round 8 A's latent finding. Reality:
+    - **`gcn-`-prefixed sched-strategy names (`gcn-max-memory-clause`, `gcn-max-ilp`, etc.) are silently NO-OP** — produce ASM byte-identical to default (size 301977, MD5 only differs in random hip_cuid hash).
+    - **un-prefixed `max-memory-clause` and `max-ilp` are the ONLY forms that actually invoke a different scheduler** (7153 line ASM diff vs default).
+    - `-mllvm -amdgpu-sched-strategy=` accepts ANY string silently (incl. nonsense) → fallback to default. Real LLVM/AMDGPU bug in ROCm 7.1 LLVM 20, but doesn't affect us — `bench_all_42.py:412-461` correctly uses un-prefixed `max-memory-clause`.
+    - **CRITICAL REVERSAL**: Round 6 A and Round 8 A's "5 strategy sweep, all noise/regress" results were **all no-op tests** (gcn-prefixed). Real untested vector is un-prefixed `max-ilp` / `max-occupancy` / `iterative-ilp` / `iterative-minreg` on deep-LOSE shapes. Already deployed: un-prefixed `max-memory-clause` (in 14/24 WIN best variants).
+  - **Optimizer B**: 8 never-tested LLVM codegen micro-flags on `14336×4096×32768` best `_v16_wpe2`. ALL DEAD END. Flags: loop-prefetch, schedule-metric-bias=80/100, mfma-padding-ratio=10/25, disable-loop-alignment, disable-clustered-low-occupancy-reschedule, disable-unclustered-high-rp-reschedule, use-aa-in-codegen, enable-pre-ra-optimizations. All [-0.85, -0.03] pp.
+  - **Optimizer C**: **SNR false-OK bug FIXED**, committed `b46834a0`. Bug actually lived in `bench_optC_round6.py:175` and `bench_round6_optA.py` (not `bench_deep_lose.py`, which has no SNR gate). Fix: new `snr_check.py` module with NaN-safe is_snr_ok/classify_snr/compute_snr_db. **Real finding**: Round 6 OptC's `_ts_u8*` variants all silently produced NaN output but passed; any "wins" from those are bogus. Re-verify under fixed gate before reusing.
+
+  Round 9 net: 0 WIN, 0 gap reduction, but **1 real commit (SNR fix)** + **1 critical methodology reversal**. 7 saturation rounds total.
+
+  **新 untested vector (after R9 reversal)**: un-prefixed `max-ilp` on deep-LOSE shapes (verified 工作的, never tested in this combination).
+
+  **新增 dead-end vectors (Round 9)**:
+  - 8 LLVM codegen micro flags (loop-prefetch, sched-metric-bias, mfma-padding, disloopalign, etc.)
+  - `gcn-`-prefixed sched-strategy names — silently no-op, equivalent to default
+
 - **Round 8 (2026-04-17, GOAL PIVOT 后第三轮)**: 3 parallel optimizers, all DEAD END / NO-OP:
   - **A** (per-shape `-mllvm -amdgpu-sched-strategy=` bucketing on 4 untested deep-LOSE shapes 4096×32768×28672 / 28672×4096×16384 / 4096×28672×32768 / 32768×4096×14336): DEAD END. 19 variants, 全部 [-0.81, +0.09] pp. 加上 R6 A/B/C 的 3 shapes, sched-strategy 现在 7/10 deep-LOSE shapes 全测过 — **vector 完全 exhausted**.
     - **重要 latent finding (待验证)**: 现有 `*_memc` baselines (在 14/24 WIN best variants 中) 使用 un-prefixed `max-memory-clause` flag, 可能 silently default to `gcn-max-occupancy` (LLVM 不识别 → fallback). 如果是真的, `_memc` family 实际是 `gcn-max-occupancy` 不是 `gcn-max-memory-clause`. 解释了为何 memc 在 WIN shapes 有效. 不会改变 deep-LOSE 结论 (R6 A 用了正确 prefix 测试, 全部 noise).
