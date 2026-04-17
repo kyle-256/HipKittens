@@ -1,0 +1,325 @@
+{
+  "shapes": {
+    "S1": {
+      "variants": {
+        "step3": {
+          "gpu": 6,
+          "cand_run": {
+            "finite": 0.9944593906402588,
+            "shape": [
+              256,
+              256
+            ]
+          },
+          "ref_err": null,
+          "snr_db": 0.0,
+          "snr_why": "ok",
+          "verdict": "BROKEN-RACE"
+        },
+        "step12": {
+          "gpu": 7,
+          "cand_run": {
+            "finite": 0.9943420886993408,
+            "shape": [
+              256,
+              256
+            ]
+          },
+          "ref_err": null,
+          "snr_db": 0.0,
+          "snr_why": "ok",
+          "verdict": "BROKEN-RACE"
+        },
+        "all": {
+          "gpu": 6,
+          "cand_run": {
+            "finite": 0.9942604303359985,
+            "shape": [
+              256,
+              256
+            ]
+          },
+          "ref_err": null,
+          "snr_db": 0.0,
+          "snr_why": "ok",
+          "verdict": "BROKEN-RACE"
+        }
+      },
+      "noise_floor_db": 0.0
+    },
+    "S2": {
+      "variants": {
+        "step3": {
+          "gpu": 7,
+          "cand_run": {
+            "finite": 0.9882680177688599,
+            "shape": [
+              256,
+              256
+            ]
+          },
+          "ref_err": null,
+          "snr_db": -2.51,
+          "snr_why": "ok",
+          "verdict": "BROKEN-RACE"
+        },
+        "all": {
+          "gpu": 7,
+          "cand_run": {
+            "finite": 0.9894366264343262,
+            "shape": [
+              256,
+              256
+            ]
+          },
+          "ref_err": null,
+          "snr_db": -2.97,
+          "snr_why": "ok",
+          "verdict": "BROKEN-RACE"
+        },
+        "step12": {
+          "gpu": 6,
+          "cand_run": {
+            "finite": 0.990598738193512,
+            "shape": [
+              256,
+              256
+            ]
+          },
+          "ref_err": null,
+          "snr_db": -49.25,
+          "snr_why": "ok",
+          "verdict": "BROKEN-RACE"
+        }
+      },
+      "noise_floor_db": -2.972557562243784
+    },
+    "S3": {
+      "variants": {
+        "step12": {
+          "gpu": 7,
+          "cand_run": {
+            "finite": 0.984918475151062,
+            "shape": [
+              256,
+              256
+            ]
+          },
+          "ref_err": null,
+          "snr_db": -63.02,
+          "snr_why": "ok",
+          "verdict": "BROKEN-RACE"
+        },
+        "step3": {
+          "gpu": 6,
+          "cand_run": {
+            "finite": 0.9861269593238831,
+            "shape": [
+              256,
+              256
+            ]
+          },
+          "ref_err": null,
+          "snr_db": -390.38,
+          "snr_why": "ok",
+          "verdict": "BROKEN-RACE"
+        },
+        "all": {
+          "gpu": 6,
+          "cand_run": {
+            "finite": 0.9854744672775269,
+            "shape": [
+              256,
+              256
+            ]
+          },
+          "ref_err": null,
+          "snr_db": -385.32,
+          "snr_why": "ok",
+          "verdict": "BROKEN-RACE"
+        }
+      },
+      "noise_floor_db": 0.0
+    },
+    "S4": {
+      "variants": {
+        "step3": {
+          "gpu": 7,
+          "cand_run": {
+            "finite": 0.9904719591140747,
+            "shape": [
+              256,
+              256
+            ]
+          },
+          "ref_err": null,
+          "snr_db": -385.32,
+          "snr_why": "ok",
+          "verdict": "BROKEN-RACE"
+        },
+        "all": {
+          "gpu": 7,
+          "cand_run": {
+            "finite": 0.9945657849311829,
+            "shape": [
+              256,
+              256
+            ]
+          },
+          "ref_err": null,
+          "snr_db": 0.0,
+          "snr_why": "ok",
+          "verdict": "BROKEN-RACE"
+        },
+        "step12": {
+          "gpu": 6,
+          "cand_run": {
+            "finite": 0.9960705041885376,
+            "shape": [
+              256,
+              256
+            ]
+          },
+          "ref_err": null,
+          "snr_db": -255.75,
+          "snr_why": "ok",
+          "verdict": "BROKEN-RACE"
+        }
+      },
+      "noise_floor_db": -2.0764781563330454
+    },
+    "S5": {
+      "variants": {
+        "step3": {
+          "gpu": 6,
+          "cand_run": {
+            "finite": 0.9900486469268799,
+            "shape": [
+              256,
+              256
+            ]
+          },
+          "ref_err": null,
+          "snr_db": -52.48,
+          "snr_why": "ok",
+          "verdict": "BROKEN-RACE"
+        },
+        "step12": {
+          "gpu": 7,
+          "cand_run": {
+            "finite": 0.9907008409500122,
+            "shape": [
+              256,
+              256
+            ]
+          },
+          "ref_err": null,
+          "snr_db": -41.17,
+          "snr_why": "ok",
+          "verdict": "BROKEN-RACE"
+        },
+        "all": {
+          "gpu": 6,
+          "cand_run": {
+            "finite": 0.9895157814025879,
+            "shape": [
+              256,
+              256
+            ]
+          },
+          "ref_err": null,
+          "snr_db": 40.94,
+          "snr_why": "ok",
+          "verdict": "OK-MARGINAL"
+        }
+      },
+      "noise_floor_db": 59.875765080819775
+    }
+  },
+  "noise_floor": {
+    "S1": 0.0,
+    "S2": -2.972557562243784,
+    "S3": 0.0,
+    "S4": -2.0764781563330454,
+    "S5": 59.875765080819775
+  },
+  "ok_pairs": [
+    [
+      "S5",
+      "all",
+      "OK-MARGINAL"
+    ]
+  ],
+  "broken_pairs": [
+    [
+      "S1",
+      "step3",
+      "BROKEN-RACE"
+    ],
+    [
+      "S1",
+      "step12",
+      "BROKEN-RACE"
+    ],
+    [
+      "S1",
+      "all",
+      "BROKEN-RACE"
+    ],
+    [
+      "S2",
+      "step3",
+      "BROKEN-RACE"
+    ],
+    [
+      "S2",
+      "all",
+      "BROKEN-RACE"
+    ],
+    [
+      "S2",
+      "step12",
+      "BROKEN-RACE"
+    ],
+    [
+      "S3",
+      "step12",
+      "BROKEN-RACE"
+    ],
+    [
+      "S3",
+      "step3",
+      "BROKEN-RACE"
+    ],
+    [
+      "S3",
+      "all",
+      "BROKEN-RACE"
+    ],
+    [
+      "S4",
+      "step3",
+      "BROKEN-RACE"
+    ],
+    [
+      "S4",
+      "all",
+      "BROKEN-RACE"
+    ],
+    [
+      "S4",
+      "step12",
+      "BROKEN-RACE"
+    ],
+    [
+      "S5",
+      "step3",
+      "BROKEN-RACE"
+    ],
+    [
+      "S5",
+      "step12",
+      "BROKEN-RACE"
+    ]
+  ]
+}

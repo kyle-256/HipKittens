@@ -1,0 +1,21 @@
+{
+  "warmup": 200,
+  "iters": 500,
+  "trim": 0.1,
+  "shapes": [
+    {
+      "label": "S5_4096x32768x14336",
+      "M": 4096,
+      "N": 32768,
+      "K": 14336,
+      "comp": 5296.1,
+      "gpu": 6,
+      "parent_suffix": "_ts_lgk2_memc_r11_iterilp",
+      "cand_suffix": "_ts_lgk2_memc_r19c_iterilp_btw_all",
+      "parent_tflops": 5040.98,
+      "cand_tflops": 5183.55,
+      "delta_pp": 2.6919808915994903,
+      "aperture_probe_finite": 0.29784154891967773
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+R19C smoke bench. warmup=200 iters=500 trim=0.1
+==============================================================================================================
+
+S5_4096x32768x14336  shape=4096x32768x14336  comp=5296.1  gpu=6
+  parent: _ts_lgk2_memc_r11_iterilp
+  cand  : _ts_lgk2_memc_r19c_iterilp_btw_all
+  [aperture probe with random scales]
+    {'finite': 0.29784154891967773}
+  parent: 5040.98 TFLOPS  (95.18%)
+  cand  : 5183.55 TFLOPS  (97.87%)  Δ=+2.69pp
+==============================================================================================================
+Saved bench_round19_optC_smoke.json
