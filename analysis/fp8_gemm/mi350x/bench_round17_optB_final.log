@@ -1,0 +1,17 @@
+R17B FINAL  warmup=200 iters=500 reps=8 discard=1  GPU=2
+P1: 28672x4096x16384  parent=_ts_gm8  comp=5273.0 TFLOPS
+==================================================================================================================================
+  rep 0: base=4952.61 cand=4976.56
+  rep 1: base=4951.23 cand=3988.48
+  rep 2: base=4932.4 cand=4982.13
+  rep 3: base=4919.41 cand=4971.48
+  rep 4: base=4943.79 cand=4976.8
+  rep 5: base=4781.07 cand=4971.6
+  rep 6: base=4950.95 cand=4980.74
+  rep 7: base=3427.87 cand=3709.61
+
+  rcg+noemxpre+tv16
+  base: mean=4700.96 max=4951.23 runs=[4951.23, 4932.4, 4919.41, 4943.79, 4781.07, 4950.95, 3427.87]
+  cand: mean=4654.41 max=4982.13 runs=[3988.48, 4982.13, 4971.48, 4976.8, 4971.6, 4980.74, 3709.61]
+  delta_mean=-46.55 pp=-0.883  max_gate=False +1pp=False  +0.5pp=False  -> FAIL
+Saved bench_round17_optB_final.json

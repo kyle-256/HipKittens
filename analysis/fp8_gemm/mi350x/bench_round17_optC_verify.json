@@ -1,0 +1,269 @@
+{
+  "runs": [
+    {
+      "shape": "DLA1",
+      "tag": "sgpr96",
+      "i": 0,
+      "base": {
+        "tflops": 5057.63,
+        "ms": 6.8072
+      },
+      "cand": {
+        "tflops": 5140.88,
+        "ms": 6.697
+      }
+    },
+    {
+      "shape": "DLA1",
+      "tag": "sgpr96",
+      "i": 1,
+      "base": {
+        "tflops": 4914.39,
+        "ms": 7.0056
+      },
+      "cand": {
+        "error": ": 1127476936969 us:  Callback: Queue 0x7ee043c00000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29\n"
+      }
+    },
+    {
+      "shape": "DLA1",
+      "tag": "sgpr96",
+      "i": 2,
+      "base": {
+        "tflops": 5147.65,
+        "ms": 6.6882
+      },
+      "cand": {
+        "tflops": 4765.44,
+        "ms": 7.2246
+      }
+    },
+    {
+      "shape": "DLA1",
+      "tag": "sgpr96",
+      "i": 3,
+      "base": {
+        "error": ": 1127617129018 us:  Callback: Queue 0x7fa376600000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29\n"
+      },
+      "cand": {
+        "tflops": 4651.99,
+        "ms": 7.4008
+      }
+    },
+    {
+      "shape": "DLA1",
+      "tag": "sgpr96",
+      "i": 4,
+      "base": {
+        "tflops": 5114.64,
+        "ms": 6.7314
+      },
+      "cand": {
+        "tflops": 4737.84,
+        "ms": 7.2667
+      }
+    },
+    {
+      "shape": "P1",
+      "tag": "fwgs256_256",
+      "i": 0,
+      "base": {
+        "tflops": 5025.9,
+        "ms": 0.7657
+      },
+      "cand": {
+        "tflops": 4994.85,
+        "ms": 0.7705
+      }
+    },
+    {
+      "shape": "P1",
+      "tag": "fwgs256_256",
+      "i": 1,
+      "base": {
+        "tflops": 4983.58,
+        "ms": 0.7722
+      },
+      "cand": {
+        "tflops": 5001.16,
+        "ms": 0.7695
+      }
+    },
+    {
+      "shape": "P1",
+      "tag": "fwgs256_256",
+      "i": 2,
+      "base": {
+        "tflops": 4996.73,
+        "ms": 0.7702
+      },
+      "cand": {
+        "tflops": 5004.89,
+        "ms": 0.7689
+      }
+    },
+    {
+      "shape": "P1",
+      "tag": "fwgs256_256",
+      "i": 3,
+      "base": {
+        "tflops": 4996.6,
+        "ms": 0.7702
+      },
+      "cand": {
+        "tflops": 5000.48,
+        "ms": 0.7696
+      }
+    },
+    {
+      "shape": "P1",
+      "tag": "fwgs256_256",
+      "i": 4,
+      "base": {
+        "tflops": 5016.11,
+        "ms": 0.7672
+      },
+      "cand": {
+        "tflops": 5019.84,
+        "ms": 0.7666
+      }
+    },
+    {
+      "shape": "P1",
+      "tag": "sgpr80",
+      "i": 0,
+      "base": {
+        "tflops": 5030.66,
+        "ms": 0.765
+      },
+      "cand": {
+        "tflops": 5016.13,
+        "ms": 0.7672
+      }
+    },
+    {
+      "shape": "P1",
+      "tag": "sgpr80",
+      "i": 1,
+      "base": {
+        "tflops": 5017.83,
+        "ms": 0.7669
+      },
+      "cand": {
+        "tflops": 5011.2,
+        "ms": 0.7679
+      }
+    },
+    {
+      "shape": "P1",
+      "tag": "sgpr80",
+      "i": 2,
+      "base": {
+        "tflops": 5005.83,
+        "ms": 0.7688
+      },
+      "cand": {
+        "tflops": 4984.42,
+        "ms": 0.7721
+      }
+    },
+    {
+      "shape": "P1",
+      "tag": "sgpr80",
+      "i": 3,
+      "base": {
+        "tflops": 4963.85,
+        "ms": 0.7753
+      },
+      "cand": {
+        "tflops": 4993.5,
+        "ms": 0.7707
+      }
+    },
+    {
+      "shape": "P1",
+      "tag": "sgpr80",
+      "i": 4,
+      "base": {
+        "tflops": 5024.93,
+        "ms": 0.7658
+      },
+      "cand": {
+        "tflops": 4794.51,
+        "ms": 0.8026
+      }
+    }
+  ],
+  "summary": [
+    {
+      "shape": "DLA1",
+      "tag": "sgpr96",
+      "mean_base": 5058.5775,
+      "mean_cand": 4824.0375,
+      "max_base": 5147.65,
+      "comp": 5781.1,
+      "delta_pp": -4.057013371157738,
+      "verdict": "fail",
+      "base_runs": [
+        5057.63,
+        4914.39,
+        5147.65,
+        5114.64
+      ],
+      "cand_runs": [
+        5140.88,
+        4765.44,
+        4651.99,
+        4737.84
+      ]
+    },
+    {
+      "shape": "P1",
+      "tag": "fwgs256_256",
+      "mean_base": 5003.784,
+      "mean_cand": 5004.244,
+      "max_base": 5025.9,
+      "comp": 5273.0,
+      "delta_pp": 0.008723686705860732,
+      "verdict": "fail",
+      "base_runs": [
+        5025.9,
+        4983.58,
+        4996.73,
+        4996.6,
+        5016.11
+      ],
+      "cand_runs": [
+        4994.85,
+        5001.16,
+        5004.89,
+        5000.48,
+        5019.84
+      ]
+    },
+    {
+      "shape": "P1",
+      "tag": "sgpr80",
+      "mean_base": 5008.62,
+      "mean_cand": 4959.952,
+      "max_base": 5030.66,
+      "comp": 5273.0,
+      "delta_pp": -0.9229660534799862,
+      "verdict": "fail",
+      "base_runs": [
+        5030.66,
+        5017.83,
+        5005.83,
+        4963.85,
+        5024.93
+      ],
+      "cand_runs": [
+        5016.13,
+        5011.2,
+        4984.42,
+        4993.5,
+        4794.51
+      ]
+    }
+  ]
+}

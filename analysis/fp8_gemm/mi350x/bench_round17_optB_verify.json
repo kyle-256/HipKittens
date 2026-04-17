@@ -1,0 +1,175 @@
+{
+  "warmup": 200,
+  "iters": 500,
+  "trim": 0.1,
+  "n_reps": 5,
+  "gpus": [
+    2,
+    3,
+    4
+  ],
+  "shape": "P1",
+  "M_N_K": [
+    28672,
+    4096,
+    16384
+  ],
+  "comp_baseline": 5273.0,
+  "parent_suffix": "_ts_gm8",
+  "candidates": [
+    {
+      "tag": "rcg+tv16+lgk2",
+      "csuf": "_r17b_rcgXtv16Xlgk2",
+      "gpu": 4,
+      "comp": 5273.0,
+      "base_stats": {
+        "runs": [
+          4959.85,
+          4946.17,
+          4918.09,
+          4978.23,
+          4944.74
+        ],
+        "mean": 4949.416,
+        "max": 4978.23,
+        "min": 4918.09,
+        "n": 5
+      },
+      "cand_stats": {
+        "runs": [
+          4978.3,
+          4956.35,
+          4970.4,
+          4954.58,
+          4958.78
+        ],
+        "mean": 4963.682,
+        "max": 4978.3,
+        "min": 4954.58,
+        "n": 5
+      },
+      "delta_mean_tflops": 14.27,
+      "delta_mean_pp": 0.271,
+      "gate_mean_ge_basemax": false,
+      "gate_pp1": false,
+      "gate_pp05": false,
+      "verdict": "FAIL"
+    },
+    {
+      "tag": "rcg+noemxpre+tv16",
+      "csuf": "_r17b_rcgXnoemxpreXtv16",
+      "gpu": 2,
+      "comp": 5273.0,
+      "base_stats": {
+        "runs": [
+          4309.89,
+          4927.08,
+          4938.39,
+          4953.29,
+          4956.07
+        ],
+        "mean": 4816.944,
+        "max": 4956.07,
+        "min": 4309.89,
+        "n": 5
+      },
+      "cand_stats": {
+        "runs": [
+          4956.18,
+          4960.57,
+          4943.22,
+          4955.93,
+          4953.67
+        ],
+        "mean": 4953.914,
+        "max": 4960.57,
+        "min": 4943.22,
+        "n": 5
+      },
+      "delta_mean_tflops": 136.97,
+      "delta_mean_pp": 2.598,
+      "gate_mean_ge_basemax": false,
+      "gate_pp1": true,
+      "gate_pp05": true,
+      "verdict": "FAIL"
+    },
+    {
+      "tag": "rcg+noemxpre+lgk2",
+      "csuf": "_r17b_rcgXnoemxpreXlgk2",
+      "gpu": 3,
+      "comp": 5273.0,
+      "base_stats": {
+        "runs": [
+          3758.25,
+          3816.14,
+          4165.76,
+          4973.02,
+          5015.99
+        ],
+        "mean": 4345.831999999999,
+        "max": 5015.99,
+        "min": 3758.25,
+        "n": 5
+      },
+      "cand_stats": {
+        "runs": [
+          3734.36,
+          3998.67,
+          5015.02,
+          5013.81,
+          5015.86
+        ],
+        "mean": 4555.544,
+        "max": 5015.86,
+        "min": 3734.36,
+        "n": 5
+      },
+      "delta_mean_tflops": 209.71,
+      "delta_mean_pp": 3.977,
+      "gate_mean_ge_basemax": false,
+      "gate_pp1": true,
+      "gate_pp05": true,
+      "verdict": "FAIL"
+    },
+    {
+      "tag": "rcg+noemxpre+tv16+lgk2",
+      "csuf": "_r17b_rcgXnoemxpreXtv16Xlgk2",
+      "gpu": 2,
+      "comp": 5273.0,
+      "base_stats": {
+        "runs": [
+          4950.13,
+          4947.39,
+          4944.31,
+          4961.71,
+          4960.75
+        ],
+        "mean": 4952.858,
+        "max": 4961.71,
+        "min": 4944.31,
+        "n": 5
+      },
+      "cand_stats": {
+        "runs": [
+          4968.02,
+          3881.67,
+          4982.96,
+          4959.2,
+          4979.3
+        ],
+        "mean": 4754.2300000000005,
+        "max": 4982.96,
+        "min": 3881.67,
+        "n": 5
+      },
+      "delta_mean_tflops": -198.63,
+      "delta_mean_pp": -3.767,
+      "gate_mean_ge_basemax": false,
+      "gate_pp1": false,
+      "gate_pp05": false,
+      "verdict": "FAIL"
+    }
+  ],
+  "wins_+1pp": [],
+  "relaxed_+0.5pp": []
+}

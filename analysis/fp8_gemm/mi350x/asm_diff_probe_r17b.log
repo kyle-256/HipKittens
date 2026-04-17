@@ -1,0 +1,19 @@
+REF parent                   _ts_gm8                                             hash=5e7bbabe1b27fa8f  err=None
+REF r14a_regclassglob        _ts_gm8_r14a_regclassglob                           hash=d2d6ac44c8cdc5e1  err=None
+REF r15a_rcg_tv16            _ts_gm8_r15a_regclassglob_tv16                      hash=86d0a84d702c495a  err=None
+REF r16c_rcg_noemxpre        _ts_gm8_r16c_regclassglobXnoemxpre                  hash=b720685ca1b04f4f  err=None
+--------------------------------------------------------------------------------------------------------------
+Compound                                  hash                vs parent / refs
+rcg+noemxpre+tv16                         e58fe5894ab74f92    DIFF_FROM_PARENT_AND_REFS
+rcg+noemxpre+v20                          140577e43ee84e7d    DIFF_FROM_PARENT_AND_REFS
+rcg+noemxpre+lgk2                         7c53523d8085b9e1    DIFF_FROM_PARENT_AND_REFS
+rcg+noemxpre+extbr                        3ae3b1f5accb5e3d    DIFF_FROM_PARENT_AND_REFS
+rcg+tv16+v20                              53e80eeeefd667e3    DIFF_FROM_PARENT_AND_REFS
+rcg+tv16+lgk2                             182be9fc7530abe1    DIFF_FROM_PARENT_AND_REFS
+rcg+tv16+extbr                            2464b56bc7562de6    DIFF_FROM_PARENT_AND_REFS
+rcg+noemxpre+tv16+v20                     9e92a6769ff529d7    DIFF_FROM_PARENT_AND_REFS
+rcg+noemxpre+tv16+lgk2                    181457bdde0c3e0e    DIFF_FROM_PARENT_AND_REFS
+rcg+noemxpre+tv16+extbr                   d369c5e79483e604    DIFF_FROM_PARENT_AND_REFS
+
+Summary: {'DIFF_FROM_PARENT_AND_REFS': 10, 'MATCH_PARENT': 0, 'MATCH_REF': 0, 'MISSING': 0}
+Saved asm_diff_probe_r17b.json

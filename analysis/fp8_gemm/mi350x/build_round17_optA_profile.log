@@ -1,0 +1,4 @@
+[+] loaded /shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/tk_mxfp4_gluon_cpp_n32768_k128256_ts_pf6_6_v12_memc.cpython-310-x86_64-linux-gnu.so
+[+] shape M=4096 N=32768 K=128256  warmup=200 iters=100
+[+] warmup done; starting 100 timed iters
+[+] avg=6.7436 ms  tflops=5105.3

@@ -1,0 +1,10 @@
+OK:   amdgpu_flat_work_group_size(64,256)
+OK:   amdgpu_flat_work_group_size(256,256)
+OK:   amdgpu_flat_work_group_size(128,512)
+OK:   amdgpu_num_vgpr(256)
+OK:   amdgpu_num_vgpr(224)
+OK:   amdgpu_num_vgpr(192)
+OK:   amdgpu_num_sgpr(96)
+OK:   amdgpu_num_sgpr(80)
+WARN: amdgpu_no_agpr -> /tmp/r17c_attr_test/amdgpu_no_agpr_.hip:2:16: warning: unknown attribute 'amdgpu_no_agpr' ignored [-Wunknown-attributes] 2 | __attribute__((amdgpu_no_agpr)) __global__ void k() {} | ^~~~~~~~~~~~~~ 1 w
+OK:   amdgpu_max_num_work_groups(8,1,1)

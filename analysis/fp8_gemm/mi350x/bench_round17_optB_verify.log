@@ -1,0 +1,21 @@
+R17B VERIFY  warmup=200 iters=500 trim=0.1 reps=5  GPUs=[2, 3, 4]
+P1: 28672x4096x16384  parent=_ts_gm8  comp_baseline=5273.0 TFLOPS
+Total candidates: 4
+==================================================================================================================================
+  rcg+tv16+lgk2                              gpu=4  base mean= 4949.4 max= 4978.2  cand mean= 4963.7 max= 4978.3  d= +14.3  (+0.271pp)  max_gate=F +1pp=F  FAIL
+      base runs: [4959.85, 4946.17, 4918.09, 4978.23, 4944.74]
+      cand runs: [4978.3, 4956.35, 4970.4, 4954.58, 4958.78]
+  rcg+noemxpre+tv16                          gpu=2  base mean= 4816.9 max= 4956.1  cand mean= 4953.9 max= 4960.6  d=+137.0  (+2.598pp)  max_gate=F +1pp=P  FAIL
+      base runs: [4309.89, 4927.08, 4938.39, 4953.29, 4956.07]
+      cand runs: [4956.18, 4960.57, 4943.22, 4955.93, 4953.67]
+  rcg+noemxpre+lgk2                          gpu=3  base mean= 4345.8 max= 5016.0  cand mean= 4555.5 max= 5015.9  d=+209.7  (+3.977pp)  max_gate=F +1pp=P  FAIL
+      base runs: [3758.25, 3816.14, 4165.76, 4973.02, 5015.99]
+      cand runs: [3734.36, 3998.67, 5015.02, 5013.81, 5015.86]
+  rcg+noemxpre+tv16+lgk2                     gpu=2  base mean= 4952.9 max= 4961.7  cand mean= 4754.2 max= 4983.0  d=-198.6  (-3.767pp)  max_gate=F +1pp=F  FAIL
+      base runs: [4950.13, 4947.39, 4944.31, 4961.71, 4960.75]
+      cand runs: [4968.02, 3881.67, 4982.96, 4959.2, 4979.3]
+
+==================================================================================================================================
+WIN (+1pp gate): 0
+RELAXED (+0.5pp gate): 0
+Saved bench_round17_optB_verify.json

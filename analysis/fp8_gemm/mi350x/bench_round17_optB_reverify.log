@@ -1,0 +1,18 @@
+R17B REVERIFY  warmup=200 iters=500 trim=0.1 reps=6 discard=1
+P1: 28672x4096x16384  parent=_ts_gm8  comp=5273.0 TFLOPS
+Total candidates: 3  GPUs=[2, 3, 4]
+==================================================================================================================================
+  rcg+tv16+lgk2                              gpu=3  base mean= 4802.8 max= 5001.8  cand mean= 4799.9 max= 5020.0  d=  -2.9  (-0.056pp)  max_gate=F +1pp=F  FAIL
+      base runs: [4957.87, 5001.77, 4978.29, 4154.23, 4922.04]
+      cand runs: [5019.99, 4972.27, 4998.16, 4008.65, 5000.45]
+  rcg+noemxpre+tv16                          gpu=2  base mean= 4921.5 max= 4945.1  cand mean= 4947.8 max= 4967.9  d= +26.2  (+0.498pp)  max_gate=P +1pp=F  FAIL
+      base runs: [4886.47, 4897.07, 4935.66, 4945.12, 4943.24]
+      cand runs: [4960.31, 4909.45, 4944.27, 4956.89, 4967.85]
+  rcg+noemxpre+tv16+lgk2                     gpu=4  base mean= 4149.1 max= 4971.6  cand mean= 4012.4 max= 4963.6  d=-136.7  (-2.593pp)  max_gate=F +1pp=F  FAIL
+      base runs: [4971.62, 4933.52, 3652.9, 3591.49, 3596.19]
+      cand runs: [4963.6, 4105.31, 3677.16, 3612.66, 3703.34]
+
+==================================================================================================================================
+WIN (+1pp gate): 0
+RELAXED (+0.5pp gate): 0
+Saved bench_round17_optB_reverify.json

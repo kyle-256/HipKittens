@@ -1,0 +1,26 @@
+Smoke pairs: 25
+  DLA1   vgpr256        gpu=7  base=5118.57 cand=5131.57 comp=5781.1  Δpp=0.22487069934787493  fail
+  DLA1   fwgs256_256    gpu=6  base=5013.92 cand=5025.52 comp=5781.1  Δpp=0.20065385480272552  fail
+  DLA1   fwgs64_256     gpu=5  base=5135.51 cand=4897.75 comp=5781.1  Δpp=-4.112712113611599  fail
+  DLA1   sgpr80         gpu=7  base=5117.92 cand=5119.96 comp=5781.1  Δpp=0.035287402051512054  fail
+  DLA1   sgpr96         gpu=6  base=4985.34 cand=5094.98 comp=5781.1  Δpp=1.89652488280776  PASS
+  DLA2   fwgs64_256     gpu=5  base=4259.24 cand=4264.85 comp=4536.4  Δpp=0.12366634335597793  fail
+  DLA2   vgpr256        gpu=6  base=4215.0 cand=4210.27 comp=4536.4  Δpp=-0.10426770126090211  fail
+  DLA2   fwgs256_256    gpu=7  base=4250.49 cand=4240.0 comp=4536.4  Δpp=-0.23124063133761977  fail
+  DLA1   vgpr224        gpu=5  base=4892.97 cand=None comp=5781.1  Δpp=None  ERR
+  DLA2   sgpr96         gpu=7  base=4243.15 cand=4228.88 comp=4536.4  Δpp=-0.31456661670045694  fail
+  DLA2   vgpr224        gpu=6  base=4214.88 cand=1528.44 comp=4536.4  Δpp=-59.219645533903545  fail
+  DLA2   vgpr192        gpu=5  base=4264.03 cand=718.65 comp=4536.4  Δpp=-78.1540428533639  fail
+  DLA7   fwgs64_256     gpu=6  base=4185.4 cand=4187.25 comp=4466.6  Δpp=0.04141852863476388  fail
+  DLA7   fwgs256_256    gpu=7  base=4184.06 cand=4184.63 comp=4466.6  Δpp=0.012761384498269577  fail
+  DLA7   vgpr256        gpu=5  base=4228.57 cand=4202.7 comp=4466.6  Δpp=-0.5791877490708791  fail
+  DLA7   vgpr224        gpu=6  base=4169.0 cand=1471.19 comp=4466.6  Δpp=-60.39963283034074  fail
+  DLA7   vgpr192        gpu=7  base=4178.72 cand=710.6 comp=4466.6  Δpp=-77.64563650203733  fail
+  DLA7   sgpr96         gpu=5  base=4204.7 cand=1992.92 comp=4466.6  Δpp=-49.51820176420543  fail
+  DLA2   sgpr80         gpu=5  base=None cand=4256.81 comp=4536.4  Δpp=None  ERR
+  P1     fwgs64_256     gpu=7  base=4965.97 cand=4980.3 comp=5273.0  Δpp=0.27176180542385603  fail
+  DLA7   sgpr80         gpu=6  base=4194.43 cand=4179.96 comp=4466.6  Δpp=-0.32396005910536546  fail
+  P1     fwgs256_256    gpu=5  base=3839.69 cand=5002.36 comp=5273.0  Δpp=22.04949743978759  PASS
+  P1     vgpr256        gpu=6  base=4951.36 cand=4938.75 comp=5273.0  Δpp=-0.23914280295846144  fail
+  P1     sgpr96         gpu=7  base=4991.8 cand=4982.57 comp=5273.0  Δpp=-0.17504267020672243  fail
+  P1     sgpr80         gpu=5  base=4995.53 cand=5025.0 comp=5273.0  Δpp=0.5588848852645601  PASS

@@ -1,0 +1,13 @@
+Total builds: 10  (workers=8)  shape=P1
+  P1     _r17b_rcgXtv16Xv20                                            OK        (5.1s)
+  P1     _r17b_rcgXnoemxpreXv20                                        OK        (5.1s)
+  P1     _r17b_rcgXtv16Xlgk2                                           OK        (5.2s)
+  P1     _r17b_rcgXnoemxpreXextbr                                      OK        (5.2s)
+  P1     _r17b_rcgXnoemxpreXtv16Xv20                                   OK        (5.3s)
+  P1     _r17b_rcgXtv16Xextbr                                          OK        (5.3s)
+  P1     _r17b_rcgXnoemxpreXtv16                                       OK        (5.4s)
+  P1     _r17b_rcgXnoemxpreXlgk2                                       OK        (5.4s)
+  P1     _r17b_rcgXnoemxpreXtv16Xlgk2                                  OK        (5.0s)
+  P1     _r17b_rcgXnoemxpreXtv16Xextbr                                 OK        (5.1s)
+
+Elapsed: 10.3s   ok=10 cached=0 fail=0
