@@ -221,6 +221,19 @@
   - **EARLY_SCALE_PF (E)**: **BROKEN + no perf gain**. Compiler aliases `pf_*` and shadow `nxt_pf_*` to same VGPRs → race; baseline ASM already issues scale loads at iter top with ~512 cyc hiding > ~400 cyc VMEM latency, no untapped scheduling room. Code has `#error` guard if enabled. See `test_early_scale_pf.py`.
   - **F, G**: INFEASIBLE in single session.
   Triggered the user's GOAL PIVOT directive at the top of this file.
+- **Round 8 (2026-04-17, GOAL PIVOT 后第三轮)**: 3 parallel optimizers, all DEAD END / NO-OP:
+  - **A** (per-shape `-mllvm -amdgpu-sched-strategy=` bucketing on 4 untested deep-LOSE shapes 4096×32768×28672 / 28672×4096×16384 / 4096×28672×32768 / 32768×4096×14336): DEAD END. 19 variants, 全部 [-0.81, +0.09] pp. 加上 R6 A/B/C 的 3 shapes, sched-strategy 现在 7/10 deep-LOSE shapes 全测过 — **vector 完全 exhausted**.
+    - **重要 latent finding (待验证)**: 现有 `*_memc` baselines (在 14/24 WIN best variants 中) 使用 un-prefixed `max-memory-clause` flag, 可能 silently default to `gcn-max-occupancy` (LLVM 不识别 → fallback). 如果是真的, `_memc` family 实际是 `gcn-max-occupancy` 不是 `gcn-max-memory-clause`. 解释了为何 memc 在 WIN shapes 有效. 不会改变 deep-LOSE 结论 (R6 A 用了正确 prefix 测试, 全部 noise).
+  - **B** (TAIL_BARRIER_VMCNT × VMCNT × 3 large-K deep-LOSE shapes): DEAD END. 29 variants. 仅在 `TAIL_SPLIT=1` 路径生效. 全部 [-0.19, +0.27] pp. **机械性 insight**: 大 K 下 (K≥14336) tail iter 占总 K iters 的 ≤0.45%, 即使完美调 tail barrier 也只能 shift 微小比例 → 数学上不可能产生 visible gain on 大 K shapes. 不要再试.
+  - **C** (`amdgpu_waves_per_eu(1,1)` on 3 register-pressure shapes): NO-OP + already REFUTED. 编译器 resource usage 显示 baseline 已经是 1 wave/SIMD (224V+256A=480 regs + `__launch_bounds__(1)` at line 1727). 加 wpe(1,1) bytewise-identical .so. **重要**: Round 2 deep-LOSE 已测过 wpe1 (`bench_deep_lose_results.json` 含 `_wpe1`, `_v16_wpe1` 等 9 个 wpe1 variants), 在 3 个 target shapes 全部 LOSE -7.6 to -51.9 TFLOPS. 我之前 "wpe1 NEVER tested" 是错的.
+  - **NEW METHODOLOGY ADDENDUM**: 在 dispatch 前先 grep `bench_deep_lose_results.json` 确认 variant 是否已测过 — Round 2 deep-LOSE 分析员的 44 variants 比我之前以为的覆盖更广.
+  Round 8 net: 0 WIN, 0 gap reduction. **6 轮饱和** (R2/R4/R5/R6/R7/R8). 每轮 0 净增.
+
+  **新增 dead-end vectors (Round 8)**:
+  - per-shape sched-strategy on P1/P2 (4 shapes × 4-5 strategies, max +0.09pp; 7/10 deep-LOSE 全覆盖)
+  - TAIL_BARRIER_VMCNT × large-K deep-LOSE (mechanistically futile, tail iter ≤0.45% of K iters)
+  - `amdgpu_waves_per_eu(1,1)` (no-op since kernel 已 1 wave/SIMD; 也已在 R2 deep-LOSE 测过, REFUTED)
+
 - **Round 7 (2026-04-17, GOAL PIVOT 后第二轮)**: 3 parallel optimizers, all DEAD END / INFEASIBLE:
   - **A** (STEP12_BR_LGKMCNT sweep on 3 P1 shapes 4096×32768×28672 / 28672×4096×16384 / 4096×28672×32768): DEAD END. Round 6 C 在 16384×4096×28672 上的 brlgk2 directionally-positive 信号**不泛化** — 9 variants 全部 -0.03~-0.14pp on GPU 1 (single-shot, warmup=200/iters=500). brlgk0 是 default value. brlgk knob 不再继续探索.
   - **B** (STATIC_XCD_REMAP on mega-M 128256×32768×4096): DEAD END. Atomic-free static remap (each XCD owns N-strip width bpc/NUM_XCDS=16, walks GROUP_M×16 tiles). 6 variants × baseline_dc/gm{2,4,8} crossed with static_xcd_remap variants: best `_static_xcd_remap_gm4` at -0.37pp. **关键架构 finding**: mega-M shape **是 A-bound, 不是 B-bound** — A traffic dominates (M=128256 vs N=32768), 缩 B working set 8x 反而损失 8x A reuse. Round 4 PERSISTENT_XCD_QUEUE 失败 + Round 7 STATIC_XCD_REMAP 失败 双重证实: mega-M 92.9% 是 register-pressure / occupancy 结构性 bound, 任何 dispatch/L2-locality 改动都不可能有用. Code 留在 `STATIC_XCD_REMAP=1` flag (default 0) 作为 documented dead-end.

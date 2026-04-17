@@ -315,6 +315,21 @@ Decider 提出 5 个 untested vectors, 3 个 in-session 可执行. 启动 3 个 
 
 **Round 5 净增**: 0 WIN, 0 gap reduction. 触发用户的 GOAL PIVOT 指令 (见文档顶部).
 
+## Round 8 (2026-04-17) — 3 parallel optimizers, all DEAD END / NO-OP
+GOAL PIVOT 第三轮, 在 Round 6 methodology rule 下, 攻击真正未测的窄向量:
+- **Optimizer A** (per-shape `-mllvm -amdgpu-sched-strategy=` bucketing on 4 untested deep-LOSE shapes 4096×32768×28672 / 28672×4096×16384 / 4096×28672×32768 / 32768×4096×14336): **DEAD END**. 19 variants × 4 shapes × 4-5 strategies (`gcn-max-occupancy`, `gcn-max-ilp`, `gcn-iterative-ilp`, `gcn-iterative-minreg`). 全部 [-0.81, +0.09] pp 区间, 最大 +0.09pp `_ts_gm8_sched_memc` on 28672×4096×16384 (远低于 +0.8pp 触发). 加上 R6 A 的 4096×32768×128256 + R6 B 的 14336×4096×32768 + R6 C 的 16384×4096×28672, sched-strategy vector 现已覆盖 7/10 deep-LOSE shapes, **vector 完全 exhausted**.
+  - **重要 latent finding**: 现有 `*_memc` baselines (在 14/24 WIN best variants 中) 使用 un-prefixed `max-memory-clause` flag, 可能 silently default to `gcn-max-occupancy` (LLVM 不识别该值 → fallback). 如果验证, 意味着 `_memc` family 实际是 `gcn-max-occupancy`, 不是 `gcn-max-memory-clause`. 这是潜在 bug 但解释了为何 memc 在 WIN shapes 上有效 (与默认不同). 未来轮可验证, 但不会改变 deep-LOSE 结论 (R6 A 用了正确 prefix 测试, 全部 noise).
+- **Optimizer B** (TAIL_BARRIER_VMCNT × VMCNT × 3 large-K deep-LOSE shapes 4096×32768×128256 / 4096×32768×14336 / 32768×4096×14336): **DEAD END**. TAIL_BARRIER_VMCNT 仅在 `TAIL_SPLIT=1` 路径生效 (确认 line 2174, 2361). 29 variants × 3 shapes × {0,4,8,16,24} × SV±4. 全部 [-0.19, +0.27] pp 区间, 最佳 +0.27pp `_ts_u16_lgk2_tbv16` on 32768×4096×14336 (低于 +0.8pp 触发). **机械性 insight (重要)**: 大 K 下 (K≥14336) tail iter 占总 K iters 的 ≤0.45%, 即使完美调 tail barrier 也只能 shift 微小比例 → 该 vector 数学上不可能产出可见增益 on 大 K shapes.
+- **Optimizer C** (`__attribute__((amdgpu_waves_per_eu(1,1)))` on 3 register-pressure shapes 128256×32768×4096 / 28672×32768×4096 / 4096×32768×128256): **NO-OP + 已 REFUTED**. 编译器 resource usage 显示 baseline (无 wpe attribute) 已经是 1 wave/SIMD (224V + 256A = 480 regs, 加上 `__launch_bounds__(_NUM_THREADS, 1)` line 1727). 加 wpe(1,1) bytewise-identical .so, 是 literal no-op. **更重要**: Round 2 deep-LOSE 工作 already tested wpe1 (build_deep_lose_variants.py:39-50: `_wpe1`, `_v16_wpe1`, `_ts_lgk2_v12_wpe1_memc`, etc.), bench_deep_lose_results.json 显示全部 LOSE on 3 target shapes (-7.6 to -51.9 TFLOPS). 我之前 prompt 写的 "wpe1 was NEVER tested" 是错的, 应记录在 dead-end list. 0 文件创建.
+
+**Round 8 净增**: 0 WIN, 0 gap reduction. **6 轮饱和** (R2/R4/R5/R6/R7/R8). 每轮 0 净增. 我已系统耗尽所有 in-session-feasible 优化向量.
+**新 dead-end vectors (Round 8)**:
+- per-shape sched-strategy bucketing on 4 P1/P2 deep-LOSE shapes (max +0.09pp)
+- TAIL_BARRIER_VMCNT × large-K deep-LOSE shapes (mechanistically futile, tail iter ≤0.45%)
+- `amdgpu_waves_per_eu(1,1)` on register-pressure shapes (no-op + already REFUTED)
+
+**Latent investigation**: `_memc` baselines may use un-prefixed `max-memory-clause` flag; verify whether that silently falls through to `gcn-max-occupancy`. Won't change deep-LOSE conclusion but worth documenting.
+
 ## Round 7 (2026-04-17) — 3 parallel optimizers, all DEAD END / INFEASIBLE
 GOAL PIVOT 第二轮, 在 Round 6 methodology rule 下:
 - **Optimizer A** (STEP12_BR_LGKMCNT∈{0,2,4} sweep on 3 P1 shapes: 4096×32768×28672, 28672×4096×16384, 4096×28672×32768): **DEAD END**. Round 6 C 在 16384×4096×28672 上的 brlgk2 directionally-positive 信号**不泛化**. 9 个 variant 单 GPU 测量, 全部 -0.03 ~ -0.14pp (<<+0.6pp noise). brlgk0 是 default value.
