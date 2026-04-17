@@ -104,6 +104,13 @@
 7. ~~**PACKED_STORE (bf16x2)**~~ — DEAD END (SWAP路径本身慢)
 8. ~~**Compiler flag tuning**~~ — DEAD END (noise level)
 9. ~~**18 new variant combos**~~ — DEAD END (0 WINs)
+10. ~~**Adopt asm_inline ("5084 TFLOPS" gluon-derived ASM body)**~~ — **DEAD END / IMPOSSIBLE**:
+    `kernel_mxfp4_asm_inline.{cpp,h}` produces INCORRECT output (SNR -1.31 dB at K=8192 256x256).
+    K-specialization (modify `s_cmp_lt_u32 s68, 28` → larger T for K∈{14336,16384,28672,32768};
+    `build_asm_kvar.py` builds variants successfully) is moot since the underlying kernel is broken.
+    Tried with CK BpreShuffle on B too: SNR -3.03 dB (worse). The "5084 TFLOPS" reference is
+    measuring a kernel that doesn't compute correct GEMM. To use ASM, would need to load
+    aiter's actual `.co` files via `hipModuleLoad` — different architectural change entirely.
 
 **性能天花板结论 (2026-04-17 三轮验证)**: 当前内核架构下所有已知优化方向已穷尽. **24/42 WIN 是天花板**. 突破需要根本性重构 (aiter 架构: A-only-LDS + B-direct-from-global + deep SW pipeline, 需 >256 VGPRs 不可行 on gfx950).
 
@@ -118,6 +125,9 @@
 - amdgpu_num_agpr=192 hint (FAILED)
 - UNROLL_K=8/16 × LGK × memc cross (边际 +0.3-1.2pp 但不翻 WIN)
 - 128256×32768×4096 mega-M shape: IMPENETRABLE
+- **asm_inline kernel correctness FAILURE** (2026-04-17): `kernel_mxfp4_asm_inline.{cpp,h}` SNR -1.31 dB,
+  the "5084-5258 TFLOPS @ 8192³" reference is meaningless. K-specialization variants build
+  cleanly but inherit the same correctness bug. See `project_mxfp4_asm_inline_broken` memory.
 
 ## Benchmark 规则
 - **warmup=200, iters=500**, trimmed mean 10%
