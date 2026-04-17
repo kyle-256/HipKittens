@@ -6,16 +6,17 @@
 
 协议：`test_mxfp8_python.py` / `test_python.py` 内的 per-iteration sync + `output.zero_()`，warmup=100 iters=200。
 
-## 当前 baseline（GPU0，per-iter sync，8192^3）— **R17 confirmed (2026-04-17)**
+## 当前 baseline（GPU0，per-iter sync，8192^3）— **R18 confirmed (2026-04-17)**
 
 | 版本 | TFLOPS | SNR | 相对 MXFP8 RCR |
 | --- | ---: | --- | ---: |
-| **FP8 per-tensor RCR (长期目标)** | **3229.67** | 49.61 dB PASS | 107.3% |
-| **MXFP8 RCR KPAIR+PIPELINE+HOIST_HI+8WAVE_FAST (R17 默认)** | **3010-3014** | 49.60 dB PASS | **100.0%** |
-| **MXFP8 RRR EXACT_8WAVE_FAST (R17 默认)** | **2862.99** | 49.59 dB PASS | **95.10%** ✅ |
-| **MXFP8 CRR PIPELINE_SCALE+8WAVE_FAST (R17 5x median)** | **2822.30** | 49.60 dB PASS | **93.71%** ✅ static gate +42.02 |
+| **FP8 per-tensor RCR (长期目标)** | **3249.71** | 49.61 dB PASS | 107.6% |
+| **MXFP8 RCR KPAIR+PIPELINE+HOIST_HI+8WAVE_FAST (R18 5x median)** | **3021.29** | 49.60 dB PASS | **100.0%** |
+| **MXFP8 RRR EXACT_8WAVE_FAST** | **2862.99** | 49.59 dB PASS | **94.76%** ✅ static gate |
+| **MXFP8 CRR PIPELINE_SCALE+8WAVE_FAST (R17 5x median)** | **2822.30** | 49.60 dB PASS | **93.42%** ✅ static gate +42.02 |
+| **gap MXFP8 RCR vs FP8 RCR** | **−228.42** (−7.03%) | | 长期目标，R17 是 -219/-6.79% |
 
-**R17 Reviewer 5x CRR re-measurement (GPU0)**：median 2822.30, std 16.67, min 2796.5, max 2841.7。R16 的单次 2775.96 是 2.6σ 低端样本，**不是真实退化**。所有 5 次 SNR + det 全 PASS。Static gate 2780.28 ✅ confirmed, dynamic gate 2864.94 ❌ -42.6 TFLOPS（与 R15 同向）。
+**R18 Reviewer 5x RCR re-measurement (GPU0)**：median 3021.29, std 10.45, min 2998.36, max 3023.81，全 SNR + det PASS。FP8 RCR median 3249.71 (std 51.44, 含 2 个 cold-start 低尾样本)。漂移在跨 session 噪声带，gap stable。
 
 ### R15 vs R16 对比（同代码同 commit a8237d01）
 
@@ -268,6 +269,49 @@ CRR PQ：**2737.94 TFLOPS** (93.55% of RCR) → 差 **42.34 TFLOPS (1.55%)** 才
     - Dev T（LDS 分配缩减 136→131 KB）：worktree 在 42f5407b base，活跃到 18:26（最后 .so build），**timeout 无 commit**
     - Diagnostic-S：完成（paradigm-shift 发现，见上）
   - **R12 行动结论**：4 个 dev 全 timeout 无 commit；唯一产出是 Diagnostic-S 的瓶颈定性更正。要 commit 代码必须重派 dev，**强烈建议下轮按 Diagnostic-S 的 SPI 启动器假说派活**：(1) 缩减 CRR LDS/block（单缓冲 A 或 B，packing 重叠）、(2) `__launch_bounds__(512, 3)` 提示 SPI 预留更多 slots、(3) 减少 SQC_DCACHE 压力（per-CTA 常量改 s_load_b256 单次加载）。**不要** 再投资 LDS bank conflict / LDS pipe / re-stripe stride 方向（已证 0 conflict，无收益）
+
+- **第十八轮评审 (2026-04-17) — R18 Diagnostic 推翻 R17 vmcnt-MFMA 假说；真瓶颈是 VMEM-issue 速率（+30%）；1 新 dead-end + 1 paradigm shift + 1 AGPR feasibility scout；0 commit**
+  - **R18 派 1 Reviewer + 1 Diagnostic + 2 dev (A/B) 并行（GPU0/1/2/3 隔离）**
+  - **Reviewer (GPU0)** — 5x RCR + 5x FP8 RCR baseline：MXFP8 RCR median **3021.29** (std 10.45, min 2998.36, max 3023.81)；FP8 RCR median **3249.71** (std 51.44, 含 2 cold-start 低尾)；gap **-228.42 TFLOPS / -7.03%**（vs R17 -219/-6.79%，跨会话漂移）；所有 SNR + det PASS
+  - **Diagnostic (GPU1) — paradigm shift：R17 vmcnt-MFMA 假说 FALSIFIED**：
+    - rocprofv3 3 PMC chunk × 30 dispatch on `rcr_exact_8wave_scaled_kernel<true>` vs `rcr_exact_8wave_kernel`：
+    - **MFMA cycles 完全相同**（536.87M），MFMA util **MXFP8 66.8% vs FP8 78.0% (-11.2pp，匹配 R17)**
+    - GRBM_GUI_ACTIVE +845K cyc (+16.8%) — 这才是 -10pp gap 的来源
+    - **MXFP8 vmcnt 等待 cycles 反而比 FP8 LESS -157K**（derived `WAIT_INST_ANY - WAIT_INST_LDS`）
+    - **MXFP8 lgkmcnt LDS 等待 cycles 也 LESS -85K**
+    - 真正的 MAJOR 差异：**SQ_INSTS_VMEM +30% (+1.57M)**，SQ_INST_LEVEL_VMEM (in-flight·time) **+39%**
+    - SQ_LDS_BANK_CONFLICT = 0；SQ_LDS_IDX_ACTIVE 完全相同 → R10 LDS-pipe / R12 SPI 假说之外又一个 R17 vmcnt 假说被打脸
+    - **真瓶颈定性**：6 个 scale buffer_load / K-block 让 VMEM 发射管道 +30% 拥塞，**back-pressure 通过 SQ_WAIT_ANY 体现** (+1.14M cyc，几乎正好等于 845K GUI gap)，不是 vmcnt idle stall。compiler scheduler **已经 perfectly 隐藏** 了 vmcnt 等待
+    - **TFLOPS attribution**：完美隐藏 vmcnt 期望恢复 ≈ 0 TFLOPS（delta 是负数）。要破 -10pp gap 必须减少 VMEM-issue 速率本身
+  - **Dev A (GPU2) — `MXFP8_RCR_EXACT_PQ_SCALE_SCHED_HINT_ENABLE` REJECT**：
+    - 在 `do_k_iter_body` 前插 `__builtin_amdgcn_sched_group_barrier(0x20, 6, 0)` + `sched_barrier(0)` 强制 6 个 scale VMEM_READ 在 ds_read 之前 issue
+    - 资源 clean (VGPR 254 / 0 spill / occ 2 / SNR 49.56 PASS)
+    - **A/B 15 rounds GPU2**：BASE 2894.93 vs EXP 2894.76，**Δ -0.006% / Welch-t -0.20**，纯噪声
+    - 完美 confirms Diagnostic 结论：compiler scheduler 已经在最优点，sched hint 无可发挥空间
+    - **永久关闭 sched_barrier hint 方向**
+  - **Dev B (GPU3) — AGPR fused-asm Path B 可行性 scout**：
+    - MFMA helpers 定位：`kernel_mxfp8_layouts.cpp:805-850` (raw + opsel_phase 两个 builtin wrappers)；`1001-1043` (per-row 2-MFMA + per-acc 8-MFMA `_impl`)；4 call sites cA/cB/cC/cD per body × KPAIR_LOOP 2 phases = **64 MFMAs/kpair**
+    - **关键发现 R5 Dev F 失败的真因**：4-wave fastpath (`rcr_mxfp8_4wave_fastpath.inc:213-284`) 已用 per-MFMA `asm volatile` + **`ACC16` 宏在每个 MFMA 都列出全部 16 acc tiles 为 `+a`** —— R5 Dev F 只把当前 d0/d1 列为 `+a`，所以 compiler 在每个 MFMA 边界都重新排 V↔A
+    - **3 条可行 path**：
+      - Path A 每 row 2-MFMA fuse：~80 LOC, 0.5-1 day, 低风险
+      - Path B 每 acc 8-MFMA fuse：~250 LOC + ACC8 macro + opsel template, 2-3 days, 中风险（推荐）
+      - Path C 每 kpair 64-MFMA fuse：**结构不可行**（`_impl` 已被 `s_barrier` + Bs subtile loads 切开 cA/cB/cC/cD）
+    - HOIST_HI + KPAIR_LOOP + PIPELINE_SCALE 模板兼容性：`op_sel:[%c…]` immediates 在 templated function 内可传递；compatible
+    - **Realistic upside 估算**：+50-100 TFLOPS (1.5-3%)，**远不足 219 TFLOPS gap**——因为 AGPR fusion 解决 VGPR live-range 不解决 VMEM-issue 速率
+    - 配合 R18 Diagnostic 新发现：**AGPR fused-asm 期望收益从 +50-100 TFLOPS 进一步下调至 ≈0**——因为它不动 VMEM-issue 速率而 R18 证明 gap 100% 来自 VMEM-issue 而非寄存器压力
+    - Dev B 建议：**Path B 投资风险/收益比变差**，除非愿意接受 +0%~+50 TFLOPS 上限
+  - **R18 综合产出 = 0 commit + 1 paradigm shift + 1 新 dead-end + 1 feasibility downgrade**：
+    1. **Paradigm shift**：R17 "vmcnt-MFMA dependency triple on critical path" 假说 FALSIFIED。compiler scheduler 已经隐藏了 vmcnt 等待。MXFP8 反而 vmcnt + lgkmcnt 等待都比 FP8 LESS。-10pp MFMA util gap 100% 来自 +30% VMEM-issue 速率（6 个 extra scale buffer_loads / K-block）造成的 dispatch back-pressure
+    2. **新 dead-end**：`MXFP8_RCR_EXACT_PQ_SCALE_SCHED_HINT_ENABLE` (sched_group_barrier hint) — Δ -0.006% / t -0.20 **永久关闭**
+    3. **AGPR fused-asm feasibility downgrade**：R5 Dev F 失败真因找到（`+a` 列表不全），但 R18 Diagnostic 同时证明该方向最大收益 ≈ 0，因为不影响 VMEM-issue 速率
+    4. **唯一仍未证伪的结构方向**：preshuffle scale layout 重设计 — 让 6 个 K-block scale loads 跨 K iteration 摊销（影响 4 fastpath + reference + 3 test caller，2-4 天工作量，上限估 ~0.5-3% TFLOPS）
+  - **R18 confirms**：MXFP8 RCR vs FP8 RCR 6.79-7.03% gap **结构性受限于** per-K-block scale load 数量。所有不动 scale load 数量的优化（prefetch / sched / inline / cache hint / VGPR 重排）都已被证伪或饱和。剩余唯一杠杆是减少 scale load 数量本身（preshuffle layout 重设计），且上限低于 gap
+  - **新会话规范（R18 起）**：
+    - **R17 假说 vmcnt-MFMA on critical path 已伪证**——文档已更正，下次不要再追这条
+    - 真瓶颈是 VMEM-issue 速率（+30%）由 6 extra scale buffer_loads/K-block 造成，bottleneck 是 dispatch back-pressure (`SQ_WAIT_ANY +1.14M cyc`) 不是 idle stall
+    - **AGPR fused-asm 期望收益从 +50-100 TFLOPS 下调至 ≈0**（不影响 VMEM-issue 速率）
+    - 唯一未证伪结构方向：preshuffle scale layout 重设计（多文件影响，上限低于 gap，但是唯一可能动 VMEM-issue 速率的杠杆）
+    - 仍坚持 R15 规范：每会话必须 GPU0 baseline 重测；commit author 用 "MXFP8 Decision Maker"
 
 - **第十七轮评审 (2026-04-17) — 新角度 rocprofv3 FP8-vs-MXFP8 RCR diagnostic 找到 vmcnt-MFMA critical-path 信号；2 条 scale-pipeline tweak 全 reject + 1 个 SMEM "+300%" 神话破解；0 commit**
   - **R17 派 1 Reviewer + 1 Diagnostic + 3 dev (A/B/C) 并行（GPU0/1/2/3 隔离）**
