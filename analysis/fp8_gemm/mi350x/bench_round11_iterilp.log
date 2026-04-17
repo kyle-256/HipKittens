@@ -1,0 +1,49 @@
+Round 11 iterative-ilp single-shot bench. GPU=6 warmup=200 iters=500 trim=0.1
+==============================================================================================================
+
+DLA1_4096x32768x128256  shape=4096x32768x128256  comp=5781.1  parent=_ts_pf6_6_v12_memc
+  baseline _ts_pf6_6_v12_memc                   5111.22 TFLOPS  (88.41%)
+  cand     _ts_pf6_6_v12_memc_r11_iterilp       ERROR: {'error': 'rc=-6', 'stderr': 'Memory access fault by GPU node-8 (Agent handle: 0x5555c349ca50) on address 0xff7d01f40000. Reason: Write access to a read-only page.\n'}
+
+DLA2_128256x32768x4096  shape=128256x32768x4096  comp=4536.4  parent=_ts_gm2_v12_memc_dc
+  baseline _ts_gm2_v12_memc_dc                  4217.30 TFLOPS  (92.97%)
+  cand     _ts_gm2_v12_memc_dc_r11_iterilp      ERROR: {'error': 'rc=-6', 'stderr': ':0:rocdevice.cpp            :3580: 1111166016961 us:  Callback: Queue 0x7fb358400000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29\n'}
+
+DLA3_4096x32768x28672  shape=4096x32768x28672  comp=5568.2  parent=_v20_memc
+  baseline _v20_memc                            5177.47 TFLOPS  (92.98%)
+  cand     _v20_memc_r11_iterilp                5279.85 TFLOPS  (94.82%)  finite=0.344
+  delta=+102.38 TFLOPS  (+1.84pp)
+
+DLA4_4096x28672x32768  shape=4096x28672x32768  comp=5649.9  parent=_u16
+  baseline _u16                                 5274.22 TFLOPS  (93.35%)
+  cand     _u16_r11_iterilp                     5387.04 TFLOPS  (95.35%)  finite=0.429
+  delta=+112.82 TFLOPS  (+2.00pp)
+
+DLA5_32768x4096x14336  shape=32768x4096x14336  comp=5223.4  parent=_ts_gm8_v12
+  baseline _ts_gm8_v12                          4904.14 TFLOPS  (93.89%)
+  cand     _ts_gm8_v12_r11_iterilp              4943.04 TFLOPS  (94.63%)  finite=0.340
+  delta=+38.90 TFLOPS  (+0.74pp)
+
+DLA6_4096x32768x14336  shape=4096x32768x14336  comp=5296.1  parent=_ts_lgk2_memc
+  baseline _ts_lgk2_memc                        4969.19 TFLOPS  (93.83%)
+  cand     _ts_lgk2_memc_r11_iterilp            5047.36 TFLOPS  (95.30%)  finite=0.305
+  delta=+78.17 TFLOPS  (+1.48pp)
+
+DLA7_28672x32768x4096  shape=28672x32768x4096  comp=4466.6  parent=_ts_lgk2_v12_memc
+  baseline _ts_lgk2_v12_memc                    4187.77 TFLOPS  (93.76%)
+  cand     _ts_lgk2_v12_memc_r11_iterilp        ERROR: {'error': 'rc=-6', 'stderr': ':0:rocdevice.cpp            :3580: 1111288506653 us:  Callback: Queue 0x7f1680200000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29\n'}
+
+WIN1_16384x4096x7168  shape=16384x4096x7168  comp=4443.2  parent=_ts_lgk2_v20_memc
+  baseline _ts_lgk2_v20_memc                    4595.44 TFLOPS  (103.43%)
+  cand     _ts_lgk2_v20_memc_r11_iterilp        ERROR: {'error': 'rc=-6', 'stderr': ':0:rocdevice.cpp            :3580: 1111309134633 us:  Callback: Queue 0x7ef2df600000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29\n'}
+
+WIN2_32768x6144x2048  shape=32768x6144x2048  comp=3239.9  parent=_ts_gm8_v12
+  baseline _ts_gm8_v12                          3365.99 TFLOPS  (103.89%)
+  cand     _ts_gm8_v12_r11_iterilp              ERROR: {'error': 'rc=-6', 'stderr': ':0:rocdevice.cpp            :3580: 1111377726494 us:  Callback: Queue 0x7fa290200000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29\n'}
+
+WIN3_4096x128256x32768  shape=4096x128256x32768  comp=3195.3  parent=_memc
+  baseline _memc                                5151.68 TFLOPS  (161.23%)
+  cand     _memc_r11_iterilp                    5236.75 TFLOPS  (163.89%)  finite=0.518
+  delta=+85.07 TFLOPS  (+2.66pp)
+==============================================================================================================
+Saved bench_round11_iterilp_results.json
