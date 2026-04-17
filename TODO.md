@@ -140,8 +140,12 @@ CRR PQ：**2737.94 TFLOPS** (93.55% of RCR) → 差 **42.34 TFLOPS (1.55%)** 才
 ### CRR 方向
 
 - [x] **PIPELINE_SCALE 默认开**（commit `8934e95c`）：reviewer GPU7 验收 OFF 2733.91 → ON 2740.55 (+0.243%)，VGPR 247→232（−15），spills 0→0，occ 2，SNR 49.60 dB，det 3/3。**未到 gate**（差 39.73 TFLOPS）但是 strict win 且为后续优化释放 15 VGPR headroom
-- [x] **R7-R9：HOIST_HI 路径架构性不可行**（5 attempts: Dev A, B, C, H, I 同 256 VGPR ceiling）。详见下方 R7-R9 评审记录
-- [ ] **未来方向（结构性，本会话不做）**：CRR 4-accumulator pattern 重构（合并 cA/cB/cC/cD 减寄存器）；或 KPAIR_LOOP 移植 CRR；或重做 `crr_exact_cA_with_b1_interleave` helper（拆掉 8 个独立 MFMA）。这些都是大型重写
+- [x] **R7-R9：HOIST_HI 路径架构性不可行**（5 attempts: Dev A, B, C, H, I 同 256 VGPR ceiling）
+- [x] **R10：rocprofv3 + ASM census 找出真实瓶颈**（不是 v_lshr，不是 opsel 计算，是 LDS 管道争用）；3 个新 dev (J/K/L) 全 reject，进一步证实架构性 ceiling
+- [ ] **未来方向（结构性，本会话不做）**：
+  - **A LDS 布局重设计**（最高收益）：把 A 从 col-major LDS 存储改为 row-major（global→LDS 阶段做 transpose），让 A 侧能用 `ds_read_b128`（16 B/读）而不是 `ds_read_b64_tr_b8`（8 B/读），LDS 指令数减半。CRR vs RRR 差距的 #1 来源
+  - CRR 4-accumulator pattern 重构（合并 cA/cB/cC/cD 减寄存器）
+  - KPAIR_LOOP 移植 CRR；或重做 `crr_exact_cA_with_b1_interleave` helper（拆掉 8 个独立 MFMA）
 - [ ] RRR 保持观察，若后续因编译器变化跌破 95% 再补
 
 ---
@@ -185,3 +189,10 @@ CRR PQ：**2737.94 TFLOPS** (93.55% of RCR) → 差 **42.34 TFLOPS (1.55%)** 才
 - **第七轮 round-3 (Dev I) (2026-04-17)**：HOIST_HI + PIPELINE_SCALE + `CRR_EXACT_INTERLEAVE_B1_LDS=0`（删掉重 8-MFMA interleave，按 RRR 简单 4-MMA 结构走）：FAIL，VGPR 256 + 145 spills + 332 B/lane scratch。**确认架构性 ceiling**：CRR baseline 247 VGPR 只有 7 headroom，K_PHASE 模板化 4 MMA × 2 phase = 8 inlined MMA blocks 必然吃掉 9–25 VGPR
 - `8934e95c` **MXFP8 CRR PIPELINE_SCALE default ON**（+0.243%，frees 15 VGPR）— 含 R7–R9 dead-end 总结
 - **R7-R9 关键架构发现**：HOIST_HI K_PHASE templating 与 CRR 4-accumulator main loop **根本不兼容**。任何 templated body doubling 都会越过 254 VGPR cap，与是否叠加 PIPELINE_SCALE / 是否关 INTERLEAVE 无关。已在 5 个独立尝试（Dev A/B/C/H/I）观察到同一 256-VGPR 上限。CRR 要破 gate 必须做**结构性重构**（合并 accumulator / 或换 kernel 结构），非微调可达。
+- **第十轮评审 (2026-04-17)**：rocprofv3 + structural-deep-dive + 3 个新 dev attempt（J/K/L），全部 reject，但**找到了真实瓶颈根因**：
+  - **rocprofv3 GPU6 8192³ counters**：CRR vs RRR：MFMA 数量相同（16.7M），MFMA busy cycles 完全相同，但 SQ_BUSY_CU_CYCLES +3.75% / SQ_INSTS_VALU **+61%** / SQ_INSTS_LDS **+50%** / SQ_WAIT_INST_LDS +20%。**MFMA 管道已饱和**，差距 100% 来自非-MFMA issue 争用
+  - **ASM census per body**：CRR 用 144 `ds_read_b64_tr_b8` (8 B/读) vs RRR 64 `ds_read_b128` (16 B/读) + 64 `ds_read_b64_tr_b8`。**CRR 多 80 LDS 读指令**——根源是 CRR 的 A 侧用 col-major LDS 布局（A_col_reg = `rt_fp8e4m3<BK=128,RBM=64,col_l,rt_128x16_s>` = 128 dwords），而 RRR 用 row-major（A_row_reg = 16 dwords，**8× 小**）。Col-major A 必须用窄的转置读，这是结构性
+  - **R10 Dev J — 2× kpair unroll without K_PHASE templating**：FAIL，VGPR 232→256 + 26 spills + 104 B/lane scratch。即使无 templating，body doubling 仍触发 live-range 翻倍（phase-0 的 a/b prefetch 撑到 phase-1）。**与 R7-R9 templated 失败同根**
+  - **R10 Dev K — `>>16` shift coalesce + `wn*RBN` precompute**：MARGINAL，Δ ≈ 0%（VGPR 不变 232/0 spills）。关键发现：**编译器已经自动 hoist 了 `wn*RBN`**——profiler 报告的 "32 v_add per body" 是 pre-hoist 静态分析，不是最终 ISA。`v_alignbit_b32` 与 `v_lshrrev_b32` 占同一 issue pipe，替换无效
+  - **R10 Dev L — load reordering (b1 pre-issue + scale hoist)**：FAIL，sub-A −0.49% / sub-B −1.78% / combined −3.14%。关键发现：**`lgkmcnt` 等待同时覆盖 LDS + scalar/VMEM scope**——重排不能让 scale buffer_load 与 A/B LDS 真正并行；反而把 scale dest VGPR live range 撑过 A/B 读寄存器期，VGPR 232→254（差点爆）
+  - **真实瓶颈定性（已三角验证）**：CRR 受限于 LDS 管道争用，不是 MFMA、不是 v_lshr、不是 opsel 计算、不是 cache miss、不是 VMEM。要破 gate 必须改 A 的 LDS 布局（global→LDS 阶段做 transpose 让 A 侧用 b128 宽读），这是大型重写不在本 sprint scope

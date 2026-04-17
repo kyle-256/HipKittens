@@ -239,6 +239,46 @@ for (int g = 0; g < crr_a_pack_count; g++) {
 3. RRR 监控；若后续回退到 95% 以下再补
 4. 回到 RCR 的剩余 4.70% 差距（三条高风险结构方向）
 
+## 第十轮评审结果 (2026-04-17)
+
+主 agent 转向**先诊断后开方**：先用 rocprofv3 + ASM census 找真实瓶颈，再派 dev。这一轮的核心收获**不是优化**，而是**用三角验证锁定根因**（非-MFMA issue 争用，源头在 LDS 管道）。
+
+### 诊断阶段（2 个并行 analysis agent）
+- **rocprofv3 GPU6 8192³ counters (CRR vs RRR)**：MFMA 数量相同（16.7M），MFMA busy cycles 完全相同；但 SQ_BUSY_CU_CYCLES +3.75% / SQ_INSTS_VALU **+61%** / SQ_INSTS_LDS **+50%** / SQ_WAIT_INST_LDS +20%。Per-MFMA 执行：CRR 2.70 VALU + 1.50 LDS vs RRR 1.68 + 1.00。**MFMA 管道完全饱和**，差距 100% 来自非-MFMA issue 争用
+- **ASM census per body**：CRR 144 `ds_read_b64_tr_b8` (8 B/读) vs RRR 64 `ds_read_b128` (16 B/读) + 64 `ds_read_b64_tr_b8`。CRR 多 **80 个** LDS 读指令
+- **结构根因**：CRR 的 A 侧用 col-major LDS 布局（`A_col_reg` = `rt_fp8e4m3<BK=128,RBM=64,col_l,rt_128x16_s>` = 128 dwords） vs RRR 的 row-major（`A_row_reg` = 16 dwords，**8× 小**）。Col-major A 必须用窄的转置读，这是 layout 内禀属性
+- **重要纠偏**：之前以为 RRR 只有 2 个 accumulator——错的，RRR 也是 4 个 cA/cB/cC/cD（同 CRR）。R7-R9 提出的 "CRR 4-accumulator vs RRR 2-accumulator" 假说**完全错误**。真正区别只在 A_col_reg vs A_row_reg
+
+### 开方阶段（3 个并行 dev agent，全 reject）
+
+| 路径 | flag / 做法 | 结果 | 采纳？ |
+|---|---|---|---|
+| **R10 Dev J** — 2× kpair unroll **WITHOUT** K_PHASE templating | `MXFP8_CRR_EXACT_PQ_KPAIR_UNROLL2_ENABLE` | FAIL，VGPR 232→256 + 26 spills + 104 B/lane scratch。即使无 templating，body doubling 仍触发 live-range 翻倍（phase-0 的 a/b prefetch 撑到 phase-1）。**与 R7-R9 templated 失败同根** | **拒绝（spills）** |
+| **R10 Dev K** — `>>16` shift coalesce + `wn*RBN` precompute | `MXFP8_CRR_EXACT_PQ_VALU_TRIM_ENABLE` (split: `_LSHR_PK_ENABLE` + `_INTERLEAVE_PRECOMPUTE_ENABLE`) | MARGINAL，Δ ≈ 0% (VGPR 232 不变 / 0 spills)。**编译器已自动 hoist `wn*RBN`**——profiler "32 v_add per body" 是 pre-hoist 静态分析，不是最终 ISA。`v_alignbit_b32` 与 `v_lshrrev_b32` 占同一 issue pipe | **拒绝（marginal，编译器已优化）** |
+| **R10 Dev L** — load reordering (b1 pre-issue + scale hoist) | `MXFP8_CRR_EXACT_PQ_LOAD_REORDER_ENABLE` (sub-A 'b1 pre-issue', sub-B 'scale reorder') | FAIL，sub-A −0.49% / sub-B −1.78% / combined −3.14% (correctness/det 全 OK)。**`lgkmcnt` 等待同时覆盖 LDS + scalar/VMEM scope**——重排不能让 scale buffer_load 与 A/B LDS 真正并行；反而把 scale dest VGPR live range 撑过 A/B 读寄存器期 (232→254) | **拒绝（regression + 揭示 lgkmcnt 同步语义）** |
+
+### R10 关键产出（不是优化，是死路确认 + 真实瓶颈定性）
+
+**真实瓶颈**：CRR 受限于 LDS 管道争用 + lgkmcnt 同步范围，**不是** MFMA、**不是** v_lshr、**不是** opsel 计算、**不是** cache miss、**不是** VMEM。要破 gate 必须改 A 的 LDS 布局（global→LDS 阶段做 transpose 让 A 侧用 `ds_read_b128` 宽读），这是大型重写不在本 sprint scope。
+
+**已穷尽的微调维度（10 轮 / 12 个 dev attempt 全 reject 或 marginal）**：
+- HOIST_HI templating (R7-R9 Dev A/B/C/H/I) — VGPR ceiling
+- noinline outline (R7 Dev F) — calling conv 不能保 4 acc live
+- runtime branch (R8 Dev G) — 同 templating ceiling
+- 2× unroll (R10 Dev J) — 同 live-range 翻倍 ceiling
+- VALU coalescing (R10 Dev K) — 编译器已优化
+- Load reorder (R10 Dev L) — lgkmcnt 同步范围阻塞
+- sched_barrier (R7 Dev E) — v_lshr 不在 critical path
+- PIPELINE_SCALE (R7 Dev D) — **唯一 win**，+0.243%, 已 commit
+
+### 后续可探索方向（高风险结构性，本会话不做）
+
+1. **A LDS 布局 transpose（最高潜力）**：在 global→LDS 阶段做 transpose 让 A 侧能用 `ds_read_b128`，把 A 侧 LDS 读指令砍半。代价：global load 阶段的 swizzle 复杂化，可能影响 occupancy 和 bank conflicts。需要重写 `load_col_from_v2_st` 配合
+2. **MMA 重排：cA + cC fusion**（同 a_pack 复用）：cA 和 cC 都用 b0，cB 和 cD 都用 b1。当前是 cA→cB→cC→cD（每次切 b），改成 cA→cC→cB→cD 可能减少 b 切换，但需重审 a 的 live range
+3. **FORCE 4-wave with fused asm block**：换 4-wave 结构（256-thread block），单 SIMD per CU，更深 ILP——但 4-wave 历史已证劣于 8-wave (Dev A round 1)
+
+下一会话不要再用并行 dev fan-out 微调，**单条深入做 LDS 布局 transpose**。
+
 ## 工作流
 
 1. Decision maker 每轮选 1–3 个最有把握的方向（不要 4 个同时开花）
