@@ -1,0 +1,75 @@
+R16B verify (5-run). GPU=2 warmup=200 iters=500 trim=0.1
+==============================================================================================================
+
+S2/largeivf2  parent=_u32  ilp=_u32_r10_iterilp  cand=_u32_r16b_iterilp_largeivf2  comp=5525.3
+  iterilp   run1: 4967.51 TFLOPS
+  iterilp   run2: 4940.85 TFLOPS
+  iterilp   run3: 4945.31 TFLOPS
+  iterilp   run4: 4961.40 TFLOPS
+  iterilp   run5: 4977.26 TFLOPS
+  candidate run1: 4972.28 TFLOPS
+  candidate run2: 4971.84 TFLOPS
+  candidate run3: 4964.72 TFLOPS
+  candidate run4: 4985.19 TFLOPS
+  candidate run5: 4981.10 TFLOPS
+  iterilp    mean=4958.47 max=4977.26
+  candidate  mean=4975.03 max=4985.19
+  delta_mean=+16.56  Δpp=+0.30  gate(mean>=ilp.max)=FAIL  gate(Δpp>=0.5)=FAIL
+
+S1/noemxpre  parent=_lgk2_dc  ilp=_lgk2_dc_r10_iterilp  cand=_lgk2_dc_r16b_iterilp_noemxpre  comp=5245.4
+  iterilp   run1: 4710.90 TFLOPS
+  iterilp   run2: 4689.58 TFLOPS
+  iterilp   run3: 4711.32 TFLOPS
+  iterilp   run4: 4687.07 TFLOPS
+  iterilp   run5: 4687.60 TFLOPS
+  candidate run1: 4700.10 TFLOPS
+  candidate run2: 4707.46 TFLOPS
+  candidate run3: 4701.61 TFLOPS
+  candidate run4: 4708.88 TFLOPS
+  candidate run5: 4707.12 TFLOPS
+  iterilp    mean=4697.29 max=4711.32
+  candidate  mean=4705.03 max=4708.88
+  delta_mean=+7.74  Δpp=+0.15  gate(mean>=ilp.max)=FAIL  gate(Δpp>=0.5)=FAIL
+
+S2/noemxpre  parent=_u32  ilp=_u32_r10_iterilp  cand=_u32_r16b_iterilp_noemxpre  comp=5525.3
+  iterilp   run1: 4951.94 TFLOPS
+  iterilp   run2: 4961.71 TFLOPS
+  iterilp   run3: 4970.97 TFLOPS
+  iterilp   run4: 4962.50 TFLOPS
+  iterilp   run5: 4968.43 TFLOPS
+  candidate run1: 4962.25 TFLOPS
+  candidate run2: 4971.40 TFLOPS
+  candidate run3: 4963.04 TFLOPS
+  candidate run4: 4938.61 TFLOPS
+  candidate run5: 4964.70 TFLOPS
+  iterilp    mean=4963.11 max=4970.97
+  candidate  mean=4960.00 max=4971.40
+  delta_mean=-3.11  Δpp=-0.06  gate(mean>=ilp.max)=FAIL  gate(Δpp>=0.5)=FAIL
+
+S3/noemxpre  parent=_v20_memc  ilp=_v20_memc_r11_iterilp  cand=_v20_memc_r16b_iterilp_noemxpre  comp=5568.2
+  iterilp   run1: 5270.44 TFLOPS
+  iterilp   run2: 5257.54 TFLOPS
+  iterilp   run3: 5258.19 TFLOPS
+  iterilp   run4: 5263.33 TFLOPS
+  iterilp   run5: 5257.34 TFLOPS
+  candidate run1: 5283.69 TFLOPS
+  candidate run2: 5275.70 TFLOPS
+  candidate run3: 5255.16 TFLOPS
+  candidate run4: 5269.62 TFLOPS
+  candidate run5: 5273.31 TFLOPS
+  iterilp    mean=5261.37 max=5270.44
+  candidate  mean=5271.50 max=5283.69
+  delta_mean=+10.13  Δpp=+0.18  gate(mean>=ilp.max)=PASS  gate(Δpp>=0.5)=FAIL
+
+Elapsed: 7.2 min
+
+==============================================================================================================
+Label  Tag               ilp.mean cand.mean    Δmean     Δpp  gate_max  gate_pp  combined
+--------------------------------------------------------------------------------------------------------------
+S2     largeivf2          4958.47   4975.03   +16.56  +0.30pp      fail     fail      fail
+S1     noemxpre           4697.29   4705.03    +7.74  +0.15pp      fail     fail      fail
+S2     noemxpre           4963.11   4960.00    -3.11  -0.06pp      fail     fail      fail
+S3     noemxpre           5261.37   5271.50   +10.13  +0.18pp      PASS     fail      fail
+
+Gate-combined (max+pp) PASS: 0/4
+Saved bench_round16_optB_verify.json

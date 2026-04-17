@@ -1,0 +1,178 @@
+{
+  "warmup": 200,
+  "iters": 500,
+  "trim": 0.1,
+  "gpu": 2,
+  "n_runs": 5,
+  "results": [
+    {
+      "label": "S2",
+      "tag": "largeivf2",
+      "M": 16384,
+      "N": 4096,
+      "K": 28672,
+      "comp": 5525.3,
+      "parent": "_u32",
+      "iterilp": "_u32_r10_iterilp",
+      "candidate": "_u32_r16b_iterilp_largeivf2",
+      "iterilp_stats": {
+        "runs": [
+          4967.51,
+          4940.85,
+          4945.31,
+          4961.4,
+          4977.26
+        ],
+        "mean": 4958.47,
+        "min": 4940.85,
+        "max": 4977.26,
+        "n": 5
+      },
+      "candidate_stats": {
+        "runs": [
+          4972.28,
+          4971.84,
+          4964.72,
+          4985.19,
+          4981.1
+        ],
+        "mean": 4975.03,
+        "min": 4964.72,
+        "max": 4985.19,
+        "n": 5
+      },
+      "delta_mean": 16.55999999999949,
+      "delta_pp": 0.29971223281992815,
+      "gate_max_pass": false,
+      "gate_pp_pass": false,
+      "gate_combined": false
+    },
+    {
+      "label": "S1",
+      "tag": "noemxpre",
+      "M": 14336,
+      "N": 4096,
+      "K": 32768,
+      "comp": 5245.4,
+      "parent": "_lgk2_dc",
+      "iterilp": "_lgk2_dc_r10_iterilp",
+      "candidate": "_lgk2_dc_r16b_iterilp_noemxpre",
+      "iterilp_stats": {
+        "runs": [
+          4710.9,
+          4689.58,
+          4711.32,
+          4687.07,
+          4687.6
+        ],
+        "mean": 4697.29,
+        "min": 4687.07,
+        "max": 4711.32,
+        "n": 5
+      },
+      "candidate_stats": {
+        "runs": [
+          4700.1,
+          4707.46,
+          4701.61,
+          4708.88,
+          4707.12
+        ],
+        "mean": 4705.03,
+        "min": 4700.1,
+        "max": 4708.88,
+        "n": 5
+      },
+      "delta_mean": 7.739999999999782,
+      "delta_pp": 0.14755786022037942,
+      "gate_max_pass": false,
+      "gate_pp_pass": false,
+      "gate_combined": false
+    },
+    {
+      "label": "S2",
+      "tag": "noemxpre",
+      "M": 16384,
+      "N": 4096,
+      "K": 28672,
+      "comp": 5525.3,
+      "parent": "_u32",
+      "iterilp": "_u32_r10_iterilp",
+      "candidate": "_u32_r16b_iterilp_noemxpre",
+      "iterilp_stats": {
+        "runs": [
+          4951.94,
+          4961.71,
+          4970.97,
+          4962.5,
+          4968.43
+        ],
+        "mean": 4963.11,
+        "min": 4951.94,
+        "max": 4970.97,
+        "n": 5
+      },
+      "candidate_stats": {
+        "runs": [
+          4962.25,
+          4971.4,
+          4963.04,
+          4938.61,
+          4964.7
+        ],
+        "mean": 4960.0,
+        "min": 4938.61,
+        "max": 4971.4,
+        "n": 5
+      },
+      "delta_mean": -3.1099999999996726,
+      "delta_pp": -0.056286536477651396,
+      "gate_max_pass": false,
+      "gate_pp_pass": false,
+      "gate_combined": false
+    },
+    {
+      "label": "S3",
+      "tag": "noemxpre",
+      "M": 4096,
+      "N": 32768,
+      "K": 28672,
+      "comp": 5568.2,
+      "parent": "_v20_memc",
+      "iterilp": "_v20_memc_r11_iterilp",
+      "candidate": "_v20_memc_r16b_iterilp_noemxpre",
+      "iterilp_stats": {
+        "runs": [
+          5270.44,
+          5257.54,
+          5258.19,
+          5263.33,
+          5257.34
+        ],
+        "mean": 5261.37,
+        "min": 5257.34,
+        "max": 5270.44,
+        "n": 5
+      },
+      "candidate_stats": {
+        "runs": [
+          5283.69,
+          5275.7,
+          5255.16,
+          5269.62,
+          5273.31
+        ],
+        "mean": 5271.5,
+        "min": 5255.16,
+        "max": 5283.69,
+        "n": 5
+      },
+      "delta_mean": 10.13000000000011,
+      "delta_pp": 0.18192593656837236,
+      "gate_max_pass": true,
+      "gate_pp_pass": false,
+      "gate_combined": false
+    }
+  ],
+  "elapsed_minutes": 7.17
+}

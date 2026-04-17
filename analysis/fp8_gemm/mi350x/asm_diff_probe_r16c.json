@@ -1,0 +1,515 @@
+{
+  "shapes": {
+    "DLA1": {
+      "parent_suffix": "_ts_pf6_6_v12_memc",
+      "parent_hash": "30ab758acebbaead",
+      "compounds": {
+        "iterilp+regclassglob": {
+          "hash": "cef61e59f60bc1b2",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_iterilpXregclassglob"
+        },
+        "iterilp+sinkavoidspill": {
+          "hash": "98c79778b0af6329",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_iterilpXsinkavoidspill"
+        },
+        "iterilp+nolicm": {
+          "hash": "5ad2eb925ea9de6b",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_iterilpXnolicm"
+        },
+        "iterilp+noemxpre": {
+          "hash": "a778430f368d21d8",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_iterilpXnoemxpre"
+        },
+        "iterilp+largeivf2": {
+          "hash": "fb9f2bbfafc1cfa9",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_iterilpXlargeivf2"
+        },
+        "regclassglob+sinkavoidspill": {
+          "hash": "33907728d9747297",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_regclassglobXsinkavoidspill"
+        },
+        "regclassglob+nolicm": {
+          "hash": "f41c79272a8c8572",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_regclassglobXnolicm"
+        },
+        "regclassglob+noemxpre": {
+          "hash": "07c5ff220aac78ac",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_regclassglobXnoemxpre"
+        },
+        "sinkavoidspill+nolicm": {
+          "hash": "24af05148677da8c",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_sinkavoidspillXnolicm"
+        },
+        "regclassglob+nolicm+sinkavoidspill": {
+          "hash": "c919de0cb04ce96d",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_regclassglobXnolicmXsinkavoidspill"
+        },
+        "iterilp+regclassglob+nolicm": {
+          "hash": "d9be66377173adb7",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_iterilpXregclassglobXnolicm"
+        },
+        "iterilp+regclassglob+sinkavoidspill": {
+          "hash": "b6c842070a0b5e18",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_iterilpXregclassglobXsinkavoidspill"
+        }
+      }
+    },
+    "DLA2": {
+      "parent_suffix": "_ts_gm2_v12_memc_dc",
+      "parent_hash": "894559f8992bca1b",
+      "compounds": {
+        "iterilp+regclassglob": {
+          "hash": "d85d127a9b78cbab",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_iterilpXregclassglob"
+        },
+        "iterilp+sinkavoidspill": {
+          "hash": "2085a374d65d2843",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_iterilpXsinkavoidspill"
+        },
+        "iterilp+nolicm": {
+          "hash": "1e49faeb945694d9",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_iterilpXnolicm"
+        },
+        "iterilp+noemxpre": {
+          "hash": "d4ff959691b357d9",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_iterilpXnoemxpre"
+        },
+        "iterilp+largeivf2": {
+          "hash": "d1b77467ecd05052",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_iterilpXlargeivf2"
+        },
+        "regclassglob+sinkavoidspill": {
+          "hash": "1adf08f0152204cc",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_regclassglobXsinkavoidspill"
+        },
+        "regclassglob+nolicm": {
+          "hash": "2c4fb29003c2f0c6",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_regclassglobXnolicm"
+        },
+        "regclassglob+noemxpre": {
+          "hash": "f8a8988d6fd2ac6f",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_regclassglobXnoemxpre"
+        },
+        "sinkavoidspill+nolicm": {
+          "hash": "af07ed489945b6d5",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_sinkavoidspillXnolicm"
+        },
+        "regclassglob+nolicm+sinkavoidspill": {
+          "hash": "940736de3fa62eab",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_regclassglobXnolicmXsinkavoidspill"
+        },
+        "iterilp+regclassglob+nolicm": {
+          "hash": "4afe73a989f59dbf",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_iterilpXregclassglobXnolicm"
+        },
+        "iterilp+regclassglob+sinkavoidspill": {
+          "hash": "904fe1459edce404",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_iterilpXregclassglobXsinkavoidspill"
+        }
+      }
+    },
+    "DLA7": {
+      "parent_suffix": "_ts_lgk2_v12_memc",
+      "parent_hash": "f98c216e0b01f906",
+      "compounds": {
+        "iterilp+regclassglob": {
+          "hash": "1c34a04b9852ff94",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_iterilpXregclassglob"
+        },
+        "iterilp+sinkavoidspill": {
+          "hash": "eab34e1db11cfd61",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_iterilpXsinkavoidspill"
+        },
+        "iterilp+nolicm": {
+          "hash": "096f42e54c76123e",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_iterilpXnolicm"
+        },
+        "iterilp+noemxpre": {
+          "hash": "b274d332754f75c4",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_iterilpXnoemxpre"
+        },
+        "iterilp+largeivf2": {
+          "hash": "3ed2c3aac6c0a318",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_iterilpXlargeivf2"
+        },
+        "regclassglob+sinkavoidspill": {
+          "hash": "55e6183a7f5058b0",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_regclassglobXsinkavoidspill"
+        },
+        "regclassglob+nolicm": {
+          "hash": "8c170a0a5b28626e",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_regclassglobXnolicm"
+        },
+        "regclassglob+noemxpre": {
+          "hash": "cb10755fbb2b6ef2",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_regclassglobXnoemxpre"
+        },
+        "sinkavoidspill+nolicm": {
+          "hash": "246cbfd2ca09bca4",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_sinkavoidspillXnolicm"
+        },
+        "regclassglob+nolicm+sinkavoidspill": {
+          "hash": "1633c9d8815e02fb",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_regclassglobXnolicmXsinkavoidspill"
+        },
+        "iterilp+regclassglob+nolicm": {
+          "hash": "cf3243d642cb243f",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_iterilpXregclassglobXnolicm"
+        },
+        "iterilp+regclassglob+sinkavoidspill": {
+          "hash": "4e723bd765c7fb0e",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_iterilpXregclassglobXsinkavoidspill"
+        }
+      }
+    },
+    "P1": {
+      "parent_suffix": "_ts_gm8",
+      "parent_hash": "5e7bbabe1b27fa8f",
+      "compounds": {
+        "iterilp+regclassglob": {
+          "hash": "39d1d0f128f9ed40",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_iterilpXregclassglob"
+        },
+        "iterilp+sinkavoidspill": {
+          "hash": "b7a884eb9c484948",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_iterilpXsinkavoidspill"
+        },
+        "iterilp+nolicm": {
+          "hash": "1ca082477fadb4af",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_iterilpXnolicm"
+        },
+        "iterilp+noemxpre": {
+          "hash": "a256faec4c5f6be3",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_iterilpXnoemxpre"
+        },
+        "iterilp+largeivf2": {
+          "hash": "d0d557fdbd2117e0",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_iterilpXlargeivf2"
+        },
+        "regclassglob+sinkavoidspill": {
+          "hash": "86487de57f1b861d",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_regclassglobXsinkavoidspill"
+        },
+        "regclassglob+nolicm": {
+          "hash": "4bebac4e7755e5df",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_regclassglobXnolicm"
+        },
+        "regclassglob+noemxpre": {
+          "hash": "b720685ca1b04f4f",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_regclassglobXnoemxpre"
+        },
+        "sinkavoidspill+nolicm": {
+          "hash": "bb76f2851482bc4f",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_sinkavoidspillXnolicm"
+        },
+        "regclassglob+nolicm+sinkavoidspill": {
+          "hash": "daabcbf82bd9e1ef",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_regclassglobXnolicmXsinkavoidspill"
+        },
+        "iterilp+regclassglob+nolicm": {
+          "hash": "891aa0cfa02eee49",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_iterilpXregclassglobXnolicm"
+        },
+        "iterilp+regclassglob+sinkavoidspill": {
+          "hash": "5656bfe3472da187",
+          "verdict": "DIFF",
+          "err": null,
+          "csuf": "_r16c_iterilpXregclassglobXsinkavoidspill"
+        }
+      }
+    }
+  },
+  "diff_pairs": [
+    [
+      "DLA1",
+      "iterilp+regclassglob"
+    ],
+    [
+      "DLA1",
+      "iterilp+sinkavoidspill"
+    ],
+    [
+      "DLA1",
+      "iterilp+nolicm"
+    ],
+    [
+      "DLA1",
+      "iterilp+noemxpre"
+    ],
+    [
+      "DLA1",
+      "iterilp+largeivf2"
+    ],
+    [
+      "DLA1",
+      "regclassglob+sinkavoidspill"
+    ],
+    [
+      "DLA1",
+      "regclassglob+nolicm"
+    ],
+    [
+      "DLA1",
+      "regclassglob+noemxpre"
+    ],
+    [
+      "DLA1",
+      "sinkavoidspill+nolicm"
+    ],
+    [
+      "DLA1",
+      "regclassglob+nolicm+sinkavoidspill"
+    ],
+    [
+      "DLA1",
+      "iterilp+regclassglob+nolicm"
+    ],
+    [
+      "DLA1",
+      "iterilp+regclassglob+sinkavoidspill"
+    ],
+    [
+      "DLA2",
+      "iterilp+regclassglob"
+    ],
+    [
+      "DLA2",
+      "iterilp+sinkavoidspill"
+    ],
+    [
+      "DLA2",
+      "iterilp+nolicm"
+    ],
+    [
+      "DLA2",
+      "iterilp+noemxpre"
+    ],
+    [
+      "DLA2",
+      "iterilp+largeivf2"
+    ],
+    [
+      "DLA2",
+      "regclassglob+sinkavoidspill"
+    ],
+    [
+      "DLA2",
+      "regclassglob+nolicm"
+    ],
+    [
+      "DLA2",
+      "regclassglob+noemxpre"
+    ],
+    [
+      "DLA2",
+      "sinkavoidspill+nolicm"
+    ],
+    [
+      "DLA2",
+      "regclassglob+nolicm+sinkavoidspill"
+    ],
+    [
+      "DLA2",
+      "iterilp+regclassglob+nolicm"
+    ],
+    [
+      "DLA2",
+      "iterilp+regclassglob+sinkavoidspill"
+    ],
+    [
+      "DLA7",
+      "iterilp+regclassglob"
+    ],
+    [
+      "DLA7",
+      "iterilp+sinkavoidspill"
+    ],
+    [
+      "DLA7",
+      "iterilp+nolicm"
+    ],
+    [
+      "DLA7",
+      "iterilp+noemxpre"
+    ],
+    [
+      "DLA7",
+      "iterilp+largeivf2"
+    ],
+    [
+      "DLA7",
+      "regclassglob+sinkavoidspill"
+    ],
+    [
+      "DLA7",
+      "regclassglob+nolicm"
+    ],
+    [
+      "DLA7",
+      "regclassglob+noemxpre"
+    ],
+    [
+      "DLA7",
+      "sinkavoidspill+nolicm"
+    ],
+    [
+      "DLA7",
+      "regclassglob+nolicm+sinkavoidspill"
+    ],
+    [
+      "DLA7",
+      "iterilp+regclassglob+nolicm"
+    ],
+    [
+      "DLA7",
+      "iterilp+regclassglob+sinkavoidspill"
+    ],
+    [
+      "P1",
+      "iterilp+regclassglob"
+    ],
+    [
+      "P1",
+      "iterilp+sinkavoidspill"
+    ],
+    [
+      "P1",
+      "iterilp+nolicm"
+    ],
+    [
+      "P1",
+      "iterilp+noemxpre"
+    ],
+    [
+      "P1",
+      "iterilp+largeivf2"
+    ],
+    [
+      "P1",
+      "regclassglob+sinkavoidspill"
+    ],
+    [
+      "P1",
+      "regclassglob+nolicm"
+    ],
+    [
+      "P1",
+      "regclassglob+noemxpre"
+    ],
+    [
+      "P1",
+      "sinkavoidspill+nolicm"
+    ],
+    [
+      "P1",
+      "regclassglob+nolicm+sinkavoidspill"
+    ],
+    [
+      "P1",
+      "iterilp+regclassglob+nolicm"
+    ],
+    [
+      "P1",
+      "iterilp+regclassglob+sinkavoidspill"
+    ]
+  ],
+  "summary": {
+    "DIFF": 48,
+    "NOOP": 0,
+    "MISSING": 0
+  }
+}

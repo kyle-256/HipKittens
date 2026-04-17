@@ -1,0 +1,165 @@
+{
+  "warmup": 200,
+  "iters": 500,
+  "trim": 0.1,
+  "gate_pp": 0.5,
+  "snr_threshold": 25.0,
+  "gpus": [
+    2,
+    3,
+    4
+  ],
+  "elapsed_minutes": 1.33,
+  "results": [
+    {
+      "label": "S1",
+      "tag": "noemxpre",
+      "gpu": 2,
+      "comp": 5245.4,
+      "iterilp_tflops": 4681.16,
+      "cand_tflops": 4695.12,
+      "delta_tflops": 13.96,
+      "delta_pp": 0.266,
+      "gate_pass": false,
+      "snr": {
+        "snr_pass": true,
+        "method": "skipped/aperture-crash-detection"
+      }
+    },
+    {
+      "label": "S2",
+      "tag": "noemxpre",
+      "gpu": 4,
+      "comp": 5525.3,
+      "iterilp_tflops": 4956.13,
+      "cand_tflops": 4969.39,
+      "delta_tflops": 13.26,
+      "delta_pp": 0.24,
+      "gate_pass": false,
+      "snr": {
+        "snr_pass": true,
+        "method": "skipped/aperture-crash-detection"
+      }
+    },
+    {
+      "label": "S1",
+      "tag": "nolicm",
+      "gpu": 3,
+      "comp": 5245.4,
+      "iterilp_tflops": 4826.7,
+      "cand_tflops": 4700.06,
+      "delta_tflops": -126.64,
+      "delta_pp": -2.414,
+      "gate_pass": false,
+      "snr": {
+        "snr_pass": true,
+        "method": "skipped/aperture-crash-detection"
+      }
+    },
+    {
+      "label": "S2",
+      "tag": "largeivf2",
+      "gpu": 2,
+      "comp": 5525.3,
+      "iterilp_tflops": 4939.6,
+      "cand_tflops": 4967.58,
+      "delta_tflops": 27.98,
+      "delta_pp": 0.506,
+      "gate_pass": true,
+      "snr": {
+        "snr_pass": true,
+        "method": "skipped/aperture-crash-detection"
+      }
+    },
+    {
+      "label": "S3",
+      "tag": "noemxpre",
+      "gpu": 3,
+      "comp": 5568.2,
+      "iterilp_tflops": 5278.95,
+      "cand_tflops": 5295.54,
+      "delta_tflops": 16.59,
+      "delta_pp": 0.298,
+      "gate_pass": false,
+      "snr": {
+        "snr_pass": true,
+        "method": "skipped/aperture-crash-detection"
+      }
+    },
+    {
+      "label": "S3",
+      "tag": "nolicm",
+      "gpu": 4,
+      "comp": 5568.2,
+      "iterilp_tflops": 5248.53,
+      "cand_tflops": 5113.46,
+      "delta_tflops": -135.07,
+      "delta_pp": -2.426,
+      "gate_pass": false,
+      "snr": {
+        "snr_pass": true,
+        "method": "skipped/aperture-crash-detection"
+      }
+    },
+    {
+      "label": "S4",
+      "tag": "noemxpre",
+      "gpu": 2,
+      "comp": 5649.9,
+      "iterilp_tflops": 5293.94,
+      "cand_tflops": 5280.06,
+      "delta_tflops": -13.88,
+      "delta_pp": -0.246,
+      "gate_pass": false,
+      "snr": {
+        "snr_pass": true,
+        "method": "skipped/aperture-crash-detection"
+      }
+    },
+    {
+      "label": "S4",
+      "tag": "nolicm",
+      "gpu": 3,
+      "comp": 5649.9,
+      "iterilp_tflops": 5418.99,
+      "cand_tflops": 5295.46,
+      "delta_tflops": -123.53,
+      "delta_pp": -2.186,
+      "gate_pass": false,
+      "snr": {
+        "snr_pass": true,
+        "method": "skipped/aperture-crash-detection"
+      }
+    },
+    {
+      "label": "S5",
+      "tag": "noemxpre",
+      "gpu": 4,
+      "comp": 5296.1,
+      "iterilp_tflops": 5054.6,
+      "cand_tflops": 5036.22,
+      "delta_tflops": -18.38,
+      "delta_pp": -0.347,
+      "gate_pass": false,
+      "snr": {
+        "snr_pass": true,
+        "method": "skipped/aperture-crash-detection"
+      }
+    },
+    {
+      "label": "S5",
+      "tag": "nolicm",
+      "gpu": 2,
+      "comp": 5296.1,
+      "iterilp_tflops": 5064.41,
+      "cand_tflops": 5048.51,
+      "delta_tflops": -15.9,
+      "delta_pp": -0.3,
+      "gate_pass": false,
+      "snr": {
+        "snr_pass": true,
+        "method": "skipped/aperture-crash-detection"
+      }
+    }
+  ]
+}

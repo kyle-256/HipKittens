@@ -1,0 +1,42 @@
+R16B smoke. GPUS=[2, 3, 4]  warmup=200 iters=500 trim=0.1  gate=+0.5pp
+Candidates (10 DIFF pairs): [['S1', 'noemxpre'], ['S1', 'nolicm'], ['S2', 'noemxpre'], ['S2', 'largeivf2'], ['S3', 'noemxpre'], ['S3', 'nolicm'], ['S4', 'noemxpre'], ['S4', 'nolicm'], ['S5', 'noemxpre'], ['S5', 'nolicm']]
+========================================================================================================================
+>> [GPU2] S1/noemxpre: smoke vs iterilp (SNR skipped — iterilp baseline non-deterministic)
+>> [GPU3] S1/nolicm: smoke vs iterilp (SNR skipped — iterilp baseline non-deterministic)
+>> [GPU4] S2/noemxpre: smoke vs iterilp (SNR skipped — iterilp baseline non-deterministic)
+<< [GPU2] S1/noemxpre: ilp=4681.16 cand=4695.12 delta=+13.96 (+0.27pp) gate>=0.5pp: fail snr=skipped/aperture-crash-detection
+>> [GPU2] S2/largeivf2: smoke vs iterilp (SNR skipped — iterilp baseline non-deterministic)
+<< [GPU4] S2/noemxpre: ilp=4956.13 cand=4969.39 delta=+13.26 (+0.24pp) gate>=0.5pp: fail snr=skipped/aperture-crash-detection
+>> [GPU3] S3/noemxpre: smoke vs iterilp (SNR skipped — iterilp baseline non-deterministic)
+<< [GPU3] S1/nolicm: ilp=4826.70 cand=4700.06 delta=-126.64 (-2.41pp) gate>=0.5pp: fail snr=skipped/aperture-crash-detection
+>> [GPU4] S3/nolicm: smoke vs iterilp (SNR skipped — iterilp baseline non-deterministic)
+<< [GPU2] S2/largeivf2: ilp=4939.60 cand=4967.58 delta=+27.98 (+0.51pp) gate>=0.5pp: PASS snr=skipped/aperture-crash-detection
+>> [GPU2] S4/noemxpre: smoke vs iterilp (SNR skipped — iterilp baseline non-deterministic)
+<< [GPU3] S3/noemxpre: ilp=5278.95 cand=5295.54 delta=+16.59 (+0.30pp) gate>=0.5pp: fail snr=skipped/aperture-crash-detection
+>> [GPU3] S4/nolicm: smoke vs iterilp (SNR skipped — iterilp baseline non-deterministic)
+<< [GPU4] S3/nolicm: ilp=5248.53 cand=5113.46 delta=-135.07 (-2.43pp) gate>=0.5pp: fail snr=skipped/aperture-crash-detection
+>> [GPU4] S5/noemxpre: smoke vs iterilp (SNR skipped — iterilp baseline non-deterministic)
+<< [GPU2] S4/noemxpre: ilp=5293.94 cand=5280.06 delta=-13.88 (-0.25pp) gate>=0.5pp: fail snr=skipped/aperture-crash-detection
+>> [GPU2] S5/nolicm: smoke vs iterilp (SNR skipped — iterilp baseline non-deterministic)
+<< [GPU3] S4/nolicm: ilp=5418.99 cand=5295.46 delta=-123.53 (-2.19pp) gate>=0.5pp: fail snr=skipped/aperture-crash-detection
+<< [GPU4] S5/noemxpre: ilp=5054.60 cand=5036.22 delta=-18.38 (-0.35pp) gate>=0.5pp: fail snr=skipped/aperture-crash-detection
+<< [GPU2] S5/nolicm: ilp=5064.41 cand=5048.51 delta=-15.90 (-0.30pp) gate>=0.5pp: fail snr=skipped/aperture-crash-detection
+
+Elapsed: 1.3 min
+
+========================================================================================================================
+Label  Tag                    ilp      cand     delta       pp  gate  snr
+------------------------------------------------------------------------------------------------------------------------
+S1     noemxpre           4681.16   4695.12    +13.96  +0.266pp  fail  nan
+S1     nolicm             4826.70   4700.06   -126.64  -2.414pp  fail  nan
+S2     largeivf2          4939.60   4967.58    +27.98  +0.506pp  PASS  nan
+S2     noemxpre           4956.13   4969.39    +13.26  +0.240pp  fail  nan
+S3     noemxpre           5278.95   5295.54    +16.59  +0.298pp  fail  nan
+S3     nolicm             5248.53   5113.46   -135.07  -2.426pp  fail  nan
+S4     noemxpre           5293.94   5280.06    -13.88  -0.246pp  fail  nan
+S4     nolicm             5418.99   5295.46   -123.53  -2.186pp  fail  nan
+S5     noemxpre           5054.60   5036.22    -18.38  -0.347pp  fail  nan
+S5     nolicm             5064.41   5048.51    -15.90  -0.300pp  fail  nan
+
+Gate-pass count: 1/10
+Saved bench_round16_optB_smoke.json

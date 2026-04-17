@@ -1,0 +1,664 @@
+{
+  "warmup": 200,
+  "iters": 500,
+  "trim": 0.1,
+  "gpus": [
+    5,
+    6,
+    7
+  ],
+  "pairs": [
+    {
+      "shape": "DLA1",
+      "tag": "iterilp+sinkavoidspill",
+      "csuf": "_r16c_iterilpXsinkavoidspill",
+      "gpu": 7,
+      "base": {
+        "tflops": 5123.93,
+        "ms": 6.7191
+      },
+      "cand": {
+        "error": "rc=-6",
+        "stderr": "Memory access fault by GPU node-9 (Agent handle: 0x55efc98cdf10) on address 0x1033b710000. Reason: Write access to a read-only page.\n"
+      }
+    },
+    {
+      "shape": "DLA1",
+      "tag": "iterilp+regclassglob",
+      "csuf": "_r16c_iterilpXregclassglob",
+      "gpu": 5,
+      "base": {
+        "error": "rc=-6",
+        "stderr": ":0:rocdevice.cpp            :3580: 1123675367023 us:  Callback: Queue 0x7fef70e00000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29\n"
+      },
+      "cand": {
+        "error": "rc=-6",
+        "stderr": "Memory access fault by GPU node-7 (Agent handle: 0x557800f47440) on address 0x10b8af10000. Reason: Unknown.\n"
+      }
+    },
+    {
+      "shape": "DLA1",
+      "tag": "iterilp+noemxpre",
+      "csuf": "_r16c_iterilpXnoemxpre",
+      "gpu": 5,
+      "base": {
+        "tflops": 5154.1,
+        "ms": 6.6798
+      },
+      "cand": {
+        "error": "rc=-6",
+        "stderr": "Memory access fault by GPU node-7 (Agent handle: 0x55a0d1c9ad20) on address 0xdd35129000. Reason: Write access to a read-only page.\n"
+      }
+    },
+    {
+      "shape": "DLA1",
+      "tag": "iterilp+nolicm",
+      "csuf": "_r16c_iterilpXnolicm",
+      "gpu": 6,
+      "base": {
+        "error": "rc=-6",
+        "stderr": ":0:rocdevice.cpp            :3580: 1123696891447 us:  Callback: Queue 0x7f7a19600000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29\n"
+      },
+      "cand": {
+        "error": "rc=-6",
+        "stderr": "Memory access fault by GPU node-8 (Agent handle: 0x55dcba3eb3f0) on address 0xff6b63728000. Reason: Write access to a read-only page.\n"
+      }
+    },
+    {
+      "shape": "DLA1",
+      "tag": "regclassglob+sinkavoidspill",
+      "csuf": "_r16c_regclassglobXsinkavoidspill",
+      "gpu": 7,
+      "comp": 5781.1,
+      "base_tflops": 5131.44,
+      "cand_tflops": 5134.36,
+      "delta_tflops": 2.92,
+      "delta_pp": 0.051,
+      "gate_pass": false
+    },
+    {
+      "shape": "DLA1",
+      "tag": "iterilp+largeivf2",
+      "csuf": "_r16c_iterilpXlargeivf2",
+      "gpu": 6,
+      "base": {
+        "tflops": 5094.38,
+        "ms": 6.7581
+      },
+      "cand": {
+        "error": "rc=-6",
+        "stderr": "Memory access fault by GPU node-8 (Agent handle: 0x5646fb1dd8e0) on address 0x123e3720000. Reason: Write access to a read-only page.\n"
+      }
+    },
+    {
+      "shape": "DLA1",
+      "tag": "sinkavoidspill+nolicm",
+      "csuf": "_r16c_sinkavoidspillXnolicm",
+      "gpu": 7,
+      "comp": 5781.1,
+      "base_tflops": 5125.09,
+      "cand_tflops": 5121.23,
+      "delta_tflops": -3.86,
+      "delta_pp": -0.067,
+      "gate_pass": false
+    },
+    {
+      "shape": "DLA1",
+      "tag": "regclassglob+noemxpre",
+      "csuf": "_r16c_regclassglobXnoemxpre",
+      "gpu": 6,
+      "base": {
+        "tflops": 5095.02,
+        "ms": 6.7573
+      },
+      "cand": {
+        "error": "rc=-6",
+        "stderr": ":0:rocdevice.cpp            :3580: 1123999621877 us:  Callback: Queue 0x7f7b14800000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29\n"
+      }
+    },
+    {
+      "shape": "DLA1",
+      "tag": "regclassglob+nolicm+sinkavoidspill",
+      "csuf": "_r16c_regclassglobXnolicmXsinkavoidspill",
+      "gpu": 5,
+      "comp": 5781.1,
+      "base_tflops": 4206.03,
+      "cand_tflops": 4211.92,
+      "delta_tflops": 5.89,
+      "delta_pp": 0.102,
+      "gate_pass": false
+    },
+    {
+      "shape": "DLA1",
+      "tag": "regclassglob+nolicm",
+      "csuf": "_r16c_regclassglobXnolicm",
+      "gpu": 5,
+      "base": {
+        "tflops": 5154.11,
+        "ms": 6.6798
+      },
+      "cand": {
+        "error": "rc=-6",
+        "stderr": ":0:rocdevice.cpp            :3580: 1124046708089 us:  Callback: Queue 0x7f61b0800000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29\n"
+      }
+    },
+    {
+      "shape": "DLA1",
+      "tag": "iterilp+regclassglob+sinkavoidspill",
+      "csuf": "_r16c_iterilpXregclassglobXsinkavoidspill",
+      "gpu": 7,
+      "base": {
+        "tflops": 5131.17,
+        "ms": 6.7097
+      },
+      "cand": {
+        "error": "rc=-6",
+        "stderr": "Memory access fault by GPU node-9 (Agent handle: 0x55c03fb537c0) on address 0x10412720000. Reason: Write access to a read-only page.\n"
+      }
+    },
+    {
+      "shape": "DLA1",
+      "tag": "iterilp+regclassglob+nolicm",
+      "csuf": "_r16c_iterilpXregclassglobXnolicm",
+      "gpu": 6,
+      "base": {
+        "tflops": 5100.03,
+        "ms": 6.7506
+      },
+      "cand": {
+        "error": "rc=-6",
+        "stderr": "Memory access fault by GPU node-8 (Agent handle: 0x55f623a942b0) on address 0xf5ebf20000. Reason: Write access to a read-only page.\n"
+      }
+    },
+    {
+      "shape": "DLA2",
+      "tag": "iterilp+regclassglob",
+      "csuf": "_r16c_iterilpXregclassglob",
+      "gpu": 5,
+      "base": {
+        "tflops": 4276.12,
+        "ms": 8.0513
+      },
+      "cand": {
+        "error": "rc=-6",
+        "stderr": ":0:rocdevice.cpp            :3580: 1124238394057 us:  Callback: Queue 0x7f3df9c00000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29\n"
+      }
+    },
+    {
+      "shape": "DLA2",
+      "tag": "iterilp+nolicm",
+      "csuf": "_r16c_iterilpXnolicm",
+      "gpu": 7,
+      "base": {
+        "tflops": 4247.97,
+        "ms": 8.1047
+      },
+      "cand": {
+        "error": "rc=-6",
+        "stderr": ":0:rocdevice.cpp            :3580: 1124444958200 us:  Callback: Queue 0x7f0755e00000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29\n"
+      }
+    },
+    {
+      "shape": "DLA2",
+      "tag": "iterilp+noemxpre",
+      "csuf": "_r16c_iterilpXnoemxpre",
+      "gpu": 5,
+      "base": {
+        "tflops": 4276.57,
+        "ms": 8.0505
+      },
+      "cand": {
+        "error": "rc=-6",
+        "stderr": ":0:rocdevice.cpp            :3580: 1124499501499 us:  Callback: Queue 0x7fbaf1600000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29\n"
+      }
+    },
+    {
+      "shape": "DLA2",
+      "tag": "iterilp+sinkavoidspill",
+      "csuf": "_r16c_iterilpXsinkavoidspill",
+      "gpu": 6,
+      "base": {
+        "tflops": 4223.63,
+        "ms": 8.1514
+      },
+      "cand": {
+        "error": "rc=-6",
+        "stderr": ":0:rocdevice.cpp            :3580: 1124511159081 us:  Callback: Queue 0x7f75c9c00000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29\n"
+      }
+    },
+    {
+      "shape": "DLA2",
+      "tag": "regclassglob+nolicm",
+      "csuf": "_r16c_regclassglobXnolicm",
+      "gpu": 5,
+      "comp": 4536.4,
+      "base_tflops": 4264.8,
+      "cand_tflops": 4270.18,
+      "delta_tflops": 5.38,
+      "delta_pp": 0.119,
+      "gate_pass": false
+    },
+    {
+      "shape": "DLA2",
+      "tag": "regclassglob+sinkavoidspill",
+      "csuf": "_r16c_regclassglobXsinkavoidspill",
+      "gpu": 6,
+      "comp": 4536.4,
+      "base_tflops": 4218.01,
+      "cand_tflops": 4228.57,
+      "delta_tflops": 10.56,
+      "delta_pp": 0.233,
+      "gate_pass": false
+    },
+    {
+      "shape": "DLA2",
+      "tag": "regclassglob+noemxpre",
+      "csuf": "_r16c_regclassglobXnoemxpre",
+      "gpu": 6,
+      "comp": 4536.4,
+      "base_tflops": 4224.42,
+      "cand_tflops": 4222.08,
+      "delta_tflops": -2.34,
+      "delta_pp": -0.052,
+      "gate_pass": false
+    },
+    {
+      "shape": "DLA2",
+      "tag": "iterilp+largeivf2",
+      "csuf": "_r16c_iterilpXlargeivf2",
+      "gpu": 7,
+      "base": {
+        "tflops": 4246.1,
+        "ms": 8.1083
+      },
+      "cand": {
+        "error": "rc=-6",
+        "stderr": ":0:rocdevice.cpp            :3580: 1124662790822 us:  Callback: Queue 0x7fe59f000000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29\n"
+      }
+    },
+    {
+      "shape": "DLA2",
+      "tag": "regclassglob+nolicm+sinkavoidspill",
+      "csuf": "_r16c_regclassglobXnolicmXsinkavoidspill",
+      "gpu": 5,
+      "comp": 4536.4,
+      "base_tflops": 4274.81,
+      "cand_tflops": 4276.58,
+      "delta_tflops": 1.77,
+      "delta_pp": 0.039,
+      "gate_pass": false
+    },
+    {
+      "shape": "DLA2",
+      "tag": "sinkavoidspill+nolicm",
+      "csuf": "_r16c_sinkavoidspillXnolicm",
+      "gpu": 7,
+      "comp": 4536.4,
+      "base_tflops": 4249.13,
+      "cand_tflops": 4241.45,
+      "delta_tflops": -7.68,
+      "delta_pp": -0.169,
+      "gate_pass": false
+    },
+    {
+      "shape": "DLA2",
+      "tag": "iterilp+regclassglob+nolicm",
+      "csuf": "_r16c_iterilpXregclassglobXnolicm",
+      "gpu": 6,
+      "base": {
+        "tflops": 4216.35,
+        "ms": 8.1655
+      },
+      "cand": {
+        "error": "rc=-6",
+        "stderr": ":0:rocdevice.cpp            :3580: 1124893041156 us:  Callback: Queue 0x7fed65200000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29\n"
+      }
+    },
+    {
+      "shape": "DLA7",
+      "tag": "iterilp+regclassglob",
+      "csuf": "_r16c_iterilpXregclassglob",
+      "gpu": 5,
+      "base": {
+        "tflops": 4184.25,
+        "ms": 1.8394
+      },
+      "cand": {
+        "error": "rc=-6",
+        "stderr": ":0:rocdevice.cpp            :3580: 1124942167327 us:  Callback: Queue 0x7fa3c6000000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29\n"
+      }
+    },
+    {
+      "shape": "DLA7",
+      "tag": "iterilp+sinkavoidspill",
+      "csuf": "_r16c_iterilpXsinkavoidspill",
+      "gpu": 6,
+      "base": {
+        "tflops": 4198.48,
+        "ms": 1.8332
+      },
+      "cand": {
+        "error": "rc=-6",
+        "stderr": ":0:rocdevice.cpp            :3580: 1124970007196 us:  Callback: Queue 0x7f62e5200000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29\n"
+      }
+    },
+    {
+      "shape": "DLA2",
+      "tag": "iterilp+regclassglob+sinkavoidspill",
+      "csuf": "_r16c_iterilpXregclassglobXsinkavoidspill",
+      "gpu": 7,
+      "base": {
+        "tflops": 4252.93,
+        "ms": 8.0952
+      },
+      "cand": {
+        "error": "rc=-6",
+        "stderr": ":0:rocdevice.cpp            :3580: 1124971351122 us:  Callback: Queue 0x7f9cf1e00000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29\n"
+      }
+    },
+    {
+      "shape": "DLA7",
+      "tag": "iterilp+nolicm",
+      "csuf": "_r16c_iterilpXnolicm",
+      "gpu": 7,
+      "base": {
+        "tflops": 4169.81,
+        "ms": 1.8458
+      },
+      "cand": {
+        "error": "rc=-6",
+        "stderr": ":0:rocdevice.cpp            :3580: 1125027649188 us:  Callback: Queue 0x7fb431800000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29\n"
+      }
+    },
+    {
+      "shape": "DLA7",
+      "tag": "iterilp+largeivf2",
+      "csuf": "_r16c_iterilpXlargeivf2",
+      "gpu": 6,
+      "base": {
+        "tflops": 4202.2,
+        "ms": 1.8316
+      },
+      "cand": {
+        "error": "rc=-6",
+        "stderr": ":0:rocdevice.cpp            :3580: 1125032536935 us:  Callback: Queue 0x7fcd46600000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29\n"
+      }
+    },
+    {
+      "shape": "DLA7",
+      "tag": "regclassglob+sinkavoidspill",
+      "csuf": "_r16c_regclassglobXsinkavoidspill",
+      "gpu": 7,
+      "comp": 4466.6,
+      "base_tflops": 4171.16,
+      "cand_tflops": 4178.26,
+      "delta_tflops": 7.1,
+      "delta_pp": 0.159,
+      "gate_pass": false
+    },
+    {
+      "shape": "DLA7",
+      "tag": "iterilp+noemxpre",
+      "csuf": "_r16c_iterilpXnoemxpre",
+      "gpu": 5,
+      "base": {
+        "tflops": 4219.14,
+        "ms": 1.8242
+      },
+      "cand": {
+        "error": "rc=-6",
+        "stderr": ":0:rocdevice.cpp            :3580: 1125042284276 us:  Callback: Queue 0x7efffe000000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29\n"
+      }
+    },
+    {
+      "shape": "DLA7",
+      "tag": "regclassglob+nolicm",
+      "csuf": "_r16c_regclassglobXnolicm",
+      "gpu": 5,
+      "comp": 4466.6,
+      "base_tflops": 3838.55,
+      "cand_tflops": 4206.35,
+      "delta_tflops": 367.8,
+      "delta_pp": 8.234,
+      "gate_pass": true
+    },
+    {
+      "shape": "DLA7",
+      "tag": "regclassglob+noemxpre",
+      "csuf": "_r16c_regclassglobXnoemxpre",
+      "gpu": 6,
+      "comp": 4466.6,
+      "base_tflops": 4202.07,
+      "cand_tflops": 4199.91,
+      "delta_tflops": -2.16,
+      "delta_pp": -0.048,
+      "gate_pass": false
+    },
+    {
+      "shape": "DLA7",
+      "tag": "sinkavoidspill+nolicm",
+      "csuf": "_r16c_sinkavoidspillXnolicm",
+      "gpu": 7,
+      "comp": 4466.6,
+      "base_tflops": 4176.2,
+      "cand_tflops": 4169.01,
+      "delta_tflops": -7.19,
+      "delta_pp": -0.161,
+      "gate_pass": false
+    },
+    {
+      "shape": "DLA7",
+      "tag": "regclassglob+nolicm+sinkavoidspill",
+      "csuf": "_r16c_regclassglobXnolicmXsinkavoidspill",
+      "gpu": 5,
+      "comp": 4466.6,
+      "base_tflops": 4189.61,
+      "cand_tflops": 4192.21,
+      "delta_tflops": 2.6,
+      "delta_pp": 0.058,
+      "gate_pass": false
+    },
+    {
+      "shape": "P1",
+      "tag": "iterilp+sinkavoidspill",
+      "csuf": "_r16c_iterilpXsinkavoidspill",
+      "gpu": 5,
+      "comp": 5273.0,
+      "base_tflops": 5007.17,
+      "cand_tflops": 5030.47,
+      "delta_tflops": 23.3,
+      "delta_pp": 0.442,
+      "gate_pass": false
+    },
+    {
+      "shape": "DLA7",
+      "tag": "iterilp+regclassglob+nolicm",
+      "csuf": "_r16c_iterilpXregclassglobXnolicm",
+      "gpu": 6,
+      "base": {
+        "tflops": 4204.01,
+        "ms": 1.8308
+      },
+      "cand": {
+        "error": "rc=-6",
+        "stderr": ":0:rocdevice.cpp            :3580: 1125116766973 us:  Callback: Queue 0x7f6cef000000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29\n"
+      }
+    },
+    {
+      "shape": "P1",
+      "tag": "iterilp+regclassglob",
+      "csuf": "_r16c_iterilpXregclassglob",
+      "gpu": 6,
+      "base": {
+        "tflops": 853.2,
+        "ms": 4.5104
+      },
+      "cand": {
+        "error": "rc=-6",
+        "stderr": "Memory access fault by GPU node-8 (Agent handle: 0x562da257b560) on address 0x6ef91cd02000. Reason: Write access to a read-only page.\n"
+      }
+    },
+    {
+      "shape": "DLA7",
+      "tag": "iterilp+regclassglob+sinkavoidspill",
+      "csuf": "_r16c_iterilpXregclassglobXsinkavoidspill",
+      "gpu": 7,
+      "base": {
+        "tflops": 4175.6,
+        "ms": 1.8432
+      },
+      "cand": {
+        "error": "rc=-6",
+        "stderr": ":0:rocdevice.cpp            :3580: 1125129556872 us:  Callback: Queue 0x7f899b200000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29\n"
+      }
+    },
+    {
+      "shape": "P1",
+      "tag": "iterilp+noemxpre",
+      "csuf": "_r16c_iterilpXnoemxpre",
+      "gpu": 5,
+      "comp": 5273.0,
+      "base_tflops": 5007.88,
+      "cand_tflops": 5051.24,
+      "delta_tflops": 43.36,
+      "delta_pp": 0.822,
+      "gate_pass": true
+    },
+    {
+      "shape": "P1",
+      "tag": "iterilp+nolicm",
+      "csuf": "_r16c_iterilpXnolicm",
+      "gpu": 7,
+      "comp": 5273.0,
+      "base_tflops": 4991.39,
+      "cand_tflops": 4963.38,
+      "delta_tflops": -28.01,
+      "delta_pp": -0.531,
+      "gate_pass": false
+    },
+    {
+      "shape": "P1",
+      "tag": "iterilp+largeivf2",
+      "csuf": "_r16c_iterilpXlargeivf2",
+      "gpu": 6,
+      "comp": 5273.0,
+      "base_tflops": 4978.97,
+      "cand_tflops": 5021.8,
+      "delta_tflops": 42.83,
+      "delta_pp": 0.812,
+      "gate_pass": true
+    },
+    {
+      "shape": "P1",
+      "tag": "sinkavoidspill+nolicm",
+      "csuf": "_r16c_sinkavoidspillXnolicm",
+      "gpu": 5,
+      "comp": 5273.0,
+      "base_tflops": 5018.33,
+      "cand_tflops": 5010.55,
+      "delta_tflops": -7.78,
+      "delta_pp": -0.148,
+      "gate_pass": false
+    },
+    {
+      "shape": "P1",
+      "tag": "regclassglob+sinkavoidspill",
+      "csuf": "_r16c_regclassglobXsinkavoidspill",
+      "gpu": 7,
+      "comp": 5273.0,
+      "base_tflops": 4984.04,
+      "cand_tflops": 4977.88,
+      "delta_tflops": -6.16,
+      "delta_pp": -0.117,
+      "gate_pass": false
+    },
+    {
+      "shape": "P1",
+      "tag": "regclassglob+noemxpre",
+      "csuf": "_r16c_regclassglobXnoemxpre",
+      "gpu": 6,
+      "comp": 5273.0,
+      "base_tflops": 4975.47,
+      "cand_tflops": 5011.28,
+      "delta_tflops": 35.81,
+      "delta_pp": 0.679,
+      "gate_pass": true
+    },
+    {
+      "shape": "P1",
+      "tag": "regclassglob+nolicm",
+      "csuf": "_r16c_regclassglobXnolicm",
+      "gpu": 7,
+      "comp": 5273.0,
+      "base_tflops": 4972.7,
+      "cand_tflops": 4976.82,
+      "delta_tflops": 4.12,
+      "delta_pp": 0.078,
+      "gate_pass": false
+    },
+    {
+      "shape": "P1",
+      "tag": "iterilp+regclassglob+nolicm",
+      "csuf": "_r16c_iterilpXregclassglobXnolicm",
+      "gpu": 5,
+      "comp": 5273.0,
+      "base_tflops": 5018.44,
+      "cand_tflops": 4969.08,
+      "delta_tflops": -49.36,
+      "delta_pp": -0.936,
+      "gate_pass": false
+    },
+    {
+      "shape": "P1",
+      "tag": "regclassglob+nolicm+sinkavoidspill",
+      "csuf": "_r16c_regclassglobXnolicmXsinkavoidspill",
+      "gpu": 6,
+      "comp": 5273.0,
+      "base_tflops": 4962.92,
+      "cand_tflops": 4959.56,
+      "delta_tflops": -3.36,
+      "delta_pp": -0.064,
+      "gate_pass": false
+    },
+    {
+      "shape": "P1",
+      "tag": "iterilp+regclassglob+sinkavoidspill",
+      "csuf": "_r16c_iterilpXregclassglobXsinkavoidspill",
+      "gpu": 7,
+      "base": {
+        "tflops": 4959.54,
+        "ms": 0.7759
+      },
+      "cand": {
+        "error": "rc=-6",
+        "stderr": "Memory access fault by GPU node-9 (Agent handle: 0x559719ce9f70) on address 0x6f8318b01000. Reason: Write access to a read-only page.\n"
+      }
+    }
+  ],
+  "smoke_passes": [
+    {
+      "shape": "DLA7",
+      "tag": "regclassglob+nolicm",
+      "csuf": "_r16c_regclassglobXnolicm",
+      "delta_pp": 8.234
+    },
+    {
+      "shape": "P1",
+      "tag": "iterilp+noemxpre",
+      "csuf": "_r16c_iterilpXnoemxpre",
+      "delta_pp": 0.822
+    },
+    {
+      "shape": "P1",
+      "tag": "iterilp+largeivf2",
+      "csuf": "_r16c_iterilpXlargeivf2",
+      "delta_pp": 0.812
+    },
+    {
+      "shape": "P1",
+      "tag": "regclassglob+noemxpre",
+      "csuf": "_r16c_regclassglobXnoemxpre",
+      "delta_pp": 0.679
+    }
+  ]
+}

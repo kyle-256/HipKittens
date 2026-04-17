@@ -1,0 +1,11 @@
+Tag  parent_h           iterilp_h          compound_h          vs_parent  vs_iterilp
+--------------------------------------------------------------------------------------------------------------
+S1   c5e5f157c4198194   6b5716413191110a   7fc3b465520823aa    DIFF       DIFF
+S2   986fd93e4ca9b57c   24b04a76a317d57c   d23a1b7c25dfb8f2    DIFF       DIFF
+S3   3eee44ebef3a229c   90a288bfa7c0b816   58ecc2e02c61cc33    DIFF       DIFF
+S4   e60923a0920f10bb   8cd81e1847c66c31   dbaf54e0ef5aa32e    DIFF       DIFF
+S5   45d5a7765c6f0b8d   63a82a63e65fa041   4a13a337b8813eba    DIFF       DIFF
+
+--------------------------------------------------------------------------------------------------------------
+Summary: {'DIFF_iterilp': 5, 'NOOP_iterilp': 0, 'MISSING': 0}
+Saved asm_diff_probe_r16a.json

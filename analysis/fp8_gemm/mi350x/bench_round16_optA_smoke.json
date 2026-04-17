@@ -1,0 +1,118 @@
+{
+  "warmup": 200,
+  "iters": 500,
+  "trim": 0.1,
+  "gate_pp": 0.5,
+  "gpus": [
+    0,
+    1
+  ],
+  "elapsed_minutes": 1.8,
+  "results": [
+    {
+      "tag": "S1",
+      "gpu": 0,
+      "comp": 5245.4,
+      "snr": {
+        "snr_ok": true,
+        "ran": true,
+        "nonzero": 58720238
+      },
+      "parent_suffix": "_lgk2_dc",
+      "iterilp_suffix": "_v16_wpe2_r10a_iterilp",
+      "candidate_suffix": "_lgk2_dc_r16a_iterilp_regclassglob",
+      "parent_tflops": 4799.53,
+      "iterilp_tflops": 4897.48,
+      "cand_tflops": 4119.84,
+      "delta_vs_iterilp_tflops": -777.64,
+      "delta_vs_iterilp_pp": -14.825,
+      "delta_vs_parent_tflops": -679.69,
+      "delta_vs_parent_pp": -12.958,
+      "gate_pass": false
+    },
+    {
+      "tag": "S2",
+      "gpu": 1,
+      "comp": 5525.3,
+      "snr": {
+        "snr_ok": true,
+        "ran": true,
+        "nonzero": 67108728
+      },
+      "parent_suffix": "_u32",
+      "iterilp_suffix": "_u8_r10a_iterilp",
+      "candidate_suffix": "_u32_r16a_iterilp_regclassglob",
+      "parent_tflops": 4987.52,
+      "iterilp_tflops": 5046.24,
+      "cand_tflops": 4972.58,
+      "delta_vs_iterilp_tflops": -73.66,
+      "delta_vs_iterilp_pp": -1.333,
+      "delta_vs_parent_tflops": -14.94,
+      "delta_vs_parent_pp": -0.27,
+      "gate_pass": false
+    },
+    {
+      "tag": "S3",
+      "gpu": 0,
+      "comp": 5568.2,
+      "snr": {
+        "snr_ok": true,
+        "ran": true,
+        "nonzero": 134217709
+      },
+      "parent_suffix": "_v20_memc",
+      "iterilp_suffix": "_v20_memc_r11_iterilp",
+      "candidate_suffix": "_v20_memc_r16a_iterilp_regclassglob",
+      "parent_tflops": 5247.84,
+      "iterilp_tflops": 5346.29,
+      "cand_tflops": 5322.35,
+      "delta_vs_iterilp_tflops": -23.94,
+      "delta_vs_iterilp_pp": -0.43,
+      "delta_vs_parent_tflops": 74.51,
+      "delta_vs_parent_pp": 1.338,
+      "gate_pass": false
+    },
+    {
+      "tag": "S4",
+      "gpu": 1,
+      "comp": 5649.9,
+      "snr": {
+        "snr_ok": true,
+        "ran": true,
+        "nonzero": 117440446
+      },
+      "parent_suffix": "_u16",
+      "iterilp_suffix": "_u16_r11_iterilp",
+      "candidate_suffix": "_u16_r16a_iterilp_regclassglob",
+      "parent_tflops": 5292.82,
+      "iterilp_tflops": 5407.56,
+      "cand_tflops": 5389.72,
+      "delta_vs_iterilp_tflops": -17.84,
+      "delta_vs_iterilp_pp": -0.316,
+      "delta_vs_parent_tflops": 96.9,
+      "delta_vs_parent_pp": 1.715,
+      "gate_pass": false
+    },
+    {
+      "tag": "S5",
+      "gpu": 0,
+      "comp": 5296.1,
+      "snr": {
+        "snr_ok": true,
+        "ran": true,
+        "nonzero": 134217692
+      },
+      "parent_suffix": "_ts_lgk2_memc",
+      "iterilp_suffix": "_ts_lgk2_memc_r11_iterilp",
+      "candidate_suffix": "_ts_lgk2_memc_r16a_iterilp_regclassglob",
+      "parent_tflops": 5086.61,
+      "iterilp_tflops": 5146.71,
+      "cand_tflops": 5083.23,
+      "delta_vs_iterilp_tflops": -63.48,
+      "delta_vs_iterilp_pp": -1.199,
+      "delta_vs_parent_tflops": -3.38,
+      "delta_vs_parent_pp": -0.064,
+      "gate_pass": false
+    }
+  ]
+}

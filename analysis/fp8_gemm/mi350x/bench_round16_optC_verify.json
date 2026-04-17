@@ -1,0 +1,380 @@
+{
+  "warmup": 200,
+  "iters": 500,
+  "trim": 0.1,
+  "reps": 5,
+  "candidates": [
+    {
+      "shape": "P1",
+      "tag": "iterilp+noemxpre",
+      "csuf": "_r16c_iterilpXnoemxpre",
+      "gpu": 6,
+      "comp": 5273.0,
+      "base_runs": [
+        {
+          "tflops": 4986.63,
+          "ms": 0.7717
+        },
+        {
+          "tflops": 4958.05,
+          "ms": 0.7762
+        },
+        {
+          "tflops": 4996.54,
+          "ms": 0.7702
+        },
+        {
+          "tflops": 4929.74,
+          "ms": 0.7806
+        },
+        {
+          "tflops": 4976.13,
+          "ms": 0.7733
+        }
+      ],
+      "cand_runs": [
+        {
+          "tflops": 5009.72,
+          "ms": 0.7682
+        },
+        {
+          "tflops": 4991.92,
+          "ms": 0.7709
+        },
+        {
+          "tflops": 4952.72,
+          "ms": 0.777
+        },
+        {
+          "tflops": 4972.33,
+          "ms": 0.7739
+        },
+        {
+          "tflops": 4973.8,
+          "ms": 0.7737
+        }
+      ],
+      "base_tflops": [
+        4986.63,
+        4958.05,
+        4996.54,
+        4929.74,
+        4976.13
+      ],
+      "cand_tflops": [
+        5009.72,
+        4991.92,
+        4952.72,
+        4972.33,
+        4973.8
+      ],
+      "base_mean": 4969.42,
+      "base_max": 4996.54,
+      "cand_mean": 4980.1,
+      "cand_max": 5009.72,
+      "delta_tflops": 10.68,
+      "delta_pp": 0.203,
+      "gate_mean_ge_max": false,
+      "gate_pp_ge_1": false,
+      "verdict": "FAIL"
+    },
+    {
+      "shape": "P1",
+      "tag": "iterilp+largeivf2",
+      "csuf": "_r16c_iterilpXlargeivf2",
+      "gpu": 7,
+      "comp": 5273.0,
+      "base_runs": [
+        {
+          "tflops": 4978.26,
+          "ms": 0.773
+        },
+        {
+          "tflops": 4999.21,
+          "ms": 0.7698
+        },
+        {
+          "tflops": 4987.45,
+          "ms": 0.7716
+        },
+        {
+          "tflops": 4976.12,
+          "ms": 0.7734
+        },
+        {
+          "tflops": 4995.38,
+          "ms": 0.7704
+        }
+      ],
+      "cand_runs": [
+        {
+          "tflops": 4999.28,
+          "ms": 0.7698
+        },
+        {
+          "tflops": 5003.1,
+          "ms": 0.7692
+        },
+        {
+          "tflops": 5001.64,
+          "ms": 0.7694
+        },
+        {
+          "tflops": 4967.06,
+          "ms": 0.7748
+        },
+        {
+          "tflops": 5012.72,
+          "ms": 0.7677
+        }
+      ],
+      "base_tflops": [
+        4978.26,
+        4999.21,
+        4987.45,
+        4976.12,
+        4995.38
+      ],
+      "cand_tflops": [
+        4999.28,
+        5003.1,
+        5001.64,
+        4967.06,
+        5012.72
+      ],
+      "base_mean": 4987.28,
+      "base_max": 4999.21,
+      "cand_mean": 4996.76,
+      "cand_max": 5012.72,
+      "delta_tflops": 9.48,
+      "delta_pp": 0.18,
+      "gate_mean_ge_max": false,
+      "gate_pp_ge_1": false,
+      "verdict": "FAIL"
+    },
+    {
+      "shape": "DLA7",
+      "tag": "regclassglob+nolicm",
+      "csuf": "_r16c_regclassglobXnolicm",
+      "gpu": 5,
+      "comp": 4466.6,
+      "base_runs": [
+        {
+          "tflops": 4200.75,
+          "ms": 1.8322
+        },
+        {
+          "tflops": 4191.17,
+          "ms": 1.8364
+        },
+        {
+          "tflops": 4187.96,
+          "ms": 1.8378
+        },
+        {
+          "tflops": 4170.26,
+          "ms": 1.8456
+        },
+        {
+          "tflops": 4195.87,
+          "ms": 1.8343
+        }
+      ],
+      "cand_runs": [
+        {
+          "tflops": 4195.98,
+          "ms": 1.8343
+        },
+        {
+          "tflops": 4192.59,
+          "ms": 1.8358
+        },
+        {
+          "tflops": 4197.66,
+          "ms": 1.8335
+        },
+        {
+          "tflops": 4200.2,
+          "ms": 1.8324
+        },
+        {
+          "tflops": 4180.75,
+          "ms": 1.841
+        }
+      ],
+      "base_tflops": [
+        4200.75,
+        4191.17,
+        4187.96,
+        4170.26,
+        4195.87
+      ],
+      "cand_tflops": [
+        4195.98,
+        4192.59,
+        4197.66,
+        4200.2,
+        4180.75
+      ],
+      "base_mean": 4189.2,
+      "base_max": 4200.75,
+      "cand_mean": 4193.44,
+      "cand_max": 4200.2,
+      "delta_tflops": 4.23,
+      "delta_pp": 0.095,
+      "gate_mean_ge_max": false,
+      "gate_pp_ge_1": false,
+      "verdict": "FAIL"
+    },
+    {
+      "shape": "P1",
+      "tag": "regclassglob+noemxpre",
+      "csuf": "_r16c_regclassglobXnoemxpre",
+      "gpu": 5,
+      "comp": 5273.0,
+      "base_runs": [
+        {
+          "tflops": 3349.15,
+          "ms": 1.149
+        },
+        {
+          "tflops": 4992.18,
+          "ms": 0.7709
+        },
+        {
+          "tflops": 5010.96,
+          "ms": 0.768
+        },
+        {
+          "tflops": 5011.88,
+          "ms": 0.7678
+        },
+        {
+          "tflops": 4990.49,
+          "ms": 0.7711
+        }
+      ],
+      "cand_runs": [
+        {
+          "tflops": 5027.22,
+          "ms": 0.7655
+        },
+        {
+          "tflops": 4997.43,
+          "ms": 0.7701
+        },
+        {
+          "tflops": 5021.81,
+          "ms": 0.7663
+        },
+        {
+          "tflops": 5064.34,
+          "ms": 0.7599
+        },
+        {
+          "tflops": 5035.2,
+          "ms": 0.7643
+        }
+      ],
+      "base_tflops": [
+        3349.15,
+        4992.18,
+        5010.96,
+        5011.88,
+        4990.49
+      ],
+      "cand_tflops": [
+        5027.22,
+        4997.43,
+        5021.81,
+        5064.34,
+        5035.2
+      ],
+      "base_mean": 4670.93,
+      "base_max": 5011.88,
+      "cand_mean": 5029.2,
+      "cand_max": 5064.34,
+      "delta_tflops": 358.27,
+      "delta_pp": 6.794,
+      "gate_mean_ge_max": true,
+      "gate_pp_ge_1": true,
+      "verdict": "WIN"
+    }
+  ],
+  "wins": [
+    {
+      "shape": "P1",
+      "tag": "regclassglob+noemxpre",
+      "csuf": "_r16c_regclassglobXnoemxpre",
+      "gpu": 5,
+      "comp": 5273.0,
+      "base_runs": [
+        {
+          "tflops": 3349.15,
+          "ms": 1.149
+        },
+        {
+          "tflops": 4992.18,
+          "ms": 0.7709
+        },
+        {
+          "tflops": 5010.96,
+          "ms": 0.768
+        },
+        {
+          "tflops": 5011.88,
+          "ms": 0.7678
+        },
+        {
+          "tflops": 4990.49,
+          "ms": 0.7711
+        }
+      ],
+      "cand_runs": [
+        {
+          "tflops": 5027.22,
+          "ms": 0.7655
+        },
+        {
+          "tflops": 4997.43,
+          "ms": 0.7701
+        },
+        {
+          "tflops": 5021.81,
+          "ms": 0.7663
+        },
+        {
+          "tflops": 5064.34,
+          "ms": 0.7599
+        },
+        {
+          "tflops": 5035.2,
+          "ms": 0.7643
+        }
+      ],
+      "base_tflops": [
+        3349.15,
+        4992.18,
+        5010.96,
+        5011.88,
+        4990.49
+      ],
+      "cand_tflops": [
+        5027.22,
+        4997.43,
+        5021.81,
+        5064.34,
+        5035.2
+      ],
+      "base_mean": 4670.93,
+      "base_max": 5011.88,
+      "cand_mean": 5029.2,
+      "cand_max": 5064.34,
+      "delta_tflops": 358.27,
+      "delta_pp": 6.794,
+      "gate_mean_ge_max": true,
+      "gate_pp_ge_1": true,
+      "verdict": "WIN"
+    }
+  ]
+}

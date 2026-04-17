@@ -1,0 +1,15 @@
+{
+  "status": "SKIPPED",
+  "reason": "0/5 candidates passed smoke gate (>=+0.5pp vs iterilp-winner)",
+  "smoke_deltas_pp_vs_iterilp": {
+    "S1": -14.82,
+    "S2": -1.33,
+    "S3": -0.43,
+    "S4": -0.32,
+    "S5": -1.2
+  },
+  "see": [
+    "bench_round16_optA_smoke.json",
+    "round16_optA_verdict.md"
+  ]
+}

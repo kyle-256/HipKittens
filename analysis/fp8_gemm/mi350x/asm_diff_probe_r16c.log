@@ -1,0 +1,53 @@
+Shape  Compound                                            hash               parent_hash         verdict
+--------------------------------------------------------------------------------------------------------------
+DLA1   iterilp+regclassglob                                cef61e59f60bc1b2   30ab758acebbaead    DIFF
+DLA1   iterilp+sinkavoidspill                              98c79778b0af6329   30ab758acebbaead    DIFF
+DLA1   iterilp+nolicm                                      5ad2eb925ea9de6b   30ab758acebbaead    DIFF
+DLA1   iterilp+noemxpre                                    a778430f368d21d8   30ab758acebbaead    DIFF
+DLA1   iterilp+largeivf2                                   fb9f2bbfafc1cfa9   30ab758acebbaead    DIFF
+DLA1   regclassglob+sinkavoidspill                         33907728d9747297   30ab758acebbaead    DIFF
+DLA1   regclassglob+nolicm                                 f41c79272a8c8572   30ab758acebbaead    DIFF
+DLA1   regclassglob+noemxpre                               07c5ff220aac78ac   30ab758acebbaead    DIFF
+DLA1   sinkavoidspill+nolicm                               24af05148677da8c   30ab758acebbaead    DIFF
+DLA1   regclassglob+nolicm+sinkavoidspill                  c919de0cb04ce96d   30ab758acebbaead    DIFF
+DLA1   iterilp+regclassglob+nolicm                         d9be66377173adb7   30ab758acebbaead    DIFF
+DLA1   iterilp+regclassglob+sinkavoidspill                 b6c842070a0b5e18   30ab758acebbaead    DIFF
+DLA2   iterilp+regclassglob                                d85d127a9b78cbab   894559f8992bca1b    DIFF
+DLA2   iterilp+sinkavoidspill                              2085a374d65d2843   894559f8992bca1b    DIFF
+DLA2   iterilp+nolicm                                      1e49faeb945694d9   894559f8992bca1b    DIFF
+DLA2   iterilp+noemxpre                                    d4ff959691b357d9   894559f8992bca1b    DIFF
+DLA2   iterilp+largeivf2                                   d1b77467ecd05052   894559f8992bca1b    DIFF
+DLA2   regclassglob+sinkavoidspill                         1adf08f0152204cc   894559f8992bca1b    DIFF
+DLA2   regclassglob+nolicm                                 2c4fb29003c2f0c6   894559f8992bca1b    DIFF
+DLA2   regclassglob+noemxpre                               f8a8988d6fd2ac6f   894559f8992bca1b    DIFF
+DLA2   sinkavoidspill+nolicm                               af07ed489945b6d5   894559f8992bca1b    DIFF
+DLA2   regclassglob+nolicm+sinkavoidspill                  940736de3fa62eab   894559f8992bca1b    DIFF
+DLA2   iterilp+regclassglob+nolicm                         4afe73a989f59dbf   894559f8992bca1b    DIFF
+DLA2   iterilp+regclassglob+sinkavoidspill                 904fe1459edce404   894559f8992bca1b    DIFF
+DLA7   iterilp+regclassglob                                1c34a04b9852ff94   f98c216e0b01f906    DIFF
+DLA7   iterilp+sinkavoidspill                              eab34e1db11cfd61   f98c216e0b01f906    DIFF
+DLA7   iterilp+nolicm                                      096f42e54c76123e   f98c216e0b01f906    DIFF
+DLA7   iterilp+noemxpre                                    b274d332754f75c4   f98c216e0b01f906    DIFF
+DLA7   iterilp+largeivf2                                   3ed2c3aac6c0a318   f98c216e0b01f906    DIFF
+DLA7   regclassglob+sinkavoidspill                         55e6183a7f5058b0   f98c216e0b01f906    DIFF
+DLA7   regclassglob+nolicm                                 8c170a0a5b28626e   f98c216e0b01f906    DIFF
+DLA7   regclassglob+noemxpre                               cb10755fbb2b6ef2   f98c216e0b01f906    DIFF
+DLA7   sinkavoidspill+nolicm                               246cbfd2ca09bca4   f98c216e0b01f906    DIFF
+DLA7   regclassglob+nolicm+sinkavoidspill                  1633c9d8815e02fb   f98c216e0b01f906    DIFF
+DLA7   iterilp+regclassglob+nolicm                         cf3243d642cb243f   f98c216e0b01f906    DIFF
+DLA7   iterilp+regclassglob+sinkavoidspill                 4e723bd765c7fb0e   f98c216e0b01f906    DIFF
+P1     iterilp+regclassglob                                39d1d0f128f9ed40   5e7bbabe1b27fa8f    DIFF
+P1     iterilp+sinkavoidspill                              b7a884eb9c484948   5e7bbabe1b27fa8f    DIFF
+P1     iterilp+nolicm                                      1ca082477fadb4af   5e7bbabe1b27fa8f    DIFF
+P1     iterilp+noemxpre                                    a256faec4c5f6be3   5e7bbabe1b27fa8f    DIFF
+P1     iterilp+largeivf2                                   d0d557fdbd2117e0   5e7bbabe1b27fa8f    DIFF
+P1     regclassglob+sinkavoidspill                         86487de57f1b861d   5e7bbabe1b27fa8f    DIFF
+P1     regclassglob+nolicm                                 4bebac4e7755e5df   5e7bbabe1b27fa8f    DIFF
+P1     regclassglob+noemxpre                               b720685ca1b04f4f   5e7bbabe1b27fa8f    DIFF
+P1     sinkavoidspill+nolicm                               bb76f2851482bc4f   5e7bbabe1b27fa8f    DIFF
+P1     regclassglob+nolicm+sinkavoidspill                  daabcbf82bd9e1ef   5e7bbabe1b27fa8f    DIFF
+P1     iterilp+regclassglob+nolicm                         891aa0cfa02eee49   5e7bbabe1b27fa8f    DIFF
+P1     iterilp+regclassglob+sinkavoidspill                 5656bfe3472da187   5e7bbabe1b27fa8f    DIFF
+
+Summary: {'DIFF': 48, 'NOOP': 0, 'MISSING': 0}
+Saved asm_diff_probe_r16c.json   diff_pairs=48

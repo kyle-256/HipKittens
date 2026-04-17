@@ -1,0 +1,67 @@
+{
+  "S1": {
+    "M": 14336,
+    "N": 4096,
+    "K": 32768,
+    "parent_suffix": "_lgk2_dc",
+    "parent_hash": "c5e5f157c4198194",
+    "iterilp_suffix": "_v16_wpe2_r10a_iterilp",
+    "iterilp_hash": "6b5716413191110a",
+    "compound_suffix": "_lgk2_dc_r16a_iterilp_regclassglob",
+    "compound_hash": "7fc3b465520823aa",
+    "vs_parent": "DIFF",
+    "vs_iterilp": "DIFF"
+  },
+  "S2": {
+    "M": 16384,
+    "N": 4096,
+    "K": 28672,
+    "parent_suffix": "_u32",
+    "parent_hash": "986fd93e4ca9b57c",
+    "iterilp_suffix": "_u8_r10a_iterilp",
+    "iterilp_hash": "24b04a76a317d57c",
+    "compound_suffix": "_u32_r16a_iterilp_regclassglob",
+    "compound_hash": "d23a1b7c25dfb8f2",
+    "vs_parent": "DIFF",
+    "vs_iterilp": "DIFF"
+  },
+  "S3": {
+    "M": 4096,
+    "N": 32768,
+    "K": 28672,
+    "parent_suffix": "_v20_memc",
+    "parent_hash": "3eee44ebef3a229c",
+    "iterilp_suffix": "_v20_memc_r11_iterilp",
+    "iterilp_hash": "90a288bfa7c0b816",
+    "compound_suffix": "_v20_memc_r16a_iterilp_regclassglob",
+    "compound_hash": "58ecc2e02c61cc33",
+    "vs_parent": "DIFF",
+    "vs_iterilp": "DIFF"
+  },
+  "S4": {
+    "M": 4096,
+    "N": 28672,
+    "K": 32768,
+    "parent_suffix": "_u16",
+    "parent_hash": "e60923a0920f10bb",
+    "iterilp_suffix": "_u16_r11_iterilp",
+    "iterilp_hash": "8cd81e1847c66c31",
+    "compound_suffix": "_u16_r16a_iterilp_regclassglob",
+    "compound_hash": "dbaf54e0ef5aa32e",
+    "vs_parent": "DIFF",
+    "vs_iterilp": "DIFF"
+  },
+  "S5": {
+    "M": 4096,
+    "N": 32768,
+    "K": 14336,
+    "parent_suffix": "_ts_lgk2_memc",
+    "parent_hash": "45d5a7765c6f0b8d",
+    "iterilp_suffix": "_ts_lgk2_memc_r11_iterilp",
+    "iterilp_hash": "63a82a63e65fa041",
+    "compound_suffix": "_ts_lgk2_memc_r16a_iterilp_regclassglob",
+    "compound_hash": "4a13a337b8813eba",
+    "vs_parent": "DIFF",
+    "vs_iterilp": "DIFF"
+  }
+}

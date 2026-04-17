@@ -1,0 +1,28 @@
+Total builds: 25  (workers=8)  (5 iterilp bases + 20 compounds)
+  S3/iterilp_base/_r11_iterilp         cached    (0.0s)  _v20_memc_r11_iterilp
+  S4/iterilp_base/_r11_iterilp         cached    (0.0s)  _u16_r11_iterilp
+  S5/iterilp_base/_r11_iterilp         cached    (0.0s)  _ts_lgk2_memc_r11_iterilp
+  S1/compound/sinkavoidspill           OK        (4.5s)  _lgk2_dc_r16b_iterilp_sinkavoidspill
+  S1/iterilp_base/_r10_iterilp         OK        (4.5s)  _lgk2_dc_r10_iterilp
+  S1/compound/noemxpre                 OK        (4.5s)  _lgk2_dc_r16b_iterilp_noemxpre
+  S1/compound/largeivf2                OK        (4.6s)  _lgk2_dc_r16b_iterilp_largeivf2
+  S1/compound/nolicm                   OK        (4.6s)  _lgk2_dc_r16b_iterilp_nolicm
+  S2/iterilp_base/_r10_iterilp         OK        (5.1s)  _u32_r10_iterilp
+  S2/compound/largeivf2                OK        (5.1s)  _u32_r16b_iterilp_largeivf2
+  S2/compound/noemxpre                 OK        (5.2s)  _u32_r16b_iterilp_noemxpre
+  S3/compound/largeivf2                OK        (4.5s)  _v20_memc_r16b_iterilp_largeivf2
+  S3/compound/nolicm                   OK        (4.5s)  _v20_memc_r16b_iterilp_nolicm
+  S3/compound/noemxpre                 OK        (4.6s)  _v20_memc_r16b_iterilp_noemxpre
+  S2/compound/nolicm                   OK        (5.1s)  _u32_r16b_iterilp_nolicm
+  S3/compound/sinkavoidspill           OK        (4.5s)  _v20_memc_r16b_iterilp_sinkavoidspill
+  S2/compound/sinkavoidspill           OK        (5.2s)  _u32_r16b_iterilp_sinkavoidspill
+  S4/compound/noemxpre                 OK        (4.6s)  _u16_r16b_iterilp_noemxpre
+  S4/compound/largeivf2                OK        (4.7s)  _u16_r16b_iterilp_largeivf2
+  S4/compound/sinkavoidspill           OK        (4.6s)  _u16_r16b_iterilp_sinkavoidspill
+  S5/compound/noemxpre                 OK        (4.6s)  _ts_lgk2_memc_r16b_iterilp_noemxpre
+  S4/compound/nolicm                   OK        (4.7s)  _u16_r16b_iterilp_nolicm
+  S5/compound/nolicm                   OK        (4.5s)  _ts_lgk2_memc_r16b_iterilp_nolicm
+  S5/compound/largeivf2                OK        (4.6s)  _ts_lgk2_memc_r16b_iterilp_largeivf2
+  S5/compound/sinkavoidspill           OK        (4.6s)  _ts_lgk2_memc_r16b_iterilp_sinkavoidspill
+
+Elapsed: 14.4s   ok=22 cached=3 fail=0
