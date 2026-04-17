@@ -15,7 +15,7 @@
 - **Avg ratio**: 100.8%
 - **Auto-tune variants**: 95 (已饱和，所有交叉积均已穷举)
 
-## 已做的优化 (14项)
+## 已做的优化 (19项)
 1. Store block reorder (A0Bl,A0Br,A1Bl,A1Br) — +0.8%
 2. MFMA operand SWAP — 正确但慢, auto-tune 选项
 3. TAIL_SPLIT=1 — 小K帮助, 大K退化, auto-tune 选项
@@ -30,6 +30,11 @@
 12. GM×LGK cross-products — gm8_lgk2, ts_gm2_lgk2, ts_gm2_lgk2_v12 (边际0.1-0.3pp)
 13. 95-variant auto-tune (全组合穷举)
 14. gl.cuh size_t overflow fix
+15. DIRECT_BL (half-direct Bl from preshuffled global) — DEAD END, 8-15% slower
+16. NT_STORE (non-temporal stores, bypass L2) — DEAD END, 15-25% slower
+17. PACKED_STORE (bf16x2 dword stores for SWAP path) — DEAD END, SWAP path inherently slower
+18. Compiler flag tuning (O2, clause, inline_all) — DEAD END, ±0.4% noise
+19. 18 new variant combos (ext_br+lgk, gm+lgk, tv+lgk) — DEAD END, 0 WINs
 
 ## Auto-tune 空间已饱和 (多轮验证)
 以下全部测试过，无法翻转任何 LOSE shape:
@@ -63,6 +68,11 @@
 - **PF_N=1/2**: 减少 PF 深度 → 退化 2-6%
 - **Asymmetric PF**: 不对称 Step3/Step4 PF 深度 → 无效
 - **GM×LGK/TAIL_VMCNT cross-products**: 边际改进不翻WIN
+- **Half-Direct Bl (DIRECT_BL)**: preshuffle B + Bl 从 global buffer_load 直取. 0 spills (253V, 87S, 98KB LDS), 正确. 但全 7 shapes 退化 8-15% (buffer_load ~400 cycle latency, Step4 仅 ~128 cycle MFMA hiding). 大N shapes -13~15%. LDS 减少无法弥补 VMEM latency
+- **NT_STORE (non-temporal stores)**: 全部 global_store_short 加 `nt` modifier 绕过 L2. 全 7 shapes 退化 15-25%. CDNA L2 对 store coalescing 至关重要
+- **PACKED_STORE (bf16x2 dword stores)**: SWAP路径 pack_bf16x2, 减 store 指令 4x. 但 SWAP 路径本身退化 13-34%, packed 无法补偿
+- **Compiler flag tuning**: -O2, -mllvm -amdgpu-max-memory-clause=1/4, -amdgpu-early-inline-all=true → ±0.4% noise, 无改善
+- **18个扩展variant组合**: ts_lgk2+ext_br/gm8/tv16/tv0, ts_gm2_lgk2+v4/v16/ext_br/no_embed, lgk2+ext_br/gm2/gm1/no_embed_v12 → 全部 0 WIN, 全部不如已有 best variant
 - 把 preshuffle 时间不算进比较
 
 ## 近阈值 shapes (最接近翻WIN)
@@ -76,19 +86,26 @@
 | 16384×4096×14336 | 98.4-98.7% | ts_tv16 | 1.3% |
 | 28672×4096×8192 | 97.5-97.7% | gm8_lgk2 | 2.3% |
 
-## 结构性限制
+## 结构性限制 (已证实无法突破)
 - B走LDS是根本瓶颈: +18% read traffic, 2x wait time vs aiter
 - 256 AGPR + B tiles 无法同时放进 256 VGPRs
 - 不 preshuffle B 就不能跳过 LDS
 - N=32768 shapes: B tile 大 → LDS traffic 成为瓶颈
-- Store epilogue: 非SWAP路径无法 pack bf16 stores
+- Store epilogue: 非SWAP路径 s[0..3] 是行连续 (strided), 无法pack. SWAP路径可pack但SWAP本身退化. NT store 绕过 L2 反而退化 (CDNA L2 做 store coalescing)
+- Compiler scheduling: 已达最优, O2/O3/clause/inline 全在 ±0.4% noise
 
-## 可能的未来方向 (高风险/高工作量)
+## 可能的未来方向 — 全部 DEAD END
 1. ~~**Fused Step34**~~ — DEAD END (退化7%)
 2. ~~**ASM rewriter**~~ — DEAD END (无增益, s_nop 硬件强制)
-3. ~~**Profile-guided**~~ — DONE: s_nop=1.4%, waits=3.4%, epilogue=10.5%, 瓶颈在 B-LDS traffic
-4. ~~**GM×LGK / TAIL_VMCNT cross-products**~~ — DEAD END (边际0.1-0.3pp, 不翻WIN)
-5. **Pre-shuffle B** — 唯一根本解决 B-LDS 的方案, 需要 Python 层 preshuffle pass
+3. ~~**Profile-guided**~~ — DONE: 瓶颈在 B-LDS traffic
+4. ~~**GM×LGK / TAIL_VMCNT cross-products**~~ — DEAD END (0.1-0.3pp, 不翻WIN)
+5. ~~**Pre-shuffle B (Half-Direct Bl)**~~ — DEAD END (8-15% 慢, buffer_load latency)
+6. ~~**NT_STORE (non-temporal stores)**~~ — DEAD END (15-25% 慢, L2 对 store coalescing 必要)
+7. ~~**PACKED_STORE (bf16x2)**~~ — DEAD END (SWAP路径本身慢)
+8. ~~**Compiler flag tuning**~~ — DEAD END (noise level)
+9. ~~**18 new variant combos**~~ — DEAD END (0 WINs)
+
+**性能天花板结论**: 当前内核架构 (B-through-LDS, 4-step K-loop pipeline, 256 AGPR/256 VGPR) 下所有已知优化方向已穷尽. 19/42 WIN 是天花板. 突破需要根本性重构 (aiter 架构: A-only-LDS + B-direct-from-global + deep SW pipeline, 需 >256 VGPRs 不可行 on gfx950)
 
 ## Benchmark 规则
 - **warmup=200, iters=500**, trimmed mean 10%

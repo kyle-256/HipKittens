@@ -43,4 +43,6 @@ analysis/fp8_gemm/mi350x/test_buffer_load_lds
 analysis/fp8_gemm/mi350x/test_opsel_scale
 analysis/fp8_gemm/mi350x/gpucore.*
 analysis/fp8_gemm/mi350x/bench_gluon_a4w4_results.json
-.claude/
+.claude/scheduled_tasks.json
+.claude/scheduled_tasks.lock
+.claude/settings.local.json

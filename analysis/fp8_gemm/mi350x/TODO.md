@@ -132,13 +132,24 @@
 - **Asymmetric PF (STEP3_PF_N ≠ STEP4_PF_N)**: 2/8, 8/2 全部不如对称 PF
 - **GM×LGK cross-products**: 边际改进 0.1-0.3pp, 不足以 flip 任何 shape
 - **TAIL_BARRIER_VMCNT tuning (0,4,16)**: ts_tv16 在部分 shapes 边际最优, 但 < 0.5pp 改进
+- **Half-Direct Bl (DIRECT_BL)**: preshuffle B后, Bl 从 global buffer_load 直取 (跳过LDS). 0 spill (253 VGPRs, 87 SGPRs, 98KB LDS). 但 buffer_load 延迟 ~400 cycles, Step4 只有 ~128 cycles MFMA 隐藏 → 全 7 shapes 退化 8-15%. 大N shapes (32768) 退化 13-15%, 最差 -15.3% (6144×4096×16384). LDS 减少33% (131→98KB) 无法弥补 VMEM latency penalty
+- **NT_STORE (non-temporal stores)**: 全部 global_store_short 加 `nt` modifier 绕过 L2. 结果: 全 7 近阈值 shapes 退化 15-25% (最差 -25%). CDNA L2 对 store coalescing 至关重要, 绕过 L2 = 直写 HBM = 慢. NT+SWAP 组合退化 34-72%
+- **PACKED_STORE (bf16x2 dword stores)**: SWAP路径 store_block_inner 中用 pack_bf16x2 将 4×2B stores 合并为 2×4B stores. 需要 SWAP_STEP34_MAIN=1. SWAP 路径本身退化 13-34%, packed 不改善
+- **Compiler flag tuning**: 测试 -O2, -mllvm -amdgpu-max-memory-clause=1/4, -mllvm -amdgpu-early-inline-all=true. 结果: 前两个shape ±0.4% noise, 6144×4096×16384 O2比O3好5%但仍远低于目标. 编译器调优无法翻WIN
+- **18个未测variant组合**: ts_lgk2_ext_br, ts_lgk2_gm8, ts_lgk2_tv16/tv0, ts_gm2_lgk2_v4/v16/ext_br/no_embed, lgk2_ext_br/gm2/gm1/no_embed_v12 等 → 全部 0 WIN, 全部不如已有best variant
 - 把 preshuffle 时间不算进比较 — 用户明确拒绝过
 
 ## 可能的未来方向 (高风险/高工作量)
-1. ~~**Fused Step34**~~ — DEAD END, 测过, 全面退化 ~7%
-2. ~~**ASM rewriter**~~ — DEAD END, s_nop 是硬件强制 hazard, inter-block code 被 MFMA pipeline 隐藏, 无增益
-3. **Pre-shuffle B** — 唯一能从根本上消除 B-LDS 瓶颈的方案, 但需要 Python 层增加 preshuffle pass. 训练场景 preshuffle 成本可分摊, 推理场景不可接受
-4. **rocprof 分析** (已做): s_nop=1.4%, waits=3.4%, epilogue_stores=10.5%. 瓶颈在结构层面 (B-LDS traffic), 不在 instruction scheduling
+1. ~~**Fused Step34**~~ — DEAD END, 退化 ~7%
+2. ~~**ASM rewriter**~~ — DEAD END, s_nop 硬件强制, 无增益
+3. ~~**Pre-shuffle B (Half-Direct Bl)**~~ — DEAD END, 8-15% 慢 (buffer_load latency)
+4. ~~**rocprof 分析**~~ — DONE: 瓶颈在 B-LDS traffic, 不在 scheduling
+5. ~~**NT_STORE (non-temporal stores)**~~ — DEAD END, 15-25% 慢 (L2 对 store coalescing 必要)
+6. ~~**PACKED_STORE (bf16x2 dword stores)**~~ — DEAD END, SWAP路径必需, SWAP本身退化
+7. ~~**Compiler flag tuning**~~ — DEAD END, ±0.4% noise
+8. ~~**Extended variant combos (18 new)**~~ — DEAD END, 0 WINs
+
+**结论**: 当前内核架构 (B-through-LDS) 下所有已知优化方向已穷尽. 19/42 WIN 是当前架构的性能天花板. 要突破需要根本性的内核重构 (如 aiter 架构: 只有 A 走 LDS, B 通过深度软件流水直接从 global 加载, 需要 >256 VGPRs 的寄存器预算)
 
 ## Rocprof 分析结论 (2026-04-16)
 对生产 .s (N=32768, K=4096, TS=1, LGK2) 做了 PC sampling 和 assembly 分析:
