@@ -203,6 +203,116 @@ using namespace kittens;
 #define MXFP4_TAIL_BARRIER_INST "s_waitcnt vmcnt(" MXFP4_STR(TAIL_BARRIER_VMCNT) ")\ns_barrier\n"
 #endif
 
+// ───── R19B: per-site (and vmcnt-relax) finer-grained barrier control ─────
+// Allow individual sites to be flipped to waitcnt-only without affecting other sites.
+// Each per-site macro defaults to the corresponding aggregate macro (STEP3 or STEP12)
+// so existing R18A behavior is preserved bit-exactly.
+//
+// STEP3 sites (live with default STEP3_EMBED_BARRIER=1):
+//   _S2 = template kpair_32mfma_with_lds_and_pf            (line ~1259)
+//   _S3 = template kpair_32mfma_with_lds_rowspread_pf      (line ~1452)
+//   _S4 = template kpair_32mfma_with_lds_and_pf_swapped_sel (line ~1677)
+// STEP3 sites (dead with default STEP3_EMBED_BARRIER=1):
+//   _S1 = kpair_64mfma_step34 entry (FUSED_STEP34=1 only,  line ~1022)
+//   _S5 = TAIL_SPLIT inner            (!STEP3_EMBED_BARRIER, line ~2127)
+//   _S6 = TAIL_SPLIT outer            (!STEP3_EMBED_BARRIER, line ~2314)
+//   _S7 = no-TAIL_SPLIT outer         (!STEP3_EMBED_BARRIER, line ~2505)
+// TAIL/STEP12 sites:
+//   STEP12_S1 = TAIL_SPLIT==1 path (line ~2213, live for all 4 parents)
+//   STEP12_S2 = TAIL_SPLIT==0 path (line ~2400, dead with TAIL_SPLIT=1)
+
+#ifndef BARRIER_TO_WAITCNT_STEP3_S1
+#define BARRIER_TO_WAITCNT_STEP3_S1 (BARRIER_TO_WAITCNT_STEP3)
+#endif
+#ifndef BARRIER_TO_WAITCNT_STEP3_S2
+#define BARRIER_TO_WAITCNT_STEP3_S2 (BARRIER_TO_WAITCNT_STEP3)
+#endif
+#ifndef BARRIER_TO_WAITCNT_STEP3_S3
+#define BARRIER_TO_WAITCNT_STEP3_S3 (BARRIER_TO_WAITCNT_STEP3)
+#endif
+#ifndef BARRIER_TO_WAITCNT_STEP3_S4
+#define BARRIER_TO_WAITCNT_STEP3_S4 (BARRIER_TO_WAITCNT_STEP3)
+#endif
+#ifndef BARRIER_TO_WAITCNT_STEP3_S5
+#define BARRIER_TO_WAITCNT_STEP3_S5 (BARRIER_TO_WAITCNT_STEP3)
+#endif
+#ifndef BARRIER_TO_WAITCNT_STEP3_S6
+#define BARRIER_TO_WAITCNT_STEP3_S6 (BARRIER_TO_WAITCNT_STEP3)
+#endif
+#ifndef BARRIER_TO_WAITCNT_STEP3_S7
+#define BARRIER_TO_WAITCNT_STEP3_S7 (BARRIER_TO_WAITCNT_STEP3)
+#endif
+#ifndef BARRIER_TO_WAITCNT_STEP12_S1
+#define BARRIER_TO_WAITCNT_STEP12_S1 (BARRIER_TO_WAITCNT_STEP12)
+#endif
+#ifndef BARRIER_TO_WAITCNT_STEP12_S2
+#define BARRIER_TO_WAITCNT_STEP12_S2 (BARRIER_TO_WAITCNT_STEP12)
+#endif
+
+// vmcnt override: when nonzero, replaces STEP3_BARRIER_VMCNT in the per-site STEP3
+// strings (and TAIL_BARRIER_VMCNT in the STEP12 strings). 0 (default) = use existing.
+// NB: applies regardless of barrier-vs-waitcnt mode — relaxed/tight vmcnt can be
+// independently swept.
+#ifndef BARRIER_TO_WAITCNT_RELAXED_VMCNT
+#define BARRIER_TO_WAITCNT_RELAXED_VMCNT 0
+#endif
+
+#if BARRIER_TO_WAITCNT_RELAXED_VMCNT > 0
+#define MXFP4_R19B_VMCNT_STR MXFP4_STR(BARRIER_TO_WAITCNT_RELAXED_VMCNT)
+#define MXFP4_R19B_TAIL_VMCNT_STR MXFP4_STR(BARRIER_TO_WAITCNT_RELAXED_VMCNT)
+#else
+#define MXFP4_R19B_VMCNT_STR MXFP4_STR(STEP3_BARRIER_VMCNT)
+#define MXFP4_R19B_TAIL_VMCNT_STR MXFP4_STR(TAIL_BARRIER_VMCNT)
+#endif
+
+// Per-site barrier strings. Each picks waitcnt-only OR vmcnt+s_barrier per its own gate.
+#if BARRIER_TO_WAITCNT_STEP3_S1
+#define MXFP4_STEP3_BARRIER_INST_S1 "s_waitcnt vmcnt(" MXFP4_R19B_VMCNT_STR ") lgkmcnt(0)\n"
+#else
+#define MXFP4_STEP3_BARRIER_INST_S1 "s_waitcnt vmcnt(" MXFP4_R19B_VMCNT_STR ")\ns_barrier\n"
+#endif
+#if BARRIER_TO_WAITCNT_STEP3_S2
+#define MXFP4_STEP3_BARRIER_INST_S2 "s_waitcnt vmcnt(" MXFP4_R19B_VMCNT_STR ") lgkmcnt(0)\n"
+#else
+#define MXFP4_STEP3_BARRIER_INST_S2 "s_waitcnt vmcnt(" MXFP4_R19B_VMCNT_STR ")\ns_barrier\n"
+#endif
+#if BARRIER_TO_WAITCNT_STEP3_S3
+#define MXFP4_STEP3_BARRIER_INST_S3 "s_waitcnt vmcnt(" MXFP4_R19B_VMCNT_STR ") lgkmcnt(0)\n"
+#else
+#define MXFP4_STEP3_BARRIER_INST_S3 "s_waitcnt vmcnt(" MXFP4_R19B_VMCNT_STR ")\ns_barrier\n"
+#endif
+#if BARRIER_TO_WAITCNT_STEP3_S4
+#define MXFP4_STEP3_BARRIER_INST_S4 "s_waitcnt vmcnt(" MXFP4_R19B_VMCNT_STR ") lgkmcnt(0)\n"
+#else
+#define MXFP4_STEP3_BARRIER_INST_S4 "s_waitcnt vmcnt(" MXFP4_R19B_VMCNT_STR ")\ns_barrier\n"
+#endif
+#if BARRIER_TO_WAITCNT_STEP3_S5
+#define MXFP4_STEP3_BARRIER_INST_S5 "s_waitcnt vmcnt(" MXFP4_R19B_VMCNT_STR ") lgkmcnt(0)\n"
+#else
+#define MXFP4_STEP3_BARRIER_INST_S5 "s_waitcnt vmcnt(" MXFP4_R19B_VMCNT_STR ")\ns_barrier\n"
+#endif
+#if BARRIER_TO_WAITCNT_STEP3_S6
+#define MXFP4_STEP3_BARRIER_INST_S6 "s_waitcnt vmcnt(" MXFP4_R19B_VMCNT_STR ") lgkmcnt(0)\n"
+#else
+#define MXFP4_STEP3_BARRIER_INST_S6 "s_waitcnt vmcnt(" MXFP4_R19B_VMCNT_STR ")\ns_barrier\n"
+#endif
+#if BARRIER_TO_WAITCNT_STEP3_S7
+#define MXFP4_STEP3_BARRIER_INST_S7 "s_waitcnt vmcnt(" MXFP4_R19B_VMCNT_STR ") lgkmcnt(0)\n"
+#else
+#define MXFP4_STEP3_BARRIER_INST_S7 "s_waitcnt vmcnt(" MXFP4_R19B_VMCNT_STR ")\ns_barrier\n"
+#endif
+
+#if BARRIER_TO_WAITCNT_STEP12_S1
+#define MXFP4_TAIL_BARRIER_INST_S1 "s_waitcnt vmcnt(" MXFP4_R19B_TAIL_VMCNT_STR ") lgkmcnt(0)\n"
+#else
+#define MXFP4_TAIL_BARRIER_INST_S1 "s_waitcnt vmcnt(" MXFP4_R19B_TAIL_VMCNT_STR ")\ns_barrier\n"
+#endif
+#if BARRIER_TO_WAITCNT_STEP12_S2
+#define MXFP4_TAIL_BARRIER_INST_S2 "s_waitcnt vmcnt(" MXFP4_R19B_TAIL_VMCNT_STR ") lgkmcnt(0)\n"
+#else
+#define MXFP4_TAIL_BARRIER_INST_S2 "s_waitcnt vmcnt(" MXFP4_R19B_TAIL_VMCNT_STR ")\ns_barrier\n"
+#endif
+
 constexpr int BLK = 256;
 constexpr int BK  = 128;
 constexpr int WARPS_M = 2, WARPS_N = 2;
@@ -1019,7 +1129,8 @@ __device__ __forceinline__ void kpair_64mfma_step34(
     unsigned sbr1 = std::bit_cast<unsigned>(br_raw[1]);
 
     // Barrier emitted separately (with memory clobber) so the MFMAs block stays lightweight
-    asm volatile(MXFP4_STEP3_BARRIER_INST ::: "memory");
+    // R19B: site _S1 (kpair_64mfma_step34, dead with default FUSED_STEP34=0)
+    asm volatile(MXFP4_STEP3_BARRIER_INST_S1 ::: "memory");
 
     asm volatile(
         // ═══ STEP 3: A1×Bl (32 MFMAs) + 8 ds_reads for nxt_a0 ═══
@@ -1256,7 +1367,8 @@ __device__ __forceinline__ void kpair_32mfma_with_lds_and_pf(
     // Row 0: 8 MFMAs + ALL 8 ds_reads front-loaded (1:1 interleave)
     // When EMIT_BARRIER: vmcnt+barrier at top, MFMAs overlap with any stall
     if constexpr (EMIT_BARRIER) {
-        asm volatile(MXFP4_STEP3_BARRIER_INST ::: "memory");
+        // R19B: site _S2 (kpair_32mfma_with_lds_and_pf, hot path)
+        asm volatile(MXFP4_STEP3_BARRIER_INST_S2 ::: "memory");
     }
     asm volatile(
         "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %24, %32, %0,  %40, %42 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
@@ -1449,7 +1561,8 @@ __device__ __forceinline__ void kpair_32mfma_with_lds_rowspread_pf(
 {
     KPAIR_SETUP();
     if constexpr (EMIT_BARRIER) {
-        asm volatile(MXFP4_STEP3_BARRIER_INST ::: "memory");
+        // R19B: site _S3 (kpair_32mfma_with_lds_rowspread_pf, hot path)
+        asm volatile(MXFP4_STEP3_BARRIER_INST_S3 ::: "memory");
     }
     // Row 0: 8 MFMAs + 2 ds_reads (d0, d4)
     {
@@ -1674,7 +1787,8 @@ __device__ __forceinline__ void kpair_32mfma_with_lds_and_pf_swapped_sel(
 {
     KPAIR_SETUP();
     if constexpr (EMIT_BARRIER) {
-        asm volatile(MXFP4_STEP3_BARRIER_INST ::: "memory");
+        // R19B: site _S4 (kpair_32mfma_with_lds_and_pf_swapped_sel, hot path)
+        asm volatile(MXFP4_STEP3_BARRIER_INST_S4 ::: "memory");
     }
     asm volatile(
         "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %32, %24, %0,  %42, %40 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
@@ -2124,7 +2238,8 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         extract_tile(a1_d, tA1);
 
 #if !STEP3_EMBED_BARRIER
-        asm volatile(MXFP4_STEP3_BARRIER_INST ::: "memory");
+        // R19B: site _S5 (TAIL_SPLIT inner !STEP3_EMBED_BARRIER, dead w/ default STEP3_EMBED_BARRIER=1)
+        asm volatile(MXFP4_STEP3_BARRIER_INST_S5 ::: "memory");
 #endif
 
         float4 nxt_a0_d[8];
@@ -2210,7 +2325,8 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         extract_tile(a1_d, tA1);
 
         // Tail: always emit barrier (no embedded barrier in pure-MFMA Step3/4)
-        asm volatile(MXFP4_TAIL_BARRIER_INST ::: "memory");
+        // R19B: TAIL site _S1 (TAIL_SPLIT==1, live for parents using -DTAIL_SPLIT=1)
+        asm volatile(MXFP4_TAIL_BARRIER_INST_S1 ::: "memory");
 
         tile_pf_params dummy_pf = {};
         kpair_32mfma_with_pf_swapped_sel<0>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw, dummy_pf, dummy_pf);
@@ -2311,7 +2427,8 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         emit_pf_tail<0>(pf_bl_p, pf_br_p);
 #else
 #if !STEP3_EMBED_BARRIER
-        asm volatile(MXFP4_STEP3_BARRIER_INST ::: "memory");
+        // R19B: site _S6 (TAIL_SPLIT outer !STEP3_EMBED_BARRIER, dead w/ default STEP3_EMBED_BARRIER=1)
+        asm volatile(MXFP4_STEP3_BARRIER_INST_S6 ::: "memory");
 #endif
 
         // Step 3: A1*Bl (32 MFMAs) + ds_read A0[nxt] + prefetch
@@ -2397,7 +2514,8 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         extract_tile(a1_d, tA1);
 
         // Tail: always emit barrier (no embedded barrier in pure-MFMA Step3/4)
-        asm volatile(MXFP4_TAIL_BARRIER_INST ::: "memory");
+        // R19B: TAIL site _S2 (TAIL_SPLIT==0, dead for parents using -DTAIL_SPLIT=1)
+        asm volatile(MXFP4_TAIL_BARRIER_INST_S2 ::: "memory");
 
         // Steps 3+4: pure MFMAs, no ds_reads, no prefetches
         tile_pf_params dummy_pf = {};
@@ -2502,7 +2620,8 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         emit_pf_tail<0>(pf_bl_p, pf_br_p);
 #else
 #if !STEP3_EMBED_BARRIER
-        asm volatile(MXFP4_STEP3_BARRIER_INST ::: "memory");
+        // R19B: site _S7 (no-TAIL_SPLIT outer !STEP3_EMBED_BARRIER, dead w/ default STEP3_EMBED_BARRIER=1)
+        asm volatile(MXFP4_STEP3_BARRIER_INST_S7 ::: "memory");
 #endif
 
         float4 nxt_a0_d[8];

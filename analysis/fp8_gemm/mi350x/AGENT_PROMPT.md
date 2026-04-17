@@ -225,6 +225,22 @@
   - **EARLY_SCALE_PF (E)**: **BROKEN + no perf gain**. Compiler aliases `pf_*` and shadow `nxt_pf_*` to same VGPRs → race; baseline ASM already issues scale loads at iter top with ~512 cyc hiding > ~400 cyc VMEM latency, no untapped scheduling room. Code has `#error` guard if enabled. See `test_early_scale_pf.py`.
   - **F, G**: INFEASIBLE in single session.
   Triggered the user's GOAL PIVOT directive at the top of this file.
+- **Round 19 (2026-04-17, R18A barrier-removal bisect on DLA1/DLA2/DLA7)**: 1 optimizer (B), all dead-end on every shape tested.
+  - **B (per-site barrier-removal bisect + vmcnt sweep on DLA1/DLA2/DLA7)** — **DEAD END**:
+    - Added 10 finer-grained macros to `kernel_mxfp4_gluon_cpp.cpp` (per-site STEP3_S1..S7, STEP12_S1..S2, RELAXED_VMCNT). Defaults preserve R18A bit-exactly; zero regression risk.
+    - 39 builds (3 shapes × 13 variants — single-site, 2-site combos, 3-vmcnt sweep, R18A ALL ref). All 39 OK.
+    - SNR probe: 35/36 BROKEN-RACE; only DLA1/_r19b_t1 (TAIL/STEP12) was OK-MARGINAL (15.47 dB) and aperture-OK on random scales.
+    - DLA1/_r19b_t1 smoke +1.43pp (single-shot) → 5-run same-GPU verify Δ-0.27 pp ⇒ **LOSE**.
+    - **Generalization**: per-site STEP3 removal, 2-site combos (s23/s24/s34/s234), and 3-site (s234) all SNR-broken on DLA1/DLA2/DLA7. vmcnt sweep at 1/4/15 also breaks SNR even when keeping s_barrier (vmcnt value perturbs FMA-reorder).
+    - **Confirms R18A finding**: barrier IS load-bearing for DLA1/DLA2/DLA7; not a single removable site exists.
+    - DLA2/DLA7 SNR-unvalidatable for any kernel-internal change (parent itself at SNR ≈ −1 dB; all variants near noise floor by construction).
+  - **Round 19 net**: 0 WIN, 0 gap reduction. R18A's P1-only win is confirmed isolated.
+  - **新 dead-end vectors (Round 19)**:
+    - Per-site `BARRIER_TO_WAITCNT_STEP3_S{2,3,4}` on DLA1/DLA2/DLA7 — every individual hot site breaks SNR worse than aggregate STEP3=1.
+    - 2-site / 3-site STEP3 combos on DLA1/DLA2/DLA7 — strictly worse than individual sites; no synergy.
+    - `BARRIER_TO_WAITCNT_STEP12_S1` on DLA1 — SNR-MARGINAL but 0 perf gain (Δ-0.27pp).
+    - `BARRIER_TO_WAITCNT_RELAXED_VMCNT` ∈ {1, 4, 15} on DLA1/DLA2/DLA7 — every value breaks SNR; barrier-VMCNT perturbation is itself a noise source.
+
 - **Round 18 (2026-04-17, source-rewrite pivot per R17A proposals)**: **R18A WIN +4.16pp on P1** (committed `4b504b0c`) — first +1pp gain in 17 rounds of post-Round-2 work. R18B/R18C DEAD END but produced kernel-structure findings that delete proposals from the queue.
   - **A (R17A-P3 inner s_barrier → s_waitcnt lgkmcnt(0))** — **WIN**:
     - 3 opt-in macros added (default 0): `BARRIER_TO_WAITCNT_STEP3` (8 hot-path STEP3 sites), `BARRIER_TO_WAITCNT_STEP12` (2 tail STEP12 sites), `BARRIER_TO_WAITCNT_ALL` (both).

@@ -1,0 +1,37 @@
+{
+  "shape": "DLA1",
+  "M": 4096,
+  "N": 32768,
+  "K": 128256,
+  "comp": 5781.1,
+  "gpu": 5,
+  "warmup": 200,
+  "iters": 500,
+  "trim": 0.1,
+  "n_runs": 5,
+  "parent_suffix": "_ts_pf6_6_v12_memc",
+  "variant_suffix": "_ts_pf6_6_v12_memc_r19b_t1",
+  "parent_runs": [
+    5156.11,
+    5149.65,
+    5121.7,
+    5147.08,
+    5142.84
+  ],
+  "variant_runs": [
+    5152.88,
+    5144.74,
+    5121.96,
+    5073.36,
+    5145.31
+  ],
+  "parent_mean": 5143.48,
+  "parent_max": 5156.11,
+  "variant_mean": 5127.65,
+  "variant_max": 5152.88,
+  "variant_min": 5073.36,
+  "delta_pp": -0.27,
+  "gate1_v_mean_ge_p_max": false,
+  "gate2_delta_ge_1pp": false,
+  "verdict": "LOSE"
+}

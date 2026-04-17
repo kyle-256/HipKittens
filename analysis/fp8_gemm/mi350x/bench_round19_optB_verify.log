@@ -1,0 +1,23 @@
+R19B 5-run same-GPU verify: DLA1 (M=4096, N=32768, K=128256), comp=5781.1
+GPU=5, warmup=200, iters=500, trim=0.1, N_RUNS=5
+Parent:  _ts_pf6_6_v12_memc
+Variant: _ts_pf6_6_v12_memc_r19b_t1
+====================================================================================================
+  parent  run 1: {'tflops': 5156.11, 'ms': 6.6772}
+  variant run 1: {'tflops': 5152.88, 'ms': 6.6814}
+  parent  run 2: {'tflops': 5149.65, 'ms': 6.6856}
+  variant run 2: {'tflops': 5144.74, 'ms': 6.692}
+  parent  run 3: {'tflops': 5121.7, 'ms': 6.7221}
+  variant run 3: {'tflops': 5121.96, 'ms': 6.7217}
+  parent  run 4: {'tflops': 5147.08, 'ms': 6.6889}
+  variant run 4: {'tflops': 5073.36, 'ms': 6.7861}
+  parent  run 5: {'tflops': 5142.84, 'ms': 6.6944}
+  variant run 5: {'tflops': 5145.31, 'ms': 6.6912}
+====================================================================================================
+
+parent  runs: [5156.11, 5149.65, 5121.7, 5147.08, 5142.84]  max=5156.11  mean=5143.48
+variant runs: [5152.88, 5144.74, 5121.96, 5073.36, 5145.31]  max=5152.88  mean=5127.65  min=5073.36
+Δmean = -0.27 pp (vs comp 5781.1)
+gate1 (v_mean >= p_max): False   gate2 (Δ >= +1pp): False   ⇒ LOSE
+
+Saved bench_round19_optB_verify.json

@@ -315,6 +315,25 @@ Decider 提出 5 个 untested vectors, 3 个 in-session 可执行. 启动 3 个 
 
 **Round 5 净增**: 0 WIN, 0 gap reduction. 触发用户的 GOAL PIVOT 指令 (见文档顶部).
 
+## Round 19 (2026-04-17) — R18A barrier-removal bisect on DLA1/DLA2/DLA7 (DEAD END)
+After R18A's per-shape +4.16pp WIN on P1 hinted that some subset of the 9 barrier sites might be droppable on the SNR-broken DLA1/DLA2/DLA7, R19B added per-site control + vmcnt sweep and bisected.
+
+- **Optimizer B — per-site STEP3/STEP12 + vmcnt sweep (DEAD END)**:
+  - 10 new per-site macros (`BARRIER_TO_WAITCNT_STEP3_S1..S7`, `STEP12_S1..S2`, `RELAXED_VMCNT`) added to kernel.cpp. Defaults preserve R18A bit-exactly; zero regression risk.
+  - 39 builds (3 shapes × 13 variants — single-site, 2-site combos, 3-vmcnt sweep, R18A ALL ref). All 39 OK.
+  - SNR probe: 35/36 BROKEN-RACE; only DLA1/_r19b_t1 (TAIL/STEP12 only) was OK-MARGINAL (15.47 dB) AND aperture-OK on random scales.
+  - DLA1/_r19b_t1: smoke +1.43pp (single-shot) → 5-run same-GPU verify Δ-0.27 pp ⇒ **LOSE** (gate1 False, gate2 False).
+  - **Confirms R18A**: barrier IS load-bearing for DLA1/DLA2/DLA7; not a single removable site exists.
+
+**Round 19 净增**: 0 WIN, 0 gap reduction. R18A's P1-only win is confirmed isolated.
+
+**新 dead-end vectors (Round 19)**:
+- Per-site `BARRIER_TO_WAITCNT_STEP3_S{2,3,4}` on DLA1/DLA2/DLA7 — every individual hot site breaks SNR worse than aggregate STEP3=1.
+- 2-site / 3-site STEP3 combos (s23/s24/s34/s234) on DLA1/DLA2/DLA7 — strictly worse than individual sites; no synergy.
+- `BARRIER_TO_WAITCNT_STEP12_S1` on DLA1 — SNR-MARGINAL but 0 perf gain (Δ-0.27pp on 5-run).
+- `BARRIER_TO_WAITCNT_RELAXED_VMCNT` ∈ {1, 4, 15} on DLA1/DLA2/DLA7 — every value breaks SNR; barrier-VMCNT perturbation is itself a noise source even when keeping s_barrier in place.
+- DLA2/DLA7 SNR-unvalidatable for any kernel-internal change via output-tile probe (parent itself at noise floor < 0 dB). Future probes need different correctness method (ULP histograms or reduced dynamic range).
+
 ## Round 18 (2026-04-17) — source-rewrite pivot per R17A proposals; **R18A WIN +4.16pp on P1** (committed `4b504b0c`)
 After R17A's rocprof analysis proved backend tuning exhausted, dispatched 3 source-rewrite optimizers attacking the R17A proposal queue (P3/P1/P2). **First +1pp gain in 17 rounds of post-Round-2 work.**
 
