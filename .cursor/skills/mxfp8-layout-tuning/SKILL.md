@@ -137,6 +137,16 @@ Parallel agents SHOULD use distinct `HIP_VISIBLE_DEVICES` (Dev A → 0, Dev B �
 - LDS: 131072 bytes (double-buffer A+B tiles)
 - Occupancy: 2 waves/SIMD
 
+### ⚠️ VGPR Number Traps (read before trusting compile remarks)
+`hipcc -Rpass-analysis=kernel-resource-usage` emits **one block per generated kernel symbol**. For the RCR MXFP8 path there are multiple:
+| Symbol | Role | VGPR / LDS |
+| --- | --- | --- |
+| `_Z11gemm_kernelIL6Layout0ELb0EEv14layout_globals` | outer dispatcher, RCR, non-PQ | 212 / 139264 |
+| `_Z11gemm_kernelIL6Layout0ELb1EEv14layout_globals` | outer dispatcher, RCR, PQ=1 | 212 / 139264 |
+| `rcr_exact_8wave_scaled_kernel<Lb1>` (real hot kernel) | actual PQ=1 scaled kernel | **254** / **131072** |
+
+The **real headroom is ~2 VGPR**, not 40. The 40-VGPR number came from the outer dispatcher and is meaningless for MFMA-pressure analysis. Always grep for the scaled kernel symbol (`rcr_exact_8wave_scaled_kernel`), not the outer `gemm_kernel` wrapper, before claiming headroom.
+
 ## Inner-Loop ASM Diff (8-wave, per kpair)
 | metric | FP8 | MXFP8 pre-HOIST_HI | MXFP8 w/ HOIST_HI (opsel) | Δ vs FP8 |
 | --- | ---: | ---: | ---: | ---: |
@@ -178,6 +188,9 @@ HOIST_HI eliminates the 6 scale-remap `v_lshr` by using the MFMA builtin's `op_s
 - Python `.s` rewriter scheduling changes (AGPR shuffle, cross-barrier MFMA split, ds_read early issue): all 0% on MXFP8. The compiler is already near-optimal within each asm block; the remaining gap is structural.
 - 8-wave-dedicated `.s` rewriter (`rewrite_mxfp8_8wave.py`) that interleaves the 6 scale-remap `v_lshr` into preceding MFMA shadows: measured GPU2 A/B +5.94 TFLOPS (+0.18%). HOIST_HI opsel already eliminates the 6 `v_lshr` entirely, so this pass has nothing left to transform on the current best kernel. Draft not kept in tree; do not resurrect unless you find a fresh structural target.
 - MXFP8 4-wave upgraded with KPAIR_LOOP + SGPR SRD + scale pipeline (Dev A, 2nd round): GPU0 A/B 4-wave bare 2878 → 4-wave KPAIR+PIPE 2900 (+22, +0.76%). Still ~90 TFLOPS below 8-wave KPAIR+SRD+SCALE_PIPE+HOIST_HI on the same GPU. The 4-wave inline-ASM MFMA path burns 256 AGPR + 256 VGPR → occupancy 1, versus 8-wave's 0 AGPR + 256 VGPR → occupancy 2. Cannot beat 8-wave until 4-wave is moved off inline-ASM onto `__builtin_amdgcn_mfma_scale_*` (which frees the AGPRs) AND a structural advantage beyond 8-wave shows up. Not worth chasing until that precondition is solved.
+- **Scale cross-iteration prefetch (ring of `a{0,1}_scale_packs_pf` + `b{0,1}_scale_packs_pf`)** on 8-wave PQ=1 (Dev A, 3rd round, flag `MXFP8_RCR_EXACT_PQ_SCALE_PREFETCH_N1_ENABLE`): scope=0 full ring (6 dwords) overflows 256-VGPR cap → 4 spills, A/B −2.26%. Spill-free scope=1 (B-only, 2 dwords) still loses −1.58% A/B on GPU0 (2967 vs 3015) — the extra `v_mov_b32` commit sequence inside the kpair loop costs more than the latency it hides. Root cause: PQ=1 baseline sits at VGPR=254 (real kernel), not 212 (outer dispatcher). Only ~2 VGPR of true headroom → any ring-buffer scheme pushes into 256-cap and spills. Delete / keep OFF.
+- **Tail compile-time K_PHASE dispatch** on 8-wave PQ=1 (Dev B, 3rd round, flag `MXFP8_RCR_EXACT_PQ_TAIL_DISPATCH_ENABLE`): correctness-clean (SNR 49.60, det PASS), resource-clean (VGPR/Spills/LDS/Occ unchanged), removes 12 tail `v_lshrrev_b32` from the kernel asm. But reviewer GPU7 A/B 10+20 rounds shows Δ = −0.04% to +0.18%, never clears the +0.25% noise floor. Tail only runs once per block; main-loop dominates. **Noise-level gain, not worth committing**; the patch *is* technically correct and could be resurrected only if combined with other tail-path optimizations that amortize the compile-time dispatch cost. Patch not kept in tree.
+- **KPAIR loop 2× unroll (4× k-pairs per iter)** on 8-wave PQ=1 (Dev C, 3rd round, flag `MXFP8_RCR_EXACT_PQ_KPAIR_UNROLL2_ENABLE`): doubling body size inside a single basic block blows live-ranges past 256 VGPR → 51 spills / 208 B scratch, A/B −54.87%. The compiler cannot fit 4 body copies into 256 VGPR regardless of `sched_barrier` placement or outer-loop unroll pragmas. Any viable deeper unroll on 8-wave needs a prior reduction of baseline VGPR pressure (accumulator reshape or intentional drop to occupancy 1). Do not retry without that precondition.
 
 ## Debug Workflow
 1. Smoke test before every formal run. Formal ≥ 4 min; smoke ~2 s.

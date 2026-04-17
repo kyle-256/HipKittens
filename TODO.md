@@ -66,9 +66,26 @@ Main loop 已无 v_lshr，结构上与 FP8 几乎一致（仅多 6 个 scale buf
 
 ## 进行中 / 下一轮
 
-- [ ] **4-wave 路径**（Dev A）— 有 14–44 VGPR headroom，可上 scale 软流水，是结构性突破可能的唯一方向
-- ~~Dev C `.s` rewriter~~ — **已拒绝**：本轮实测 GPU2 A/B 仅 +5.94 TFLOPS (+0.18%)，且 HOIST_HI 已经从源头消除 6 个 `v_lshr`（彻底抹平 rewriter 的优化空间）。继续养 rewriter 维护成本不划算，关闭该方向，不再派活。
-- [ ] 继续压缩剩余 6 scale buffer_load（考虑 LDS 缓存 scale，但 131 KB LDS 已接近 160 KB CU 限制）
+**第三轮评审 (2026-04-17) — 三条路径全 REJECT，不 commit 代码**
+
+| 路径 | 结果 | 采纳？ |
+|---|---|---|
+| Dev A — scale cross-iter prefetch (MXFP8_RCR_EXACT_PQ_SCALE_PREFETCH_N1_ENABLE) | scope=0 full ring: 4 spills, A/B −2.26%; scope=1 B-only spill-free: A/B −1.58%。真实 VGPR 254，2 VGPR headroom 根本不够。 | **拒绝** |
+| Dev B — tail compile-time K_PHASE dispatch (MXFP8_RCR_EXACT_PQ_TAIL_DISPATCH_ENABLE) | 正确性+资源全 clean（VGPR 254 / Spills 0 / LDS 128 KB / Occ 2 不变），asm 少 12 tail v_lshr；但 reviewer GPU7 A/B 10+20 rounds Δ = −0.04% ~ +0.18%，低于 +0.25% 噪声门槛 | **拒绝**（技术正确但噪声级） |
+| Dev C — KPAIR 2× unroll (MXFP8_RCR_EXACT_PQ_KPAIR_UNROLL2_ENABLE) | body 翻倍 → live-range 爆 256 VGPR，51 spills，A/B −54.87% | **拒绝** |
+
+**关键纠错**：真实 8-wave PQ scaled kernel = **VGPR 254 / LDS 131 KB**（不是之前决策者读错的 212 VGPR / 139 KB，那是 outer dispatcher）。headroom 仅 ~2 VGPR。
+
+### 下一轮方向（按优先级）
+
+- [ ] **降低 baseline VGPR 压力**：accumulator reshape 或主动下调到 occupancy=1 换更深软流水 —— 这是 KPAIR-unroll / scale-prefetch / 任何 cross-iter pipeline 的先决条件
+- [ ] **LDS 缓存 scale 可行性**：开关 `MXFP8_RCR_EXACT_PQ_SCALE_LDS_ENABLE` 已在代码里但未走过；研究把 6 scale buffer_load 换成 1 次批量 LDS store + ds_read
+- [ ] **`sched_barrier` 手工编排 main loop**：在 HOIST_HI 基础上尝试改变 buffer_load / ds_read / MFMA 交错（不加 VGPR，不加 spill）
+- [ ] **试探 CU-level L2 prefetch / tile routing**：绕开 VGPR 瓶颈从存储端吃胜
+- ~~Dev A scale prefetch (n+1 ring)~~ — 已关闭，VGPR 不够
+- ~~Dev B tail dispatch~~ — 已关闭，收益噪声级
+- ~~Dev C KPAIR 2× unroll~~ — 已关闭，VGPR 爆
+- ~~Dev C `.s` rewriter~~ — 第二轮关闭，HOIST_HI 已覆盖
 
 ## 成功条件
 
@@ -80,5 +97,6 @@ Main loop 已无 v_lshr，结构上与 FP8 几乎一致（仅多 6 个 scale buf
 ## 运行记录
 
 - `0a3eafb6` Remove all MXFP4 and Gluon kernels on mxfp8-only branch
-- Dev B HOIST_HI opsel 消除 main-loop v_lshr（reviewer GPU7 验收 2925.64，A/B +17.80；GPU1 head-to-head +25.67）。main-loop `v_lshr` 0，spills 0，VGPR 256→254，occupancy 2。构建 flag 加 `-DMXFP8_RCR_EXACT_PQ_HOIST_HI_ENABLE=1`。
-- `stash@{0}` WIP: agent team half-finished MXFP8 attempts (未测完，不要乱 pop)
+- `bc0081e5` Tidy repo: skills, gitignore, agent team runbook
+- `f943af92` HOIST_HI opsel 消除 main-loop v_lshr（reviewer GPU7 验收 2925.64，A/B +17.80；GPU1 head-to-head +25.67）。main-loop `v_lshr` 0，spills 0，VGPR 256→254，occupancy 2。构建 flag 加 `-DMXFP8_RCR_EXACT_PQ_HOIST_HI_ENABLE=1`。
+- **第三轮 (2026-04-17)**：三条路径（scale prefetch n+1 / tail compile-time dispatch / KPAIR 2× unroll）全 reject。Baseline 稳定在 2917–2932 TFLOPS。无代码 commit，仅文档修正 baseline VGPR 数字（254，不是 212）+ 写入三条新 dead-end。

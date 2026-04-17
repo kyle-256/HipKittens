@@ -28,6 +28,8 @@
 | MXFP8 8-wave KPAIR+SRD+SCALE_PIPE (前 baseline) | 2897.66 | 49.60 | 256 / 0 / 0 / 135 KB |
 | 差距 (当前最佳 vs FP8) | −145.29 (−4.73%) | | |
 
+> **VGPR 读数陷阱**：`-Rpass-analysis=kernel-resource-usage` 会为每个符号各报一次；MXFP8 RCR PQ 路径的真实 hot kernel 是 `rcr_exact_8wave_scaled_kernel<Lb1>`（VGPR **254** / LDS **131 KB**）。外壳 `gemm_kernel<Layout0,*>` 只是 dispatcher，显示 VGPR 212 / LDS 139 KB，**不是**可用于 headroom 推断的数字。任何基于「40 VGPR headroom」的优化提案都是错的，请以 scaled kernel 符号的 remark 为准。
+
 ## 角色定义
 
 ### Decision Maker（主 agent）
@@ -86,6 +88,20 @@ stash@{0} 已 pop 并逐条评审。三条路径：
 | Dev C — ASM rewriter `rewrite_mxfp8_8wave.py` + `build_rewrite_8wave.sh` | GPU2 A/B 仅 +5.94 TFLOPS (+0.18%)；HOIST_HI 已从源头消除 `v_lshr`，rewriter 的重排空间被覆盖 | **拒绝**（边际收益 + 维护成本不划算，脚本未入库） |
 
 任何后续 agent 想重启 Dev C 的 ASM rewriter 方向之前，必须先证明 HOIST_HI 框架下还有可被 rewriter 独占抢到的非 `v_lshr` 结构性收益，否则视为重蹈覆辙。
+
+## 第三轮评审结果 (2026-04-17)
+
+主 agent 基于错误假设（40 VGPR headroom）派了 3 个 dev，结果真实 baseline 是 254 VGPR / ~2 headroom。三条路径全 reject：
+
+| 路径 | flag | 结果 | 采纳？ |
+|---|---|---|---|
+| Dev A — scale cross-iter prefetch (n+1 ring) | `MXFP8_RCR_EXACT_PQ_SCALE_PREFETCH_N1_ENABLE` | scope=0 full ring 4 spills A/B −2.26%；scope=1 B-only spill-free A/B −1.58%；VGPR 不够 | **拒绝** |
+| Dev B — tail compile-time K_PHASE dispatch | `MXFP8_RCR_EXACT_PQ_TAIL_DISPATCH_ENABLE` | 正确+资源 clean（少 12 tail v_lshr）但 reviewer GPU7 A/B 10+20 rounds Δ = −0.04% ~ +0.18%，低于 +0.25% 门槛 | **拒绝**（技术正确但噪声级） |
+| Dev C — KPAIR 2× unroll (4× k-pairs / iter) | `MXFP8_RCR_EXACT_PQ_KPAIR_UNROLL2_ENABLE` | body 翻倍→live-range 爆 256 VGPR，51 spills 208 B scratch，A/B −54.87% | **拒绝** |
+
+**本轮无代码 commit，仅文档更正**。SKILL / TODO / agent_prompt 三处都加了「真实 VGPR=254，读 compile remarks 必须取 `rcr_exact_8wave_scaled_kernel` 符号，不要取 outer `gemm_kernel` 包装」的纠偏说明。
+
+下一轮必须先解决 **baseline VGPR 压力** 才能再动 cross-iter pipeline / deeper unroll；否则任何需要额外寄存器的方案都会直接 spill。
 
 ## 工作流
 
