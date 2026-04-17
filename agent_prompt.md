@@ -279,6 +279,34 @@ for (int g = 0; g < crr_a_pack_count; g++) {
 
 下一会话不要再用并行 dev fan-out 微调，**单条深入做 LDS 布局 transpose**。
 
+## 第十一轮评审结果 (2026-04-17) — A LDS 布局 transpose 两条路径全 BROKEN，B 也是窄读
+
+主 agent 派 2 个 scout 调研可行性 → 选定两条并行 dev：
+
+### Scout 阶段产出
+- **Scout-1（A LDS transpose 可行性）**：`ST_crr_a` 现为 `ST_v2a = st_fp8e4m3<HB,BK,st_16x128_v2a_s>`（kernel_mxfp8_layouts.cpp:399-401, 4227-4234），byte-XOR swizzle `((offset>>7)&7)<<4`。RRR 用 `ST_row = st_16x128_s`。`load_transpose` 已存在（kernel_mxfp8_layouts.cpp:1726-1825），处理 col-global→row-LDS。已存在的 `CRR_A_LDS_REENCODE` macro（line 4235-4276）就是这条 transpose 的 partial impl，但通过额外 LDS write/read 而不是直接写。**Verdict**：ATTEMPTABLE，~80-150 LoC
+- **Scout-2（替代 MFMA shape）**：仅有 `mfma_scale_f32_16x16x128_f8f6f4` 和 `mfma_scale_f32_32x32x64_f8f6f4` 两个 scaled FP8 intrinsic（mma.cuh:104,119,137）。RRR 和 CRR **都用 16x16x128**——no signal。32x32x64 的 A 操作数 dword 数量相同（8 dwords），但 D=floatx16 vs floatx4 → 4× 输出/issue → 可减少总 issue 量。但需要新 scaled wrapper + RBM/RBN 半化 + scale-pack 索引重设。Effort 150-300 LoC + 1-2 天
+
+### 开方阶段（2 个并行 dev agent，全 reject）
+
+| 路径 | 做法 | 结果 | 采纳？ |
+|---|---|---|---|
+| **R11 Dev M** — 直接 ST_row 替换 + reg transpose | `CRR_A_LDS_ROW_MAJOR` flag, `ST_crr_a` 改 `st_16x128_s`，主循环用 `load(A_row_reg, sub) → transpose(A_col_reg, A_row_reg)` | **BROKEN**：编译过 (VGPR 248 / 0 spills / occ 2)，但 SNR=−2.71 dB / 1340 TFLOPS。`load_transpose` 写出的 LDS 布局与通用 `load(A_row_reg, ...)` 期望的 row-major 消费不匹配。`CRR_ROW_SHARED_TRANSPOSE` 参考路径自身被 fastpath `static_assert` 关掉，无 known-good baseline | **拒绝（correctness）** |
+| **R11 Dev N** — 启用现成 `CRR_A_LDS_REENCODE=1` (stepping-stone) | 强制走 reencode 路径，`load_col_from_v2a_st → transpose → store(Aenc) → load(b128)` | **BROKEN**：1017 TFLOPS / SNR=1 dB。被迫关 8-wave fastpath（`crr_mxfp8_exact_8wave_fastpath.inc:32` 硬 `#error`）；REENCODE 分支调用未-scaled `mma_AB(...)` 而不是宏 `CRR_DO_MMA(...)`——MXFP8 scale 通路未接入。**ISA 验证 wide read 原理正确**：基线 0× ds_read_b128 + 144× ds_read_b64_tr_b8 → REENCODE 48× ds_read_b128 + 144× ds_read_b64_tr_b8 | **拒绝（correctness + 非 fastpath）** |
+
+### R11 关键新发现：B 操作数也是窄读
+
+ASM census 144 个 ds_read_b64_tr_b8 中 ~96 来自 **B**，仅 ~48 来自 A。CRR 的 col-major B layout 同样阻塞 b128 宽读。即使 A 完美修复，**只解决 ~25% 的 LDS pressure**——A-only 修复**结构上无法**到达 +1.43% gate。
+
+### R11 综合结论
+
+CRR gate (2780.28 TFLOPS) 在当前架构下需要 multi-day 结构重写：
+1. `load_transpose` 与 `ST_row` 的 LDS 布局对齐调试（需要 instrumented LDS dump 或先把 `CRR_ROW_SHARED_TRANSPOSE` 在 gemm_kernel 非-fastpath 跑通做对照）
+2. 加 `A_row_reg` 重载到 `crr_mma_scaled_from_packs` 把 MXFP8 scale 通路接进新 A 路径（约 50-100 LoC，需 mirror RRR 的 `mma_ABt` pattern）
+3. **B 操作数 layout 重设计**（解锁剩余 75% LDS pressure）—— Scout 未调研，未知是否有 partial impl
+
+**承认 gate 当前架构不可达**。已 commit 的 `8934e95c` PIPELINE_SCALE 默认开（+0.243%, 2740.55 TFLOPS）是 R7-R11 共 11 轮唯一 strict win。下一会话若续做 CRR：先开 `CRR_ROW_SHARED_TRANSPOSE` 在非 fastpath 跑通做 known-good baseline，再决定要不要投入 multi-day 重写；或转向 RCR 剩余 4.70% 差距。
+
 ## 工作流
 
 1. Decision maker 每轮选 1–3 个最有把握的方向（不要 4 个同时开花）
