@@ -1,4 +1,11 @@
-# Agent Team Runbook — MXFP8 RCR → FP8 per-tensor Parity
+# Agent Team Runbook — MXFP8 Optimization
+
+## 任务目标（两条线并行）
+
+1. **长期**：MXFP8 RCR 追平 FP8 per-tensor（3070.93 TFLOPS）
+2. **当前优先**：MXFP8 RRR / CRR ≥ MXFP8 RCR × 95% = **2780.28 TFLOPS**
+   - RRR: 2794.26 TFLOPS 已达标 ✅
+   - CRR: 2737.94 TFLOPS 需补 42.34 TFLOPS (1.55%) ❌
 
 ## 总则
 
@@ -21,14 +28,20 @@
 
 ## Baseline (2026-04-17)
 
-| 版本 | TFLOPS | SNR | VGPR / AGPR / Spills / LDS |
-| --- | ---: | --- | --- |
-| **FP8 RCR (target)** | **3070.93** | 49.61 | 252 / 0 / 0 / 131 KB |
-| **MXFP8 8-wave KPAIR+SRD+SCALE_PIPE+HOIST_HI(opsel)** | **2925.64** (GPU7 reviewer, SNR+det PASS) | 49.60 | 254 / 0 / 0 / 131 KB |
-| MXFP8 8-wave KPAIR+SRD+SCALE_PIPE (前 baseline) | 2897.66 | 49.60 | 256 / 0 / 0 / 135 KB |
-| 差距 (当前最佳 vs FP8) | −145.29 (−4.73%) | | |
+| 版本 | TFLOPS | SNR | VGPR / AGPR / Spills / LDS | % of MXFP8 RCR |
+| --- | ---: | --- | --- | ---: |
+| **FP8 RCR (长期 target)** | **3070.93** | 49.61 | 252 / 0 / 0 / 131 KB | 104.9% |
+| **MXFP8 RCR KPAIR+SRD+SCALE_PIPE+HOIST_HI** | **2926.61** (GPU7 reviewer) | 49.60 | 254 / 0 / 0 / 131 KB | **100.0%** |
+| **MXFP8 RRR (默认 flag)** | **2794.26** | 49.59 | — | **95.48%** ✅ |
+| **MXFP8 CRR (默认 flag)** | **2737.94** | 49.60 | — | **93.55%** ❌ |
+| RCR 差距 vs FP8 | −144.32 (−4.70%) | | | |
 
-> **VGPR 读数陷阱**：`-Rpass-analysis=kernel-resource-usage` 会为每个符号各报一次；MXFP8 RCR PQ 路径的真实 hot kernel 是 `rcr_exact_8wave_scaled_kernel<Lb1>`（VGPR **254** / LDS **131 KB**）。外壳 `gemm_kernel<Layout0,*>` 只是 dispatcher，显示 VGPR 212 / LDS 139 KB，**不是**可用于 headroom 推断的数字。任何基于「40 VGPR headroom」的优化提案都是错的，请以 scaled kernel 符号的 remark 为准。
+**95% gate 线** = 2926.61 × 0.95 = **2780.28 TFLOPS**
+
+- RRR：+13.98 TFLOPS 超线，本轮不动
+- CRR：−42.34 TFLOPS (−1.55%)，本轮必须补上
+
+> **VGPR 读数陷阱**：`-Rpass-analysis=kernel-resource-usage` 会为每个符号各报一次；MXFP8 RCR PQ 路径的真实 hot kernel 是 `rcr_exact_8wave_scaled_kernel<Lb1>`（VGPR **254** / LDS **131 KB**）。外壳 `gemm_kernel<Layout0,*>` 只是 dispatcher，显示 VGPR 212 / LDS 139 KB，**不是**可用于 headroom 推断的数字。任何基于「40 VGPR headroom」的优化提案都是错的，请以 scaled kernel 符号的 remark 为准。CRR 同理，看 `crr_exact_8wave_scaled_kernel<Lb1>` 符号的 remark。
 
 ## 角色定义
 
@@ -142,6 +155,53 @@ Dev H 单条路径：**强制 occupancy=1 架构性不可能**：
 - **结论更新**：occupancy=1 不是"难"也不是"高风险"，是**算术不可能**。要 occ=1 只能改 block 大小（不同 kernel 结构，基本是整个项目重写）。下一轮可行的结构方向收窄到 3 条：SCALE_LDS 完全替代 / AGPR fused-asm block / preshuffle layout 重设计。
 
 **6 轮 / 8 dev agents 全 reject**。SKILL dead-ends 列表再 +1（FORCE_OCC1 的架构不可行证明）。
+
+## 第七轮起：RRR / CRR 95% gate 任务 (2026-04-17)
+
+RCR 方向已达微调上限，决策者转向 RRR / CRR 对齐目标：**≥ 2780.28 TFLOPS**（RCR × 0.95）。
+
+### GPU7 实测 baseline
+
+| Layout | TFLOPS | vs RCR | 状态 |
+|---|---:|---:|---|
+| RCR | 2926.61 | 100.0% | 参照 |
+| RRR | 2794.26 | 95.48% | ✅ 已达标 |
+| CRR | 2737.94 | 93.55% | ❌ 差 42.34 TFLOPS |
+
+### CRR 差距诊断
+
+`crr_mxfp8_exact_8wave_fastpath.inc` 主循环 (L407-461) 在每奇数 k 做：
+```cpp
+for (int g = 0; g < crr_a_pack_count; g++) {
+    a0_scale_packs[g] = std::bit_cast<fp8e8m0_4>(
+        std::bit_cast<uint32_t>(a0_scale_packs[g]) >> 16);   // C++ 层 shift
+    a1_scale_packs[g] = ...;  // 再一条
+}
+// 再 4 条 for b0, b1
+```
+这 6 条 C++ shift 编出 6 × `v_lshrrev_b32` per kpair，**跟 RCR pre-HOIST_HI 完全同构**。
+
+关键资产（已经写好，只是主循环没用）：
+- `crr_mma_scaled_base<opsel_a, opsel_b>` 支持 2-bit opsel（bit 1 = byte-select lo/hi）
+- `crr_exact_cA_with_b1_interleave_raw_phase<K_PHASE, INSERT_AFTER, ...>` compile-time K_PHASE
+- `crr_mma_scaled_phase<K_PHASE>(...)` compile-time
+- tail 路径（L463-536）已经用 compile-time `_phase<0>` / `_phase<1>`
+
+### CRR 派活：Dev CRR-A（已派，被打断未完成）
+
+- **Worktree**：`/tmp/wt-crr-a`（detached HEAD @ `77370d3f`）
+- **GPU**：`HIP_VISIBLE_DEVICES=0`（smoke + A/B）；GPU7 留给 reviewer
+- **新增 flag**：`MXFP8_CRR_EXACT_PQ_HOIST_HI_ENABLE`（默认 0）
+- **做法**：主循环 `for (k ...)` 改成 C++20 templated lambda `[&]<int K_PHASE>(int k)`，2× k 展开，`K_PHASE==0` 调 `load_raw_scales(k >> 1)`，`K_PHASE==1` 直接用 `raw_phase<1>` helper（byte-select 高 16 位）；**删掉 L411-420 的 6 条 shift**
+- **Pass 判据**：ON ≥ 2780.28 TFLOPS AND Δ > +1% AND spills=0 AND SNR > 48 AND det 3/3 AND 不回归 RCR/FP8
+- 当前状态：任务被中断；worktree 保留，下次会话可续派
+
+### 后续计划
+
+1. Dev CRR-A 完成 / 胜出者 commit（若 Dev CRR-A reject 另起方向：如搬 KPAIR_LOOP 到 CRR、或重做 CRR scale loader）
+2. Reviewer 跑 CRR smoke / formal / A/B + RCR + FP8 回归
+3. RRR 监控；若后续回退到 95% 以下再补
+4. 回到 RCR 的剩余 4.70% 差距（三条高风险结构方向）
 
 ## 工作流
 

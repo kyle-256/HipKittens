@@ -1,14 +1,26 @@
 # MXFP8 优化 TODO
 
-目标：MXFP8 RCR 追平 FP8 per-tensor，协议为 `test_mxfp8_python.py` / `test_python.py` 内的 per-iteration sync + `output.zero_()`。
+目标：
+1. MXFP8 RCR 追平 FP8 per-tensor（长期）
+2. **MXFP8 RRR / CRR 达到 MXFP8 RCR 的 95%**（新增，优先）
 
-## 当前 baseline（per-iter sync，8192^3，RCR）
+协议：`test_mxfp8_python.py` / `test_python.py` 内的 per-iteration sync + `output.zero_()`，warmup=100 iters=200。
 
-| 版本 | TFLOPS | SNR | Spills | 差距 |
-| --- | ---: | --- | ---: | --- |
-| **FP8 per-tensor RCR (target)** | **3070.93** | 49.61 dB PASS | 0 | 目标线 |
-| **MXFP8 8-wave KPAIR+SRD+SCALE_PIPE+HOIST_HI(opsel) (当前最佳)** | **2925.64** | 49.60 dB PASS | 0 | −145.29 TFLOPS (−4.73%) |
-| MXFP8 8-wave KPAIR+SRD+SCALE_PIPE (前 baseline) | 2897.66 | 49.60 dB PASS | 0 | −173.27 TFLOPS (−5.64%) |
+## 当前 baseline（GPU7，per-iter sync，8192^3）
+
+| 版本 | TFLOPS | SNR | Spills | 相对 MXFP8 RCR |
+| --- | ---: | --- | ---: | ---: |
+| **FP8 per-tensor RCR (长期目标)** | **3070.93** | 49.61 dB PASS | 0 | 105.0% |
+| **MXFP8 8-wave RCR KPAIR+SRD+SCALE_PIPE+HOIST_HI (当前最佳)** | **2926.61** | 49.60 dB PASS | 0 | 100.0% |
+| **MXFP8 8-wave RRR (默认 flag)** | **2794.26** | 49.59 dB PASS | — | **95.48%** ✅ |
+| **MXFP8 8-wave CRR (默认 flag)** | **2737.94** | 49.60 dB PASS | — | **93.55%** ❌ 差 1.55% |
+
+### RRR / CRR 95% gate
+
+目标线：2926.61 × 0.95 = **2780.28 TFLOPS**
+
+- RRR：2794.26 ≥ 2780.28 → **已达标**（+13.98 over gate），本轮不动
+- CRR：2737.94 vs 2780.28 → **差 42.34 TFLOPS (1.55%)**，必须补上
 
 reviewer 验收数据（GPU7，warmup=100 iters=200 per-iter sync）：
 - HOIST_HI formal (with SNR + det 3/3 gate): 2925.64 TFLOPS PASS
@@ -105,15 +117,48 @@ Main loop 已无 v_lshr，结构上与 FP8 几乎一致（仅多 6 个 scale buf
 - ~~主动下调到 occupancy=1~~ **已证明不可能**：8-wave 512-thread block 在 4-SIMD CU 上算术最小 occ 就是 2 waves/SIMD，不是 flag 能改的。要 occ=1 需换成 4-wave 256-thread block（另一个 kernel），或 2-wave 128-thread block（完全重写）
 - [ ] **bank conflict / MFMA utilization profiling**（`rocprofv3 -i`）：145 TFLOPS 里有多少是 MFMA 利用率，多少是 latency stall
 
-### 本轮结论
-MXFP8 从 `feat/mxfp8-only` 分支的起点 2737 TFLOPS 一路推到 2925.64 TFLOPS，**已达到当前结构约束下可微调的上限**。剩余 145 TFLOPS 差距只能靠**结构性重构**（任选一条高风险大改造）去摸。非结构性的调度/cache/小 flag/occupancy 尝试全部饱和。建议下一轮只选 1 条结构路径深入，不再并行派多 dev。
+### RCR 本轮结论
+MXFP8 RCR 从 `feat/mxfp8-only` 分支的起点 2737 TFLOPS 一路推到 2925.64 TFLOPS，**已达到当前结构约束下可微调的上限**。剩余 145 TFLOPS 差距只能靠**结构性重构**（任选一条高风险大改造）去摸。非结构性的调度/cache/小 flag/occupancy 尝试全部饱和。
+
+---
+
+## RRR / CRR 95% 任务（进行中）
+
+### GPU7 实测 baseline (2026-04-17)
+
+RRR PQ：**2794.26 TFLOPS** (95.48% of RCR) → 已达 95%，本轮不动
+
+CRR PQ：**2737.94 TFLOPS** (93.55% of RCR) → 差 **42.34 TFLOPS (1.55%)** 才到 95% gate (2780.28)
+
+### CRR 差距根因
+
+`crr_mxfp8_exact_8wave_fastpath.inc` L407-461 主循环在每奇数 k 对 6 个 scale packs 做 C++ 层 `>> 16` shift（L411-420），这映射到 6 × `v_lshrrev_b32` per kpair —— **跟 RCR pre-HOIST_HI 完全同构**。
+
+`crr_mma_scaled_base<opsel_a, opsel_b>` 已经支持 2-bit opsel（byte-select 在 bit 1），`crr_exact_cA_with_b1_interleave_raw_phase<K_PHASE, ...>` 和 `crr_mma_scaled_phase<K_PHASE>(...)` 等 compile-time 模板化 helper **代码里已经有**，只是主循环没用。
+
+### CRR 方向
+
+- [ ] Dev CRR-A：HOIST_HI 思路移植 CRR —— 新增 flag `MXFP8_CRR_EXACT_PQ_HOIST_HI_ENABLE`，把主循环改成 `[&]<int K_PHASE>(...)` 模板化 lambda，`K_PHASE==0` 走 `load_raw_scales`，`K_PHASE==1` 走 `raw_phase<1>` helper（byte-select 高 16 位），**删掉 6 条 shift 回退**
+- [ ] Reviewer：smoke 256 → formal 8192 → A/B 10 runs GPU0 + GPU7 各一轮 → 必须 ON ≥ 2780.28 且 Δ > +1%
+- [ ] 有效果 commit + 同步 TODO / agent_prompt / SKILL
+- [ ] RRR 保持观察，若后续因编译器变化跌破 95% 再补
+
+---
 
 ## 成功条件
 
+### 长期（RCR）
 - MXFP8 RCR ≥ 3070.93 TFLOPS（per-iter 协议）
 - SNR > 48 dB
 - 3 次 determinism 一致
 - FP8 baseline 无回归
+
+### 本轮（RRR / CRR）
+- **RRR PQ 8192³ ≥ 2780.28 TFLOPS**（当前最佳 MXFP8 RCR × 0.95）
+- **CRR PQ 8192³ ≥ 2780.28 TFLOPS**
+- SNR > 48 dB
+- 3 次 determinism 一致
+- 不回归 RCR / FP8
 
 ## 运行记录
 
@@ -127,3 +172,5 @@ MXFP8 从 `feat/mxfp8-only` 分支的起点 2737 TFLOPS 一路推到 2925.64 TFL
 - **第五轮 (2026-04-17)**：三条路径全 reject。Dev F 实测 AGPR per-MFMA `"+a"`：−2.19%（per-MFMA 边界 V↔A 切换爆 285 次 shuffle + 13 spills）。Dev G 实测 sc0 cache hint：+0.066% 噪声。Dev G2 证明 `buffer_load_b64` 合并在当前 scale layout 下**结构不可行**（6 SRD 间距 8192 B）。剩余只能靠结构性重构。
 - `5d31c742` Round-5 dead-ends: AGPR per-MFMA, scale L2 hint, b64 merge broken（仅文档 commit）
 - **第六轮 (2026-04-17)**：Dev H 证明 occupancy=1 在 512-thread 8-wave block 上**架构性不可能**（CU 只有 4 SIMD，一个 512-thread block 最少占 2 waves/SIMD）。加 pipeline 扩展反而 63 spills / −63%。Occupancy 轴彻底关闭。
+- `77370d3f` Round-6 dead-end: occupancy=1 architecturally impossible for 8-wave（仅文档 commit）
+- **第七轮起 (2026-04-17)**：任务转向 RRR / CRR 95%-of-RCR gate。GPU7 实测三 layout：RCR 2926.61 / RRR 2794.26 (95.48%，已达标) / CRR 2737.94 (93.55%，差 42.34)。CRR 差距根因：主循环每奇数 k 做 6 × `scale_pack >> 16` → `v_lshrrev_b32`，跟 RCR pre-HOIST_HI 同构。计划：移植 HOIST_HI opsel 思路到 CRR 主循环（flag `MXFP8_CRR_EXACT_PQ_HOIST_HI_ENABLE`）。Dev CRR-A 已派活（worktree `/tmp/wt-crr-a`，GPU0），被打断未完成。
