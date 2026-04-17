@@ -1,0 +1,16 @@
+R13B SNR check (variant vs baseline). GPU=6
+==============================================================================================================
+
+Parent _ts_gm8  baseline: {'finite': 0.5525066256523132, 'sum': nan, 'max': nan}
+  _ts_gm8_r13b_iterilp                                finite=0.386  snr=None dB  [FAIL]
+  _ts_gm8_r13b_iterminreg                             finite=0.400  snr=None dB  [FAIL]
+  _ts_gm8_r13b_maxocc                                 finite=0.555  snr=None dB  [FAIL]
+  _ts_gm8_r13b_iteroccexp                             finite=0.558  snr=None dB  [FAIL]
+  _ts_gm8_r13b_iterilp_stack_memc                     finite=0.548  snr=None dB  [FAIL]
+  _ts_gm8_r13b_memc_stack_iterilp                     finite=0.394  snr=None dB  [FAIL]
+
+Parent _ts_lgk2_v12_memc  baseline: {'finite': 0.5264616012573242, 'sum': nan, 'max': nan}
+  _ts_lgk2_v12_memc_r13b_iterilp                      finite=0.373  snr=None dB  [FAIL]
+  _ts_lgk2_v12_memc_r13b_iterminreg                   finite=0.363  snr=None dB  [FAIL]
+  _ts_lgk2_v12_memc_r13b_maxocc                       finite=0.527  snr=None dB  [FAIL]
+  _ts_lgk2_v12_memc_r13b_iteroccexp                   finite=0.531  snr=None dB  [FAIL]

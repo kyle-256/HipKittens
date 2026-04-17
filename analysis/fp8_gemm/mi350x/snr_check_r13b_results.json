@@ -1,0 +1,105 @@
+{
+  "gpu": 6,
+  "rows": [
+    {
+      "variant": "_ts_gm8_r13b_iterilp",
+      "result": {
+        "finite": 0.3856576979160309,
+        "sum": NaN,
+        "max": NaN
+      },
+      "snr_db": null,
+      "verdict": "FAIL"
+    },
+    {
+      "variant": "_ts_gm8_r13b_iterminreg",
+      "result": {
+        "finite": 0.3996327519416809,
+        "sum": NaN,
+        "max": NaN
+      },
+      "snr_db": null,
+      "verdict": "FAIL"
+    },
+    {
+      "variant": "_ts_gm8_r13b_maxocc",
+      "result": {
+        "finite": 0.5545629858970642,
+        "sum": NaN,
+        "max": NaN
+      },
+      "snr_db": null,
+      "verdict": "FAIL"
+    },
+    {
+      "variant": "_ts_gm8_r13b_iteroccexp",
+      "result": {
+        "finite": 0.558286726474762,
+        "sum": NaN,
+        "max": NaN
+      },
+      "snr_db": null,
+      "verdict": "FAIL"
+    },
+    {
+      "variant": "_ts_gm8_r13b_iterilp_stack_memc",
+      "result": {
+        "finite": 0.5475862622261047,
+        "sum": NaN,
+        "max": NaN
+      },
+      "snr_db": null,
+      "verdict": "FAIL"
+    },
+    {
+      "variant": "_ts_gm8_r13b_memc_stack_iterilp",
+      "result": {
+        "finite": 0.39385852217674255,
+        "sum": NaN,
+        "max": NaN
+      },
+      "snr_db": null,
+      "verdict": "FAIL"
+    },
+    {
+      "variant": "_ts_lgk2_v12_memc_r13b_iterilp",
+      "result": {
+        "finite": 0.3730781674385071,
+        "sum": NaN,
+        "max": NaN
+      },
+      "snr_db": null,
+      "verdict": "FAIL"
+    },
+    {
+      "variant": "_ts_lgk2_v12_memc_r13b_iterminreg",
+      "result": {
+        "finite": 0.36323800683021545,
+        "sum": NaN,
+        "max": NaN
+      },
+      "snr_db": null,
+      "verdict": "FAIL"
+    },
+    {
+      "variant": "_ts_lgk2_v12_memc_r13b_maxocc",
+      "result": {
+        "finite": 0.5266993045806885,
+        "sum": NaN,
+        "max": NaN
+      },
+      "snr_db": null,
+      "verdict": "FAIL"
+    },
+    {
+      "variant": "_ts_lgk2_v12_memc_r13b_iteroccexp",
+      "result": {
+        "finite": 0.530820369720459,
+        "sum": NaN,
+        "max": NaN
+      },
+      "snr_db": null,
+      "verdict": "FAIL"
+    }
+  ]
+}

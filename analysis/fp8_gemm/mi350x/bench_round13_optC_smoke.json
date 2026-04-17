@@ -1,0 +1,253 @@
+{
+  "warmup": 20,
+  "iters": 50,
+  "gpu": 7,
+  "results": [
+    {
+      "label": "S1_14336x4096x32768",
+      "variant": "_v16_wpe2_r10a_iterilp",
+      "kind": "current_best",
+      "tflops": 4726.21,
+      "ms": 0.8142,
+      "finite_frac": 0.2971303164958954,
+      "retries_used": 0,
+      "status": "OK"
+    },
+    {
+      "label": "S1_14336x4096x32768",
+      "variant": "_v16_wpe2_r13c_iterminreg",
+      "kind": "candidate",
+      "error": "RC-6",
+      "stderr": "Memory access fault by GPU node-9 (Agent handle: 0x564be06d0a10) on address 0x8f800000. Reason: Unknown.\n",
+      "status": "BROKEN",
+      "fails": 3
+    },
+    {
+      "label": "S1_14336x4096x32768",
+      "variant": "_v16_wpe2_r13c_itermaxocc",
+      "kind": "candidate",
+      "tflops": 4632.26,
+      "ms": 0.8308,
+      "finite_frac": 0.687002956867218,
+      "retries_used": 0,
+      "status": "OK"
+    },
+    {
+      "label": "S1_14336x4096x32768",
+      "variant": "_v16_wpe2_r13c_iterilp_brlgk4",
+      "kind": "candidate",
+      "tflops": 3015.89,
+      "ms": 1.276,
+      "finite_frac": 0.32828086614608765,
+      "retries_used": 0,
+      "status": "OK"
+    },
+    {
+      "label": "S1_14336x4096x32768",
+      "variant": "_v16_wpe2_r13c_iterilp_v24",
+      "kind": "candidate",
+      "tflops": 4742.4,
+      "ms": 0.8115,
+      "finite_frac": 0.30522221326828003,
+      "retries_used": 0,
+      "status": "OK"
+    },
+    {
+      "label": "S2_16384x4096x28672",
+      "variant": "_u8_r10a_iterilp",
+      "kind": "current_best",
+      "tflops": 4985.94,
+      "ms": 0.7718,
+      "finite_frac": 0.32706958055496216,
+      "retries_used": 0,
+      "status": "OK"
+    },
+    {
+      "label": "S2_16384x4096x28672",
+      "variant": "_u8_r13c_iterminreg",
+      "kind": "candidate",
+      "error": "RC-6",
+      "stderr": "Memory access fault by GPU node-9 (Agent handle: 0x562c4eb58430) on address 0x7f16e000. Reason: Unknown.\n",
+      "status": "BROKEN",
+      "fails": 3
+    },
+    {
+      "label": "S2_16384x4096x28672",
+      "variant": "_u8_r13c_itermaxocc",
+      "kind": "candidate",
+      "tflops": 4897.95,
+      "ms": 0.7857,
+      "finite_frac": 0.6988979578018188,
+      "retries_used": 0,
+      "status": "OK"
+    },
+    {
+      "label": "S2_16384x4096x28672",
+      "variant": "_u8_r13c_iterilp_brlgk4",
+      "kind": "candidate",
+      "tflops": 4984.46,
+      "ms": 0.7721,
+      "finite_frac": 0.33380740880966187,
+      "retries_used": 0,
+      "status": "OK"
+    },
+    {
+      "label": "S2_16384x4096x28672",
+      "variant": "_u8_r13c_iterilp_v24",
+      "kind": "candidate",
+      "tflops": 5013.1,
+      "ms": 0.7676,
+      "finite_frac": 0.32796698808670044,
+      "retries_used": 0,
+      "status": "OK"
+    },
+    {
+      "label": "S3_4096x32768x28672",
+      "variant": "_v20_memc_r11_iterilp",
+      "kind": "current_best",
+      "tflops": 5288.74,
+      "ms": 1.4553,
+      "finite_frac": 0.3107794523239136,
+      "retries_used": 0,
+      "status": "OK"
+    },
+    {
+      "label": "S3_4096x32768x28672",
+      "variant": "_v20_memc_r13c_iterminreg",
+      "kind": "candidate",
+      "error": "RC-6",
+      "stderr": "Memory access fault by GPU node-9 (Agent handle: 0x55b484248fc0) on address 0x39b26000. Reason: Unknown.\n",
+      "status": "BROKEN",
+      "fails": 3
+    },
+    {
+      "label": "S3_4096x32768x28672",
+      "variant": "_v20_memc_r13c_itermaxocc",
+      "kind": "candidate",
+      "tflops": 5140.56,
+      "ms": 1.4972,
+      "finite_frac": 0.6747771501541138,
+      "retries_used": 0,
+      "status": "OK"
+    },
+    {
+      "label": "S3_4096x32768x28672",
+      "variant": "_v20_memc_r13c_iterilp_brlgk4",
+      "kind": "candidate",
+      "tflops": 5267.68,
+      "ms": 1.4611,
+      "finite_frac": 0.2854991555213928,
+      "retries_used": 0,
+      "status": "OK"
+    },
+    {
+      "label": "S3_4096x32768x28672",
+      "variant": "_v20_memc_r13c_iterilp_v24",
+      "kind": "candidate",
+      "tflops": 5257.82,
+      "ms": 1.4638,
+      "finite_frac": 0.2881057858467102,
+      "retries_used": 0,
+      "status": "OK"
+    },
+    {
+      "label": "S4_4096x28672x32768",
+      "variant": "_u16_r11_iterilp",
+      "kind": "current_best",
+      "tflops": 5383.1,
+      "ms": 1.4298,
+      "finite_frac": 0.41992706060409546,
+      "retries_used": 0,
+      "status": "OK"
+    },
+    {
+      "label": "S4_4096x28672x32768",
+      "variant": "_u16_r13c_iterminreg",
+      "kind": "candidate",
+      "error": "RC-6",
+      "stderr": "Memory access fault by GPU node-9 (Agent handle: 0x559683d20e90) on address 0x78a80000. Reason: Unknown.\n",
+      "status": "BROKEN",
+      "fails": 3
+    },
+    {
+      "label": "S4_4096x28672x32768",
+      "variant": "_u16_r13c_itermaxocc",
+      "kind": "candidate",
+      "tflops": 5261.14,
+      "ms": 1.4629,
+      "finite_frac": 0.6504940390586853,
+      "retries_used": 0,
+      "status": "OK"
+    },
+    {
+      "label": "S4_4096x28672x32768",
+      "variant": "_u16_r13c_iterilp_brlgk4",
+      "kind": "candidate",
+      "tflops": 5370.46,
+      "ms": 1.4331,
+      "finite_frac": 0.4077698290348053,
+      "retries_used": 0,
+      "status": "OK"
+    },
+    {
+      "label": "S4_4096x28672x32768",
+      "variant": "_u16_r13c_iterilp_v24",
+      "kind": "candidate",
+      "tflops": 5341.66,
+      "ms": 1.4409,
+      "finite_frac": 0.4816530644893646,
+      "retries_used": 0,
+      "status": "OK"
+    },
+    {
+      "label": "S5_4096x32768x14336",
+      "variant": "_ts_lgk2_memc_r11_iterilp",
+      "kind": "current_best",
+      "tflops": 4992.64,
+      "ms": 0.7708,
+      "finite_frac": 0.30408453941345215,
+      "retries_used": 0,
+      "status": "OK"
+    },
+    {
+      "label": "S5_4096x32768x14336",
+      "variant": "_ts_lgk2_memc_r13c_iterminreg",
+      "kind": "candidate",
+      "tflops": 4872.74,
+      "ms": 0.7898,
+      "finite_frac": 0.2837413549423218,
+      "retries_used": 0,
+      "status": "OK"
+    },
+    {
+      "label": "S5_4096x32768x14336",
+      "variant": "_ts_lgk2_memc_r13c_itermaxocc",
+      "kind": "candidate",
+      "tflops": 4874.99,
+      "ms": 0.7894,
+      "finite_frac": 0.3221006989479065,
+      "retries_used": 0,
+      "status": "OK"
+    },
+    {
+      "label": "S5_4096x32768x14336",
+      "variant": "_ts_lgk2_memc_r13c_iterilp_brlgk4",
+      "kind": "candidate",
+      "tflops": 4972.49,
+      "ms": 0.7739,
+      "finite_frac": 0.3303777575492859,
+      "retries_used": 0,
+      "status": "OK"
+    },
+    {
+      "label": "S5_4096x32768x14336",
+      "variant": "_ts_lgk2_memc_r13c_iterilp_v24",
+      "kind": "candidate",
+      "tflops": 4973.19,
+      "ms": 0.7738,
+      "finite_frac": 0.2827797830104828,
+      "retries_used": 0,
+      "status": "OK"
+    }
+  ]
+}

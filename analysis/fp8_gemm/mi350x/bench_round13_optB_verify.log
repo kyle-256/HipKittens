@@ -1,0 +1,34 @@
+R13B verify (5-run). shape=28672x4096x16384 comp=5350.6 GPU=6 warmup=200 iters=500
+==============================================================================================================
+
+memc_stack_iterilp_vs_orig  baseline=_ts_gm8  candidate=_ts_gm8_r13b_memc_stack_iterilp
+  baseline  run1: 4964.84 TFLOPS
+  baseline  run2: 4977.64 TFLOPS
+  baseline  run3: 4971.09 TFLOPS
+  baseline  run4: 4958.37 TFLOPS
+  baseline  run5: 4978.66 TFLOPS
+  candidate run1: 4994.41 TFLOPS
+  candidate run2: 4971.71 TFLOPS
+  candidate run3: 4964.38 TFLOPS
+  candidate run4: 4976.28 TFLOPS
+  candidate run5: 4973.49 TFLOPS
+  baseline  mean=4970.12 max=4978.66 min=4958.37
+  candidate mean=4976.05 max=4994.41 min=4964.38
+  delta_mean=+5.93 TFLOPS  (+0.11pp)  gate(mean>=base.max)=FAIL
+
+iterilp_vs_orig  baseline=_ts_gm8  candidate=_ts_gm8_r13b_iterilp
+  baseline  run1: 4992.51 TFLOPS
+  baseline  run2: 4968.71 TFLOPS
+  baseline  run3: 4968.55 TFLOPS
+  baseline  run4: 4969.43 TFLOPS
+  baseline  run5: 4960.67 TFLOPS
+  candidate run1: 4969.24 TFLOPS
+  candidate run2: 4980.64 TFLOPS
+  candidate run3: 4975.23 TFLOPS
+  candidate run4: 4970.44 TFLOPS
+  candidate run5: 4962.32 TFLOPS
+  baseline  mean=4971.97 max=4992.51 min=4960.67
+  candidate mean=4971.57 max=4980.64 min=4962.32
+  delta_mean=-0.40 TFLOPS  (-0.01pp)  gate(mean>=base.max)=FAIL
+
+Saved bench_round13_optB_verify.json

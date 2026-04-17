@@ -1,0 +1,72 @@
+Skipping (parent-equivalent): [('WIN2', 'itermaxocc'), ('WIN2', 'itermaxoccx'), ('WIN2', 'maxocc')]
+Always-skip strategies: {'itermaxoccx', 'maxocc'}
+
+DLA1 iterminreg (_ts_pf6_6_v12_memc_r13_iterminreg):
+  retry1: NaN-output (finite=0.179)
+  retry2: NaN-output (finite=0.179)
+  retry3: NaN-output (finite=0.178)
+  -> 0/3  verdict=BROKEN
+
+DLA1 itermaxocc (_ts_pf6_6_v12_memc_r13_itermaxocc):
+  retry1: ERROR APERTURE
+  retry2: ERROR APERTURE
+  retry3: ERROR APERTURE
+  -> 0/3  verdict=BROKEN
+
+DLA1 maxilp (_ts_pf6_6_v12_memc_r13_maxilp):
+  retry1: ERROR APERTURE
+  retry2: ERROR APERTURE
+  retry3: ERROR APERTURE
+  -> 0/3  verdict=BROKEN
+
+DLA2 iterminreg (_ts_gm2_v12_memc_dc_r13_iterminreg):
+  retry1: NaN-output (finite=0.913)
+  retry2: NaN-output (finite=0.912)
+  retry3: NaN-output (finite=0.913)
+  -> 0/3  verdict=BROKEN
+
+DLA2 itermaxocc (_ts_gm2_v12_memc_dc_r13_itermaxocc):
+  retry1: NaN-output (finite=0.904)
+  retry2: NaN-output (finite=0.901)
+  retry3: NaN-output (finite=0.896)
+  -> 0/3  verdict=BROKEN
+
+DLA2 maxilp (_ts_gm2_v12_memc_dc_r13_maxilp):
+  retry1: NaN-output (finite=0.990)
+  retry2: NaN-output (finite=0.987)
+  retry3: NaN-output (finite=0.943)
+  -> 0/3  verdict=BROKEN
+
+DLA7 iterminreg (_ts_lgk2_v12_memc_r13_iterminreg):
+  retry1: NaN-output (finite=0.836)
+  retry2: NaN-output (finite=0.835)
+  retry3: NaN-output (finite=0.830)
+  -> 0/3  verdict=BROKEN
+
+DLA7 itermaxocc (_ts_lgk2_v12_memc_r13_itermaxocc):
+  retry1: NaN-output (finite=0.812)
+  retry2: NaN-output (finite=0.798)
+  retry3: NaN-output (finite=0.830)
+  -> 0/3  verdict=BROKEN
+
+DLA7 maxilp (_ts_lgk2_v12_memc_r13_maxilp):
+  retry1: NaN-output (finite=0.913)
+  retry2: NaN-output (finite=0.936)
+  retry3: NaN-output (finite=0.981)
+  -> 0/3  verdict=BROKEN
+
+WIN2 iterminreg (_ts_gm8_v12_r13_iterminreg):
+  retry1: NaN-output (finite=0.943)
+  retry2: NaN-output (finite=0.876)
+  retry3: NaN-output (finite=0.944)
+  -> 0/3  verdict=BROKEN
+
+WIN2 itermaxocc: SKIP (parent-equivalent)
+
+WIN2 maxilp (_ts_gm8_v12_r13_maxilp):
+  retry1: NaN-output (finite=0.973)
+  retry2: NaN-output (finite=0.972)
+  retry3: NaN-output (finite=0.947)
+  -> 0/3  verdict=BROKEN
+
+Saved bench_round13_optA_smoke.json
