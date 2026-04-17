@@ -79,7 +79,12 @@ After subagents return:
    any `.so` binary, any `bench_v*_baseline.json` (keep only one
    "final" json per directory).
 3. Run the Reviewer agent: re-benchmark the modified directory, confirm
-   SNR + determinism + non-regression.
+   SNR + determinism + non-regression. **The Reviewer MUST use a
+   different `HIP_VISIBLE_DEVICES` than the Dev** who claimed the win,
+   to rule out per-GPU DVFS thermal artifacts. P9 demonstrated that
+   the same code can show +1.2pp on one GPU and -0.88pp on another
+   when clocks are not actually pinned (and `rocm-smi --setperflevel high`
+   is silently broken on this host).
 4. Ensure the strong layouts didn't regress (FP8 RRR ≥ 1.4x, CRR ≥ 1.8x;
    BF16 keep whatever baseline was).
 5. Update `TODO.md` with new state and remaining items.
@@ -137,6 +142,59 @@ Every skill update should reflect only what was verified in the current
 session, not aspirational targets.
 
 ## Session Log
+
+### 2026-04-17 — P9 (3 Devs + 1 Reviewer in worktrees, all model=opus)
+
+**Outcome: nothing landed. All three optimization directions bottomed out
+at DVFS noise after cross-GPU validation.**
+
+- **BF16 CRR Dev (worktree `agent-aa1be9f2`, GPU 4)** — KI=296
+  `#pragma unroll 1` specialization. Build log confirms SGPR spills
+  26 → 0 at KI=296. On Dev's GPU 4: +1.2pp on (8192,3584,18944).
+  Reviewer on GPU 2: SAME shape, SAME code → -0.88pp (regression).
+  Geo-mean across the layout was -0.28pp on CRR. The unroll-2 → unroll-1
+  trade reduces spills but loses barrier-hiding; net negative for CRR
+  on this kernel. Cosmetic `readfirstlane` hoist of `row*2/col*2` had
+  zero effect on spill count (compiler already factored it). Diff
+  preserved in worktree, NOT landed.
+- **BF16 RCR/RRR Dev (worktree `team-bf16-rcrrrr-mn`, GPU 5)** — per-shape
+  `vmcnt`/`lgkmcnt` autotune via 4-profile `WAITCNT_PROFILE` template
+  arg. +0.25pp / +0.17pp consistent across 3 runs but inside the
+  calibrated DVFS noise band (per-shape stdev 0.66pp from a CRR
+  identical-code calibration). Bloats the .so by ~7×. Diff preserved,
+  not landed.
+- **FP8 RCR Dev (worktree `agent-a693b720`, GPU 0)** — re-bench of the
+  per-shape NUM_XCDS strategy with `--warmup 30 --iters 100 --trials 5`
+  on every weak shape. Result: xcd=8 wins on every weak shape by
+  0.1-2.5%; the P8 xcd=16 "wins" were thermal noise. Closed item;
+  no diff.
+- **Decider** — applied Dev 1's diff to main worktree, ran Reviewer
+  agent on GPU 2 (different from Dev 1's GPU 4 to rule out thermals),
+  Reviewer rejected, working tree reverted. Updated TODO.md +
+  agent_prompt.md to record findings. Committed docs only as P9.
+
+**Lessons (additive to P8 lessons):**
+
+1. **`rocm-smi --setperflevel high` is silently broken on this host.**
+   Both with and without sudo it returns success but perf level stays
+   "auto". Confirmed across P8 + P9. Without clock pinning, ±2pp DVFS
+   noise dominates any single-knob effect.
+2. **Always cross-validate on a 2nd GPU before committing**, even if
+   the change shows a real ISA-level effect (like SGPR spill count
+   dropping). Dev 1's KI=296 unroll-1 change ABSOLUTELY dropped spills
+   from 26 to 0 — but the wall-clock effect on the target shape was
+   *opposite* on a different GPU. The mechanism was real; the
+   interpretation was wrong.
+3. **SGPR spill count is a means, not an end.** Reducing spills can
+   regress perf if the trade (e.g. losing #pragma unroll for spill
+   reduction) costs more in barrier-hiding than it saves in load
+   pressure. Always measure the wall clock.
+4. **+0.25pp consistent across 3 runs is still noise** when the
+   calibrated per-shape stdev is 0.66pp. Always calibrate the noise
+   floor with an identical-code A/B run before claiming a win in the
+   sub-1pp band.
+5. **Reviewer must use a different GPU than the Dev** who claimed the
+   win. Codifying this in the Decider Checklist now (see step 3).
 
 ### 2026-04-17 — P8 (3 Devs in worktrees, all model=opus)
 - **FP8 Dev (a67f50ee, GPU 0)** — implemented runtime `g.num_xcds` end-to-end

@@ -7,7 +7,16 @@
 - SNR ≥ 48 dB (FP8) / ≥ 47 dB (BF16 vs torch.mm), bit-exact determinism are hard gates.
 - Never commit `*.so`, `.autotune_cache.json` is OK to keep (it's text), logs are not.
 
-## Current Status (2026-04-17, post-P8)
+## Current Status (2026-04-17, post-P9 — no code change landed)
+
+P9 was an agent-team exploration session (3 Devs + 1 Reviewer, all opus). Net
+result: nothing landed. Three optimization directions all bottomed out at
+DVFS noise after cross-GPU validation. See "Closed / Completed" for details
+and lessons.
+
+The numbers below are unchanged from post-P8.
+
+
 
 ### FP8 — ✅ All targets met
 
@@ -38,17 +47,28 @@ layout; no layout regressed.
 ## Open Items — High Priority
 
 ### BF16 CRR (biggest residual gap, -4.7pp)
-- [ ] **Reduce SGPR spill on CRR KI=128 (26) and KI=296 (26)**. Per-iter
-      constants (e.g. `tile+1/+2/+3` SRD offsets, `b_coord(col*2, ...)`
-      arithmetic) keep refilling SGPRs in the loop body; hoist these out.
-      The 7-SGPR-spill KI=172 variant runs ~1pp better than its neighbors
-      at the same shapes, so spill reduction is the right axis. CRR-specific
-      micro-tunes (CRR_MAIN_VMCNT/LGKMCNT, CRR_UNROLL=4, CRR_NUM_XCDS,
-      CRR_CHUNK) all stayed within the ±2pp DVFS noise band — explored and
-      ruled out 2026-04-17.
-- [ ] Pin GPU clocks (`rocm-smi --setperflevel high`) before any future
-      CRR tuning sweep. The 2pp DVFS drift was the dominant signal in the
-      P8 CRR exploration.
+- [ ] **Reduce SGPR spill on CRR KI=128 (26)**. P9 confirmed KI=296 spill
+      reduction (26→0 via `#pragma unroll 1`) does NOT translate to perf
+      wins under cross-GPU validation — the K=18944 CRR shape *regressed*
+      0.88pp on GPU 2 even though spills genuinely dropped to 0 and Dev 1's
+      GPU 4 measurement showed +1.2pp. Conclusion: bare unroll reduction
+      trades barrier hiding for spill reduction and the trade is net
+      negative on CRR. KI=128 still untried; would need a deeper
+      restructure (split-lambda, SRD-offset hoist into LDS, etc.) rather
+      than just unroll-1. Cosmetic `readfirstlane` hoist of `row*2/col*2`
+      is also explored (P9): RCR/RRR neutral, kept out of tree.
+- [ ] **GPU clock pinning is silently broken** on this host —
+      `rocm-smi --setperflevel high` returns success but perf level
+      stays "auto" both with and without sudo. P8 + P9 confirmed.
+      Root cause unknown; might be a kernel module issue. Without it,
+      ±2pp of DVFS noise dominates any single-knob effect, so any future
+      sweep MUST average across ≥ 5 trials AND validate on a 2nd GPU.
+- [ ] Per-shape WAITCNT autotune (RCR/RRR `vmcnt`/`lgkmcnt` profiles via
+      `WAITCNT_PROFILE` template arg) was prototyped P9 (worktree
+      `team-bf16-rcrrrr-mn`): +0.25pp / +0.17pp consistent across 3 runs
+      but inside the calibrated DVFS noise band (per-shape stdev ≈ 0.66pp,
+      CRR-pinned-code calibration). Bloats .so by ~7×. Diff preserved in
+      worktree, NOT landed.
 
 ### BF16 RCR / RRR (-1.6 to -2.0pp)
 - [ ] Try M↔N kernel swap for shapes where N > M (explicit grid swap, not
@@ -59,18 +79,22 @@ layout; no layout regressed.
 - [ ] Consider runtime 4-wave path for large-grid shapes (analogous to FP8).
 
 ### FP8 RCR (within noise of 1.00x; 12 weak shapes still 0.90-0.93x)
-- [ ] **Per-shape NUM_XCDS for FP8** — the runtime `g.num_xcds`
-      machinery has been validated end-to-end (see Strategy A
-      investigation 2026-04-17). 4 shapes prefer xcd=16 with +0.6 to
-      +1.7pp wins, but per-shape noise on the other 44 cancels the
-      geo-mean gain. Re-attempt with longer averaging or more aggressive
-      MID-shape coverage; the diff lives in worktree
-      `agent-a67f50ee` for reference.
+- [x] ~~Per-shape NUM_XCDS for FP8~~ — P9 ran a strict per-shape re-bench
+      (warmup=30, iters=100, trials=5) on every weak shape. Result:
+      **xcd=8 wins on every one of the 12 weak shapes** by 0.1-2.5%. The
+      previous attempt's "wins" for xcd∈{4,16} were per-shape thermal
+      noise. Mechanism is sound but offers no headroom — closed.
 - [ ] Small K + big N remain weak: (M, 28672, 4096), (M, 37888, 3584).
-      hipBLASLt likely uses Split-K. Explore deterministic on-chip Split-K
-      (no atomics).
-- [ ] Revisit KI template specialization with `unroll 1` instead of `unroll 2`
-      to avoid spills.
+      hipBLASLt likely uses Split-K. Explore deterministic on-chip
+      Split-K (no atomics) — no clean implementation idea yet; the
+      grid is already sparse enough that "splitting K" inside one block
+      doesn't help. Open problem.
+- [ ] Revisit KI template specialization with `unroll 1` instead of
+      `unroll 2`. **Caveat from P9**: BF16 KI=296 unroll-1 dropped
+      spills 26→0 but cost 0.88pp on the target CRR shape. Suggests
+      barrier-hiding from unroll-2 outweighs the spill cost on at
+      least some kernels. If revisited for FP8, validate on at least
+      2 GPUs before committing.
 
 ## Open Items — Correctness
 
@@ -89,6 +113,25 @@ layout; no layout regressed.
 
 ## Closed / Completed
 
+- 2026-04-17 P9 — Agent team session (3 Devs + 1 Reviewer, all opus).
+  Three optimization directions explored, **nothing landed**:
+  - BF16 CRR KI=296 `#pragma unroll 1` (Dev 1, GPU 4): SGPR spills
+    26→0 confirmed in build log, +1.2pp on (8192,3584,18944) on GPU 4
+    → -0.88pp on the same shape on GPU 2 (Reviewer). Net geo-mean
+    within ±0.3pp on every layout. **Rejected** — barrier-hiding from
+    unroll-2 beats spill reduction here, and DVFS noise (clock pinning
+    silently broken) hid the regression on Dev's GPU.
+  - BF16 RCR/RRR per-shape WAITCNT autotune (Dev 2, GPU 5): consistent
+    +0.25pp/+0.17pp across 3 runs but inside calibrated noise band
+    (stdev 0.66pp/shape). **Abandoned** — not worth 7× .so bloat.
+  - FP8 RCR per-shape NUM_XCDS retry (Dev 3, GPU 0): with proper
+    averaging xcd=8 wins on every weak shape; previous "wins" were
+    thermal noise. **Closed** — moved this item to the closed list.
+  Lessons:
+  - `rocm-smi --setperflevel high` silently no-ops on this host. Any
+    sweep that doesn't validate on a 2nd GPU is suspect.
+  - SGPR spill count is a means, not an end. Confirm the wall-clock
+    drop, not just the spill drop.
 - 2026-04-17 P8 — BF16 per-shape NUM_XCDS autotune landed: RCR +1.0pp,
   RRR +1.6pp, CRR +1.7pp. FP8 MID_VMCNT 4→6 corrected (P7 commit message
   claimed this but file shipped at 4).
