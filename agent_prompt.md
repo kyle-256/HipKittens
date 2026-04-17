@@ -33,13 +33,14 @@
 | **FP8 RCR (长期 target)** | **3070.93** | 49.61 | 252 / 0 / 0 / 131 KB | 104.9% |
 | **MXFP8 RCR KPAIR+SRD+SCALE_PIPE+HOIST_HI** | **2926.61** (GPU7 reviewer) | 49.60 | 254 / 0 / 0 / 131 KB | **100.0%** |
 | **MXFP8 RRR (默认 flag)** | **2794.26** | 49.59 | — | **95.48%** ✅ |
-| **MXFP8 CRR (默认 flag)** | **2737.94** | 49.60 | — | **93.55%** ❌ |
+| **MXFP8 CRR + PIPELINE_SCALE (新默认)** | **2740.55** (GPU7 reviewer) | 49.60 | 232 / 0 / 0 / 136 KB | **93.64%** ❌ |
+| MXFP8 CRR (旧默认 PIPELINE_SCALE=0) | 2733.91 | 49.60 | 247 / 0 / 0 / 136 KB | 93.42% |
 | RCR 差距 vs FP8 | −144.32 (−4.70%) | | | |
 
 **95% gate 线** = 2926.61 × 0.95 = **2780.28 TFLOPS**
 
 - RRR：+13.98 TFLOPS 超线，本轮不动
-- CRR：−42.34 TFLOPS (−1.55%)，本轮必须补上
+- CRR：−39.73 TFLOPS (−1.43%)（PIPELINE_SCALE 默认开后）；HOIST_HI 路径已验证架构性不可行（详见 R7-R9），单 flag 无法到达 gate；要破 gate 必须做结构性重构
 
 > **VGPR 读数陷阱**：`-Rpass-analysis=kernel-resource-usage` 会为每个符号各报一次；MXFP8 RCR PQ 路径的真实 hot kernel 是 `rcr_exact_8wave_scaled_kernel<Lb1>`（VGPR **254** / LDS **131 KB**）。外壳 `gemm_kernel<Layout0,*>` 只是 dispatcher，显示 VGPR 212 / LDS 139 KB，**不是**可用于 headroom 推断的数字。任何基于「40 VGPR headroom」的优化提案都是错的，请以 scaled kernel 符号的 remark 为准。CRR 同理，看 `crr_exact_8wave_scaled_kernel<Lb1>` 符号的 remark。
 
@@ -187,19 +188,54 @@ for (int g = 0; g < crr_a_pack_count; g++) {
 - `crr_mma_scaled_phase<K_PHASE>(...)` compile-time
 - tail 路径（L463-536）已经用 compile-time `_phase<0>` / `_phase<1>`
 
-### CRR 派活：Dev CRR-A（已派，被打断未完成）
+### CRR R7-R9 评审结果 (2026-04-17)
 
-- **Worktree**：`/tmp/wt-crr-a`（detached HEAD @ `77370d3f`）
-- **GPU**：`HIP_VISIBLE_DEVICES=0`（smoke + A/B）；GPU7 留给 reviewer
-- **新增 flag**：`MXFP8_CRR_EXACT_PQ_HOIST_HI_ENABLE`（默认 0）
-- **做法**：主循环 `for (k ...)` 改成 C++20 templated lambda `[&]<int K_PHASE>(int k)`，2× k 展开，`K_PHASE==0` 调 `load_raw_scales(k >> 1)`，`K_PHASE==1` 直接用 `raw_phase<1>` helper（byte-select 高 16 位）；**删掉 L411-420 的 6 条 shift**
-- **Pass 判据**：ON ≥ 2780.28 TFLOPS AND Δ > +1% AND spills=0 AND SNR > 48 AND det 3/3 AND 不回归 RCR/FP8
-- 当前状态：任务被中断；worktree 保留，下次会话可续派
+总计 9 个 dev attempt，1 个采纳 (Dev D)，8 个 reject。
+
+| 路径 | flag / 做法 | 结果 | 采纳？ |
+|---|---|---|---|
+| R7 Dev A — HOIST_HI K_PHASE templated lambda v1 | 主循环 K_PHASE 模板化 | VGPR 256 + 53 spills, A/B −54% | **拒绝** |
+| R7 Dev B — HOIST_HI v2 (削减 helper inline) | 同上 + try减少模板内 inline | VGPR 256 + 91 spills, A/B −67% | **拒绝** |
+| R7 Dev C — HOIST_HI v3 (再削) | 同上 | VGPR 256 + 173 spills, A/B −54% | **拒绝** |
+| **R7 Dev D — PIPELINE_SCALE only** | `MXFP8_CRR_EXACT_PQ_PIPELINE_SCALE_ENABLE=1` | ✅ GPU7 reviewer 2740.55 (+0.243%)，VGPR 247→232 (−15)，spills 0，det 3/3 | **采纳，commit `8934e95c`** |
+| R7 Dev E — sched_barrier 实验 (no body change) | sched_barrier 加 hint | A/B Δ ≈ 0% (噪声)。**结论：v_lshr 不在 critical path** | **拒绝（marginal）** |
+| R7 Dev F — `__noinline__` outlined helper | 把 main loop body 拆出 noinline 函数 | catastrophic：correctness 46% / scratch 800–888 B/lane / A/B −97%。**AMDGPU calling conv 无法跨 noinline 边界保持 4 个 accumulator live** | **拒绝（broken）** |
+| R8 Dev G — runtime branch HOIST_HI | runtime if/else 替代 templated lambda（避免 codegen 翻倍） | 3 变体全 FAIL gate；V1 256 VGPR + 13 spills，V2 manual unroll 256 + 347 spills；A/B −94%，correctness FAIL | **拒绝（broken）** |
+| R8 Dev H — PIPELINE+HOIST 组合 | 同时叠加 PIPELINE_SCALE 与 HOIST_HI templated lambda | 256 VGPR + 29 spills；PIPELINE 的 SRSRC（24×32-bit）与 HOIST_HI 双 phase packs live 互相挤兑 | **拒绝（spills）** |
+| R9 Dev I — HOIST + PIPELINE + 关 INTERLEAVE_B1_LDS | 删 `crr_exact_cA_with_b1_interleave`（重 8-MFMA helper），按 RRR 简单 4-MMA 结构走 + HOIST_HI K_PHASE templated lambda + PIPELINE_SCALE | 256 VGPR + 145 spills + 332 B/lane scratch | **拒绝（spills）** |
+
+### 关键架构发现 (R7-R9)
+
+**HOIST_HI K_PHASE templating 与 CRR 4-accumulator main loop 根本不兼容**：
+
+- CRR baseline 247 VGPR / 254 cap → 仅 7 VGPR headroom
+- K_PHASE templated lambda 把 4 MMA × 2 phase = 8 inlined MMA blocks 同时展开
+- 任何 templated body doubling 都要 9–25 VGPR
+- → 必然爆 256 VGPR + spills，**与是否叠加 PIPELINE_SCALE / 是否关 INTERLEAVE_B1_LDS 无关**
+- 在 5 个独立尝试（Dev A/B/C/H/I）观察到同一 256-VGPR ceiling，证伪假设
+
+**RRR 为何成功 HOIST_HI 移植**：RRR 用简单 2-MMA-call body（无 `crr_exact_cA_with_b1_interleave` 那种 8 单 MFMA + LDS interleave），K_PHASE 模板化后 inlined codegen 体积可控，在 254 VGPR cap 下能容纳。CRR 4-accumulator + interleave helper 是结构差异，删 interleave 也救不回（Dev I 已证）。
+
+**v_lshr 不在 critical path** (Dev E)：之前以为 6 × `v_lshrrev_b32` 是 main loop bottleneck，sched_barrier 实验证伪。即使理论上消除这 6 条 shift，对总时间影响也在噪声里。HOIST_HI 在 RCR 上的成功更多来自 codegen 重排（更优的 issue order）而不是单纯减 shift。
+
+### 已关闭的死路
+
+- ~~HOIST_HI 移植 CRR (任何形式：templated lambda / runtime branch / outlined noinline)~~：架构性 VGPR 不足
+- ~~CRR HOIST_HI + 任意辅助 flag 组合（PIPELINE_SCALE / 关 INTERLEAVE）~~：仍然 spills
+- ~~`__noinline__` outlined helper~~：AMDGPU calling conv 不能跨 noinline 保持 4 accumulator live
+- ~~sched_barrier-only 调度优化~~：v_lshr 不在 critical path，调度变化在噪声内
+
+### 未来可探索方向（高风险结构性，本会话不做）
+
+- **CRR 4-accumulator → 2-accumulator 重构**：合并 cA/cB/cC/cD → 减一半 VGPR live，留出 templated lambda 空间
+- **KPAIR_LOOP 移植 CRR**：参考 RCR 的 KPAIR loop 改造，可能改变 register lifetime 形状
+- **重写 `crr_exact_cA_with_b1_interleave_*`**：拆掉 8 个独立 MFMA + LDS interleave，换更紧凑的实现
+- **CRR scale loader 重设计**：bypass 现有 scale pack 路径，类似 RCR 的 SGPR-SRD path
 
 ### 后续计划
 
-1. Dev CRR-A 完成 / 胜出者 commit（若 Dev CRR-A reject 另起方向：如搬 KPAIR_LOOP 到 CRR、或重做 CRR scale loader）
-2. Reviewer 跑 CRR smoke / formal / A/B + RCR + FP8 回归
+1. CRR PIPELINE_SCALE 已 commit (`8934e95c`)，达到当前微调上限
+2. **CRR 不再值得短期投入小改动**：剩 39.73 TFLOPS 必须靠结构性重构，下一会话若要继续应**单条深入**而非并行 dev fan-out
 3. RRR 监控；若后续回退到 95% 以下再补
 4. 回到 RCR 的剩余 4.70% 差距（三条高风险结构方向）
 

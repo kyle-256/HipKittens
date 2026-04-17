@@ -13,14 +13,15 @@
 | **FP8 per-tensor RCR (长期目标)** | **3070.93** | 49.61 dB PASS | 0 | 105.0% |
 | **MXFP8 8-wave RCR KPAIR+SRD+SCALE_PIPE+HOIST_HI (当前最佳)** | **2926.61** | 49.60 dB PASS | 0 | 100.0% |
 | **MXFP8 8-wave RRR (默认 flag)** | **2794.26** | 49.59 dB PASS | — | **95.48%** ✅ |
-| **MXFP8 8-wave CRR (默认 flag)** | **2737.94** | 49.60 dB PASS | — | **93.55%** ❌ 差 1.55% |
+| **MXFP8 8-wave CRR + PIPELINE_SCALE (新默认 flag)** | **2740.55** | 49.60 dB PASS | 0 | **93.64%** ❌ 差 1.46% |
+| MXFP8 8-wave CRR (旧默认，PIPELINE_SCALE=0) | 2733.91 | 49.60 dB PASS | 0 | 93.42% |
 
 ### RRR / CRR 95% gate
 
 目标线：2926.61 × 0.95 = **2780.28 TFLOPS**
 
 - RRR：2794.26 ≥ 2780.28 → **已达标**（+13.98 over gate），本轮不动
-- CRR：2737.94 vs 2780.28 → **差 42.34 TFLOPS (1.55%)**，必须补上
+- CRR：2740.55 vs 2780.28 → **差 39.73 TFLOPS (1.43%)**（PIPELINE_SCALE 默认开后）；HOIST_HI 路径已证架构性不可行（见 R7-R9），单 flag 无法到达 gate
 
 reviewer 验收数据（GPU7，warmup=100 iters=200 per-iter sync）：
 - HOIST_HI formal (with SNR + det 3/3 gate): 2925.64 TFLOPS PASS
@@ -138,9 +139,9 @@ CRR PQ：**2737.94 TFLOPS** (93.55% of RCR) → 差 **42.34 TFLOPS (1.55%)** 才
 
 ### CRR 方向
 
-- [ ] Dev CRR-A：HOIST_HI 思路移植 CRR —— 新增 flag `MXFP8_CRR_EXACT_PQ_HOIST_HI_ENABLE`，把主循环改成 `[&]<int K_PHASE>(...)` 模板化 lambda，`K_PHASE==0` 走 `load_raw_scales`，`K_PHASE==1` 走 `raw_phase<1>` helper（byte-select 高 16 位），**删掉 6 条 shift 回退**
-- [ ] Reviewer：smoke 256 → formal 8192 → A/B 10 runs GPU0 + GPU7 各一轮 → 必须 ON ≥ 2780.28 且 Δ > +1%
-- [ ] 有效果 commit + 同步 TODO / agent_prompt / SKILL
+- [x] **PIPELINE_SCALE 默认开**（commit `8934e95c`）：reviewer GPU7 验收 OFF 2733.91 → ON 2740.55 (+0.243%)，VGPR 247→232（−15），spills 0→0，occ 2，SNR 49.60 dB，det 3/3。**未到 gate**（差 39.73 TFLOPS）但是 strict win 且为后续优化释放 15 VGPR headroom
+- [x] **R7-R9：HOIST_HI 路径架构性不可行**（5 attempts: Dev A, B, C, H, I 同 256 VGPR ceiling）。详见下方 R7-R9 评审记录
+- [ ] **未来方向（结构性，本会话不做）**：CRR 4-accumulator pattern 重构（合并 cA/cB/cC/cD 减寄存器）；或 KPAIR_LOOP 移植 CRR；或重做 `crr_exact_cA_with_b1_interleave` helper（拆掉 8 个独立 MFMA）。这些都是大型重写
 - [ ] RRR 保持观察，若后续因编译器变化跌破 95% 再补
 
 ---
@@ -174,3 +175,13 @@ CRR PQ：**2737.94 TFLOPS** (93.55% of RCR) → 差 **42.34 TFLOPS (1.55%)** 才
 - **第六轮 (2026-04-17)**：Dev H 证明 occupancy=1 在 512-thread 8-wave block 上**架构性不可能**（CU 只有 4 SIMD，一个 512-thread block 最少占 2 waves/SIMD）。加 pipeline 扩展反而 63 spills / −63%。Occupancy 轴彻底关闭。
 - `77370d3f` Round-6 dead-end: occupancy=1 architecturally impossible for 8-wave（仅文档 commit）
 - **第七轮起 (2026-04-17)**：任务转向 RRR / CRR 95%-of-RCR gate。GPU7 实测三 layout：RCR 2926.61 / RRR 2794.26 (95.48%，已达标) / CRR 2737.94 (93.55%，差 42.34)。CRR 差距根因：主循环每奇数 k 做 6 × `scale_pack >> 16` → `v_lshrrev_b32`，跟 RCR pre-HOIST_HI 同构。计划：移植 HOIST_HI opsel 思路到 CRR 主循环（flag `MXFP8_CRR_EXACT_PQ_HOIST_HI_ENABLE`）。Dev CRR-A 已派活（worktree `/tmp/wt-crr-a`，GPU0），被打断未完成。
+- **第七轮 round-1 重启 (2026-04-17)**：续派 Dev A/B/C 三 HOIST_HI 变体（CRR HOIST_HI K_PHASE templated lambda）—— 全 FAIL：CRR 4-accumulator (cA/cB/cC/cD) + 重 `crr_exact_cA_with_b1_interleave` 在 K_PHASE 模板化时 inlined codegen 翻倍，VGPR 247→256+ 含 53–173 spills，A/B −54% 到 −67%。
+- **第七轮 round-2 (2026-04-17)**：Dev D/E/F/G/H 五个新方向：
+  - **Dev D — PIPELINE_SCALE only**：✅ +0.243% on GPU7（详见 commit `8934e95c`），VGPR 247→232（−15），spills 0
+  - **Dev E — sched_barrier (no body change)**：噪声级，Δ ≈ 0%。**结论：v_lshr 不在 critical path**
+  - **Dev F — `__noinline__` outlined helper**：catastrophic：correctness 46% / scratch 800–888 B/lane / −97%。AMDGPU calling convention 无法跨 noinline 边界保持 4 个 accumulator live
+  - **Dev G — runtime branch HOIST_HI**：3 变体全 FAIL gate；V1 `if/else` 256 VGPR + 13 spills，V2 manual unroll 256 + 347 spills，V3 with scopes 同 V2；A/B −94% / correctness FAIL
+  - **Dev H — PIPELINE+HOIST combo**：256 VGPR + 29 spills；PIPELINE 的 SRSRC（24×32-bit）与 HOIST_HI 双 phase packs live 互相挤兑
+- **第七轮 round-3 (Dev I) (2026-04-17)**：HOIST_HI + PIPELINE_SCALE + `CRR_EXACT_INTERLEAVE_B1_LDS=0`（删掉重 8-MFMA interleave，按 RRR 简单 4-MMA 结构走）：FAIL，VGPR 256 + 145 spills + 332 B/lane scratch。**确认架构性 ceiling**：CRR baseline 247 VGPR 只有 7 headroom，K_PHASE 模板化 4 MMA × 2 phase = 8 inlined MMA blocks 必然吃掉 9–25 VGPR
+- `8934e95c` **MXFP8 CRR PIPELINE_SCALE default ON**（+0.243%，frees 15 VGPR）— 含 R7–R9 dead-end 总结
+- **R7-R9 关键架构发现**：HOIST_HI K_PHASE templating 与 CRR 4-accumulator main loop **根本不兼容**。任何 templated body doubling 都会越过 254 VGPR cap，与是否叠加 PIPELINE_SCALE / 是否关 INTERLEAVE 无关。已在 5 个独立尝试（Dev A/B/C/H/I）观察到同一 256-VGPR 上限。CRR 要破 gate 必须做**结构性重构**（合并 accumulator / 或换 kernel 结构），非微调可达。
