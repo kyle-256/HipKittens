@@ -225,6 +225,32 @@
   - **EARLY_SCALE_PF (E)**: **BROKEN + no perf gain**. Compiler aliases `pf_*` and shadow `nxt_pf_*` to same VGPRs → race; baseline ASM already issues scale loads at iter top with ~512 cyc hiding > ~400 cyc VMEM latency, no untapped scheduling room. Code has `#error` guard if enabled. See `test_early_scale_pf.py`.
   - **F, G**: INFEASIBLE in single session.
   Triggered the user's GOAL PIVOT directive at the top of this file.
+- **Round 16 (2026-04-17, compound stacking iterilp × regalloc/sink/LICM)**: 3 parallel optimizers, **0 new WINs, 12th saturation round**. 3 hypothesis-falsifying findings:
+  - **A (iterilp + regclassglob on 5 R10/R11 winners)**:
+    - All 5 compounds DIFF .text but every one HURT vs iterilp-only winner: S1 -14.82pp (catastrophic), S2 -1.33pp, S3 -0.43pp, S4 -0.32pp, S5 -1.20pp.
+    - **Hypothesis "regalloc family ⊥ scheduler family ⇒ stacks safely" is FALSIFIED.** Regalloc priority changes interfere with iterilp's preferred register layout.
+    - regclassglob's +0.236pp on P1 is **iterilp-INDEPENDENT**; on iterilp WINs the flag has the OPPOSITE sign.
+  - **B (iterilp + 4 R15B safe-DIFF flags × 5 winners = 20 compounds)**:
+    - 10 DIFF, 10 NOOP-vs-iterilp, 0 BUILD-fail. Smoke (+0.5pp gate): 1/10 PASS (S2/largeivf2 +0.51pp, collapsed to +0.30pp on 5-run).
+    - **nolicm + iterilp regresses -2.2 to -2.4pp** on S1/S3/S4 (LICM re-enables hoisting around iterilp reorder).
+    - noemxpre ±0.35pp noise; sinkavoidspill ASM-NOOP everywhere on iterilp parents.
+  - **C (cross-axis compounds × 4 stuck shapes, 25 variants, SNR-first safety)**:
+    - **DEFINITIVE FINDING**: iterilp SGPR-clobber bug is INDEPENDENT of regalloc policy (regclassglob/sinkavoidspill/nolicm) AND independent of scheduler perturbations (largeivf2/noemxpre).
+    - Every iterilp+X compound on DLA1/DLA2/DLA7 still aperture-crashes at full M.
+    - **Hypothesis (regalloc restructuring might dodge the bug) is DISPROVEN.**
+    - Best signal: P1 regclassglob+noemxpre clean re-verify **+0.30pp** (mean ≥ base.max PASS, +1pp gate FAIL).
+
+  **Round 16 net**: 0 WIN, 0 gap reduction. **12 saturation rounds total**. R10/R11 still the only break-out rounds.
+
+  **新 dead-end vectors (Round 16)**:
+  - iterilp + regclassglob on 5 R10/R11 winners — UNIVERSALLY HURTS (-0.32 to -14.82pp); regalloc and scheduler axes are NOT independent
+  - iterilp + {noemxpre, largeivf2, sinkavoidspill, nolicm} on 5 winners — 0/20 wins; nolicm catastrophic
+  - iterilp + any non-scheduler flag on DLA1/DLA2/DLA7 — still aperture-crashes (bug is pure scheduler-induced; regalloc cannot dodge)
+  - regclassglob + nolicm + sinkavoidspill triple stack on stuck shapes — DIFF but all sub-+1pp
+  - ~25 NEW BROKEN-APERTURE registry entries (iterilp×X compounds on DLA1/DLA2/DLA7)
+
+  **Frontier post-R16 (UNCHANGED)**: 12 rounds saturate flag/macro/source-micro/compound axes. **Future agents must NOT propose more compound flag stacks** (cross-axis interference is now empirically established). Only multi-day kernel rewrites remain: MFMA op switch 32x32x64, K-split rewrite, SLM relayout, B-direct.
+
 - **Round 15 (2026-04-17, regclassglob cross-shape + 42 new LLVM flags + 3 source micros)**: 3 parallel optimizers, **0 new WINs, 11th saturation round**. LLVM-flag space now exhausted at **69 distinct flags** (27 R14A + 42 R15B):
   - **A (regclassglob cross-shape + 7 P1 macro compounds)**:
     - Fresh asm-diff: regclassglob produces DIFF on ALL 4 shapes (R14A's "NOOP on DLA2/DLA7" was a misread).
