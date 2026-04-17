@@ -24,7 +24,7 @@ enum class Layout { RCR, RRR, CRR };
 struct layout_globals {
     _gl a, b, c;
     hipStream_t stream;
-    int m, n, k, ki, bpr, bpc, group_m;
+    int m, n, k, ki, bpr, bpc, group_m, num_xcds;
     dim3 block() { return dim3(NUM_THREADS); }
     size_t dynamic_shared_memory() { return MAX_SHARED_MEMORY; }
 };
@@ -79,7 +79,7 @@ void gemm_kernel(const layout_globals g) {
     // non-tall-N. The two paths produce different (pid_m, pid_n) mappings
     // but both preserve the XCD-swizzled traversal order.
     const int NUM_WGS = total_tiles;
-    wgid = chiplet_transform_chunked(wgid, NUM_WGS, NUM_XCDS, 64);
+    wgid = chiplet_transform_chunked(wgid, NUM_WGS, g.num_xcds, 64);
     const int num_pid_m = g.bpr;
     const int num_pid_n = g.bpc;
     const int WG  = g.group_m;
@@ -494,32 +494,32 @@ void dispatch_gemm(layout_globals g) {
 }
 
 static void gemm_dispatch(pybind11::object a, pybind11::object b, pybind11::object c,
-                          int gm, const char* layout_name) {
+                          int gm, int num_xcds, const char* layout_name) {
     auto c_gl = py::from_object<_gl>::make(c);
     layout_globals g{py::from_object<_gl>::make(a), py::from_object<_gl>::make(b),
                      c_gl, {},
-                     0, 0, 0, 0, 0, 0, gm};
+                     0, 0, 0, 0, 0, 0, gm, num_xcds};
 
     if (layout_name[0] == 'r' && layout_name[1] == 'c') dispatch_gemm<Layout::RCR>(g);
     else if (layout_name[0] == 'r' && layout_name[1] == 'r') dispatch_gemm<Layout::RRR>(g);
     else dispatch_gemm<Layout::CRR>(g);
 }
 
-static void rcr(pybind11::object a, pybind11::object b, pybind11::object c, int gm) {
-    gemm_dispatch(a, b, c, gm, "rcr");
+static void rcr(pybind11::object a, pybind11::object b, pybind11::object c, int gm, int num_xcds) {
+    gemm_dispatch(a, b, c, gm, num_xcds, "rcr");
 }
-static void rrr(pybind11::object a, pybind11::object b, pybind11::object c, int gm) {
-    gemm_dispatch(a, b, c, gm, "rrr");
+static void rrr(pybind11::object a, pybind11::object b, pybind11::object c, int gm, int num_xcds) {
+    gemm_dispatch(a, b, c, gm, num_xcds, "rrr");
 }
-static void crr(pybind11::object a, pybind11::object b, pybind11::object c, int gm) {
-    gemm_dispatch(a, b, c, gm, "crr");
+static void crr(pybind11::object a, pybind11::object b, pybind11::object c, int gm, int num_xcds) {
+    gemm_dispatch(a, b, c, gm, num_xcds, "crr");
 }
 
 PYBIND11_MODULE(tk_bf16_layouts, m) {
     using namespace pybind11::literals;
-    m.def("gemm_rcr", &rcr, "a"_a, "b"_a, "c"_a, "group_m"_a=4);
-    m.def("gemm_rrr", &rrr, "a"_a, "b"_a, "c"_a, "group_m"_a=4);
-    m.def("gemm_crr", &crr, "a"_a, "b"_a, "c"_a, "group_m"_a=4);
+    m.def("gemm_rcr", &rcr, "a"_a, "b"_a, "c"_a, "group_m"_a=4, "num_xcds"_a=8);
+    m.def("gemm_rrr", &rrr, "a"_a, "b"_a, "c"_a, "group_m"_a=4, "num_xcds"_a=8);
+    m.def("gemm_crr", &crr, "a"_a, "b"_a, "c"_a, "group_m"_a=4, "num_xcds"_a=8);
     m.attr("BLOCK_SIZE") = BLOCK_SIZE;
     m.attr("K_STEP") = K_STEP;
 }

@@ -88,7 +88,7 @@ using namespace kittens;
 // second pair of MMAs fires, which matters more as the two-tile macro-iter
 // gets shorter (small K).
 #ifndef RCR_TWO_TILE_MID_VMCNT
-#define RCR_TWO_TILE_MID_VMCNT 4
+#define RCR_TWO_TILE_MID_VMCNT 6
 #endif
 #ifndef RCR_SINGLE_STAGE
 #define RCR_SINGLE_STAGE 0

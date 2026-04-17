@@ -9,11 +9,38 @@ torch.manual_seed(42)
 sys.path.insert(0, os.path.dirname(__file__))
 import tk_bf16_layouts
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../fp8_gemm/mi350x"))
-from bench_vs_hipblaslt import DenseModelConfigs, gen_gemm_test_cases
+# Inlined from analysis/fp8_gemm/mi350x/bench_vs_hipblaslt.py to avoid the
+# tk_fp8_layouts .so import dependency (FP8 build not required for BF16 bench).
+DenseModelConfigs = {
+    "Llama-2-7B":     {"seqlen": 4096, "hidden_size": 4096,  "intermediate_size": 11008,
+                       "num_attention_heads": 32,  "num_key_value_heads": 32, "head_dim": 128},
+    "Llama-2-70B":    {"seqlen": 4096, "hidden_size": 8192,  "intermediate_size": 28672,
+                       "num_attention_heads": 64,  "num_key_value_heads": 8,  "head_dim": 128},
+    "Llama-3.1-8B":   {"seqlen": 8192, "hidden_size": 4096,  "intermediate_size": 14336,
+                       "num_attention_heads": 32,  "num_key_value_heads": 8,  "head_dim": 128},
+    "Llama-3.1-405B": {"seqlen": 8192, "hidden_size": 16384, "intermediate_size": 53248,
+                       "num_attention_heads": 128, "num_key_value_heads": 8,  "head_dim": 128},
+    "Qwen2.5-7B":     {"seqlen": 8192, "hidden_size": 3584,  "intermediate_size": 18944,
+                       "num_attention_heads": 28,  "num_key_value_heads": 4,  "head_dim": 128},
+    "Qwen2.5-72B":    {"seqlen": 8192, "hidden_size": 8192,  "intermediate_size": 29568,
+                       "num_attention_heads": 64,  "num_key_value_heads": 8,  "head_dim": 128},
+    "Mistral-7B":     {"seqlen": 4096, "hidden_size": 4096,  "intermediate_size": 14336,
+                       "num_attention_heads": 32,  "num_key_value_heads": 8,  "head_dim": 128},
+}
+
+def gen_gemm_test_cases(config):
+    seq = config["seqlen"]; hs = config["hidden_size"]; inter = config["intermediate_size"]
+    nah = config["num_attention_heads"]; nkv = config["num_key_value_heads"]; hd = config["head_dim"]
+    return [
+        ("attn_qkv",    seq, int((nah + 2 * nkv) * hd), hs),
+        ("attn_out",    seq, hs, hs),
+        ("mlp_gate_up", seq, int(2 * inter), hs),
+        ("mlp_down",    seq, hs, inter),
+    ]
 
 WARMUP, ITERS = 20, 40
 GM_SEARCH = [1, 2, 4, 8, 16]
+XCD_SEARCH = [4, 8, 16]
 # Best-of-N repeats to reject launch/DVFS noise: per-gm we time ITERS kernel
 # launches NREPEAT times and take the min of each set, then the min across
 # repeats. Min is used because GEMM time is lower-bounded by hardware and any
@@ -56,13 +83,14 @@ def bench_tk(M, N, K, layout):
               "crr": tk_bf16_layouts.gemm_crr}
     fn = fn_map[layout]
 
-    best_ms, best_gm = float("inf"), 4
-    for gm in GM_SEARCH:
-        run = lambda g=gm: fn(A, B, C, g)
-        ms = _time(run)
-        if ms < best_ms:
-            best_ms, best_gm = ms, gm
-    return 2.0 * M * N * K / (best_ms * 1e9), best_gm
+    best_ms, best_gm, best_xcd = float("inf"), 4, 8
+    for xcd in XCD_SEARCH:
+        for gm in GM_SEARCH:
+            run = lambda g=gm, x=xcd: fn(A, B, C, g, x)
+            ms = _time(run)
+            if ms < best_ms:
+                best_ms, best_gm, best_xcd = ms, gm, xcd
+    return 2.0 * M * N * K / (best_ms * 1e9), best_gm, best_xcd
 
 
 def bench_torch(M, N, K, layout):
@@ -95,9 +123,9 @@ LAYOUTS = ["rcr", "rrr", "crr"]
 print(f"BF16 GEMM benchmark: {len(shapes)} shapes × {len(LAYOUTS)} layouts vs torch.mm (hipBLASLt)")
 print(f"{'M':>5} {'N':>6} {'K':>5}", end="")
 for lay in LAYOUTS:
-    print(f" | {lay.upper():>3} {'TK':>7} {'gm':>2} {'torch':>7} {'ratio':>6}", end="")
+    print(f" | {lay.upper():>3} {'TK':>7} {'gm':>2} {'xc':>2} {'torch':>7} {'ratio':>6}", end="")
 print()
-print("-" * 110)
+print("-" * 130)
 
 stats_by_layout = {l: [] for l in LAYOUTS}
 all_rows = []
@@ -105,7 +133,7 @@ for M, n, k in shapes:
     row = {"M": M, "N": n, "K": k}
     line = f"{M:>5} {n:>6} {k:>5}"
     for layout in LAYOUTS:
-        tk_tf, gm = bench_tk(M, n, k, layout)
+        tk_tf, gm, xcd = bench_tk(M, n, k, layout)
         torch_tf = bench_torch(M, n, k, layout)
         ratio = tk_tf / torch_tf if torch_tf > 0 else 0
         stats_by_layout[layout].append(ratio)
@@ -113,8 +141,9 @@ for M, n, k in shapes:
         row[f"{layout}_tk"] = tk_tf
         row[f"{layout}_torch"] = torch_tf
         row[f"{layout}_gm"] = gm
+        row[f"{layout}_xcd"] = xcd
         row[f"{layout}_ratio"] = ratio
-        line += f" | {layout.upper():>3} {tk_tf:>7.1f} {gm:>2} {torch_tf:>7.1f} {ratio:>.3f}x{win}"
+        line += f" | {layout.upper():>3} {tk_tf:>7.1f} {gm:>2} {xcd:>2} {torch_tf:>7.1f} {ratio:>.3f}x{win}"
     all_rows.append(row)
     print(line, flush=True)
 
