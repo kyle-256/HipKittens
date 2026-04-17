@@ -111,6 +111,18 @@
     Tried with CK BpreShuffle on B too: SNR -3.03 dB (worse). The "5084 TFLOPS" reference is
     measuring a kernel that doesn't compute correct GEMM. To use ASM, would need to load
     aiter's actual `.co` files via `hipModuleLoad` — different architectural change entirely.
+11. ~~**EARLY_BL_PF (Bl buffer_load issued at Step12 start, ~128-MFMA hiding)**~~ — **DEAD END (2026-04-17)**:
+    Hypothesis: original DIRECT_BL placed Bl buffer_load inside Step4 with only ~32 cyc MFMA hiding for
+    a ~400 cyc buffer_load — issuing it before Step12 gives ~512 cyc hiding.
+    Result on 14336×4096×32768 (deep-LOSE shape, aiter=5245.4 TFLOPS, warmup=200 iters=500):
+        baseline LDS:        4540.4 TFLOPS  (86.6%)
+        DIRECT_BL (orig):    3786.3 TFLOPS  (72.2%)
+        DIRECT_BL+EARLY:     4004.2 TFLOPS  (76.3%)
+    Hypothesis VALIDATED (+4.1pp from latency hiding) but still 10.3pp behind LDS path.
+    Conclusion: B-direct architecture is **structurally inadequate** on this kernel even with optimal
+    Step12-launched prefetch. Resource cost (254V at bench, 4 SGPR spill) eats throughput, and
+    eliminating LDS-store traffic doesn't compensate for the loss of LDS-broadcast bandwidth.
+    Code is behind `-DEARLY_BL_PF=1` flag, default off. See `test_early_bl_pf.py` for repro.
 
 **性能天花板结论 (2026-04-17 三轮验证)**: 当前内核架构下所有已知优化方向已穷尽. **24/42 WIN 是天花板**. 突破需要根本性重构 (aiter 架构: A-only-LDS + B-direct-from-global + deep SW pipeline, 需 >256 VGPRs 不可行 on gfx950).
 
@@ -128,6 +140,10 @@
 - **asm_inline kernel correctness FAILURE** (2026-04-17): `kernel_mxfp4_asm_inline.{cpp,h}` SNR -1.31 dB,
   the "5084-5258 TFLOPS @ 8192³" reference is meaningless. K-specialization variants build
   cleanly but inherit the same correctness bug. See `project_mxfp4_asm_inline_broken` memory.
+- **EARLY_BL_PF** (2026-04-17): DIRECT_BL with Bl buffer_load relocated to Step12 start (128-MFMA hiding window).
+  +4.1pp vs original DIRECT_BL on 14336×4096×32768 (latency-hiding hypothesis confirmed) but still
+  -10.3pp vs LDS baseline. B-direct path structurally cannot match LDS broadcast bandwidth on this kernel.
+  Code preserved behind `EARLY_BL_PF=1` flag (default 0). See `test_early_bl_pf.py`.
 
 ## Benchmark 规则
 - **warmup=200, iters=500**, trimmed mean 10%

@@ -237,6 +237,11 @@ memclause family (`-mllvm -amdgpu-sched-strategy=max-memory-clause`) is the domi
 - **AGPR hint (amdgpu_num_agpr=192)**: 全部 sub-best — FAILED
 - **UNROLL_K=8/16 × LGK × VMCNT × memc cross**: 在 deep-LOSE 上 +0.3-1.2pp 边际 (4 个 shape), 不翻 LOSE (推翻 AGENT_PROMPT 之前 "UNROLL=1,2,4 worse" 的过早结论 — 8/16 配合 lgk/v12/memc 才有效, 但仍不够)
 - **128256×32768×4096 (mega-M)**: 完全 IMPENETRABLE — Round 2 + deep-LOSE 都无法逼近 R1 best (`ts_gm2_v12_memc_dc` 92.9%)
+- **EARLY_BL_PF (DIRECT_BL with Bl buffer_load 移到 Step12 前, ~128 MFMA latency hiding)**: 在 14336×4096×32768 deep-LOSE shape 测试 (warmup=200, iters=500):
+  - baseline LDS 路径:        4540.4 TFLOPS (86.6% aiter)
+  - DIRECT_BL 原版 (Step4 内): 3786.3 TFLOPS (72.2%)
+  - DIRECT_BL + EARLY_BL_PF:  4004.2 TFLOPS (76.3%)
+  Latency-hiding 假设 VALIDATED (+4.1pp), 但 DIRECT_BL+EARLY 仍比 LDS 慢 10.3pp. 结论: B-direct 路径在当前内核上 **结构性 inadequate**, 即使 Step12-launched prefetch 完全隐藏 buffer_load 延迟. LDS broadcast bandwidth 是真正瓶颈, 不是 load latency. 代码保留在 `EARLY_BL_PF=1` flag 下 (default 0). 见 `test_early_bl_pf.py`. 这次实验 close 了 "B-direct 重写" 这条路 — 唯一能突破 24 WIN 的就是 aiter 架构 (A-only-LDS + deep-pipelined B-direct), 需 >256 VGPRs, 在 gfx950 不可行.
 
 ## Rocprof 分析结论 (2026-04-16)
 对生产 .s (N=32768, K=4096, TS=1, LGK2) 做了 PC sampling 和 assembly 分析:

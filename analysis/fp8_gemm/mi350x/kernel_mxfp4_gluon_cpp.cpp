@@ -80,6 +80,17 @@ using namespace kittens;
 #error "DIRECT_BL is incompatible with FUSED_STEP34"
 #endif
 
+// EARLY_BL_PF: when DIRECT_BL=1, issue the next-iter Bl buffer_load_dwordx4 BEFORE
+// Step12 instead of inside Step4. This gives ~128 MFMAs (~512 cycles) of latency
+// hiding for the ~400-cycle buffer_load, vs the original ~32 cycles in Step4 alone.
+// Step4 then runs as pure MFMAs + Br prefetch (Bl already in VGPR).
+#ifndef EARLY_BL_PF
+#define EARLY_BL_PF 0
+#endif
+#if EARLY_BL_PF && !DIRECT_BL
+#error "EARLY_BL_PF requires DIRECT_BL=1"
+#endif
+
 #ifndef NT_STORE
 #define NT_STORE 0
 #endif
@@ -1910,6 +1921,13 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
             load_pq_scale_x2_async(br_srd, lane_soff_x2, nxt_scale, pf_br[0], pf_br[1]);
         }
 
+        float4 nxt_bl_d[8];
+#if DIRECT_BL && EARLY_BL_PF
+        // Issue Bl buffer_load BEFORE Step12 — ~128 MFMAs (~512 cyc) hiding window
+        load_bl_direct_async(nxt_bl_d, srd_b_ps, bl_voff_ps,
+            bl_ps_n0_soff + static_cast<uint32_t>(bt + 1) * 2 * BL_K0_STRIDE);
+#endif
+
         float4 br_d[8], a1_d[8];
 #if SWAP_STEP12_MAIN
         kpair_64mfma_step12_swapped_sel(acc_A0Bl, acc_A0Br, tA0, tBl,
@@ -1931,14 +1949,20 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 #endif
 
         float4 nxt_a0_d[8];
-        float4 nxt_bl_d[8];
         kpair_32mfma_with_lds_and_pf_swapped_sel<STEP3_PF_N, STEP3_EMBED_BARRIER>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
             nxt_a0_d[0], nxt_a0_d[1], nxt_a0_d[2], nxt_a0_d[3],
             nxt_a0_d[4], nxt_a0_d[5], nxt_a0_d[6], nxt_a0_d[7],
             sel_a0_p0, sel_a0_p1, pf_a0_p, pf_a1_p);
         emit_pf_tail<STEP3_PF_N>(pf_a0_p, pf_a1_p);
 
-#if DIRECT_BL
+#if DIRECT_BL && EARLY_BL_PF
+        // Step4: pure MFMAs + Br prefetch only (Bl already in nxt_bl_d, no late vmem)
+        {
+            tile_pf_params dummy_pf = {};
+            kpair_32mfma_with_pf_swapped_sel<PF_MPT>(acc_A1Br, tA1, tBr, a1_raw, br_raw,
+                pf_br_p, dummy_pf);
+        }
+#elif DIRECT_BL
         kpair_32mfma_with_vmem_bl_wrap(acc_A1Br, tA1, tBr, a1_raw, br_raw,
             nxt_bl_d[0], nxt_bl_d[1], nxt_bl_d[2], nxt_bl_d[3],
             nxt_bl_d[4], nxt_bl_d[5], nxt_bl_d[6], nxt_bl_d[7],
@@ -2226,6 +2250,16 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
             load_pq_scale_x2_async(br_srd, lane_soff_x2, nxt_scale, pf_br[0], pf_br[1]);
         }
 
+        float4 nxt_bl_d[8];
+#if DIRECT_BL && EARLY_BL_PF
+        // Issue Bl buffer_load BEFORE Step12 — ~128 MFMAs (~512 cyc) hiding window
+        {
+            const uint32_t bl_nxt_bt = static_cast<uint32_t>((bt + 1 < k_byte_iters) ? (bt + 1) : bt);
+            load_bl_direct_async(nxt_bl_d, srd_b_ps, bl_voff_ps,
+                bl_ps_n0_soff + bl_nxt_bt * 2 * BL_K0_STRIDE);
+        }
+#endif
+
         float4 br_d[8], a1_d[8];
         kpair_64mfma_step12(acc_A0Bl, acc_A0Br, tA0, tBl,
             a0_raw, bl_raw, br_raw, br_d, a1_d,
@@ -2239,7 +2273,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 #if FUSED_STEP34
         // Fused Step34: barrier + 64 MFMAs + 16 ds_reads in one asm block
         float4 nxt_a0_d[8];
-        float4 nxt_bl_d[8];
+        // (nxt_bl_d already declared above)
         kpair_64mfma_step34(acc_A1Bl, acc_A1Br, tA1, tBl, tBr,
             a1_raw, bl_raw, br_raw, nxt_a0_d, nxt_bl_d,
             sel_a0_p0, sel_a0_p1, sel_bl_p0, sel_bl_p1);
@@ -2252,7 +2286,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 #endif
 
         float4 nxt_a0_d[8];
-        float4 nxt_bl_d[8];
+        // (nxt_bl_d already declared above)
 #if SPREAD_LDS
         kpair_32mfma_with_lds_rowspread_pf<STEP3_PF_N, STEP3_EMBED_BARRIER>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
 #else
@@ -2263,7 +2297,14 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
             sel_a0_p0, sel_a0_p1, pf_a0_p, pf_a1_p);
         emit_pf_tail<STEP3_PF_N>(pf_a0_p, pf_a1_p);
 
-#if DIRECT_BL
+#if DIRECT_BL && EARLY_BL_PF
+        // Step4: pure MFMAs + Br prefetch only (Bl already loaded into nxt_bl_d above)
+        {
+            tile_pf_params dummy_pf = {};
+            kpair_32mfma_with_pf<PF_MPT>(acc_A1Br, tA1, tBr, a1_raw, br_raw,
+                pf_br_p, dummy_pf);
+        }
+#elif DIRECT_BL
         {
             const uint32_t bl_nxt_bt = static_cast<uint32_t>((bt + 1 < k_byte_iters) ? (bt + 1) : bt);
             kpair_32mfma_with_vmem_bl_wrap(acc_A1Br, tA1, tBr, a1_raw, br_raw,
