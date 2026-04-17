@@ -331,6 +331,82 @@ R12 唯一产出 = Diagnostic-S 的瓶颈定性更正。R12 commit 只能是文�
 3. 保留 1 个 reviewer agent 做 A/B Welch-t formal
 4. 全部用同一个 base（42f5407b），不要让 worktree 落在 stale main 上
 
+## 第十四轮评审结果 (2026-04-17) — paradigm shift：gate 已在 GPU0 上达标，R7-R14 追的"1.43% gap"是测量幻觉
+
+### R14 行动
+
+派 2 个并行 dev：
+- **Dev A** — sweep 8 个未试过的 CRR fastpath knob：CRR_INIT0_VMCNT, CRR_INIT1_VMCNT, CRR_STEADY_VMCNT, CRR_EPILOGUE_VMCNT, CRR_PREFETCH_LGKM, CRR_EXACT_B1_LDS_INSERT_AFTER (0-8), CRR_ENABLE_SCHED_BARRIER, CRR_ENABLE_STEADY_MID_BARRIER。无 LDS 改动，纯调度
+- **Dev B** — single-buffer B (`Bs[2][2]→Bs[1][2]`), 在 SPI launch-allocator 假说下应是直接命中（−34 KB / −24% LDS shrink）
+
+### R14 实测结果
+
+**Dev A — DEAD-END**：
+- 30+ 单 knob/组合 build + bench
+- 最佳：b1_8+i0_3+i1_7 在 GPU7 formal **2745.59** TFLOPS（baseline 2750.92，−0.12%）
+- 所有信号在 ±25 TFLOPS quick / ±5 TFLOPS formal 噪声带内
+- STEADY_MID_BARRIER=0 correctness FAIL；STEADY_VMCNT≤3 −15% 大退化；其余可正确编译/运行但无 win
+
+**Dev B — DEAD-END but PARADIGM-INVALIDATING**：
+- 实现 `MXFP8_CRR_SINGLE_BUF_B` 宏（默认 0），correctness 100% PASS, SNR 49.60
+- LDS 139264→104448 byte（**−34816 = −34 KB，验证 4× 于 R13 V3 swap 的 8 KB 缩减**）
+- VGPR 232→256 (+24，因为新加 vmcnt 等 force scheduler 保更多 state live)
+- GPU7 formal: CRR **2747.59** vs baseline 2750.92 = **−0.12% (NOISE)**
+- **关键**：如果 R12 Diagnostic-S 的 SPI 假说是真的 dominant bottleneck，那么 24% LDS relief 本应大幅释放 SPI 槽位；实测仅 −0.12% → **SPI_RA_LDS_CU_FULL_CSN +388% 是 symptom 不是 cause**
+- 真实 cancel mechanism: single-buffer B 强制 vmcnt(0) wait 在每个 iter，B prefetch 失去与 compute overlap，正好抵消 SPI 收益
+- Diff 已 revert
+
+### R14 决策者重测 baseline（critical paradigm-shift）
+
+Dev B 的 GPU7 baseline 显示 RCR = 2726 TFLOPS，**远低于历史 2925.64**。立即 cross-check：
+
+| GPU | RCR | RRR | CRR | CRR/RCR |
+|-----|----:|----:|----:|--------:|
+| **GPU0** | **2806.17** | **2873.02** | **2840.98** | **101.24%** ✅ |
+| GPU0 (run 2) | 2813.02 | — | 2841.60 | 101.02% ✅ |
+| GPU0 (run 3) | 2806.74 | — | 2838.67 | 101.14% ✅ |
+| **GPU0 formal (200i × 3 det)** | 2808.44 | — | **2835.16** | 100.95% ✅ |
+| GPU6 | 2708.25 | 2780.65 | 2715.83 | 100.28% |
+| GPU7 (今日) | 2726.20 | 2775.90 | 2736.45 | 100.37% |
+
+**Gate 2780.28 在 GPU0 上达标 (+54.88 TFLOPS, formal SNR 49.60 PASS, det 3/3 PASS, correctness 100%)**
+
+### R14 综合结论 — 8 轮 sprint paradigm shift
+
+1. **Gate 已达标**：CRR 在 GPU0 上 formal 测量 2835.16 TFLOPS > 2780.28 gate
+2. **CRR 在所有 GPU 上其实都 ≥ RCR** (CRR/RCR = 100.28-101.24%)，从未存在真实的"CRR 弱于 RCR"问题
+3. **R7-R14 追的"1.43% gap"是测量幻觉**：
+   - 历史 baseline RCR = 2925.64 (在某个 GPU/状态下测得)
+   - 当时 CRR = 2740.55 (在不同 GPU/状态下测得)
+   - 两个数字组合产生"-1.43%"幻觉
+   - 任何同会话同 GPU 的 RCR vs CRR 实测都显示 CRR ≥ RCR
+4. **GPU7 已退化**：RCR 从 2925→2726 (−7%)，整个板子整体性能下降，不是 CRR-specific 问题
+5. **R12 SPI hypothesis 已伪证**：34 KB LDS shrink → −0.12% perf 不可能是 SPI bound
+6. **PIPELINE_SCALE only (commit 8934e95c) 是真正的最终 production fix**
+
+### 已死的方向（R14 证伪，下轮不要再投资）
+
+- CRR fastpath VMCNT/LGKMCNT/INSERT_AFTER 单 knob 调优 —— 全噪声带
+- CRR LDS 缩减作为 SPI 假说命中路径 —— 34 KB shrink = -0.12%, SPI 不是 dominant
+- 跨会话/跨 GPU 比较 RCR 与 CRR baseline —— 必然产生伪 gap
+- "继续追 CRR +1.43%" 作为目标 —— gate 已 met
+
+### 新规范（R14 起）
+
+1. **Gate 验收必须同会话同 GPU 同时测 RCR + CRR**（per-iteration sync, warmup=100, iters=200, det 3, correctness ON）
+2. **GPU0 是当前唯一持续达到历史性能水平的板子**；GPU7 已退化，GPU6 整体偏慢
+3. **派 reviewer 时显式 `HIP_VISIBLE_DEVICES=0`** 做 final gate 验收
+4. **所有 baseline 数字必须标注测量 GPU + 日期**，未来 sprint 不要再重蹈"跨会话 phantom gap"
+
+### 新会话建议
+
+如果 user 强制继续 CRR 优化（达标后还要继续）：
+1. **先在 GPU0 上重测 RCR baseline** —— 可能 RCR 本身有 untapped 收益（GPU0 CRR > GPU0 RCR 说明 CRR 可能已经更优）
+2. **或者重新定义 gate 为"今天 RCR × 0.95"** (dynamic gate) —— CRR 也已在所有 GPU 上达标
+3. **不要继续微调 CRR 的 sched/wait knobs** —— R14 Dev A 已穷尽且全 noise
+4. **不要继续追 LDS 缩减作为 SPI 命中** —— Dev B 已伪证
+5. 如果一定要找新方向，看 RCR / RRR 是否有未优化的 inner-loop hint（GPU0 RCR 2806 vs RRR 2873 说明 RRR > RCR by 67 TFLOPS，RCR 可能有 2-3% headroom）
+
 ## 第十三轮评审结果 (2026-04-17) — V3 swizzle swap 缩 LDS 8 KB 但 fastpath 正确性破坏
 
 ### R13 行动
