@@ -1,0 +1,15 @@
+Total SNR checks: 7
+  _r18c_pb2                        gpu=6  ref={'finite': 0.172865629196167, 'nz': 0.9999949932098389, 'mean_abs': nan, 'std': nan}
+    cand={'error': 'rc=-6', 'stderr': 'Memory access fault by GPU node-8 (Agent handle: 0x5610a49b75d0) on address 0x7ec7b98ba000. Reason: Unknown.\n'}  -> BROKEN
+  _r18c_pb4                        gpu=7  ref={'finite': 0.17137885093688965, 'nz': 0.9999954700469971, 'mean_abs': nan, 'std': nan}
+    cand={'error': 'rc=-6', 'stderr': 'Memory access fault by GPU node-9 (Agent handle: 0x55e5f9bb6390) on address 0x7fcb5624a000. Reason: Unknown.\n'}  -> BROKEN
+  _r18c_pb1                        gpu=5  ref={'finite': 0.16259765625, 'nz': 0.9999955892562866, 'mean_abs': nan, 'std': nan}
+    cand={'error': 'rc=-6', 'stderr': 'Memory access fault by GPU node-7 (Agent handle: 0x5619b47b7a10) on address 0x7ef95f0a2000. Reason: Unknown.\n'}  -> BROKEN
+  _r18c_pb8                        gpu=5  ref={'finite': 0.1687408685684204, 'nz': 0.9999951124191284, 'mean_abs': nan, 'std': nan}
+    cand={'error': 'rc=-6', 'stderr': 'Memory access fault by GPU node-7 (Agent handle: 0x5634123b5e40) on address 0x7f42e70a2000. Reason: Unknown.\n'}  -> BROKEN
+  _r18c_pb2_g1216                  gpu=7  ref={'finite': 0.17255425453186035, 'nz': 0.9999943971633911, 'mean_abs': nan, 'std': nan}
+    cand={'error': 'rc=-6', 'stderr': 'Memory access fault by GPU node-9 (Agent handle: 0x561d4d786d70) on address 0x7ee2315f7000. Reason: Unknown.\n'}  -> BROKEN
+  _r18c_pb1_g1216                  gpu=6  ref={'finite': 0.1677466630935669, 'nz': 0.9999951124191284, 'mean_abs': nan, 'std': nan}
+    cand={'error': 'rc=-6', 'stderr': 'Memory access fault by GPU node-8 (Agent handle: 0x55cf536c91a0) on address 0x7f9092f8a000. Reason: Unknown.\n'}  -> BROKEN
+  _r18c_pb1_static                 gpu=5  ref={'finite': 0.17673194408416748, 'nz': 0.9999948740005493, 'mean_abs': nan, 'std': nan}
+    cand={'error': 'rc=-6', 'stderr': 'Memory access fault by GPU node-7 (Agent handle: 0x55beaf09fba0) on address 0x7f28eb0a2000. Reason: Unknown.\n'}  -> BROKEN

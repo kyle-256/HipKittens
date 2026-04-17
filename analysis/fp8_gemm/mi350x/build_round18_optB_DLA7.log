@@ -1,0 +1,124 @@
+CMD: /opt/rocm/bin/hipcc /shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/wrap_n32768_k4096_ts_lgk2_v12_memc_r18b_dblc.cpp --offload-arch=gfx950 -DKITTENS_CDNA4 -DHIP_ENABLE_WARP_SYNC_BUILTINS -ffast-math -I/opt/rocm/include/rocrand -I/shared_nfs/kyle/test/HipKittens/include -I/shared_nfs/kyle/test/HipKittens/prototype -I/opt/rocm/include/hip -I/usr/include/python3.10 -I/opt/venv/lib/python3.10/site-packages/pybind11/include -shared -fPIC -std=c++20 -w -Rpass-analysis=kernel-resource-usage -L/usr/lib/python3.10/config-3.10-x86_64-linux-gnu -L/usr/lib/x86_64-linux-gnu -ldl -lm -DK_DIM=4096 -DN_DIM=32768 -DTAIL_SPLIT=1 -DSTEP12_BR_LGKMCNT=2 -DSTEP3_BARRIER_VMCNT=12 -mllvm -amdgpu-sched-strategy=max-memory-clause -DDOUBLE_C_PINGPONG=1 -o /shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/tk_mxfp4_gluon_cpp_n32768_k4096_ts_lgk2_v12_memc_r18b_dblc.cpython-310-x86_64-linux-gnu.so
+
+STDOUT:
+
+
+STDERR:
+/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/wrap_n32768_k4096_ts_lgk2_v12_memc_r18b_dblc.cpp:1421:9: error: invalid operand for instruction
+ 1421 |         "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %28, %36, %0,  %40, %42 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+      |         ^
+<inline asm>:1:86: note: instantiated into assembly here
+    1 |         v_mfma_scale_f32_16x16x128_f8f6f4 a[128:131],  v[108:111], a[128:131], a[128:131],  a[108:111], a[100:103] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+      |                                                                                             ^
+/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/wrap_n32768_k4096_ts_lgk2_v12_memc_r18b_dblc.cpp:1422:10: error: invalid operand for instruction
+ 1422 |         "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %28, %37, %1,  %40, %42 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+      |          ^
+<inline asm>:2:85: note: instantiated into assembly here
+    2 | v_mfma_scale_f32_16x16x128_f8f6f4 a[120:123],  v[108:111], a[120:123], a[120:123],  a[108:111], a[100:103] op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+      |                                                                                     ^
+/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/wrap_n32768_k4096_ts_lgk2_v12_memc_r18b_dblc.cpp:1423:10: error: invalid operand for instruction
+ 1423 |         "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %28, %38, %2,  %40, %43 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+      |          ^
+<inline asm>:3:85: note: instantiated into assembly here
+    3 | v_mfma_scale_f32_16x16x128_f8f6f4 a[116:119],  v[108:111], a[116:119], a[116:119],  a[108:111], a[96:99] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+      |                                                                                     ^
+/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/wrap_n32768_k4096_ts_lgk2_v12_memc_r18b_dblc.cpp:1424:10: error: invalid operand for instruction
+ 1424 |         "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %28, %39, %3,  %40, %43 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+      |          ^
+<inline asm>:4:85: note: instantiated into assembly here
+    4 | v_mfma_scale_f32_16x16x128_f8f6f4 a[112:115],  v[108:111], a[112:115], a[112:115],  a[108:111], a[96:99] op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+      |                                                                                     ^
+/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/wrap_n32768_k4096_ts_lgk2_v12_memc_r18b_dblc.cpp:1426:10: error: invalid operand for instruction
+ 1426 |         "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %29, %36, %4,  %40, %42 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+      |          ^
+<inline asm>:5:85: note: instantiated into assembly here
+    5 | v_mfma_scale_f32_16x16x128_f8f6f4 a[108:111],  v[112:115], a[128:131], a[108:111],  a[108:111], a[100:103] op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+      |                                                                                     ^
+/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/wrap_n32768_k4096_ts_lgk2_v12_memc_r18b_dblc.cpp:1427:10: error: invalid operand for instruction
+ 1427 |         "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %29, %37, %5,  %40, %42 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+      |          ^
+<inline asm>:6:85: note: instantiated into assembly here
+    6 | v_mfma_scale_f32_16x16x128_f8f6f4 a[104:107],  v[112:115], a[120:123], a[104:107],  a[108:111], a[100:103] op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+      |                                                                                     ^
+/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/wrap_n32768_k4096_ts_lgk2_v12_memc_r18b_dblc.cpp:1428:10: error: invalid operand for instruction
+ 1428 |         "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %29, %38, %6,  %40, %43 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+      |          ^
+<inline asm>:7:85: note: instantiated into assembly here
+    7 | v_mfma_scale_f32_16x16x128_f8f6f4 a[100:103],  v[112:115], a[116:119], a[100:103],  a[108:111], a[96:99] op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+      |                                                                                     ^
+/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/wrap_n32768_k4096_ts_lgk2_v12_memc_r18b_dblc.cpp:1429:10: error: invalid operand for instruction
+ 1429 |         "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %29, %39, %7,  %40, %43 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+      |          ^
+<inline asm>:8:81: note: instantiated into assembly here
+    8 | v_mfma_scale_f32_16x16x128_f8f6f4 a[96:99],  v[112:115], a[112:115], a[96:99],  a[108:111], a[96:99] op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+      |                                                                                 ^
+/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/wrap_n32768_k4096_ts_lgk2_v12_memc_r18b_dblc.cpp:1431:10: error: invalid operand for instruction
+ 1431 |         "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %30, %36, %8,  %41, %42 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+      |          ^
+<inline asm>:9:81: note: instantiated into assembly here
+    9 | v_mfma_scale_f32_16x16x128_f8f6f4 a[92:95],  v[116:119], a[128:131], a[92:95],  a[104:107], a[100:103] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+      |                                                                                 ^
+/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/wrap_n32768_k4096_ts_lgk2_v12_memc_r18b_dblc.cpp:1432:10: error: invalid operand for instruction
+ 1432 |         "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %30, %37, %9,  %41, %42 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+      |          ^
+<inline asm>:10:81: note: instantiated into assembly here
+   10 | v_mfma_scale_f32_16x16x128_f8f6f4 a[88:91],  v[116:119], a[120:123], a[88:91],  a[104:107], a[100:103] op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+      |                                                                                 ^
+/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/wrap_n32768_k4096_ts_lgk2_v12_memc_r18b_dblc.cpp:1433:10: error: invalid operand for instruction
+ 1433 |         "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %30, %38, %10, %41, %43 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+      |          ^
+<inline asm>:11:79: note: instantiated into assembly here
+   11 | v_mfma_scale_f32_16x16x128_f8f6f4 a[80:83], v[116:119], a[116:119], a[80:83], a[104:107], a[96:99] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+      |                                                                               ^
+/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/wrap_n32768_k4096_ts_lgk2_v12_memc_r18b_dblc.cpp:1434:10: error: invalid operand for instruction
+ 1434 |         "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %30, %39, %11, %41, %43 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+      |          ^
+<inline asm>:12:79: note: instantiated into assembly here
+   12 | v_mfma_scale_f32_16x16x128_f8f6f4 a[72:75], v[116:119], a[112:115], a[72:75], a[104:107], a[96:99] op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+      |                                                                               ^
+/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/wrap_n32768_k4096_ts_lgk2_v12_memc_r18b_dblc.cpp:1436:10: error: invalid operand for instruction
+ 1436 |         "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %31, %36, %12, %41, %42 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+      |          ^
+<inline asm>:13:79: note: instantiated into assembly here
+   13 | v_mfma_scale_f32_16x16x128_f8f6f4 a[64:67], v[120:123], a[128:131], a[64:67], a[104:107], a[100:103] op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+      |                                                                               ^
+/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/wrap_n32768_k4096_ts_lgk2_v12_memc_r18b_dblc.cpp:1437:10: error: invalid operand for instruction
+ 1437 |         "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %31, %37, %13, %41, %42 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+      |          ^
+<inline asm>:14:79: note: instantiated into assembly here
+   14 | v_mfma_scale_f32_16x16x128_f8f6f4 a[56:59], v[120:123], a[120:123], a[56:59], a[104:107], a[100:103] op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+      |                                                                               ^
+/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/wrap_n32768_k4096_ts_lgk2_v12_memc_r18b_dblc.cpp:1438:10: error: invalid operand for instruction
+ 1438 |         "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %31, %38, %14, %41, %43 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+      |          ^
+<inline asm>:15:79: note: instantiated into assembly here
+   15 | v_mfma_scale_f32_16x16x128_f8f6f4 a[48:51], v[120:123], a[116:119], a[48:51], a[104:107], a[96:99] op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+      |                                                                               ^
+/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/wrap_n32768_k4096_ts_lgk2_v12_memc_r18b_dblc.cpp:1439:10: error: invalid operand for instruction
+ 1439 |         "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %31, %39, %15, %41, %43 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+      |          ^
+<inline asm>:16:79: note: instantiated into assembly here
+   16 | v_mfma_scale_f32_16x16x128_f8f6f4 a[40:43], v[120:123], a[112:115], a[40:43], a[104:107], a[96:99] op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+      |                                                                               ^
+/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/wrap_n32768_k4096_ts_lgk2_v12_memc_r18b_dblc.cpp:1421:9: error: invalid operand for instruction
+ 1421 |         "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %28, %36, %0,  %40, %42 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+      |         ^
+<inline asm>:1:74: note: instantiated into assembly here
+    1 |         v_mfma_scale_f32_16x16x128_f8f6f4 a[4:7],  v[176:179], a[4:7], a[4:7],  a[60:63], a[44:47] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+      |                                                                                 ^
+/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/wrap_n32768_k4096_ts_lgk2_v12_memc_r18b_dblc.cpp:1422:10: error: invalid operand for instruction
+ 1422 |         "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %28, %37, %1,  %40, %42 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+      |          ^
+<inline asm>:2:79: note: instantiated into assembly here
+    2 | v_mfma_scale_f32_16x16x128_f8f6f4 a[84:87],  v[176:179], a[84:87], a[84:87],  a[60:63], a[44:47] op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+      |                                                                               ^
+/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/wrap_n32768_k4096_ts_lgk2_v12_memc_r18b_dblc.cpp:1423:10: error: invalid operand for instruction
+ 1423 |         "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %28, %38, %2,  %40, %43 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+      |          ^
+<inline asm>:3:79: note: instantiated into assembly here
+    3 | v_mfma_scale_f32_16x16x128_f8f6f4 a[76:79],  v[176:179], a[76:79], a[76:79],  a[60:63], a[36:39] op_sel_hi:[1,1,0] cbsz:4 blgp:4
+      |                                                                               ^
+fatal error: too many errors emitted, stopping now [-ferror-limit=]
+20 errors generated when compiling for gfx950.
+failed to execute:/opt/rocm/lib/llvm/bin/clang++  --offload-arch=gfx950 -O3 --driver-mode=g++ -O3 --hip-link  -x hip /shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/wrap_n32768_k4096_ts_lgk2_v12_memc_r18b_dblc.cpp -DKITTENS_CDNA4 -DHIP_ENABLE_WARP_SYNC_BUILTINS -ffast-math -I/opt/rocm/include/rocrand -I/shared_nfs/kyle/test/HipKittens/include -I/shared_nfs/kyle/test/HipKittens/prototype -I/opt/rocm/include/hip -I/usr/include/python3.10 -I/opt/venv/lib/python3.10/site-packages/pybind11/include -shared -fPIC -std=c++20 -w -Rpass-analysis=kernel-resource-usage -L/usr/lib/python3.10/config-3.10-x86_64-linux-gnu -L/usr/lib/x86_64-linux-gnu -ldl -lm -DK_DIM=4096 -DN_DIM=32768 -DTAIL_SPLIT=1 -DSTEP12_BR_LGKMCNT=2 -DSTEP3_BARRIER_VMCNT=12 -mllvm -amdgpu-sched-strategy=max-memory-clause -DDOUBLE_C_PINGPONG=1 -o "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/tk_mxfp4_gluon_cpp_n32768_k4096_ts_lgk2_v12_memc_r18b_dblc.cpython-310-x86_64-linux-gnu.so"
+

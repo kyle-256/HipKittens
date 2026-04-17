@@ -20,7 +20,7 @@
 | **P0** (was) | 16384×4096×28672 | **91.9%** | **u32_r10_iterilp** | 大K + 大M | R10 +1.82pp |
 | P1 | 128256×32768×4096 | 92.9% | ts_gm2_v12_memc_dc | mega-M+N | iterilp = compiler bug, A-bound |
 | P1 (was) | 4096×32768×28672 | **94.8%** | **v20_memc_r11_iterilp** | 大K + 大N | R11 +1.84pp |
-| P1 | 28672×4096×16384 | 93.7% | ts_gm8 | 大K + 大M | iterilp 未测 (R13?) |
+| P1 (was) | 28672×4096×16384 | **99.10%** | **ts_gm8 + BARRIER_TO_WAITCNT_ALL** | 大K + 大M | **R18A +4.16pp WIN, 17-round dry spell broken** |
 | P2 (was) | 4096×28672×32768 | **95.4%** | **u16_r11_iterilp** | 大K + 大N | R11 +2.00pp |
 | P2 | 32768×4096×14336 | 94.6% | ts_gm8_v12_r11_iterilp | 大K + 大M | R11 +0.74pp 未到 gate |
 | P2 (was) | 4096×32768×14336 | **95.3%** | **ts_lgk2_memc_r11_iterilp** | 大K + 大N | R11 +1.80pp |
@@ -314,6 +314,73 @@ Decider 提出 5 个 untested vectors, 3 个 in-session 可执行. 启动 3 个 
   - 代码加 `#error` 守卫 (`EARLY_SCALE_PF=1` 编译失败), 保留 flag 和 test 作为 DEAD END 文档. 见 `test_early_scale_pf.py`
 
 **Round 5 净增**: 0 WIN, 0 gap reduction. 触发用户的 GOAL PIVOT 指令 (见文档顶部).
+
+## Round 18 (2026-04-17) — source-rewrite pivot per R17A proposals; **R18A WIN +4.16pp on P1** (committed `4b504b0c`)
+After R17A's rocprof analysis proved backend tuning exhausted, dispatched 3 source-rewrite optimizers attacking the R17A proposal queue (P3/P1/P2). **First +1pp gain in 17 rounds of post-Round-2 work.**
+
+- **Optimizer A — R17A-P3 inner s_barrier → s_waitcnt lgkmcnt(0) (WIN)**:
+  - 3 opt-in macros added to kernel.cpp (default 0): `BARRIER_TO_WAITCNT_STEP3` (8 hot-path STEP3 sites), `BARRIER_TO_WAITCNT_STEP12` (2 tail STEP12 sites), `BARRIER_TO_WAITCNT_ALL` (both).
+  - SNR probe with noise-floor-relative gating: 3/12 (4 shapes × 3 variants) SNR-OK; 9 SNR-broken — barrier IS load-bearing for DLA1/DLA2/DLA7.
+  - **P1 (28672x4096x16384) + BARRIER_TO_WAITCNT_ALL=1**: parent 5079.43 TFLOPS (94.93%) → variant 5302.23 TFLOPS (**99.10%**), Δ = **+4.16pp**, 5-run same-GPU verify, both gates pass. **WIN, committed `4b504b0c`.**
+  - DLA1/step12 SNR-passed under uniform-scale probe but APERTURE-violated under random-scale bench inputs — **uniform-input SNR is necessary but not sufficient**.
+  - DLA2/DLA7 cannot be SNR-validated via this method (parent saturates bf16, noise floor < -5 dB).
+  - Macros default 0 → other 41 shapes byte-identical, no regression risk.
+  - **NOT auto-added to bench_all_42** (per-shape opt-in only; global add would risk silent wrong-output on K-large shapes).
+- **Optimizer B — R17A-P1 double C-accumulator ping-pong (DEAD END)**:
+  - Build FAILED on all 4 shapes with "invalid operand for instruction".
+  - **R17A's profile proposal misread the kernel structure**: rows 1-3 use `ds_read_b128` results (`d1/d2/d3`) as MFMA A-operand, NOT `a_lo[i]`. A naive phase-interleave assuming uniform A operand semantics is invalid.
+  - True ping-pong would require: (a) move all 8 ds_reads up-front (~2.5M extra cycles, NEGATIVE EV) OR (b) double AGPR pressure 64→128 dropping wpe=2→1 (NEGATIVE EV) OR (c) multi-day producer-consumer LDS protocol rewrite.
+  - **R17A-P1 dropped from registry.**
+- **Optimizer C — R17A-P2 M-tile expansion for K=128256 (DEAD END)**:
+  - Source refactor (M=128→512 not 256, agent escalated) needs ~600 LOC duplication + 4× scale buffers + 8 accumulator sets — multi-day.
+  - **MI355X LDS budget = 160 KB/CU (NOT 64 KB as R17A assumed)**. M=256 doubling pushes A-tiles to ~192 KB total — overflows. Mitigations (single-buffer A, half-N) negate the latency-hide gain.
+  - M=192 fallback also infeasible: not power-of-2, doesn't divide 64 (scale-pack `>> 6` row indexing).
+  - **PERSISTENT_XCD with batch={1,2,4,8}** (R14C only tested batch=16/32) **all 7 variants crash with `Memory access fault by GPU node-X`** before completing a single dispatch — dispatcher mechanism has a bug at large grid counts.
+  - **R17A-P2 dropped from per-round registry (long-horizon 3-5 day refactor only).**
+
+**Round 18 净增**: **+1 deep-LOSE shape gap closed** (P1 94.93% → 99.10%, +4.16pp; almost-WIN). 17-round dry spell broken.
+
+**新 dead-end vectors (Round 18)**:
+- R17A-P1 (double C ping-pong) — kernel structure incompatible without multi-day rewrite
+- R17A-P2 (M-tile expansion) — LDS budget overflow + per-round infeasible
+- PERSISTENT_XCD batch={1,2,4,8} on DLA1 — GPU memfault, dispatcher bug at large grid counts
+- BARRIER_TO_WAITCNT on DLA1/DLA2/DLA7 — barrier load-bearing (SNR breaks or aperture-faults)
+
+**Frontier post-R18**: P1 nearly closed (99.10%, ≤1pp from 100%). DLA1/DLA2/DLA7 still need their own source-rewrites (the barrier trick won't work on them). Remaining proposals: (a) MFMA op switch 32x32x64, (b) K-split rewrite, (c) SLM relayout, (d) per-shape kernel specialization. Long-horizon: R17A-P1, R17A-P2 multi-day refactors.
+
+## Round 17 (2026-04-17) — profile/triple-stack/attribute axes, all DEAD END (13th saturation round)
+3 parallel optimizers (Opus 4.7) attacked 3 genuinely-new angles after R16 explicitly forbade more compound flag stacks. **0 wins**. R17A produced first hard profile evidence that further LLVM-flag tuning is futile.
+
+- **Optimizer A (rocprof DLA1 + fresh 8-GPU 42-shape re-baseline)**:
+  - **rocprof on DLA1 (4096×32768×128256)**: VALUBusy=49% (kernel idle half the cycles). MFMA-pipeline floor ≈ 0.9-1.8 ms vs 6.74 ms wall ⇒ MFMA fills only 13-27% of wall-time.
+  - **Bottleneck classified**: MFMA-accumulator dependency stall (single C-tile reused, 8-cyc f4 latency); K-loop epilogue per-iter `s_barrier`+`s_waitcnt` ~0.6-1.2 ms; prefetch m0-hazard `s_nop` compounds 31× vs the K=4096 case.
+  - **HARD VERDICT (new)**: VALUBusy=49% is a register-allocation/MFMA-scheduling problem, **not a backend-flag problem**. Further `-mllvm` tuning cannot move this needle.
+  - **3 source-edit proposals (NOT implemented; queued for future kernel-rewrite rounds)**:
+    - P1 — Double C-accumulator tiling (split `rt_C[4][4]` → `rt_C0/C1`, ping-pong MFMAs). EV +2-4pp on DLA1. Risk: register-pressure forces ½ occupancy.
+    - P2 — Larger M-tile (M=128→M=256) for K=128256 specialization. Halves CTA count 524K→262K. EV +1-2pp.
+    - P3 — Replace inner `s_barrier` with `s_waitcnt lgkmcnt(0)`. EV +5-6pp if SNR-safe.
+  - **42-shape re-baseline (partial 27/42)**: 18/26 fully-comparable shapes within ±2pp of Round 2; 5 improved 3 regressed; net +0.4pp. **No formerly-LOSE shape flipped to WIN.** 15 shapes incl. all 4 deep-LOSE need overnight 8-GPU re-run (115 variants × iters=500 took ~3-4× the 20-30 min estimate).
+- **Optimizer B (P1 NO-iterilp triple/quad stacks of 3 sub-threshold positives)**:
+  - 10 variants stacking the 3 known sub-threshold P1 positives: regclassglob (+0.236pp), regclassglob+tv16 (+0.225pp), regclassglob+noemxpre (+0.30pp).
+  - **All 10 ASM-DIFF distinct from parent and from R14A/R15A/R16C 2-stack winners.**
+  - Best 3-stack: `rcg+noemxpre+tv16` = **+0.498pp** (just below +0.5pp gate; tied with best 2-stack).
+  - **HYPOTHESIS-FALSIFYING**: Linear additivity of sub-threshold deltas COLLAPSED. Predicted sum +0.76pp; observed +0.50pp. **3rd flag adds 0pp on top of best 2-stack.** Compound-stacking axis on P1 fully exhausted.
+  - 2 quad-stacks catastrophically regressed: `rcg+noemxpre+tv16+v20` -15.83pp; `rcg+tv16+extbr` -20.68pp.
+- **Optimizer C (untested __attribute__ knobs on 4 stuck shapes)**:
+  - 9 attributes RECOGNIZED: `flat_work_group_size(64,256)`/(256,256)/(128,512), `num_vgpr(256/224/192)`, `num_sgpr(96/80)`, `max_num_work_groups(8,1,1)`. 1 unrecognized: `amdgpu_no_agpr`.
+  - **All 32 successful builds produce DIFF .text.** 4 builds hung the LLVM scheduler past 600s (`fwgs128_512` + launch_bounds(256,1) conflict).
+  - **All gate-PASS smokes collapsed on verify**: best was DLA1/sgpr96 smoke +1.90pp → verify -4.06pp + aperture crashes; P1/sgpr80 smoke +0.56pp → verify -0.92pp.
+  - **Catastrophic regressions**: vgpr192 -78pp on DLA2/DLA7; vgpr224 -59 to -60pp; sgpr96 -49pp on DLA7. mnwg8 → APERTURE on all 4 shapes.
+  - **The 4 stuck shapes are at a register-allocation fixed point robust to attribute-level coercion.** Confirms R3+R12 saturation from a new angle.
+
+**Round 17 净增**: 0 WIN, 0 gap reduction. **13 saturation rounds total. Backend axes (flags/attrs/compound stacks) now provably exhausted.**
+
+**新 dead-end vectors (Round 17)**:
+- All 9 recognized AMDGPU codegen attributes — KILL or APERTURE on the 4 stuck shapes; 7 new BROKEN registry entries.
+- Triple/quad stacks of regclassglob × {noemxpre, tv16, v20, lgk2, extbr} on P1 — additivity collapses; 2 NEW catastrophic destabilizers (rcg+tv16+extbr; rcg+noemxpre+tv16+v20).
+- All `-mllvm` LLVM-flag tuning on DLA1 — provably bottleneck-mismatched (VALUBusy=49% is not a backend issue).
+
+**Frontier post-R17 (HARDENED, evidence-based)**: 13 rounds saturate flag/macro/source-micro/compound/attribute axes. **rocprof has now PROVEN further backend tuning cannot help DLA1.** Future agents must NOT propose more `-mllvm` flag work on the 4 stuck shapes. Only kernel-source rewrites can move the needle: (a) double C-accumulator tiling [R17A-P1], (b) M=256 specialization for K=128256 [R17A-P2], (c) inner-barrier→waitcnt rewrite [R17A-P3], (d) MFMA op switch 32x32x64, (e) K-split rewrite, (f) SLM relayout, (g) full B-direct.
 
 ## Round 16 (2026-04-17) — compound stacking (iterilp × regalloc/sink/LICM), all DEAD END
 3 parallel optimizers (Opus 4.7) attacked the never-tested COMPOUND STACKING axis. **0 wins, 12th saturation round**. 3 critical hypothesis-falsifying findings:
