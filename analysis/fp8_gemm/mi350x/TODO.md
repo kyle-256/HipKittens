@@ -16,14 +16,14 @@
 | 优先级 | Shape | 当前 Ratio | 当前 Best Variant | 类别 | 备注 |
 |-------|-------|-----------|------------------|------|------|
 | **P0** | 4096×32768×128256 | 88.3% | ts_gm8 | mega-K + 大N | iterilp = compiler bug, 不可用 |
-| **P0** (was) | 14336×4096×32768 | **91.4%** | **lgk2_dc_r10_iterilp** | 大K + 大M | R10 +1.78pp |
+| **P0** (was) | 14336×4096×32768 | **96.18%** | **lgk2_dc_btw_step3** | 大K + 大M | **R19A +6.58pp WIN (biggest single-shape gain)** |
 | **P0** (was) | 16384×4096×28672 | **91.9%** | **u32_r10_iterilp** | 大K + 大M | R10 +1.82pp |
 | P1 | 128256×32768×4096 | 92.9% | ts_gm2_v12_memc_dc | mega-M+N | iterilp = compiler bug, A-bound |
 | P1 (was) | 4096×32768×28672 | **94.8%** | **v20_memc_r11_iterilp** | 大K + 大N | R11 +1.84pp |
 | P1 (was) | 28672×4096×16384 | **99.10%** | **ts_gm8 + BARRIER_TO_WAITCNT_ALL** | 大K + 大M | **R18A +4.16pp WIN, 17-round dry spell broken** |
 | P2 (was) | 4096×28672×32768 | **95.4%** | **u16_r11_iterilp** | 大K + 大N | R11 +2.00pp |
 | P2 | 32768×4096×14336 | 94.6% | ts_gm8_v12_r11_iterilp | 大K + 大M | R11 +0.74pp 未到 gate |
-| P2 (was) | 4096×32768×14336 | **95.3%** | **ts_lgk2_memc_r11_iterilp** | 大K + 大N | R11 +1.80pp |
+| P2 (was) | 4096×32768×14336 | **97.87%** | **ts_lgk2_memc_r19c_iterilp_btw_all** | 大K + 大N | **R19C +2.69pp WIN (iterilp ⊥ barrier-removal)** |
 | P2 | 28672×32768×4096 | 94.5% | ts_lgk2_v12_memc | 大M+N | iterilp = compiler bug |
 
 ### 应当探索的方向 (缩 gap, 非翻 WIN)
@@ -315,24 +315,41 @@ Decider 提出 5 个 untested vectors, 3 个 in-session 可执行. 启动 3 个 
 
 **Round 5 净增**: 0 WIN, 0 gap reduction. 触发用户的 GOAL PIVOT 指令 (见文档顶部).
 
-## Round 19 (2026-04-17) — R18A barrier-removal bisect on DLA1/DLA2/DLA7 (DEAD END)
-After R18A's per-shape +4.16pp WIN on P1 hinted that some subset of the 9 barrier sites might be droppable on the SNR-broken DLA1/DLA2/DLA7, R19B added per-site control + vmcnt sweep and bisected.
+## Round 19 (2026-04-17) — barrier-removal extended; **2 new WINs** (S1 +6.58pp, S5 +2.69pp)
+3 parallel optimizers extending R18A's BARRIER_TO_WAITCNT WIN. **Net: +2 deep-LOSE shapes closed (S1, S5); cumulative R18+R19 = 3 closed (P1, S1, S5).** Biggest single-shape gain to date: S1 +6.58pp.
 
-- **Optimizer B — per-site STEP3/STEP12 + vmcnt sweep (DEAD END)**:
+- **Optimizer A — 41-shape sweep of BARRIER_TO_WAITCNT_{STEP3,STEP12,ALL} (1 WIN)**:
+  - Selected 15 candidate shapes from the 18 LOSE list (skipped DLA1/DLA2/DLA7 known-broken + already-won P1).
+  - 45 builds (15 shapes × 3 variants), SNR + aperture-probe pre-filter, smoke + 5-run same-GPU verify.
+  - **S1 (14336x4096x32768) + `_lgk2_dc_btw_step3`**: parent 89.6% → variant **96.18% (+6.58pp)**. Both gates PASS. **WIN, committed `e29f6c3a`.** This is the biggest single-shape gain in any post-R2 round.
+  - S1 + `_lgk2_dc_btw_all` also passes (+6.32pp) but dominated by step3-only.
+  - S4 (`_u16_btw_step12`): smoke +0.76 → verify +0.22 (FAIL).
+  - S14 (`_ts_lgk2_btw_step12`): smoke +2.72 → verify +0.42 (FAIL).
+  - 11/15 candidates pre-failed SNR floor (parent saturates bf16) — confirms the SNR methodology constrains this axis to shapes with parent-SNR floor > 10 dB.
+  - **Wired 3 opt-in entries into bench_all_42.py**: `_p1_btw_all` (R18A P1), `_lgk2_dc_btw_step3` (R19A S1), `_lgk2_dc_btw_all` (R19A S1 dominated).
+- **Optimizer B — per-site STEP3/STEP12 + vmcnt sweep on DLA1/DLA2/DLA7 (DEAD END)**:
   - 10 new per-site macros (`BARRIER_TO_WAITCNT_STEP3_S1..S7`, `STEP12_S1..S2`, `RELAXED_VMCNT`) added to kernel.cpp. Defaults preserve R18A bit-exactly; zero regression risk.
-  - 39 builds (3 shapes × 13 variants — single-site, 2-site combos, 3-vmcnt sweep, R18A ALL ref). All 39 OK.
-  - SNR probe: 35/36 BROKEN-RACE; only DLA1/_r19b_t1 (TAIL/STEP12 only) was OK-MARGINAL (15.47 dB) AND aperture-OK on random scales.
-  - DLA1/_r19b_t1: smoke +1.43pp (single-shot) → 5-run same-GPU verify Δ-0.27 pp ⇒ **LOSE** (gate1 False, gate2 False).
+  - 39 builds (3 shapes × 13 variants); 35/36 SNR-broken; only DLA1/_r19b_t1 OK but Δ-0.27pp on 5-run verify.
   - **Confirms R18A**: barrier IS load-bearing for DLA1/DLA2/DLA7; not a single removable site exists.
+  - Committed dead-end registry as `56affcbd`.
+- **Optimizer C — Stack BARRIER_TO_WAITCNT with iterilp on S1-S5 winners (1 WIN)**:
+  - 15 builds (5 shapes × 3 variants) testing iterilp ⊥ source-rewrite hypothesis.
+  - **S5 (4096x32768x14336) + `_ts_lgk2_memc_r19c_iterilp_btw_all`**: parent 95.18% → variant **97.87% (+2.69pp)**. Both gates PASS. **WIN, committed `a0f1949c`.**
+  - S1-S4 SNR-unvalidatable (K∈{28672,32768} non-deterministic from bf16 saturation + FMA reorder).
+  - Subtle finding: on S5, removing only STEP3 OR only STEP12 is racy in isolation, but removing both together is safe — **the two barriers form a matched producer/consumer pair**.
+  - **Hypothesis verdict**: iterilp ⊥ source-rewrite is PARTIALLY supported (1 confirmed compose, 4 unvalidatable due to bf16 saturation noise floor).
 
-**Round 19 净增**: 0 WIN, 0 gap reduction. R18A's P1-only win is confirmed isolated.
+**Round 19 净增**: **+2 deep-LOSE shapes closed** (S1 +6.58pp, S5 +2.69pp). Cumulative R18+R19 = **3 closed** (P1, S1, S5). 
 
 **新 dead-end vectors (Round 19)**:
-- Per-site `BARRIER_TO_WAITCNT_STEP3_S{2,3,4}` on DLA1/DLA2/DLA7 — every individual hot site breaks SNR worse than aggregate STEP3=1.
-- 2-site / 3-site STEP3 combos (s23/s24/s34/s234) on DLA1/DLA2/DLA7 — strictly worse than individual sites; no synergy.
-- `BARRIER_TO_WAITCNT_STEP12_S1` on DLA1 — SNR-MARGINAL but 0 perf gain (Δ-0.27pp on 5-run).
-- `BARRIER_TO_WAITCNT_RELAXED_VMCNT` ∈ {1, 4, 15} on DLA1/DLA2/DLA7 — every value breaks SNR; barrier-VMCNT perturbation is itself a noise source even when keeping s_barrier in place.
-- DLA2/DLA7 SNR-unvalidatable for any kernel-internal change via output-tile probe (parent itself at noise floor < 0 dB). Future probes need different correctness method (ULP histograms or reduced dynamic range).
+- Per-site `BARRIER_TO_WAITCNT_STEP3_S{2,3,4}` on DLA1/DLA2/DLA7 — every individual hot site breaks SNR worse than aggregate.
+- 2-site / 3-site STEP3 combos on DLA1/DLA2/DLA7 — no synergy; strictly worse than singles.
+- `BARRIER_TO_WAITCNT_STEP12_S1` on DLA1 — SNR-MARGINAL but 0 perf gain.
+- `BARRIER_TO_WAITCNT_RELAXED_VMCNT` ∈ {1,4,15} on DLA1/DLA2/DLA7 — barrier-VMCNT perturbation alone breaks SNR.
+- DLA2/DLA7 SNR-unvalidatable via output-tile probe (parent at noise floor < 0 dB). Future probes need ULP histograms / reduced dynamic range.
+- 11/15 BARRIER_TO_WAITCNT candidates in R19A pre-failed SNR floor — bf16 saturation is the dominant constraint on this axis going forward.
+
+**Frontier post-R19 (UPDATED)**: Barrier-removal axis substantially yielded but now constrained by SNR floor to shapes with parent SNR > 10 dB. 3 deep-LOSE wins (P1, S1, S5). **Remaining stuck**: DLA1/DLA2/DLA7 (SNR-broken, barrier load-bearing) + 11+ LOSE shapes that pre-fail SNR floor (bf16 saturation in parent). **Next axes**: (a) different correctness probe (ULP histogram, reduced-dynamic-range scales) to validate kernel changes on DLA2/DLA7, (b) per-shape kernel specialization for K=128256 (DLA1), (c) MFMA op switch 32x32x64 (long-horizon).
 
 ## Round 18 (2026-04-17) — source-rewrite pivot per R17A proposals; **R18A WIN +4.16pp on P1** (committed `4b504b0c`)
 After R17A's rocprof analysis proved backend tuning exhausted, dispatched 3 source-rewrite optimizers attacking the R17A proposal queue (P3/P1/P2). **First +1pp gain in 17 rounds of post-Round-2 work.**
