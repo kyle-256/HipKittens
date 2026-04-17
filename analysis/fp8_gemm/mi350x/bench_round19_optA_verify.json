@@ -1,0 +1,118 @@
+{
+  "params": {
+    "warmup": 200,
+    "iters": 500,
+    "trim": 0.1,
+    "n_runs": 5
+  },
+  "pairs": [
+    {
+      "lab": "S14_step12",
+      "comp": 4428.1,
+      "parent_runs": [
+        4289.4,
+        4283.29,
+        4346.44,
+        4341.84,
+        4355.81
+      ],
+      "variant_runs": [
+        4354.92,
+        4345.68,
+        4348.77,
+        4301.97,
+        4358.04
+      ],
+      "parent_max": 4355.81,
+      "parent_mean": 4323.356,
+      "variant_max": 4358.04,
+      "variant_mean": 4341.876,
+      "variant_min": 4301.97,
+      "delta_pp": 0.418,
+      "gate1": false,
+      "gate2": false,
+      "verdict": "FAIL"
+    },
+    {
+      "lab": "S1_all",
+      "comp": 5245.4,
+      "parent_runs": [
+        4667.77,
+        4661.47,
+        4688.63,
+        4686.57,
+        4689.96
+      ],
+      "variant_runs": [
+        5037.57,
+        5003.14,
+        4975.15,
+        5007.5,
+        5028.31
+      ],
+      "parent_max": 4689.96,
+      "parent_mean": 4678.88,
+      "variant_max": 5037.57,
+      "variant_mean": 5010.334,
+      "variant_min": 4975.15,
+      "delta_pp": 6.319,
+      "gate1": true,
+      "gate2": true,
+      "verdict": "WIN"
+    },
+    {
+      "lab": "S1_step3",
+      "comp": 5245.4,
+      "parent_runs": [
+        4788.57,
+        4807.33,
+        4760.68,
+        4779.51,
+        4801.79
+      ],
+      "variant_runs": [
+        5112.3,
+        5137.36,
+        5142.45,
+        5131.14,
+        5139.64
+      ],
+      "parent_max": 4807.33,
+      "parent_mean": 4787.576,
+      "variant_max": 5142.45,
+      "variant_mean": 5132.578,
+      "variant_min": 5112.3,
+      "delta_pp": 6.577,
+      "gate1": true,
+      "gate2": true,
+      "verdict": "WIN"
+    },
+    {
+      "lab": "S4_step12",
+      "comp": 5649.9,
+      "parent_runs": [
+        5279.04,
+        5291.81,
+        5317.85,
+        5287.31,
+        5308.17
+      ],
+      "variant_runs": [
+        5297.43,
+        5311.91,
+        5310.11,
+        5312.6,
+        5312.93
+      ],
+      "parent_max": 5317.85,
+      "parent_mean": 5296.836,
+      "variant_max": 5312.93,
+      "variant_mean": 5308.996,
+      "variant_min": 5297.43,
+      "delta_pp": 0.215,
+      "gate1": false,
+      "gate2": false,
+      "verdict": "FAIL"
+    }
+  ]
+}

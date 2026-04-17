@@ -1,0 +1,93 @@
+{
+  "params": {
+    "warmup": 200,
+    "iters": 500,
+    "trim": 0.1
+  },
+  "rows": [
+    {
+      "lab": "S1",
+      "shape": [
+        14336,
+        4096,
+        32768
+      ],
+      "comp": 5245.4,
+      "parent": "_lgk2_dc",
+      "variant": "_r19a_step12",
+      "parent_tflops": 4791.95,
+      "variant_tflops": 4701.87,
+      "delta_pp": -1.717
+    },
+    {
+      "lab": "S1",
+      "shape": [
+        14336,
+        4096,
+        32768
+      ],
+      "comp": 5245.4,
+      "parent": "_lgk2_dc",
+      "variant": "_r19a_step3",
+      "parent_tflops": 4791.95,
+      "variant_tflops": 5114.92,
+      "delta_pp": 6.157
+    },
+    {
+      "lab": "S1",
+      "shape": [
+        14336,
+        4096,
+        32768
+      ],
+      "comp": 5245.4,
+      "parent": "_lgk2_dc",
+      "variant": "_r19a_all",
+      "parent_tflops": 4791.95,
+      "variant_tflops": 5020.0,
+      "delta_pp": 4.348
+    },
+    {
+      "lab": "S4",
+      "shape": [
+        4096,
+        28672,
+        32768
+      ],
+      "comp": 5649.9,
+      "parent": "_u16",
+      "variant": "_r19a_step3",
+      "parent_tflops": 5263.51,
+      "variant_tflops": 5231.89,
+      "delta_pp": -0.56
+    },
+    {
+      "lab": "S4",
+      "shape": [
+        4096,
+        28672,
+        32768
+      ],
+      "comp": 5649.9,
+      "parent": "_u16",
+      "variant": "_r19a_step12",
+      "parent_tflops": 5263.51,
+      "variant_tflops": 5306.39,
+      "delta_pp": 0.759
+    },
+    {
+      "lab": "S14",
+      "shape": [
+        6144,
+        4096,
+        16384
+      ],
+      "comp": 4428.1,
+      "parent": "_ts_lgk2",
+      "variant": "_r19a_step12",
+      "parent_tflops": 4351.03,
+      "variant_tflops": 4471.55,
+      "delta_pp": 2.722
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+R19 OptA 5-run verify. warmup=200 iters=500 trim=0.1 N_RUNS=5
+Pairs: 4
+==============================================================================================================
+
+  [S14_step12]  comp=4428.1
+    parent  runs: [4289.4, 4283.3, 4346.4, 4341.8, 4355.8]  max=4355.81  mean=4323.36
+    variant runs: [4354.9, 4345.7, 4348.8, 4302.0, 4358.0]  max=4358.04  mean=4341.88  min=4301.97
+    Δmean=+0.42pp  gate1=False  gate2=False  -> FAIL
+
+  [S1_all]  comp=5245.4
+    parent  runs: [4667.8, 4661.5, 4688.6, 4686.6, 4690.0]  max=4689.96  mean=4678.88
+    variant runs: [5037.6, 5003.1, 4975.1, 5007.5, 5028.3]  max=5037.57  mean=5010.33  min=4975.15
+    Δmean=+6.32pp  gate1=True  gate2=True  -> WIN
+
+  [S1_step3]  comp=5245.4
+    parent  runs: [4788.6, 4807.3, 4760.7, 4779.5, 4801.8]  max=4807.33  mean=4787.58
+    variant runs: [5112.3, 5137.4, 5142.4, 5131.1, 5139.6]  max=5142.45  mean=5132.58  min=5112.30
+    Δmean=+6.58pp  gate1=True  gate2=True  -> WIN
+
+  [S4_step12]  comp=5649.9
+    parent  runs: [5279.0, 5291.8, 5317.9, 5287.3, 5308.2]  max=5317.85  mean=5296.84
+    variant runs: [5297.4, 5311.9, 5310.1, 5312.6, 5312.9]  max=5312.93  mean=5309.00  min=5297.43
+    Δmean=+0.22pp  gate1=False  gate2=False  -> FAIL
+
+Elapsed: 0.9 min
+Saved bench_round19_optA_verify.json

@@ -459,6 +459,15 @@ def main():
         ("_ts_v12_tv0_memc", "-DTAIL_SPLIT=1 -DSTEP3_BARRIER_VMCNT=12 -DTAIL_BARRIER_VMCNT=0 -mllvm -amdgpu-sched-strategy=max-memory-clause"),
         ("_v20_memc", "-DSTEP3_BARRIER_VMCNT=20 -mllvm -amdgpu-sched-strategy=max-memory-clause"),
         ("_ts_v4_tv0_memc", "-DTAIL_SPLIT=1 -DSTEP3_BARRIER_VMCNT=4 -DTAIL_BARRIER_VMCNT=0 -mllvm -amdgpu-sched-strategy=max-memory-clause"),
+        # Round 18/19: BARRIER_TO_WAITCNT (drop inner-loop s_barrier in favor of
+        # s_waitcnt lgkmcnt(0)). CORRECTNESS-RISKY — only safe on shapes where
+        # parent SNR is high (>20 dB at uniform inputs). R18A: P1 (28672x4096x16384)
+        # +4.16pp. R19A: S1 (14336x4096x32768) +6.58pp / step3 variant.
+        # On most other shapes the cross-wave barrier IS load-bearing — a variant
+        # picked here may produce wrong output. SNR-validate any new selection.
+        ("_p1_btw_all", "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=8 -DBARRIER_TO_WAITCNT_ALL=1"),  # R18A WIN: P1
+        ("_lgk2_dc_btw_step3", "-DSTEP12_BR_LGKMCNT=2 -mllvm -amdgpu-disable-clustered-low-occupancy-reschedule -DBARRIER_TO_WAITCNT_STEP3=1"),  # R19A WIN: S1 (14336x4096x32768)
+        ("_lgk2_dc_btw_all", "-DSTEP12_BR_LGKMCNT=2 -mllvm -amdgpu-disable-clustered-low-occupancy-reschedule -DBARRIER_TO_WAITCNT_ALL=1"),  # R19A near-WIN: S1
     ]
     for n_val, k_val in nk_pairs:
         for suffix, cppflags in variants:
