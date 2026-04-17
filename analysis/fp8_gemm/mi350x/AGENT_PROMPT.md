@@ -258,7 +258,7 @@
     - GPU bias is **50-100 TFLOPS / 1-2pp**, per-run noise is **±0.6pp** at 5-run replication.
     - Any deep-LOSE Δ < 2pp claim **must** be validated by: single-GPU, 5-run replication, with mean-must-beat-baseline-MAX gate (not mean-vs-mean).
     - Never compare baselines measured on different GPUs.
-    - `bench_deep_lose.py` correctness check has a false-OK SNR bug (NaN baselines pass `if snr > 25` because NaN compare is False but mis-classifies as OK) — fix before relying on it for new variants.
+    - ~~`bench_deep_lose.py` correctness check has a false-OK SNR bug (NaN baselines pass `if snr > 25` because NaN compare is False but mis-classifies as OK)~~ **FIXED 2026-04-17 (Round 9 Optimizer C)**: Bug actually lived in `bench_optC_round6.py:175` (`if snr['snr_db'] < 25`) and `bench_round6_optA.py:180` (NaN-tainted output gave snr=+Inf via `noi>0` short-circuit). Fix: new `snr_check.py` module (NaN-safe `is_snr_ok` / `classify_snr` / `compute_snr_db`); both bench files now reject NaN/None/-Inf SNR. Verified on real prior `bench_optC_round6_results.json` — all 5 `_ts_u8*` variants had `snr_db=NaN, max_abs=NaN` and were silently benched; under the fix they would have been REJECTED. `bench_deep_lose.py` itself currently has no SNR gate (perf-only spot bench); add one via `from snr_check import is_snr_ok` if/when correctness gating is needed there.
   Net: 0 WIN, 0 gap reduction. Round 6 confirms even the "easier" gap-reduction goal (+1pp on a single shape) is at noise floor for the 3 P0 shapes.
 
 ## Benchmark 规则
