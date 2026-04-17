@@ -315,6 +315,40 @@ Decider 提出 5 个 untested vectors, 3 个 in-session 可执行. 启动 3 个 
 
 **Round 5 净增**: 0 WIN, 0 gap reduction. 触发用户的 GOAL PIVOT 指令 (见文档顶部).
 
+## Round 14 (2026-04-17) — non-scheduler LLVM + macro + DLA1 deep-dive, all DEAD END (committed `2717330d`)
+3 parallel optimizers (Opus 4.7) attacked the 4 sched-strategy-exhausted deep-LOSE shapes from R13 along orthogonal axes. **0 wins**, but 4 critical findings exhaust the in-session optimization frontier:
+
+- **Optimizer A (non-scheduler LLVM flags, 27 flags × 4 shapes via asm-diff probe)**:
+  - **Best 5-run signal**: `greedy-regclass-priority-trumps-globalness=true` on P1 (28672×4096×16384) → +12.5 TFLOPS / +0.24pp 5-run mean, gate(mean ≥ baseline.max) PASS but **sub-+1pp threshold**. Documented for future, not deployable as variant.
+  - 63/108 flag×shape combos NOOP (text-identical .text → silent no-op on this kernel).
+  - **NEW BROKEN-BUILD entry**: `-mllvm -amdgpu-promote-alloca-to-vector-limit=N` (any N tried) breaks build with "illegal VGPR to SGPR copy" at line 1728.
+  - **3 NEW BROKEN-APERTURE flags on DLA1** (4096×32768×128256): `misched-cluster=false`, `amdgpu-dpp-combine=false`, `amdgpu-disable-clustered-low-occupancy-reschedule`. SGPR-clobber bug class is **broader than just iterative-ilp scheduler axis**.
+  - DLA2/DLA7/P1: 23/27 flags NOOP — all 3 are flag-insensitive shapes.
+- **Optimizer B (kernel-macro sweep, 28 untested combos × 4 shapes)**:
+  - 0/28 passed +1pp gate. Best: `pf6_6_v20_memc` on DLA1 +0.13pp 5-run mean.
+  - **DLA1 `pf6_6+lgk4` triggered HSA APERTURE bug with NO scheduler flag changes** (default scheduler, just macro change). Proves SGPR-clobber bug class is shape×macro driven, not just shape×scheduler.
+  - `coverage_audit.md` documents the 28 macro combos as the **exhaustive untested macro-axis set** on these 4 parents.
+- **Optimizer C (DLA1 deep dive, 9 non-scheduler LLVM flags via asm-diff)**:
+  - 0 wins, all flags NOOP/regress on DLA1. **DLA1 is now triple-exhausted**: R12A (sched-strategy), R13A (alt iterative schedulers), R14C (non-scheduler LLVM flags) all produced 0 deltas.
+
+**Round 14 净增**: 0 WIN, 0 gap reduction. **10 saturation rounds total** (R2/R4/R5/R6/R7/R8/R9/R12/R13/R14). R10/R11 remain the only break-out rounds (5 verified deep-LOSE wins via un-prefixed iterative-ilp, +1.85pp avg).
+
+**新 dead-end vectors (Round 14)**:
+- `-amdgpu-membound-threshold` × {0,50,100,200} on 4 broken shapes — NOOP/regress
+- `relaxed-occupancy-deps` — NOOP on 3/4 shapes, no measurable effect
+- `divergence-merge` / `merge-m0-init` flags — NOOP on all 4
+- `vgpr-index-mode` / `lds-thread-affinity` / `wavefront-priority-vgpr` / `lwt` (loop-warmup-time) — NOOP on all 4
+- `early-spill-bypass` flags / `dce-in-ra` / `dpp-combine` (true) — NOOP / regress
+- `lst{16,256}` (loop-strength-threshold) / `sghazard{0,64}` (sgpr-hazard) — NOOP on all 4
+- `pf6_6+lgk4` macro combo on DLA1 — NEW BROKEN-APERTURE finding (compiler bug at default scheduler)
+- 9 non-scheduler LLVM flags from R14C on DLA1 — silent NOOP (text-identical)
+- 28 macro combos in coverage_audit.md — all sub-threshold (best +0.13pp)
+
+**Frontier post-R14 (kernel-source level only — multi-day work, infeasible in single session)**:
+- 4 deep-LOSE shapes (DLA1 88.3%, DLA2 92.9%, DLA7 94.5%, P1=28672×4096×16384 93.7%) have **no remaining flag-level lever**.
+- Both LLVM scheduler axis (R8/R10/R12/R13) and non-scheduler LLVM axis (R14A/C) and macro axis (R14B + Round 2 deep-LOSE sweep) are **all exhausted**.
+- Future work paths: (a) MFMA op switch to `v_mfma_scale_f32_32x32x64_f8f6f4`, (b) K-split rewrite (per-shape K-loop unrolling at source level), (c) SLM relayout (rebuild `st_16x128_s::swizzle` for different bank/acc pattern), (d) full B-direct (aiter-style) rewrite — needs >256 VGPRs, blocked on gfx950 register budget.
+
 ## Round 13 (2026-04-17) — alt-scheduler exhaustion sweep, all DEAD END (committed `75d5e305`)
 3 parallel optimizers extending R10/R11/R12 iterative-ilp space. **0 new wins**, 3 critical findings:
 

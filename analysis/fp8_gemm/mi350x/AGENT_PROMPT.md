@@ -225,6 +225,34 @@
   - **EARLY_SCALE_PF (E)**: **BROKEN + no perf gain**. Compiler aliases `pf_*` and shadow `nxt_pf_*` to same VGPRs → race; baseline ASM already issues scale loads at iter top with ~512 cyc hiding > ~400 cyc VMEM latency, no untapped scheduling room. Code has `#error` guard if enabled. See `test_early_scale_pf.py`.
   - **F, G**: INFEASIBLE in single session.
   Triggered the user's GOAL PIVOT directive at the top of this file.
+- **Round 14 (2026-04-17, non-scheduler LLVM + macro + DLA1 deep-dive)**: 3 parallel optimizers, **0 new WINs**, all 4 broken shapes EXHAUSTED across remaining flag axes (committed `2717330d`):
+  - **A (non-scheduler LLVM flags, 27 flags × 4 shapes via asm-diff probe)**:
+    - **Best 5-run signal**: `-mllvm -greedy-regclass-priority-trumps-globalness=true` on P1 (28672×4096×16384) → +12.5 TFLOPS / +0.24pp 5-run mean, gate(mean≥baseline.max) PASS but **sub-+1pp threshold**. Documented for future, not deployable.
+    - 63/108 flag×shape combos NOOP (text-identical .text → silent no-op on this kernel).
+    - **NEW BROKEN-BUILD entry**: `-mllvm -amdgpu-promote-alloca-to-vector-limit=N` (any value) breaks build with "illegal VGPR to SGPR copy" at line 1728. Do not use.
+    - **3 NEW BROKEN-APERTURE flags on DLA1**: `misched-cluster=false`, `amdgpu-dpp-combine=false`, `amdgpu-disable-clustered-low-occupancy-reschedule`. **SGPR-clobber bug class is broader than just iterative-ilp scheduler** — the bug surface includes generic mid-end transformation flags.
+    - DLA2/DLA7/P1 are flag-insensitive shapes (23/27 flags NOOP across each).
+  - **B (kernel-macro sweep, 28 untested combos × 4 shapes)**:
+    - 0/28 passed +1pp gate. Best: `pf6_6_v20_memc` on DLA1 +0.13pp 5-run mean.
+    - **DLA1 `pf6_6+lgk4` triggered HSA APERTURE bug with NO scheduler flag changes** (default scheduler, just macro change). The SGPR-clobber bug class is shape×macro driven, not just shape×scheduler.
+    - `coverage_audit.md` documents the 28 macro combos as the **exhaustive untested macro-axis set** on these 4 parents. Don't propose more macro permutations.
+  - **C (DLA1 deep dive, 9 non-scheduler LLVM flags via asm-diff)**:
+    - 0 wins, all flags NOOP/regress on DLA1. **DLA1 is now triple-exhausted**: R12A (sched-strategy), R13A (alt iterative schedulers), R14C (non-scheduler LLVM flags) all produced 0 deltas.
+
+  **Round 14 net**: 0 WIN, 0 gap reduction. **10 saturation rounds total** (R2/R4/R5/R6/R7/R8/R9/R12/R13/R14). R10/R11 remain the only break-out rounds.
+
+  **新 dead-end vectors (Round 14)**:
+  - 27 non-scheduler LLVM flags (membound-threshold, relaxed-occupancy-deps, divergence-merge, vgpr-index-mode, lds-thread-affinity, wavefront-priority-vgpr, lwt, regalloc-bias, dce-in-ra, dpp-combine=true, lst{16,256}, sghazard{0,64}, etc.) — silent NOOP across the 4 broken shapes; only `regclassglob` produced sub-threshold +0.24pp signal.
+  - 28 kernel-macro combos (extbr/noembed/v20/v24/lgk4/tv0/tv16/gm1 cross-products on the 4 broken parents) — all sub-+1pp.
+  - `pf6_6+lgk4` on DLA1 — NEW BROKEN-APERTURE finding (compiler bug at default scheduler).
+  - `-amdgpu-promote-alloca-to-vector-limit` — NEW BROKEN-BUILD finding (illegal VGPR→SGPR copy).
+  - `misched-cluster=false`, `dpp-combine=false`, `amdgpu-disable-clustered-low-occupancy-reschedule` on DLA1 — NEW BROKEN-APERTURE flags.
+
+  **Frontier post-R14 (KERNEL-SOURCE LEVEL ONLY — multi-day work, infeasible in single session)**:
+  - 4 deep-LOSE shapes (DLA1 88.3%, DLA2 92.9%, DLA7 94.5%, P1=28672×4096×16384 93.7%) have **NO remaining flag-level lever**. Three exhausted axes: LLVM scheduler (R8/R10/R12/R13), non-scheduler LLVM (R14A/C), kernel macros (R14B + Round 2 deep-LOSE sweep).
+  - Future work paths require kernel rewrite: (a) MFMA op switch to `v_mfma_scale_f32_32x32x64_f8f6f4`, (b) K-split rewrite at source level, (c) SLM relayout (rebuild `st_16x128_s::swizzle` for different bank/acc pattern), (d) full B-direct (aiter-style, blocked on >256 VGPR budget).
+  - **Future agents**: do NOT propose more LLVM flag sweeps or macro permutations on these 4 shapes. Either pick up a kernel-source rewrite, OR confirm the run is documenting saturation, not chasing it.
+
 - **Round 13 (2026-04-17, alt-scheduler exhaustion sweep)**: 3 parallel optimizers, **0 new WINs** but 3 critical findings (committed `75d5e305`):
   - **A (alt iterative schedulers on 4 R12-broken shapes DLA1/DLA2/DLA7/WIN2)**: 0/12 candidates survived smoke.
     - `iterative-minreg`, `max-ilp`, `iterative-maxocc` ALL trigger SAME SGPR-clobber bug as `iterative-ilp`.
