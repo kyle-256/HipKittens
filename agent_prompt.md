@@ -331,6 +331,47 @@ R12 唯一产出 = Diagnostic-S 的瓶颈定性更正。R12 commit 只能是文�
 3. 保留 1 个 reviewer agent 做 A/B Welch-t formal
 4. 全部用同一个 base（42f5407b），不要让 worktree 落在 stale main 上
 
+## 第十三轮评审结果 (2026-04-17) — V3 swizzle swap 缩 LDS 8 KB 但 fastpath 正确性破坏
+
+### R13 行动
+
+按 R12 Diagnostic-S 假说路径 (1)（缩 CRR LDS）选了最直接路径：把 CRR fastpath 的 A/B tile 从 `ST_v2a`/`ST_v2`（含 128 B subtile padding）改成 `ST_v3`（0 padding，预期 8 KB shrink）。代码变更：
+- `crr_mxfp8_exact_8wave_fastpath.inc:41` 把 `static_assert(!CRR_USE_V3_SWIZZLE, ...)` wrap 进 `#if !CRR_USE_V3_SWIZZLE`
+- 同样 wrap 4 个 `CRR_*_REG_ROW_LOAD_*` asserts
+- `crr_exact_cA_with_b1_interleave_fixed_phase` 和 `_raw_phase` 函数 templated on STB（之前 hardcoded `const ST_v2&`），加 lambda：if constexpr `std::is_same_v<STB, ST_v3>` → `load_col_from_v3_st(b1, b1_tile, wn*RBN)`，else → `load_col_from_v2_st(...)`
+
+### R13 实测结果
+
+**构建 (V3=1 + fastpath=1)**：✅ VGPR 232→242 (+10), spills 0, occ 2 不变，**LDS Size 139264→131072 byte 完全匹配预期 8 KB shrink**
+
+**正确性**：fastpath FAIL — 8192³ pass-rate **66966620/67108864 = 99.79%** = **142244 个 NaN 输出**，TFLOPS 表面 2457（NaN 下游传播触发 division-by-NaN slowdown），SNR=NaN
+
+**关键 diagnostic（隔离 bug）**：
+1. **fastpath OFF + V3=1**（强制走 generic gemm_kernel<Layout::CRR> 用同样 ST_v3 + load_col_from_v3_st）：✅ **PASS** SNR 49.60 dB，pass-rate 100%（但只有 2.71 TFLOPS，generic kernel 慢 1000×）→ **证明 ST_v3 + V3 col-load helpers 本身正确**
+2. **fastpath ON + V3=1 + b1 interleave OFF**（`CRR_EXACT_INTERLEAVE_B1_LDS=0`）：仍 FAIL **完全相同 142244 NaN** → bug **不在 b1 interleave**，在 fastpath 更深层的 LDS write/read pipeline ordering
+
+**结论**：V3 swap **架构上对 CRR fastpath 不兼容**，即使 LDS shrink 完美匹配 SPI 假说预期。non-fastpath barrier 重所以不暴露；fastpath pipelined ds_write 与 ds_read_b64_tr_b8 在 double-buffer 循环里有 ordering 问题（具体是否 prefill_swizzled_offsets 与 v3 swizzle 在 double-buffer Bs[2][2] 上有 stride 假设差异，未深查）
+
+**已 revert** `crr_mxfp8_exact_8wave_fastpath.inc`，工作树恢复干净
+
+### R13 关键产出（dead-end，不是优化）
+
+- **V3 + non-fastpath PASSES** —— 可作为 ground truth 验证 V3 byte 布局是 OK 的
+- **V3 + fastpath fails identically with/without b1 interleave** —— bug 在更基础层（global→LDS write 与 col-load read 的 pipeline ordering），不是 R13 加的 lambda
+- **LDS 8 KB shrink 是真实可达的**（编译器报告确认），但触发的 fastpath 正确性破坏需要重写 fastpath 同步层才能消除
+
+### 已死的方向（R13 证伪，下轮不要再投资）
+
+- ST_v3 swizzle swap 的任何变体 —— fastpath 不兼容（已实测）
+- 加 sched_barrier/extra `s_waitcnt lgkmcnt(0)` 救 V3 fastpath —— 任何加粗 barrier 都会消掉 SPI 收益（瓶颈是 launch allocator，不是 LDS bank）
+
+### 新会话建议（按 SPI 假说剩余路径优先级）
+
+1. **`__launch_bounds__(512, 3)`** —— 纯 compile-time 试验，无 LDS swizzle 改动，只在 `crr_exact_8wave_scaled_kernel` 的 `__launch_bounds__` 加 `, 3`。如果 register usage 不超 cap、不强制 spill，会让 SPI 预留 3 blocks/CU 而不是 2，直接命中 SPI_RA_LDS_CU_FULL 瓶颈。**最低风险，最高收益候选**
+2. **单缓冲 B（`Bs[1][2]` 而不是 `Bs[2][2]`）** —— 直接砍 32 KB LDS（136→104 KB），让 SPI 占用槽位降到 RRR 以下。代价：B 的 global→LDS prefetch 与 register load 重叠机会减半，需要重新分析 vmcnt schedule。中等风险，需 ~50-100 LoC
+3. **per-CTA 常量改 `s_load_b256` 单次加载** —— 减 `SQC_DCACHE_BUSY_CYCLES +129%`。低风险但收益不确定（可能 < 1%）
+4. **静默 dev fan-out 模式不工作** —— R12/R13 都证明了，下轮直接 inline 干活更快
+
 ## 第十一轮评审结果 (2026-04-17) — A LDS 布局 transpose 两条路径全 BROKEN，B 也是窄读
 
 主 agent 派 2 个 scout 调研可行性 → 选定两条并行 dev：
