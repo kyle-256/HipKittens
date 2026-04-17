@@ -9,13 +9,15 @@
 
 **改为**: 缩小 deep-LOSE shape 的 gap. 即使 88% → 92% 也算真实进步, **+1pp 即可 commit**.
 
-### 重点 shape (P0 优先)
-| 优先级 | Shape | 当前 Ratio | 当前 Best | 类别 |
-|-------|-------|-----------|-----------|------|
-| **P0** | 4096×32768×128256 | 88.3% | ts_gm8 | mega-K + 大N |
-| **P0** | 14336×4096×32768 | 89.6% | lgk2_dc | 大K + 大M |
-| **P0** | 16384×4096×28672 | 90.1% | u32 | 大K + 大M |
-| P1 | 128256×32768×4096 | 92.9% | ts_gm2_v12_memc_dc | mega-M+N |
+### 重点 shape (P0 优先, single-GPU verified ratios from Round 6)
+**注意**: 之前 TODO.md 的 ratio (88.3/89.6/90.1) 是跨 GPU 平均, 实际单 GPU 5-run 测量更高. Round 6 reviewer 确认 14336×4096×32768 真实 baseline ratio 是 90.12% (不是 89.66%), 测量 4727±13 TFLOPS. 类似偏差可能存在于其他 shapes — 任何 +1pp 改进 claim **必须 single-GPU 5-run replication 验证**.
+
+| 优先级 | Shape | 当前 Ratio (单GPU) | 当前 Best | 类别 |
+|-------|-------|------------------|-----------|------|
+| **P0** | 4096×32768×128256 | ~90.1% (was 88.3%) | _ts_pf6_6_v12_memc | mega-K + 大N |
+| **P0** | 14336×4096×32768 | **90.12%** (verified) | _v16_wpe2 | 大K + 大M |
+| **P0** | 16384×4096×28672 | ~90.5% | _u8 | 大K + 大M |
+| P1 | 128256×32768×4096 | 92.9% | ts_gm2_v12_memc_dc | mega-M+N (reg-pressure bound) |
 | P1 | 4096×32768×28672 | 93.7% | v20_memc | 大K + 大N |
 | P1 | 28672×4096×16384 | 93.7% | ts_gm8 | 大K + 大M |
 | P2 | 4096×28672×32768 | 94.1% | u16 | 大K + 大N |
@@ -219,6 +221,21 @@
   - **EARLY_SCALE_PF (E)**: **BROKEN + no perf gain**. Compiler aliases `pf_*` and shadow `nxt_pf_*` to same VGPRs → race; baseline ASM already issues scale loads at iter top with ~512 cyc hiding > ~400 cyc VMEM latency, no untapped scheduling room. Code has `#error` guard if enabled. See `test_early_scale_pf.py`.
   - **F, G**: INFEASIBLE in single session.
   Triggered the user's GOAL PIVOT directive at the top of this file.
+- **Round 6 (2026-04-17, GOAL PIVOT 后第一轮)**: 3 parallel optimizers, all DEAD END / MARGINAL (REVERTED):
+  - **A** (4096×32768×128256 / compiler flags + L2 prefetch): DEAD END.
+    - **gfx950 has NO L2 prefetch instruction**: `__builtin_amdgcn_s_prefetch_data` and `s_buffer_prefetch_data` are tagged `gfx12-insts` only (verified `BuiltinsAMDGPU.def`). Don't propose software L2 prefetch on this arch.
+    - **`-mllvm -amdgpu-igroup-lp` does NOT exist** in this LLVM build (verified `llc -mcpu=gfx950 -help-hidden`). Source-level `__builtin_amdgcn_iglp_opt` is documented dead-end.
+    - Available `-mllvm -amdgpu-sched-strategy=` values: `gcn-max-occupancy`, `gcn-max-ilp`, `gcn-max-memory-clause`, `gcn-iterative-ilp`, `gcn-iterative-minreg`, `gcn-iterative-max-occupancy-experimental` (need `gcn-` prefix). All 5 alternatives to current `gcn-max-memory-clause` either match noise or regress -2 to -16pp on the target.
+  - **B** (14336×4096×32768 / UNROLL_K sweep): claimed +3.16pp WIN (commit `198bb3a4`) → **REJECTED by Reviewer**. Commit reverted (`4c11f8bb`), reviewer doc commit `acbc8b38`.
+    - **Phantom-baseline mechanism**: B measured baseline at 4591 TFLOPS (87.52%) on a different GPU; single-GPU 5-run replication on GPU 5 shows true baseline is **4727±13 TFLOPS** (90.12%). All 3 "winners" sit within ±0.16pp of this true baseline. The +3.16pp was a GPU-bias + run-noise artifact, not a real signal.
+    - UNROLL_K=2/4/8/16/32 × `_v16_wpe2`/`_memc`/`_lgk2_dc` cross-product produces **identical real performance** to current best on this shape. UNROLL_K direction is exhausted.
+  - **C** (16384×4096×28672 / TAIL_SPLIT epilogue): DEAD END. TAIL_SPLIT=1 consistently equal-or-worse for K≥7168 (steady-state main loop already saturates MFMA pipe; tail-splitting adds branch/barrier overhead). Best `_u8_lgk2` at +0.19pp, far below +1pp bar. `STEP12_BR_LGKMCNT=2` was the only directionally-positive knob — possibly worth retesting on other shapes.
+  - **NEW METHODOLOGY RULE (mandatory for all future deep-LOSE work)**:
+    - GPU bias is **50-100 TFLOPS / 1-2pp**, per-run noise is **±0.6pp** at 5-run replication.
+    - Any deep-LOSE Δ < 2pp claim **must** be validated by: single-GPU, 5-run replication, with mean-must-beat-baseline-MAX gate (not mean-vs-mean).
+    - Never compare baselines measured on different GPUs.
+    - `bench_deep_lose.py` correctness check has a false-OK SNR bug (NaN baselines pass `if snr > 25` because NaN compare is False but mis-classifies as OK) — fix before relying on it for new variants.
+  Net: 0 WIN, 0 gap reduction. Round 6 confirms even the "easier" gap-reduction goal (+1pp on a single shape) is at noise floor for the 3 P0 shapes.
 
 ## Benchmark 规则
 - **warmup=200, iters=500**, trimmed mean 10%
