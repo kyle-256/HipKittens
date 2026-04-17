@@ -315,6 +315,41 @@ Decider 提出 5 个 untested vectors, 3 个 in-session 可执行. 启动 3 个 
 
 **Round 5 净增**: 0 WIN, 0 gap reduction. 触发用户的 GOAL PIVOT 指令 (见文档顶部).
 
+## Round 15 (2026-04-17) — regclassglob cross-shape + 42 new LLVM flags + 3 source micros, all DEAD END (committed via this round)
+3 parallel optimizers (Opus 4.7) attacked the post-R14 frontier from orthogonal angles. **0 wins, 11th saturation round**. Cumulative LLVM-flag space now exhausted at **69 distinct flags** (27 R14A + 42 R15B).
+
+- **Optimizer A (regclassglob cross-shape + 7 P1 macro compounds)**:
+  - Fresh asm-diff: regclassglob produces DIFF on ALL 4 shapes (R14A's "NOOP on DLA2/DLA7" was a misread of the JSON).
+  - 5-run verify: P1 bare regclassglob **+0.236pp** (cleanly replicates R14A's +0.24pp). P1c regclassglob_tv16 **+0.225pp** with mean ≥ baseline.max **PASS** but sub-+1pp gate FAIL.
+  - DLA1/DLA2/DLA7 all FAIL +0.5pp smoke gate (Δ -22.8 to -0.02pp; -22.8 was single-run noise artifact, verify shows +0.11pp).
+  - 0/11 commit-eligible. **regclassglob is real-but-tiny perturbation, not a +1pp lever.**
+- **Optimizer B (42 untested LLVM flags, NO overlap with R14A's 27)**:
+  - Coverage families: coalescer (8), spill/AGPR (5), machine-sink/LICM (6), post-RA scheduler (6), IGLP (2), loop (3), AMDGPU misc (12).
+  - 168/168 builds OK. **Only 8/42 flags mutate .text** on at least one shape; 34 silent NOOP. 5-run verify: 0/3 candidates pass +1pp gate.
+  - **NEW BROKEN-APERTURE flags**: `-join-liveintervals=false` (P1/DLA1 crash; -30pp on DLA2/DLA7), `-greedy-reverse-local-assignment` (3/4 shapes).
+  - **Major regression flags (do not use)**: `-disable-machine-sink` -21.83pp on DLA1; `-disable-post-ra` -3.87pp on multiple shapes.
+- **Optimizer C (3 source-level micro probes, strict 35-min time-box)**:
+  - New macros `TAIL_BARRIER_LGKMCNT`, `STEP4_BARRIER_VMCNT`, `PF_GROUP_OFFSET` added to kernel.cpp temporarily, then **REVERTED** (no source change committed).
+  - `TAIL_BARRIER_LGKMCNT` best -0.21pp on DLA7. CLOSED.
+  - `STEP4_BARRIER_VMCNT` all values 4-20 LOSE on DLA1. CLOSED.
+  - `PF_GROUP_OFFSET=-1` +0.20pp on DLA1 within noise. Compiler reorders buffer_load_lds anyway; source-level rotation doesn't survive isel. CLOSED.
+
+**Round 15 净增**: 0 WIN, 0 gap reduction. **11 saturation rounds total** (R2/R4/R5/R6/R7/R8/R9/R12/R13/R14/R15). R10/R11 remain the only break-out rounds (5 verified deep-LOSE wins via un-prefixed iterative-ilp).
+
+**新 dead-end vectors (Round 15)**:
+- regclassglob × 7 macro compounds on P1 — all sub-+1pp; tv16 closest at +0.225pp gate-mean-PASS but threshold-FAIL
+- regclassglob bare on DLA1/DLA2/DLA7 — verify Δ ∈ [-0.06, +0.11] pp
+- 42 LLVM flags from 7 families (coalescer/spill-AGPR/sink-LICM/postRA/IGLP/loop/misc) — 34 NOOP, 8 DIFF, 0 wins
+- `-join-liveintervals=false` — NEW BROKEN-APERTURE on P1/DLA1, -30pp on DLA2/DLA7
+- `-greedy-reverse-local-assignment` — NEW BROKEN-APERTURE on 3/4 shapes
+- `-disable-machine-sink` — -21.83pp on DLA1
+- `-disable-post-ra` — -3.87pp multi-shape
+- `TAIL_BARRIER_LGKMCNT` source macro — closed (best -0.21pp)
+- `STEP4_BARRIER_VMCNT` source macro — closed (all values LOSE)
+- `PF_GROUP_OFFSET` source macro — closed (compiler isel re-orders, +0.20pp within noise)
+
+**Frontier post-R15 (UNCHANGED from R14)**: 4 deep-LOSE shapes (DLA1/DLA2/DLA7/P1) have NO remaining flag-level lever. LLVM flag space exhausted at 69 flags. Single-edit kernel-source probes also dead. Any future progress requires multi-day rewrites: (a) MFMA op switch to 32x32x64, (b) K-split rewrite, (c) SLM relayout, (d) full B-direct (aiter-style, blocked on >256 VGPR).
+
 ## Round 14 (2026-04-17) — non-scheduler LLVM + macro + DLA1 deep-dive, all DEAD END (committed `2717330d`)
 3 parallel optimizers (Opus 4.7) attacked the 4 sched-strategy-exhausted deep-LOSE shapes from R13 along orthogonal axes. **0 wins**, but 4 critical findings exhaust the in-session optimization frontier:
 

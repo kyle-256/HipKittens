@@ -225,6 +225,37 @@
   - **EARLY_SCALE_PF (E)**: **BROKEN + no perf gain**. Compiler aliases `pf_*` and shadow `nxt_pf_*` to same VGPRs → race; baseline ASM already issues scale loads at iter top with ~512 cyc hiding > ~400 cyc VMEM latency, no untapped scheduling room. Code has `#error` guard if enabled. See `test_early_scale_pf.py`.
   - **F, G**: INFEASIBLE in single session.
   Triggered the user's GOAL PIVOT directive at the top of this file.
+- **Round 15 (2026-04-17, regclassglob cross-shape + 42 new LLVM flags + 3 source micros)**: 3 parallel optimizers, **0 new WINs, 11th saturation round**. LLVM-flag space now exhausted at **69 distinct flags** (27 R14A + 42 R15B):
+  - **A (regclassglob cross-shape + 7 P1 macro compounds)**:
+    - Fresh asm-diff: regclassglob produces DIFF on ALL 4 shapes (R14A's "NOOP on DLA2/DLA7" was a misread).
+    - 5-run verify: P1 bare regclassglob **+0.236pp** (replicates R14A signal). P1c regclassglob_tv16 **+0.225pp** with mean ≥ baseline.max **PASS** but sub-+1pp gate FAIL.
+    - DLA1/DLA2/DLA7 verify Δ ∈ [-0.06, +0.11] pp.
+    - 0/11 commit-eligible. **regclassglob is real-but-tiny perturbation; macro compounds cannot amplify past noise.**
+  - **B (42 untested LLVM flags, NO overlap with R14A's 27, 7 untouched families)**:
+    - Coverage: coalescer (8), spill/AGPR (5), machine-sink/LICM (6), post-RA scheduler (6), IGLP (2), loop (3), AMDGPU misc (12).
+    - 168/168 builds OK. Only 8/42 mutate .text; 34 silent NOOP. 5-run verify: 0/3 candidates pass +1pp gate.
+    - **NEW BROKEN-APERTURE flags**: `-join-liveintervals=false` (P1/DLA1 crash; -30pp on DLA2/DLA7), `-greedy-reverse-local-assignment` (3/4 shapes).
+    - **Major-regression flags (do NOT use)**: `-disable-machine-sink` -21.83pp on DLA1; `-disable-post-ra` -3.87pp.
+  - **C (3 source-level micro probes, time-boxed 35 min)**:
+    - New macros `TAIL_BARRIER_LGKMCNT`, `STEP4_BARRIER_VMCNT`, `PF_GROUP_OFFSET` added/REVERTED.
+    - All three CLOSED: TAIL_BARRIER_LGKMCNT best -0.21pp on DLA7; STEP4_BARRIER_VMCNT all values 4-20 LOSE on DLA1; PF_GROUP_OFFSET=-1 +0.20pp on DLA1 within noise (compiler isel re-orders buffer_load_lds anyway).
+
+  **Round 15 net**: 0 WIN, 0 gap reduction. **11 saturation rounds total**. R10/R11 still the only break-out rounds.
+
+  **新 dead-end vectors (Round 15)**:
+  - regclassglob × 7 macro compounds on P1 — sub-+1pp; tv16 closest at +0.225pp gate-mean-PASS but threshold-FAIL
+  - regclassglob bare on DLA1/DLA2/DLA7 — verify Δ ∈ [-0.06, +0.11] pp (P1 only-shape signal confirmed)
+  - 42 LLVM flags from 7 families — 34 NOOP, 8 DIFF, 0 wins
+  - `-join-liveintervals=false` — NEW BROKEN-APERTURE on P1/DLA1, -30pp on DLA2/DLA7
+  - `-greedy-reverse-local-assignment` — NEW BROKEN-APERTURE on 3/4 shapes
+  - `-disable-machine-sink` — -21.83pp on DLA1
+  - `-disable-post-ra` — -3.87pp multi-shape
+  - `TAIL_BARRIER_LGKMCNT` source macro — closed (best -0.21pp on DLA7; tail iter ≤6% even at K=4096)
+  - `STEP4_BARRIER_VMCNT` source macro — closed (all 4-20 LOSE; Step3 barrier already sufficient)
+  - `PF_GROUP_OFFSET` source macro — closed (compiler isel re-orders, +0.20pp = noise)
+
+  **Frontier post-R15 (UNCHANGED)**: 69 LLVM flags + 28 macro combos + 3 source-level micros all dead on the 4 broken shapes. **Future agents must NOT propose more LLVM flag sweeps, macro permutations, or single-line source micros**. Any progress requires multi-day rewrites: (a) MFMA op 32x32x64 switch, (b) K-split rewrite, (c) SLM relayout, (d) full B-direct.
+
 - **Round 14 (2026-04-17, non-scheduler LLVM + macro + DLA1 deep-dive)**: 3 parallel optimizers, **0 new WINs**, all 4 broken shapes EXHAUSTED across remaining flag axes (committed `2717330d`):
   - **A (non-scheduler LLVM flags, 27 flags × 4 shapes via asm-diff probe)**:
     - **Best 5-run signal**: `-mllvm -greedy-regclass-priority-trumps-globalness=true` on P1 (28672×4096×16384) → +12.5 TFLOPS / +0.24pp 5-run mean, gate(mean≥baseline.max) PASS but **sub-+1pp threshold**. Documented for future, not deployable.
