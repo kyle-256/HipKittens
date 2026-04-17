@@ -29,17 +29,17 @@
 5. 禁止提交 `*.so`、`*.s`、`*_layout_results_*.json`、`.bak*`、`gpucore.*`、`__pycache__` 等（`.gitignore` 已覆盖）
 6. 每个子 agent 使用不同 `HIP_VISIBLE_DEVICES` 以免 GPU 冲突：Dev A → 0，Dev B → 1，Dev C → 2，Reviewer/formal → 7
 
-## Baseline (R16 2026-04-17 GPU0 fresh，pure source defaults)
+## Baseline (R17 2026-04-17 GPU0 confirmed，pure source defaults)
 
 | 版本 | TFLOPS | SNR | 备注 |
 | --- | ---: | --- | --- |
 | **FP8 RCR (长期 target)** | **3229.67** | 49.61 PASS | (R15 GPU0: 3253.80) — DVFS cold-start drift 0.74% |
-| **MXFP8 RCR KPAIR+PIPELINE+HOIST_HI+8WAVE_FAST** | **3010.57** | 49.60 PASS | (R15 GPU0: 3015.73) — drift 0.17% |
+| **MXFP8 RCR KPAIR+PIPELINE+HOIST_HI+8WAVE_FAST** | **3010-3014** | 49.60 PASS | (R15 GPU0: 3015.73) — drift 0.17% |
 | **MXFP8 RRR EXACT_8WAVE_FAST** | **2862.99** | 49.59 PASS | static ✅ (+82.71) / dynamic ✅ (+2.95) |
-| **MXFP8 CRR PIPELINE_SCALE+8WAVE_FAST** | **2775.96** | 49.60 PASS | static ❌ -4.32 / dynamic ❌ -84 (噪声边缘) |
-| RCR 差距 vs FP8 | −219.10 (−6.79%) | | 长期目标，R15 是 -238/-7.32% |
+| **MXFP8 CRR PIPELINE_SCALE+8WAVE_FAST (R17 5x median)** | **2822.30** | 49.60 PASS | std 16.67, min 2796.5 max 2841.7 — static ✅ (+42.02) / dynamic ❌ -42.6 |
+| RCR 差距 vs FP8 | −219 (−6.79%) | | 长期目标，R15 是 -238/-7.32% |
 
-跨会话 baseline 漂移 1-2% 是正常现象（R14/R15/R16 一致 confirm），CRR 这次小幅落 gate 之下 4.32 TFLOPS 是测量噪声不是真实退化。
+**R17 修正 R16 的 CRR 漂移读数**：R16 的单次 2775.96 是 5x re-measurement 中的 2.6σ 低端样本。median 2822.30 和 5/5 sample 全过 static gate 2780.28。所有 5 次 SNR + det PASS。跨会话 baseline 漂移 1-2% 是正常现象（R14/R15/R16/R17 一致 confirm）。
 
 **历史 baseline (GPU7, 2026-04-17 早期会话)** — 仅作 95% gate 锚点，不再用作回归对照：MXFP8 RCR 2926.61 / RRR 2794.26 / CRR 2740.55
 
@@ -481,6 +481,79 @@ CRR gate (2780.28 TFLOPS) 在当前架构下需要 multi-day 结构重写：
 3. **B 操作数 layout 重设计**（解锁剩余 75% LDS pressure）—— Scout 未调研，未知是否有 partial impl
 
 **承认 gate 当前架构不可达**。已 commit 的 `8934e95c` PIPELINE_SCALE 默认开（+0.243%, 2740.55 TFLOPS）是 R7-R11 共 11 轮唯一 strict win。下一会话若续做 CRR：先开 `CRR_ROW_SHARED_TRANSPOSE` 在非 fastpath 跑通做 known-good baseline，再决定要不要投入 multi-day 重写；或转向 RCR 剩余 4.70% 差距。
+
+## 第十七轮评审结果 (2026-04-17) — rocprofv3 FP8-vs-MXFP8 RCR 第一次横向比较找到 vmcnt-MFMA critical-path 信号；2 条 scale-pipeline tweak 全 reject + 1 个 SMEM 神话破解；0 commit
+
+### R17 派 1 Reviewer + 1 Diagnostic + 3 dev (A/B/C) 并行（GPU0/1/2/3 隔离）
+
+- **Reviewer (GPU0)** — CRR 5x re-measurement 反驳 R16 的 2775.96 漂移
+- **Diagnostic (GPU1)** — 第一次做 rocprofv3 FP8-RCR vs MXFP8-RCR 对比（之前 R10/R12 只比 CRR/RRR）
+- **Dev A (GPU0)** — FP8 vs MXFP8 RCR 内层 ASM diff（与 Diagnostic 信号收敛）
+- **Dev B (GPU2)** — KPAIR_INLINE_SCALE + SCALE_PREFETCH_N2 实验
+- **Dev C (GPU3)** — "+300% SMEM" 源头 hunt via -save-temps + propose fix
+
+### Reviewer (GPU0) — CRR 5x median 2822.30 / std 16.67
+- 5/5 sample 全过 static gate 2780.28（min 2796.5, max 2841.7）
+- 所有 5 次 SNR 49.60 + det 3/3 PASS
+- **R16 的单次 2775.96 是 2.6σ 低端样本**，不是真实退化
+- Static gate ✅ confirmed；dynamic gate ❌ -42.6 TFLOPS（与 R15 同向）
+
+### Diagnostic (GPU1) — rocprofv3 FP8-vs-MXFP8 RCR 对比新信号
+- MFMA busy% 78%→68%（**-10pp idle**）
+- SQ_INSTS_SMEM 表面 "+300%"（24576 → 98304）— **后来 Dev C 证明是 cosmetic**
+- SQC_DCACHE_BUSY +18%
+- **关键新信号**：vmcnt(3) / vmcnt(4) waitcnt 在 MXFP8 中**紧贴 MFMA 簇之前**，FP8 中是**之后**——暗示 scale→MFMA 数据依赖在 critical path
+
+### Dev A (GPU0) — ASM diff 收敛
+确认 Diagnostic 假说。FP8 内层是 MFMA-pure；MXFP8 在每 K iter 主体之前都有一个 scale `buffer_load + vmcnt + MFMA` 的 dependency triple。**这是 -10pp MFMA util gap 的根因**（不是寄存器，不是 LDS bank conflict，不是 cache miss）
+
+### Dev B (GPU2) — KPAIR_INLINE_SCALE + SCALE_PREFETCH_N2 全 REJECT（2 条新 dead-end）
+
+| 实验 | flag | 结果 | 资源 | 采纳？ |
+|---|---|---|---|---|
+| EXP1 KPAIR_INLINE_SCALE | `MXFP8_RCR_EXACT_PQ_KPAIR_INLINE_SCALE_ENABLE=1` | formal A/B Welch-t -9.59 / **-1.95% 退化** | VGPR 254→256 + 8 spills + 36B scratch | **拒绝（永久关闭）** |
+| EXP2-A SCALE_PREFETCH_N2 (B-only, BEFORE body) | `MXFP8_RCR_EXACT_PQ_SCALE_PREFETCH_N2_ENABLE=1` (variant A) | formal A/B Welch-t -8.51 / **-0.81% 退化** | clean +2 VGPR / 0 spill | **拒绝（永久关闭）** |
+| EXP2-B SCALE_PREFETCH_N2 (B-only, AFTER body) | (variant B) | 主动 abort | 174 spills / 588B scratch | **拒绝（永久关闭）** |
+
+- EXP1 根因：PIPELINE_SCALE 已经在 body 之前用 SRD/buffer_load_b32 把 scale 拿到，再 inline 一次纯属重复加载
+- EXP2-A 根因：强制 per-iter A 重载（为给 prefetch slot 让位），新增的 vmcnt 又落到 critical path 上
+
+### Dev C (GPU3) — "+300% SMEM" 神话破解（measurement artifact，不是 bottleneck）
+
+- 通过 `-save-temps` + ISA 对比 + waves-per-block 反推
+- **+73,728 extra SMEM ops 全部来自 prologue 的 `layout_globals` struct**（kernel_mxfp8_layouts.cpp:1906-1919）比 FP8 的 `rcr_exact_8wave_globals` (lean: 3 ptrs + stream，M/N/K constexpr) 多 9 个 s_load_bxxx 字段
+- 8192 waves × 9 extra s_loads = **73,728 exactly**（精确匹配 perf counter）
+- **量化估算**：73,728 × ~16 cycle / 1216 SIMDs / 1.7 GHz ≈ 570 ns / 10 ms kernel = **<0.006%**
+- 真正的 -10pp MFMA util gap 来自 Dev A 的 per-iter scale dependency，**不是** prologue s_loads
+- Refactor `layout_globals` → lean 需要碰所有 dispatch site 与 `gemm_kernel` 模板，回归风险高，benefit 低于噪声 → **不投入**
+- **永久关闭 "prologue SMEM 是瓶颈" 调查方向**
+
+### R17 综合产出 = 0 commit + 2 个新 dead-end + 1 个 myth-busting + 1 个有价值诊断
+
+1. **新 dead-end**：`MXFP8_RCR_EXACT_PQ_KPAIR_INLINE_SCALE_ENABLE` 与 PIPELINE_SCALE 叠加 -1.95%
+2. **新 dead-end**：`SCALE_PREFETCH_N2` (B-only) 变体 A -0.81% / 变体 B 174 spills
+3. **Myth-busting**：FP8-vs-MXFP8 "+300% SMEM" 是 cosmetic struct artifact，runtime 占比 <0.006%
+4. **有价值诊断**：vmcnt-MFMA dependency triple 是 -10pp MFMA util gap 的真因，但已知所有 prefetch 深一层尝试都触发 spill 或 vmcnt 重新落到 critical path —— 在当前 PIPELINE_SCALE 框架下 saturated
+5. **R17 Reviewer 数据修正 R16**：CRR static gate 5/5 PASS，median 2822.30
+
+### R17 confirms
+
+MXFP8 RCR 在当前结构 + PIPELINE_SCALE pipeline 下，**所有非结构性 scale-pipeline tweak 都已饱和**。R3-R17 共 15 轮短-cycle dev fan-out 累计 0 win（R15 hygiene fix 不算优化是默认值修正）。
+
+### 已死的方向（R17 证伪/穷尽，下轮不要再投资）
+
+- `MXFP8_RCR_EXACT_PQ_KPAIR_INLINE_SCALE_ENABLE` 与现有 PIPELINE_SCALE 叠加（R17 Dev B EXP1）
+- `SCALE_PREFETCH_N2` (B-only) 任何变体（R17 Dev B EXP2 A/B）
+- 把 prologue SMEM count 当性能瓶颈调（R17 Dev C 量化证伪 <0.006% runtime）
+- "再深一层 scale prefetch" / "inline 一份 scale 加载" 模式 —— PIPELINE_SCALE 已经覆盖最优，所有重叠方案都退化
+
+### 新会话规范（R17 起）
+
+1. **不要再做"试新 flag"或"调 prefetch / 缓存策略"sprint** —— R3-R17 反复证明短-cycle fan-out 0 win
+2. 不要把 SMEM count 当 perf 信号——可能是 cosmetic struct 差异（量化估算 cycles 验证）
+3. rocprofv3 FP8-vs-MXFP8 横向比较是新增的诊断手段，但 vmcnt-MFMA critical path 信号已经被 R17 EXP 证伪有可调空间
+4. 如果 user 强制继续：必须**单条深度做 multi-day 结构重写**之一（AGPR fused-asm block 接续 R5 Dev F partial impl，或 preshuffle scale layout 重设计影响面 = 4 fastpath + reference + 3 test caller）
+5. 仍坚持 R15 规范：每会话必须 GPU0 baseline 重测；commit author 用 "MXFP8 Decision Maker"
 
 ## 第十六轮评审结果 (2026-04-17) — 长期目标 RCR vs FP8 (-7.32%) 三条非破坏性路径全 dead-end，0 commit
 

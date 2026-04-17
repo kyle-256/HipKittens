@@ -6,14 +6,16 @@
 
 协议：`test_mxfp8_python.py` / `test_python.py` 内的 per-iteration sync + `output.zero_()`，warmup=100 iters=200。
 
-## 当前 baseline（GPU0，per-iter sync，8192^3）— **R16 fresh measurement (2026-04-17)**
+## 当前 baseline（GPU0，per-iter sync，8192^3）— **R17 confirmed (2026-04-17)**
 
 | 版本 | TFLOPS | SNR | 相对 MXFP8 RCR |
 | --- | ---: | --- | ---: |
 | **FP8 per-tensor RCR (长期目标)** | **3229.67** | 49.61 dB PASS | 107.3% |
-| **MXFP8 RCR KPAIR+PIPELINE+HOIST_HI+8WAVE_FAST (R16 默认)** | **3010.57** | 49.60 dB PASS | **100.0%** |
-| **MXFP8 RRR EXACT_8WAVE_FAST (R16 默认)** | **2862.99** | 49.59 dB PASS | **95.10%** ✅ |
-| **MXFP8 CRR PIPELINE_SCALE+8WAVE_FAST (R16 默认)** | **2775.96** | 49.60 dB PASS | **92.21%** (噪声漂移，落 static gate 下 4.32 TFLOPS) |
+| **MXFP8 RCR KPAIR+PIPELINE+HOIST_HI+8WAVE_FAST (R17 默认)** | **3010-3014** | 49.60 dB PASS | **100.0%** |
+| **MXFP8 RRR EXACT_8WAVE_FAST (R17 默认)** | **2862.99** | 49.59 dB PASS | **95.10%** ✅ |
+| **MXFP8 CRR PIPELINE_SCALE+8WAVE_FAST (R17 5x median)** | **2822.30** | 49.60 dB PASS | **93.71%** ✅ static gate +42.02 |
+
+**R17 Reviewer 5x CRR re-measurement (GPU0)**：median 2822.30, std 16.67, min 2796.5, max 2841.7。R16 的单次 2775.96 是 2.6σ 低端样本，**不是真实退化**。所有 5 次 SNR + det 全 PASS。Static gate 2780.28 ✅ confirmed, dynamic gate 2864.94 ❌ -42.6 TFLOPS（与 R15 同向）。
 
 ### R15 vs R16 对比（同代码同 commit a8237d01）
 
@@ -266,6 +268,41 @@ CRR PQ：**2737.94 TFLOPS** (93.55% of RCR) → 差 **42.34 TFLOPS (1.55%)** 才
     - Dev T（LDS 分配缩减 136→131 KB）：worktree 在 42f5407b base，活跃到 18:26（最后 .so build），**timeout 无 commit**
     - Diagnostic-S：完成（paradigm-shift 发现，见上）
   - **R12 行动结论**：4 个 dev 全 timeout 无 commit；唯一产出是 Diagnostic-S 的瓶颈定性更正。要 commit 代码必须重派 dev，**强烈建议下轮按 Diagnostic-S 的 SPI 启动器假说派活**：(1) 缩减 CRR LDS/block（单缓冲 A 或 B，packing 重叠）、(2) `__launch_bounds__(512, 3)` 提示 SPI 预留更多 slots、(3) 减少 SQC_DCACHE 压力（per-CTA 常量改 s_load_b256 单次加载）。**不要** 再投资 LDS bank conflict / LDS pipe / re-stripe stride 方向（已证 0 conflict，无收益）
+
+- **第十七轮评审 (2026-04-17) — 新角度 rocprofv3 FP8-vs-MXFP8 RCR diagnostic 找到 vmcnt-MFMA critical-path 信号；2 条 scale-pipeline tweak 全 reject + 1 个 SMEM "+300%" 神话破解；0 commit**
+  - **R17 派 1 Reviewer + 1 Diagnostic + 3 dev (A/B/C) 并行（GPU0/1/2/3 隔离）**
+  - **Reviewer (GPU0)** — CRR 5x re-measurement 反驳 R16 漂移：median 2822.30 / std 16.67 / min 2796.5 / max 2841.7。R16 单次 2775.96 是 2.6σ 低端样本，**static gate 2780.28 PASS confirmed**（5/5 sample 全 over）。所有 5 次 SNR + det PASS。RCR/RRR/FP8 同 R16 持平
+  - **Diagnostic (GPU1) — 第一次做 rocprofv3 FP8-RCR vs MXFP8-RCR 对比**（之前 R10/R12 只比 CRR/RRR）：
+    - MFMA busy% 78%→68%（**-10pp idle**）
+    - SQ_INSTS_SMEM 表面 "+300%"（24576 → 98304）
+    - SQC_DCACHE_BUSY +18%
+    - **关键新信号**：vmcnt(3) / vmcnt(4) waitcnt 在 MXFP8 中**紧贴 MFMA 簇之前**，FP8 中是**之后**——暗示 scale-MFMA 数据依赖在 critical path 上
+  - **Dev A (GPU0) — FP8 vs MXFP8 RCR 内层 ASM diff 收敛**：确认 Diagnostic 假说。FP8 内层是 MFMA-pure；MXFP8 在每 K iter 主体之前都有一个 scale `buffer_load + vmcnt + MFMA` 的 dependency triple。**这是 -10pp MFMA util gap 的根因**（不是寄存器，不是 LDS bank conflict，不是 cache miss）
+  - **Dev B (GPU2) — KPAIR_INLINE_SCALE + SCALE_PREFETCH_N2 全 REJECT（2 条新 dead-end）**：
+    - **EXP1 `MXFP8_RCR_EXACT_PQ_KPAIR_INLINE_SCALE_ENABLE=1`**（在 `do_k_iter_body` 里直接发 scale buffer_load 而非走 SRD pipeline）：VGPR 254→256 + 8 spills + 36B scratch；formal A/B Welch-t -9.59 / **-1.95% 退化**。根因：PIPELINE_SCALE 已经在 body 之前用 SRD/buffer_load_b32 把 scale 拿到，再 inline 一次纯属重复加载
+    - **EXP2 `SCALE_PREFETCH_N2` (B-only, n+2 ring)** 变体 A（prefetch BEFORE body）：clean +2 VGPR / 0 spill；formal A/B Welch-t -8.51 / **-0.81% 退化**。根因：强制 per-iter A 重载（为给 prefetch slot 让位），新增的 vmcnt 又落到 critical path 上
+    - **EXP2 变体 B（prefetch AFTER body）**：174 spills / 588B scratch → 主动 abort
+    - **永久关闭这 2 个 flag**（与现有 PIPELINE_SCALE 叠加皆退化）
+  - **Dev C (GPU3) — "+300% SMEM" 神话破解（measurement artifact，不是 bottleneck）**：
+    - 通过 `-save-temps` + ISA 对比 + waves-per-block 反推：**+73,728 extra SMEM ops 全部来自 prologue 的 `layout_globals` struct 比 FP8 的 `rcr_exact_8wave_globals` struct 多 9 个 s_load_bxxx 字段**
+    - `layout_globals` 有 12+ 字段（M/N/K runtime + grid + 多个指针 + stream），FP8 lean struct 只有 3 ptrs + stream（M/N/K 是 `constexpr`）
+    - 8192 waves × 9 extra s_loads = **73,728 exactly**（精确匹配 perf counter）
+    - **量化估算**：73,728 ops × ~16 cycle / 1216 SIMDs / 1.7 GHz ≈ 570 ns 总开销 / 10 ms kernel 总时间 = **<0.006%**
+    - 真正的 -10pp MFMA util gap 来自 Dev A 的 per-iter scale dependency，**不是** prologue s_loads
+    - Refactor `layout_globals` → lean 需要碰所有 dispatch site 与 `gemm_kernel` 模板，回归风险高，benefit 低于噪声 → **不投入**
+    - **永久关闭"prologue SMEM 是瓶颈"调查方向**
+  - **R17 综合产出 = 0 commit + 2 个新 dead-end + 1 个 myth-busting + 1 个有价值诊断**：
+    1. **新 dead-end**：`MXFP8_RCR_EXACT_PQ_KPAIR_INLINE_SCALE_ENABLE` 与现有 PIPELINE_SCALE 叠加 -1.95% 退化（**永久关闭**）
+    2. **新 dead-end**：`SCALE_PREFETCH_N2` (B-only) 变体 A -0.81% 退化（**永久关闭**）；变体 B 174 spills（**永久关闭**）
+    3. **Myth-busting**：FP8-vs-MXFP8 "+300% SMEM" 是 cosmetic measurement artifact (`layout_globals` struct 比 lean struct 多 9 字段)，runtime 占比 <0.006%，**不是 bottleneck**
+    4. **有价值诊断**：vmcnt-MFMA dependency triple 是 -10pp MFMA util gap 的真因（per-iter scale buffer_load 在 critical path 上），但与 PIPELINE_SCALE 已经做过的优化空间已经饱和——所有"再深一层 prefetch"尝试都触发 spill 或 vmcnt 重新落到 critical path
+    5. **R17 Reviewer 数据修正 R16**：CRR static gate 在 5/5 sample 全 PASS（median 2822.30 +42.02 over gate），R16 单次 2775.96 是噪声极端样本不是真实退化
+  - **R17 confirms**：MXFP8 RCR 在当前结构 + 当前 PIPELINE_SCALE pipeline 下，**所有非结构性 scale-pipeline tweak 都已饱和**。R3-R17 共 15 轮短-cycle dev fan-out 累计 0 win（R15 hygiene fix 不算优化是默认值修正）。剩余 219 TFLOPS / 6.79% gap 必须靠多日结构重写（AGPR fused-asm block 接续 R5 Dev F partial impl，或 preshuffle scale layout 重设计影响 4 fastpath + reference + 3 test caller）
+  - **新会话规范（R17 起）**：
+    - **不要再做"试新 flag"或"调 prefetch / 缓存策略"sprint** —— R3-R17 共 15 轮反复证明短-cycle dev fan-out 0 win
+    - 不要把 SMEM count 当 perf 信号——可能是 cosmetic struct 差异（量化估算 cycles 验证）
+    - rocprofv3 FP8-vs-MXFP8 横向比较是新增的诊断手段，但 vmcnt-MFMA critical path 信号已经被 R17 EXP 证伪有可调空间
+    - 如果 user 强制继续：必须**单条深度做 multi-day 结构重写**之一
 
 - **第十六轮评审 (2026-04-17) — 长期目标 RCR vs FP8 (-7.32%) 三条非破坏性路径全 dead-end，0 commit**
   - **R16 派 1 Reviewer + 3 dev 并行（GPU0/1/2/3 隔离）**，全部为非破坏性短-cycle 实验（不动结构）：
