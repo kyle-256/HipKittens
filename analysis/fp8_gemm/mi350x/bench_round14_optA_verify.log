@@ -1,0 +1,64 @@
+R14A 5-run verify. GPU=1 warmup=200 iters=500
+==============================================================================================================
+
+P1  shape=28672x4096x16384  comp=5273.0  parent=_ts_gm8  tag=regclassglob
+  baseline run1: 4998.72
+  baseline run2: 4997.06
+  baseline run3: 5000.99
+  baseline run4: 4997.82
+  baseline run5: 5001.58
+  candidate run1: 5008.48
+  candidate run2: 5019.38
+  candidate run3: 5009.26
+  candidate run4: 5016.59
+  candidate run5: 5004.96
+  baseline  mean=4999.23 max=5001.58 min=4997.06
+  candidate mean=5011.73 max=5019.38 min=5004.96
+  delta_mean=+12.50 TFLOPS  (+0.24pp)  gate(mean>=base.max)=PASS
+
+DLA1  shape=4096x32768x128256  comp=5781.1  parent=_ts_pf6_6_v12_memc  tag=dppc
+  baseline run1: 5082.22
+  baseline run2: 5072.10
+  baseline run3: 5040.37
+  baseline run4: 5053.30
+  baseline run5: 5068.23
+  candidate run1: 5059.89
+  candidate run2: 5062.31
+  candidate run3: 5064.54
+  candidate run4: 5025.26
+  candidate run5: 5054.29
+  baseline  mean=5063.24 max=5082.22 min=5040.37
+  candidate mean=5053.26 max=5064.54 min=5025.26
+  delta_mean=-9.98 TFLOPS  (-0.17pp)  gate(mean>=base.max)=FAIL
+
+DLA7  shape=28672x32768x4096  comp=4466.6  parent=_ts_lgk2_v12_memc  tag=nomisched
+  baseline run1: 4203.88
+  baseline run2: 4211.52
+  baseline run3: 4210.61
+  baseline run4: 4202.39
+  baseline run5: 4203.70
+  candidate run1: 4211.60
+  candidate run2: 4207.13
+  candidate run3: 4208.44
+  candidate run4: 4209.98
+  candidate run5: 4210.92
+  baseline  mean=4206.42 max=4211.52 min=4202.39
+  candidate mean=4209.61 max=4211.60 min=4207.13
+  delta_mean=+3.19 TFLOPS  (+0.07pp)  gate(mean>=base.max)=FAIL
+
+DLA2  shape=128256x32768x4096  comp=4536.4  parent=_ts_gm2_v12_memc_dc  tag=regclassglob
+  baseline run1: 4190.60
+  baseline run2: 4195.53
+  baseline run3: 4190.03
+  baseline run4: 4176.86
+  baseline run5: 4182.97
+  candidate run1: 4196.22
+  candidate run2: 4197.75
+  candidate run3: 4190.98
+  candidate run4: 4195.61
+  candidate run5: 4192.11
+  baseline  mean=4187.20 max=4195.53 min=4176.86
+  candidate mean=4194.53 max=4197.75 min=4190.98
+  delta_mean=+7.33 TFLOPS  (+0.16pp)  gate(mean>=base.max)=FAIL
+
+Saved bench_round14_optA_verify.json

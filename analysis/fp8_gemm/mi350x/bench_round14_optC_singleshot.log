@@ -1,0 +1,20 @@
+Round 14 OptC DLA1 single-shot. GPU=3 warmup=200 iters=500 trim=0.1
+Shape 4096x32768x128256  parent=_ts_pf6_6_v12_memc  comp_tflops=5781.1
+==============================================================================================================
+  _ts_pf6_6_v12_memc                                 tflops=5117.15  (88.52%)  (parent)
+  _ts_pf6_6_v12_memc_r14c_v3_brlgk0                  tflops=5111.68  (88.42%)  Δ=-5.47T  -0.095pp
+  _ts_pf6_6_v12_memc_r14c_v2_v16                     tflops=5115.21  (88.48%)  Δ=-1.94T  -0.034pp
+  _ts_pf6_6_v12_memc_r14c_v2_v20                     tflops=5100.09  (88.22%)  Δ=-17.06T  -0.295pp
+  _ts_pf6_6_v12_memc_r14c_v2_v8                      tflops=5119.47  (88.56%)  Δ=+2.32T  +0.040pp
+  _ts_pf6_6_v12_memc_r14c_v2_v24                     tflops=5114.34  (88.47%)  Δ=-2.81T  -0.049pp
+  _ts_pf6_6_v12_memc_r14c_v4_tbv16                   tflops=5118.89  (88.55%)  Δ=+1.74T  +0.030pp
+  _ts_pf6_6_v12_memc_r14c_v3_brlgk4                  tflops=5108.80  (88.37%)  Δ=-8.35T  -0.144pp
+  _ts_pf6_6_v12_memc_r14c_cb_tbv16_brlgk4            tflops=5112.68  (88.44%)  Δ=-4.47T  -0.077pp
+  _ts_pf6_6_v12_memc_r14c_cb_gm8_tbv16               tflops=5097.95  (88.18%)  Δ=-19.20T  -0.332pp
+  _ts_pf6_6_v12_memc_r14c_v5_gm8                     tflops=5094.36  (88.12%)  Δ=-22.79T  -0.394pp
+  _ts_pf6_6_v12_memc_r14c_v4_tbv0                    tflops=5103.84  (88.28%)  Δ=-13.31T  -0.230pp
+  _ts_pf6_6_v12_memc_r14c_v2_v4                      tflops=5100.09  (88.22%)  Δ=-17.06T  -0.295pp
+  _ts_pf6_6_v12_memc_r14c_v4_tbv4                    tflops=5104.48  (88.30%)  Δ=-12.67T  -0.219pp
+  _ts_pf6_6_v12_memc_r14c_v10_static_xcd             tflops=5065.76  (87.63%)  Δ=-51.39T  -0.889pp
+==============================================================================================================
+Saved bench_round14_optC_singleshot.json

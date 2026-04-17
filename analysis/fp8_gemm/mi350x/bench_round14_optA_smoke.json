@@ -1,0 +1,269 @@
+{
+  "warmup": 20,
+  "iters": 50,
+  "trim": 0.1,
+  "gpu": 1,
+  "results": [
+    {
+      "label": "DLA1",
+      "tag": "mb0",
+      "suffix": "_ts_pf6_6_v12_memc_r14a_mb0",
+      "status": "OK",
+      "tflops": 5092.29,
+      "finite": 0.47211796045303345,
+      "retry": 0
+    },
+    {
+      "label": "DLA1",
+      "tag": "mb50",
+      "suffix": "_ts_pf6_6_v12_memc_r14a_mb50",
+      "status": "OK",
+      "tflops": 5090.26,
+      "finite": 0.46089625358581543,
+      "retry": 0
+    },
+    {
+      "label": "DLA1",
+      "tag": "mb100",
+      "suffix": "_ts_pf6_6_v12_memc_r14a_mb100",
+      "status": "OK",
+      "tflops": 5094.77,
+      "finite": 0.46600329875946045,
+      "retry": 0
+    },
+    {
+      "label": "DLA1",
+      "tag": "mb200",
+      "suffix": "_ts_pf6_6_v12_memc_r14a_mb200",
+      "status": "OK",
+      "tflops": 5106.71,
+      "finite": 0.47169655561447144,
+      "retry": 0
+    },
+    {
+      "label": "DLA1",
+      "tag": "relaxocc",
+      "suffix": "_ts_pf6_6_v12_memc_r14a_relaxocc",
+      "status": "OK",
+      "tflops": 5091.35,
+      "finite": 0.4775029122829437,
+      "retry": 0
+    },
+    {
+      "label": "DLA1",
+      "tag": "mb0_relaxocc",
+      "suffix": "_ts_pf6_6_v12_memc_r14a_mb0_relaxocc",
+      "status": "OK",
+      "tflops": 5092.16,
+      "finite": 0.4675796329975128,
+      "retry": 0
+    },
+    {
+      "label": "DLA1",
+      "tag": "nodiv",
+      "suffix": "_ts_pf6_6_v12_memc_r14a_nodiv",
+      "status": "OK",
+      "tflops": 5095.85,
+      "finite": 0.4715604782104492,
+      "retry": 0
+    },
+    {
+      "label": "DLA1",
+      "tag": "nomergem0",
+      "suffix": "_ts_pf6_6_v12_memc_r14a_nomergem0",
+      "status": "OK",
+      "tflops": 5093.09,
+      "finite": 0.46915388107299805,
+      "retry": 0
+    },
+    {
+      "label": "DLA1",
+      "tag": "nomisched",
+      "suffix": "_ts_pf6_6_v12_memc_r14a_nomisched",
+      "status": "OK",
+      "tflops": 5058.34,
+      "finite": 0.47208526730537415,
+      "retry": 0
+    },
+    {
+      "label": "DLA1",
+      "tag": "dppc",
+      "suffix": "_ts_pf6_6_v12_memc_r14a_dppc",
+      "status": "OK",
+      "tflops": 5094.68,
+      "finite": 0.4687989056110382,
+      "retry": 0
+    },
+    {
+      "label": "DLA1",
+      "tag": "nodppc",
+      "suffix": "_ts_pf6_6_v12_memc_r14a_nodppc",
+      "status": "OK",
+      "tflops": 5100.64,
+      "finite": 0.47166159749031067,
+      "retry": 0
+    },
+    {
+      "label": "DLA1",
+      "tag": "vgprix",
+      "suffix": "_ts_pf6_6_v12_memc_r14a_vgprix",
+      "status": "OK",
+      "tflops": 5096.7,
+      "finite": 0.4624198079109192,
+      "retry": 0
+    },
+    {
+      "label": "DLA1",
+      "tag": "regclassglob",
+      "suffix": "_ts_pf6_6_v12_memc_r14a_regclassglob",
+      "status": "OK",
+      "tflops": 5092.94,
+      "finite": 0.4804365038871765,
+      "retry": 0
+    },
+    {
+      "label": "DLA1",
+      "tag": "nolowoccr",
+      "suffix": "_ts_pf6_6_v12_memc_r14a_nolowoccr",
+      "status": "OK",
+      "tflops": 5088.97,
+      "finite": 0.4672757685184479,
+      "retry": 0
+    },
+    {
+      "label": "DLA1",
+      "tag": "nohighrpr",
+      "suffix": "_ts_pf6_6_v12_memc_r14a_nohighrpr",
+      "status": "OK",
+      "tflops": 5100.54,
+      "finite": 0.4741095304489136,
+      "retry": 0
+    },
+    {
+      "label": "DLA1",
+      "tag": "lst16",
+      "suffix": "_ts_pf6_6_v12_memc_r14a_lst16",
+      "status": "OK",
+      "tflops": 5096.92,
+      "finite": 0.4807555079460144,
+      "retry": 0
+    },
+    {
+      "label": "DLA1",
+      "tag": "lst256",
+      "suffix": "_ts_pf6_6_v12_memc_r14a_lst256",
+      "status": "OK",
+      "tflops": 5101.89,
+      "finite": 0.4681142568588257,
+      "retry": 0
+    },
+    {
+      "label": "DLA1",
+      "tag": "sghazard0",
+      "suffix": "_ts_pf6_6_v12_memc_r14a_sghazard0",
+      "status": "OK",
+      "tflops": 5107.84,
+      "finite": 0.45221224427223206,
+      "retry": 0
+    },
+    {
+      "label": "DLA1",
+      "tag": "sghazard64",
+      "suffix": "_ts_pf6_6_v12_memc_r14a_sghazard64",
+      "status": "OK",
+      "tflops": 5096.91,
+      "finite": 0.46261271834373474,
+      "retry": 0
+    },
+    {
+      "label": "DLA1",
+      "tag": "wpv0",
+      "suffix": "_ts_pf6_6_v12_memc_r14a_wpv0",
+      "status": "OK",
+      "tflops": 5108.08,
+      "finite": 0.46675553917884827,
+      "retry": 0
+    },
+    {
+      "label": "DLA1",
+      "tag": "wpv500",
+      "suffix": "_ts_pf6_6_v12_memc_r14a_wpv500",
+      "status": "OK",
+      "tflops": 5091.14,
+      "finite": 0.47171980142593384,
+      "retry": 0
+    },
+    {
+      "label": "DLA1",
+      "tag": "lwt50",
+      "suffix": "_ts_pf6_6_v12_memc_r14a_lwt50",
+      "status": "OK",
+      "tflops": 5075.91,
+      "finite": 0.4682367444038391,
+      "retry": 0
+    },
+    {
+      "label": "DLA1",
+      "tag": "lwt100",
+      "suffix": "_ts_pf6_6_v12_memc_r14a_lwt100",
+      "status": "OK",
+      "tflops": 5082.68,
+      "finite": 0.46866345405578613,
+      "retry": 0
+    },
+    {
+      "label": "DLA2",
+      "tag": "nomisched",
+      "suffix": "_ts_gm2_v12_memc_dc_r14a_nomisched",
+      "status": "OK",
+      "tflops": 4199.18,
+      "finite": 0.6634617447853088,
+      "retry": 0
+    },
+    {
+      "label": "DLA2",
+      "tag": "regclassglob",
+      "suffix": "_ts_gm2_v12_memc_dc_r14a_regclassglob",
+      "status": "OK",
+      "tflops": 4194.91,
+      "finite": 0.6438084244728088,
+      "retry": 0
+    },
+    {
+      "label": "DLA7",
+      "tag": "nomisched",
+      "suffix": "_ts_lgk2_v12_memc_r14a_nomisched",
+      "status": "OK",
+      "tflops": 4244.15,
+      "finite": 0.36979377269744873,
+      "retry": 0
+    },
+    {
+      "label": "DLA7",
+      "tag": "regclassglob",
+      "suffix": "_ts_lgk2_v12_memc_r14a_regclassglob",
+      "status": "OK",
+      "tflops": 4203.35,
+      "finite": 0.35916584730148315,
+      "retry": 0
+    },
+    {
+      "label": "P1",
+      "tag": "regclassglob",
+      "suffix": "_ts_gm8_r14a_regclassglob",
+      "status": "OK",
+      "tflops": 4942.4,
+      "finite": 0.5251023173332214,
+      "retry": 0
+    },
+    {
+      "label": "P1",
+      "tag": "nohighrpr",
+      "suffix": "_ts_gm8_r14a_nohighrpr",
+      "status": "OK",
+      "tflops": 4880.38,
+      "finite": 0.5515317320823669,
+      "retry": 0
+    }
+  ]
+}

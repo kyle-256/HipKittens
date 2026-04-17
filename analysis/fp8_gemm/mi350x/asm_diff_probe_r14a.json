@@ -1,0 +1,456 @@
+{
+  "shapes": {
+    "DLA1": {
+      "parent": "c2400812e33eec5c",
+      "flags": {
+        "mb0": {
+          "text_hash": "e5a3b6196c68aba4",
+          "verdict": "DIFF"
+        },
+        "mb50": {
+          "text_hash": "e5a3b6196c68aba4",
+          "verdict": "DIFF"
+        },
+        "mb100": {
+          "text_hash": "e5a3b6196c68aba4",
+          "verdict": "DIFF"
+        },
+        "mb200": {
+          "text_hash": "e5a3b6196c68aba4",
+          "verdict": "DIFF"
+        },
+        "relaxocc": {
+          "text_hash": "e5a3b6196c68aba4",
+          "verdict": "DIFF"
+        },
+        "mb0_relaxocc": {
+          "text_hash": "e5a3b6196c68aba4",
+          "verdict": "DIFF"
+        },
+        "pav16": {
+          "text_hash": null,
+          "verdict": "MISSING"
+        },
+        "pav32": {
+          "text_hash": null,
+          "verdict": "MISSING"
+        },
+        "pav64": {
+          "text_hash": null,
+          "verdict": "MISSING"
+        },
+        "nopav": {
+          "text_hash": null,
+          "verdict": "MISSING"
+        },
+        "nodiv": {
+          "text_hash": "e5a3b6196c68aba4",
+          "verdict": "DIFF"
+        },
+        "nomergem0": {
+          "text_hash": "e5a3b6196c68aba4",
+          "verdict": "DIFF"
+        },
+        "nomisched": {
+          "text_hash": "be9cb6d11c8f7e4c",
+          "verdict": "DIFF"
+        },
+        "dppc": {
+          "text_hash": "e5a3b6196c68aba4",
+          "verdict": "DIFF"
+        },
+        "nodppc": {
+          "text_hash": "e5a3b6196c68aba4",
+          "verdict": "DIFF"
+        },
+        "vgprix": {
+          "text_hash": "e5a3b6196c68aba4",
+          "verdict": "DIFF"
+        },
+        "regclassglob": {
+          "text_hash": "13f4b16530153269",
+          "verdict": "DIFF"
+        },
+        "nolowoccr": {
+          "text_hash": "e5a3b6196c68aba4",
+          "verdict": "DIFF"
+        },
+        "nohighrpr": {
+          "text_hash": "e5a3b6196c68aba4",
+          "verdict": "DIFF"
+        },
+        "lst16": {
+          "text_hash": "e5a3b6196c68aba4",
+          "verdict": "DIFF"
+        },
+        "lst256": {
+          "text_hash": "e5a3b6196c68aba4",
+          "verdict": "DIFF"
+        },
+        "sghazard0": {
+          "text_hash": "e5a3b6196c68aba4",
+          "verdict": "DIFF"
+        },
+        "sghazard64": {
+          "text_hash": "e5a3b6196c68aba4",
+          "verdict": "DIFF"
+        },
+        "wpv0": {
+          "text_hash": "e5a3b6196c68aba4",
+          "verdict": "DIFF"
+        },
+        "wpv500": {
+          "text_hash": "e5a3b6196c68aba4",
+          "verdict": "DIFF"
+        },
+        "lwt50": {
+          "text_hash": "e5a3b6196c68aba4",
+          "verdict": "DIFF"
+        },
+        "lwt100": {
+          "text_hash": "e5a3b6196c68aba4",
+          "verdict": "DIFF"
+        }
+      }
+    },
+    "DLA2": {
+      "parent": "4bd4d79ff4b044c1",
+      "flags": {
+        "mb0": {
+          "text_hash": "4bd4d79ff4b044c1",
+          "verdict": "NOOP"
+        },
+        "mb50": {
+          "text_hash": "4bd4d79ff4b044c1",
+          "verdict": "NOOP"
+        },
+        "mb100": {
+          "text_hash": "4bd4d79ff4b044c1",
+          "verdict": "NOOP"
+        },
+        "mb200": {
+          "text_hash": "4bd4d79ff4b044c1",
+          "verdict": "NOOP"
+        },
+        "relaxocc": {
+          "text_hash": "4bd4d79ff4b044c1",
+          "verdict": "NOOP"
+        },
+        "mb0_relaxocc": {
+          "text_hash": "4bd4d79ff4b044c1",
+          "verdict": "NOOP"
+        },
+        "pav16": {
+          "text_hash": "54273bcf7cc039d7",
+          "verdict": "DIFF"
+        },
+        "pav32": {
+          "text_hash": "54273bcf7cc039d7",
+          "verdict": "DIFF"
+        },
+        "pav64": {
+          "text_hash": "54273bcf7cc039d7",
+          "verdict": "DIFF"
+        },
+        "nopav": {
+          "text_hash": "54273bcf7cc039d7",
+          "verdict": "DIFF"
+        },
+        "nodiv": {
+          "text_hash": "4bd4d79ff4b044c1",
+          "verdict": "NOOP"
+        },
+        "nomergem0": {
+          "text_hash": "4bd4d79ff4b044c1",
+          "verdict": "NOOP"
+        },
+        "nomisched": {
+          "text_hash": "9a7f789d781acbb9",
+          "verdict": "DIFF"
+        },
+        "dppc": {
+          "text_hash": "4bd4d79ff4b044c1",
+          "verdict": "NOOP"
+        },
+        "nodppc": {
+          "text_hash": "4bd4d79ff4b044c1",
+          "verdict": "NOOP"
+        },
+        "vgprix": {
+          "text_hash": "4bd4d79ff4b044c1",
+          "verdict": "NOOP"
+        },
+        "regclassglob": {
+          "text_hash": "757f1bada390a57a",
+          "verdict": "DIFF"
+        },
+        "nolowoccr": {
+          "text_hash": "4bd4d79ff4b044c1",
+          "verdict": "NOOP"
+        },
+        "nohighrpr": {
+          "text_hash": "4bd4d79ff4b044c1",
+          "verdict": "NOOP"
+        },
+        "lst16": {
+          "text_hash": "4bd4d79ff4b044c1",
+          "verdict": "NOOP"
+        },
+        "lst256": {
+          "text_hash": "4bd4d79ff4b044c1",
+          "verdict": "NOOP"
+        },
+        "sghazard0": {
+          "text_hash": "4bd4d79ff4b044c1",
+          "verdict": "NOOP"
+        },
+        "sghazard64": {
+          "text_hash": "4bd4d79ff4b044c1",
+          "verdict": "NOOP"
+        },
+        "wpv0": {
+          "text_hash": "4bd4d79ff4b044c1",
+          "verdict": "NOOP"
+        },
+        "wpv500": {
+          "text_hash": "4bd4d79ff4b044c1",
+          "verdict": "NOOP"
+        },
+        "lwt50": {
+          "text_hash": "4bd4d79ff4b044c1",
+          "verdict": "NOOP"
+        },
+        "lwt100": {
+          "text_hash": "4bd4d79ff4b044c1",
+          "verdict": "NOOP"
+        }
+      }
+    },
+    "DLA7": {
+      "parent": "25110f2c98d70d4a",
+      "flags": {
+        "mb0": {
+          "text_hash": "25110f2c98d70d4a",
+          "verdict": "NOOP"
+        },
+        "mb50": {
+          "text_hash": "25110f2c98d70d4a",
+          "verdict": "NOOP"
+        },
+        "mb100": {
+          "text_hash": "25110f2c98d70d4a",
+          "verdict": "NOOP"
+        },
+        "mb200": {
+          "text_hash": "25110f2c98d70d4a",
+          "verdict": "NOOP"
+        },
+        "relaxocc": {
+          "text_hash": "25110f2c98d70d4a",
+          "verdict": "NOOP"
+        },
+        "mb0_relaxocc": {
+          "text_hash": "25110f2c98d70d4a",
+          "verdict": "NOOP"
+        },
+        "pav16": {
+          "text_hash": "5c334f06f1dee4ae",
+          "verdict": "DIFF"
+        },
+        "pav32": {
+          "text_hash": "5c334f06f1dee4ae",
+          "verdict": "DIFF"
+        },
+        "pav64": {
+          "text_hash": "5c334f06f1dee4ae",
+          "verdict": "DIFF"
+        },
+        "nopav": {
+          "text_hash": "5c334f06f1dee4ae",
+          "verdict": "DIFF"
+        },
+        "nodiv": {
+          "text_hash": "25110f2c98d70d4a",
+          "verdict": "NOOP"
+        },
+        "nomergem0": {
+          "text_hash": "25110f2c98d70d4a",
+          "verdict": "NOOP"
+        },
+        "nomisched": {
+          "text_hash": "8e3e87363ef5a79c",
+          "verdict": "DIFF"
+        },
+        "dppc": {
+          "text_hash": "25110f2c98d70d4a",
+          "verdict": "NOOP"
+        },
+        "nodppc": {
+          "text_hash": "25110f2c98d70d4a",
+          "verdict": "NOOP"
+        },
+        "vgprix": {
+          "text_hash": "25110f2c98d70d4a",
+          "verdict": "NOOP"
+        },
+        "regclassglob": {
+          "text_hash": "ca6bef434e541075",
+          "verdict": "DIFF"
+        },
+        "nolowoccr": {
+          "text_hash": "25110f2c98d70d4a",
+          "verdict": "NOOP"
+        },
+        "nohighrpr": {
+          "text_hash": "25110f2c98d70d4a",
+          "verdict": "NOOP"
+        },
+        "lst16": {
+          "text_hash": "25110f2c98d70d4a",
+          "verdict": "NOOP"
+        },
+        "lst256": {
+          "text_hash": "25110f2c98d70d4a",
+          "verdict": "NOOP"
+        },
+        "sghazard0": {
+          "text_hash": "25110f2c98d70d4a",
+          "verdict": "NOOP"
+        },
+        "sghazard64": {
+          "text_hash": "25110f2c98d70d4a",
+          "verdict": "NOOP"
+        },
+        "wpv0": {
+          "text_hash": "25110f2c98d70d4a",
+          "verdict": "NOOP"
+        },
+        "wpv500": {
+          "text_hash": "25110f2c98d70d4a",
+          "verdict": "NOOP"
+        },
+        "lwt50": {
+          "text_hash": "25110f2c98d70d4a",
+          "verdict": "NOOP"
+        },
+        "lwt100": {
+          "text_hash": "25110f2c98d70d4a",
+          "verdict": "NOOP"
+        }
+      }
+    },
+    "P1": {
+      "parent": "186aeff97eb705a9",
+      "flags": {
+        "mb0": {
+          "text_hash": "186aeff97eb705a9",
+          "verdict": "NOOP"
+        },
+        "mb50": {
+          "text_hash": "186aeff97eb705a9",
+          "verdict": "NOOP"
+        },
+        "mb100": {
+          "text_hash": "186aeff97eb705a9",
+          "verdict": "NOOP"
+        },
+        "mb200": {
+          "text_hash": "186aeff97eb705a9",
+          "verdict": "NOOP"
+        },
+        "relaxocc": {
+          "text_hash": "186aeff97eb705a9",
+          "verdict": "NOOP"
+        },
+        "mb0_relaxocc": {
+          "text_hash": "186aeff97eb705a9",
+          "verdict": "NOOP"
+        },
+        "pav16": {
+          "text_hash": null,
+          "verdict": "MISSING"
+        },
+        "pav32": {
+          "text_hash": null,
+          "verdict": "MISSING"
+        },
+        "pav64": {
+          "text_hash": null,
+          "verdict": "MISSING"
+        },
+        "nopav": {
+          "text_hash": null,
+          "verdict": "MISSING"
+        },
+        "nodiv": {
+          "text_hash": "186aeff97eb705a9",
+          "verdict": "NOOP"
+        },
+        "nomergem0": {
+          "text_hash": "186aeff97eb705a9",
+          "verdict": "NOOP"
+        },
+        "nomisched": {
+          "text_hash": "186aeff97eb705a9",
+          "verdict": "NOOP"
+        },
+        "dppc": {
+          "text_hash": "186aeff97eb705a9",
+          "verdict": "NOOP"
+        },
+        "nodppc": {
+          "text_hash": "186aeff97eb705a9",
+          "verdict": "NOOP"
+        },
+        "vgprix": {
+          "text_hash": "186aeff97eb705a9",
+          "verdict": "NOOP"
+        },
+        "regclassglob": {
+          "text_hash": "e6ae56adfa140207",
+          "verdict": "DIFF"
+        },
+        "nolowoccr": {
+          "text_hash": "186aeff97eb705a9",
+          "verdict": "NOOP"
+        },
+        "nohighrpr": {
+          "text_hash": "271c902533866316",
+          "verdict": "DIFF"
+        },
+        "lst16": {
+          "text_hash": "186aeff97eb705a9",
+          "verdict": "NOOP"
+        },
+        "lst256": {
+          "text_hash": "186aeff97eb705a9",
+          "verdict": "NOOP"
+        },
+        "sghazard0": {
+          "text_hash": "186aeff97eb705a9",
+          "verdict": "NOOP"
+        },
+        "sghazard64": {
+          "text_hash": "186aeff97eb705a9",
+          "verdict": "NOOP"
+        },
+        "wpv0": {
+          "text_hash": "186aeff97eb705a9",
+          "verdict": "NOOP"
+        },
+        "wpv500": {
+          "text_hash": "186aeff97eb705a9",
+          "verdict": "NOOP"
+        },
+        "lwt50": {
+          "text_hash": "186aeff97eb705a9",
+          "verdict": "NOOP"
+        },
+        "lwt100": {
+          "text_hash": "186aeff97eb705a9",
+          "verdict": "NOOP"
+        }
+      }
+    }
+  }
+}

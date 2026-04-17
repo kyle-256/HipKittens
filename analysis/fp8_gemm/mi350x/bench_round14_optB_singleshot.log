@@ -1,0 +1,32 @@
+Round 14 OptB single-shot. GPU=2 warmup=200 iters=500 candidates=20
+==============================================================================================================
+
+[DLA1] parent _ts_pf6_6_v12_memc                         5043.09 TFLOPS  (87.23%)  finite=0.467
+  cand _ts_pf6_6_v12_memc_r14b_extbr                    4912.67 TFLOPS  (84.98%)  delta=-130.42T  (-2.26pp)  finite=0.488
+  cand _ts_pf6_6_v12_memc_r14b_noembed                  5067.60 TFLOPS  (87.66%)  delta=+24.51T  (+0.42pp)  finite=0.470
+  cand _ts_pf6_6_v20_memc                               5070.04 TFLOPS  (87.70%)  delta=+26.95T  (+0.47pp)  finite=0.472
+  cand _ts_pf6_6_v24_memc                               5027.76 TFLOPS  (86.97%)  delta=-15.33T  (-0.27pp)  finite=0.460
+  cand _ts_pf6_6_lgk4_v12_memc                          ERROR: APERTURE
+  cand _ts_pf6_6_v12_memc_tv0                           5074.62 TFLOPS  (87.78%)  delta=+31.53T  (+0.55pp)  finite=0.476
+  cand _ts_pf6_6_v12_memc_tv16                          5082.15 TFLOPS  (87.91%)  delta=+39.06T  (+0.68pp)  finite=0.476
+
+[DLA2] parent _ts_gm2_v12_memc_dc                        4207.01 TFLOPS  (92.74%)  finite=0.663
+  cand _ts_gm2_v12_memc_dc_noembed                      4207.80 TFLOPS  (92.76%)  delta=+0.79T  (+0.02pp)  finite=0.669
+  cand _ts_gm2_v12_memc_dc_extbr                        4172.22 TFLOPS  (91.97%)  delta=-34.79T  (-0.77pp)  finite=0.678
+
+[DLA7] parent _ts_lgk2_v12_memc                          4218.41 TFLOPS  (94.44%)  finite=0.428
+  cand _ts_lgk2_v12_memc_tv0                            4218.40 TFLOPS  (94.44%)  delta=-0.01T  (-0.00pp)  finite=0.437
+  cand _ts_lgk2_v12_memc_tv16                           4222.71 TFLOPS  (94.54%)  delta=+4.30T  (+0.10pp)  finite=0.427
+  cand _ts_lgk2_v12_memc_extbr                          4205.93 TFLOPS  (94.16%)  delta=-12.48T  (-0.28pp)  finite=0.429
+  cand _ts_lgk2_v12_memc_noembed                        4233.44 TFLOPS  (94.78%)  delta=+15.03T  (+0.34pp)  finite=0.424
+  cand _ts_lgk4_v12_memc                                4233.72 TFLOPS  (94.79%)  delta=+15.31T  (+0.34pp)  finite=0.428
+  cand _ts_lgk2_v20_memc                                4237.04 TFLOPS  (94.86%)  delta=+18.63T  (+0.42pp)  finite=0.413
+
+[P1] parent _ts_gm8                                    4939.41 TFLOPS  (92.32%)  finite=0.552
+  cand _ts_gm8_memc                                     4939.28 TFLOPS  (92.31%)  delta=-0.13T  (-0.00pp)  finite=0.563
+  cand _ts_gm8_noembed                                  4918.24 TFLOPS  (91.92%)  delta=-21.17T  (-0.40pp)  finite=0.547
+  cand _ts_gm8_noembed_memc                             4953.58 TFLOPS  (92.58%)  delta=+14.17T  (+0.26pp)  finite=0.548
+  cand _ts_gm8_v20_memc                                 4937.44 TFLOPS  (92.28%)  delta=-1.97T  (-0.04pp)  finite=0.556
+  cand _ts_gm8_v12_memc                                 4952.16 TFLOPS  (92.55%)  delta=+12.75T  (+0.24pp)  finite=0.563
+==============================================================================================================
+Saved bench_round14_optB_singleshot.json

@@ -1,0 +1,40 @@
+Round 14 OptB smoke. GPU=2 warmup=20 iters=50 variants=28
+==============================================================================================================
+
+[DLA1] parent _ts_pf6_6_v12_memc                         -> OK tflops=5134.29 finite=0.402
+  cand _ts_pf6_6_v12_memc_r14b_extbr                    OK   tflops=4934.84  finite=0.413  retries=0
+  cand _ts_pf6_6_v12_memc_r14b_noembed                  OK   tflops=5096.61  finite=0.403  retries=0
+  cand _ts_pf6_6_v20_memc                               OK   tflops=5121.90  finite=0.408  retries=0
+  cand _ts_pf6_6_v24_memc                               OK   tflops=5114.19  finite=0.387  retries=0
+  cand _ts_pf6_6_lgk4_v12_memc                          OK   tflops=5098.94  finite=0.407  retries=0
+  cand _ts_pf6_6_v12_memc_tv0                           OK   tflops=5107.22  finite=0.382  retries=0
+  cand _ts_pf6_6_v12_memc_tv16                          OK   tflops=5121.05  finite=0.410  retries=0
+
+[DLA2] parent _ts_gm2_v12_memc_dc                        -> OK tflops=4233.14 finite=0.558
+  cand _ts_gm1_v12_memc_dc                              OK   tflops=3895.70  finite=0.535  retries=0
+  cand _ts_gm1_lgk2_v12_memc_dc                         OK   tflops=3905.90  finite=0.530  retries=0
+  cand _ts_gm1_v20_memc_dc                              OK   tflops=3884.66  finite=0.538  retries=0
+  cand _ts_gm1_v12_memc_dc_extbr                        OK   tflops=3904.13  finite=0.533  retries=0
+  cand _ts_gm1_v12_memc_dc_tv0                          OK   tflops=3923.73  finite=0.533  retries=0
+  cand _ts_gm2_v12_memc_dc_noembed                      OK   tflops=4234.08  finite=0.575  retries=0
+  cand _ts_gm2_v12_memc_dc_extbr                        OK   tflops=4193.35  finite=0.587  retries=0
+
+[DLA7] parent _ts_lgk2_v12_memc                          -> OK tflops=4223.70 finite=0.328
+  cand _ts_lgk2_v12_memc_tv0                            OK   tflops=4184.53  finite=0.360  retries=0
+  cand _ts_lgk2_v12_memc_tv16                           OK   tflops=4249.75  finite=0.321  retries=0
+  cand _ts_lgk2_v12_memc_extbr                          OK   tflops=4189.22  finite=0.346  retries=0
+  cand _ts_lgk2_v12_memc_noembed                        OK   tflops=4239.16  finite=0.319  retries=0
+  cand _ts_lgk4_v12_memc                                OK   tflops=4237.11  finite=0.316  retries=0
+  cand _ts_lgk2_v20_memc                                OK   tflops=4235.32  finite=0.329  retries=0
+
+[P1] parent _ts_gm8                                    -> OK tflops=4917.96 finite=0.566
+  cand _ts_gm8_memc                                     OK   tflops=4918.25  finite=0.565  retries=0
+  cand _ts_gm8_lgk2_memc                                OK   tflops=4852.06  finite=0.571  retries=0
+  cand _ts_gm8_v12_memc                                 OK   tflops=4867.06  finite=0.553  retries=0
+  cand _ts_gm8_extbr                                    OK   tflops=4818.66  finite=0.725  retries=0
+  cand _ts_gm8_extbr_memc                               OK   tflops=4794.17  finite=0.734  retries=0
+  cand _ts_gm8_noembed                                  OK   tflops=4898.62  finite=0.566  retries=0
+  cand _ts_gm8_noembed_memc                             OK   tflops=4896.94  finite=0.572  retries=0
+  cand _ts_gm8_v20_memc                                 OK   tflops=4897.75  finite=0.575  retries=0
+==============================================================================================================
+Saved bench_round14_optB_smoke.json

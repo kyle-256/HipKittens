@@ -1,0 +1,89 @@
+Round 14 OptB verify (5-run). GPU=2 warmup=200 iters=500
+==============================================================================================================
+
+=== DLA1_pf6_6_tv16  shape=4096x32768x128256  comp=5781.1  parent=_ts_pf6_6_v12_memc  cand=_ts_pf6_6_v12_memc_tv16 ===
+  baseline  run1: 5078.05 TFLOPS
+  baseline  run2: 5075.69 TFLOPS
+  baseline  run3: 5041.13 TFLOPS
+  baseline  run4: 5069.11 TFLOPS
+  baseline  run5: 5075.21 TFLOPS
+  candidate run1: 5058.88 TFLOPS
+  candidate run2: 5060.26 TFLOPS
+  candidate run3: 5071.65 TFLOPS
+  candidate run4: 5059.18 TFLOPS
+  candidate run5: 5058.00 TFLOPS
+  baseline  mean=5067.84 max=5078.05 min=5041.13
+  candidate mean=5061.59 max=5071.65 min=5058.00
+  delta_mean=-6.25 TFLOPS  (-0.11pp)  gate(mean>=base.max)=FAIL
+
+=== DLA1_pf6_6_tv0  shape=4096x32768x128256  comp=5781.1  parent=_ts_pf6_6_v12_memc  cand=_ts_pf6_6_v12_memc_tv0 ===
+  (using cached baseline runs: [5078.05, 5075.69, 5041.13, 5069.11, 5075.21])
+  candidate run1: 5068.73 TFLOPS
+  candidate run2: 5066.63 TFLOPS
+  candidate run3: 5071.06 TFLOPS
+  candidate run4: 5052.54 TFLOPS
+  candidate run5: 5066.13 TFLOPS
+  baseline  mean=5067.84 max=5078.05 min=5041.13
+  candidate mean=5065.02 max=5071.06 min=5052.54
+  delta_mean=-2.82 TFLOPS  (-0.05pp)  gate(mean>=base.max)=FAIL
+
+=== DLA1_pf6_6_v20  shape=4096x32768x128256  comp=5781.1  parent=_ts_pf6_6_v12_memc  cand=_ts_pf6_6_v20_memc ===
+  (using cached baseline runs: [5078.05, 5075.69, 5041.13, 5069.11, 5075.21])
+  candidate run1: 5077.45 TFLOPS
+  candidate run2: 5067.73 TFLOPS
+  candidate run3: 5063.12 TFLOPS
+  candidate run4: 5067.49 TFLOPS
+  candidate run5: 5062.26 TFLOPS
+  baseline  mean=5067.84 max=5078.05 min=5041.13
+  candidate mean=5067.61 max=5077.45 min=5062.26
+  delta_mean=-0.23 TFLOPS  (-0.00pp)  gate(mean>=base.max)=FAIL
+
+=== DLA1_pf6_6_noembed  shape=4096x32768x128256  comp=5781.1  parent=_ts_pf6_6_v12_memc  cand=_ts_pf6_6_v12_memc_r14b_noembed ===
+  (using cached baseline runs: [5078.05, 5075.69, 5041.13, 5069.11, 5075.21])
+  candidate run1: 5068.77 TFLOPS
+  candidate run2: 5063.46 TFLOPS
+  candidate run3: 5056.32 TFLOPS
+  candidate run4: 5049.13 TFLOPS
+  candidate run5: 5024.71 TFLOPS
+  baseline  mean=5067.84 max=5078.05 min=5041.13
+  candidate mean=5052.48 max=5068.77 min=5024.71
+  delta_mean=-15.36 TFLOPS  (-0.27pp)  gate(mean>=base.max)=FAIL
+
+=== DLA7_lgk2_v20  shape=28672x32768x4096  comp=4466.6  parent=_ts_lgk2_v12_memc  cand=_ts_lgk2_v20_memc ===
+  baseline  run1: 4222.61 TFLOPS
+  baseline  run2: 4234.21 TFLOPS
+  baseline  run3: 4205.73 TFLOPS
+  baseline  run4: 4233.43 TFLOPS
+  baseline  run5: 4231.39 TFLOPS
+  candidate run1: 4234.56 TFLOPS
+  candidate run2: 4223.61 TFLOPS
+  candidate run3: 4229.97 TFLOPS
+  candidate run4: 4235.01 TFLOPS
+  candidate run5: 4232.77 TFLOPS
+  baseline  mean=4225.47 max=4234.21 min=4205.73
+  candidate mean=4231.18 max=4235.01 min=4223.61
+  delta_mean=+5.71 TFLOPS  (+0.13pp)  gate(mean>=base.max)=FAIL
+
+=== DLA7_lgk4_v12  shape=28672x32768x4096  comp=4466.6  parent=_ts_lgk2_v12_memc  cand=_ts_lgk4_v12_memc ===
+  (using cached baseline runs: [4222.61, 4234.21, 4205.73, 4233.43, 4231.39])
+  candidate run1: 4222.47 TFLOPS
+  candidate run2: 4229.21 TFLOPS
+  candidate run3: 4222.16 TFLOPS
+  candidate run4: 4226.24 TFLOPS
+  candidate run5: 4230.61 TFLOPS
+  baseline  mean=4225.47 max=4234.21 min=4205.73
+  candidate mean=4226.14 max=4230.61 min=4222.16
+  delta_mean=+0.67 TFLOPS  (+0.02pp)  gate(mean>=base.max)=FAIL
+
+=== DLA7_lgk2_noembed  shape=28672x32768x4096  comp=4466.6  parent=_ts_lgk2_v12_memc  cand=_ts_lgk2_v12_memc_noembed ===
+  (using cached baseline runs: [4222.61, 4234.21, 4205.73, 4233.43, 4231.39])
+  candidate run1: 4223.80 TFLOPS
+  candidate run2: 4212.77 TFLOPS
+  candidate run3: 4231.16 TFLOPS
+  candidate run4: 4226.32 TFLOPS
+  candidate run5: 4231.94 TFLOPS
+  baseline  mean=4225.47 max=4234.21 min=4205.73
+  candidate mean=4225.20 max=4231.94 min=4212.77
+  delta_mean=-0.27 TFLOPS  (-0.01pp)  gate(mean>=base.max)=FAIL
+
+Saved bench_round14_optB_verify.json
