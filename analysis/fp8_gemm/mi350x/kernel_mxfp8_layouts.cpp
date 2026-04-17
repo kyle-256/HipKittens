@@ -2166,9 +2166,13 @@ static_assert(WARPS_M == 2, "MXFP8 exact 8-wave fast path requires WARPS_M=2");
 static_assert(WARPS_N == 4, "MXFP8 exact 8-wave fast path requires WARPS_N=4");
 static_assert(std::is_same_v<RCR_B_reg, B_row_reg>, "MXFP8 exact RCR fast path assumes row-layout B registers");
 
-template<bool PRESHUFFLED_QUANT>
+template<bool PRESHUFFLED_QUANT, int SCALE_VERSION = 1>
 __global__ __launch_bounds__(_NUM_THREADS, GEMM_MIN_BLOCKS_PER_CU)
 void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
+    // SCALE_VERSION:
+    //   1 = original V1 preshuffle layout (per row_group SRDs / b32 loads)
+    //   2 = R21 V2-RCR wave-tile reordered layout (per wave-tile SRD,
+    //       buffer_load_b128 for A, buffer_load_b64 for B)
     static_assert(N_DIM % BLK == 0, "MXFP8 exact 8-wave fast path requires N_DIM divisible by BLK");
     static_assert(K_DIM % BK == 0, "MXFP8 exact 8-wave fast path requires K_DIM divisible by BK");
     constexpr int blocks_per_col = N_DIM / BLK;
@@ -2271,6 +2275,8 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
     i32x4 a0p0_srsrc = {}, a0p1_srsrc = {}, a1p0_srsrc = {}, a1p1_srsrc = {};
     i32x4 b0p0_srsrc = {}, b1p0_srsrc = {};
 #endif
+    // V2 wave-tile SRDs: 1 SRD per wave for A, 1 per wave for B.
+    i32x4 a_v2_srsrc = {}, b_v2_srsrc = {};
     if constexpr (PRESHUFFLED_QUANT) {
         #pragma unroll
         for (int pack_idx = 0; pack_idx < RBM / 32; ++pack_idx) {
@@ -2295,7 +2301,7 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
             );
         }
 #if MXFP8_RCR_EXACT_PQ_PIPELINE_SCALE_ENABLE
-        {
+        if constexpr (SCALE_VERSION == 1) {
             auto make_scale_srd = [](const void* ptr) -> i32x4 {
                 i32x4 srd = std::bit_cast<i32x4>(
                     make_buffer_resource(
@@ -2318,6 +2324,44 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
                 a0p1_srsrc = make_scale_srd(a0_scale_row_bases[1]);
                 a1p1_srsrc = make_scale_srd(a1_scale_row_bases[1]);
             }
+        } else { // SCALE_VERSION == 2
+            // V2-RCR: per-wave-tile slab SRDs.
+            // A side: pack_count=4, num_slabs_a = (M/BLK)*WARPS_M.
+            //   slab_bytes_a = 4 * 32 * padded_k_blocks = 128 * padded_k_blocks.
+            //   slab(br, wm) = br * WARPS_M + wm.
+            // B side: pack_count=2, num_slabs_b = (N/BLK)*WARPS_N.
+            //   slab_bytes_b = 2 * 32 * padded_k_blocks = 64 * padded_k_blocks.
+            //   slab(bc, wn) = bc * WARPS_N + wn.
+            const int padded_k_blocks =
+                (g.k / 32 + 7) & ~7; // round up to multiple of 8
+            const size_t slab_bytes_a = 128u * padded_k_blocks;
+            const size_t slab_bytes_b = 64u * padded_k_blocks;
+            const size_t slab_idx_a = static_cast<size_t>(br) * WARPS_M + wm;
+            const size_t slab_idx_b = static_cast<size_t>(bc) * WARPS_N + wn;
+            const uint8_t* a_v2_base =
+                reinterpret_cast<const uint8_t*>(g.a_scale.raw_ptr) +
+                slab_idx_a * slab_bytes_a;
+            const uint8_t* b_v2_base =
+                reinterpret_cast<const uint8_t*>(g.b_scale.raw_ptr) +
+                slab_idx_b * slab_bytes_b;
+            auto make_v2_srd = [](const void* ptr, uint32_t bytes) -> i32x4 {
+                i32x4 srd = std::bit_cast<i32x4>(
+                    make_buffer_resource(
+                        static_cast<uint64_t>(reinterpret_cast<std::uintptr_t>(ptr)),
+                        bytes,
+                        0x00110000u
+                    )
+                );
+                srd[0] = __builtin_amdgcn_readfirstlane(srd[0]);
+                srd[1] = __builtin_amdgcn_readfirstlane(srd[1]);
+                srd[2] = __builtin_amdgcn_readfirstlane(srd[2]);
+                srd[3] = __builtin_amdgcn_readfirstlane(srd[3]);
+                return srd;
+            };
+            a_v2_srsrc = make_v2_srd(a_v2_base,
+                                     static_cast<uint32_t>(slab_bytes_a));
+            b_v2_srsrc = make_v2_srd(b_v2_base,
+                                     static_cast<uint32_t>(slab_bytes_b));
         }
 #endif
 #if MXFP8_RCR_EXACT_PQ_SCALE_LDS_ENABLE
@@ -2522,6 +2566,60 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
         }
 #endif
         if constexpr (PRESHUFFLED_QUANT) {
+            if constexpr (SCALE_VERSION == 2) {
+                // V2-RCR: per (k_pair, lane), one b128 fetches all 4 A
+                // packs ({a0p0, a1p0, a0p1, a1p1}) and one b64 fetches
+                // both B packs ({b0p0, b1p0}). This must mirror the V2
+                // load logic in load_scale_buffer to ensure warmup,
+                // pre-tail, and tail iterations consume V2-packed data
+                // correctly (g.a_scale / g.b_scale point at V2 buffers).
+                const uint32_t a_voff =
+                    (static_cast<uint32_t>(lane_kblk) << 8) |
+                    (static_cast<uint32_t>(lane_nonk) << 4);
+                const uint32_t a_soff = static_cast<uint32_t>(k_pair) << 10;
+                const __uint128_t a_raw =
+                    llvm_amdgcn_raw_buffer_load_b128(a_v2_srsrc, a_voff, a_soff, 0);
+                const uint32_t a_w0 = static_cast<uint32_t>(a_raw      );
+                const uint32_t a_w1 = static_cast<uint32_t>(a_raw >> 32);
+                const uint32_t a_w2 = static_cast<uint32_t>(a_raw >> 64);
+                const uint32_t a_w3 = static_cast<uint32_t>(a_raw >> 96);
+#if MXFP8_RCR_EXACT_PQ_PHASE_U16_CACHE_ENABLE
+                a0_phase_u16[0][0] = static_cast<uint16_t>(a_w0);
+                a0_phase_u16[1][0] = static_cast<uint16_t>(a_w0 >> 16);
+                a1_phase_u16[0][0] = static_cast<uint16_t>(a_w1);
+                a1_phase_u16[1][0] = static_cast<uint16_t>(a_w1 >> 16);
+                if constexpr (RBM / 32 > 1) {
+                    a0_phase_u16[0][1] = static_cast<uint16_t>(a_w2);
+                    a0_phase_u16[1][1] = static_cast<uint16_t>(a_w2 >> 16);
+                    a1_phase_u16[0][1] = static_cast<uint16_t>(a_w3);
+                    a1_phase_u16[1][1] = static_cast<uint16_t>(a_w3 >> 16);
+                }
+#else
+                a0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(a_w0);
+                a1_scale_packs[0] = std::bit_cast<fp8e8m0_4>(a_w1);
+                if constexpr (RBM / 32 > 1) {
+                    a0_scale_packs[1] = std::bit_cast<fp8e8m0_4>(a_w2);
+                    a1_scale_packs[1] = std::bit_cast<fp8e8m0_4>(a_w3);
+                }
+#endif
+                const uint32_t b_voff =
+                    (static_cast<uint32_t>(lane_kblk) << 7) |
+                    (static_cast<uint32_t>(lane_nonk) << 3);
+                const uint32_t b_soff = static_cast<uint32_t>(k_pair) << 9;
+                const uint64_t b_raw =
+                    llvm_amdgcn_raw_buffer_load_b64(b_v2_srsrc, b_voff, b_soff, 0);
+                const uint32_t b_w0 = static_cast<uint32_t>(b_raw      );
+                const uint32_t b_w1 = static_cast<uint32_t>(b_raw >> 32);
+#if MXFP8_RCR_EXACT_PQ_PHASE_U16_CACHE_ENABLE
+                b0_phase_u16[0][0] = static_cast<uint16_t>(b_w0);
+                b0_phase_u16[1][0] = static_cast<uint16_t>(b_w0 >> 16);
+                b1_phase_u16[0][0] = static_cast<uint16_t>(b_w1);
+                b1_phase_u16[1][0] = static_cast<uint16_t>(b_w1 >> 16);
+#else
+                b0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(b_w0);
+                b1_scale_packs[0] = std::bit_cast<fp8e8m0_4>(b_w1);
+#endif
+            } else {
             #pragma unroll
             for (int pack_idx = 0; pack_idx < RBM / 32; ++pack_idx) {
                 const uint32_t a0_raw = std::bit_cast<uint32_t>(
@@ -2574,6 +2672,7 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
                 b1_scale_packs[pack_idx] = std::bit_cast<fp8e8m0_4>(b1_raw);
 #endif
             }
+            } // end SCALE_VERSION == 1
         } else {
             load_scale_packs_16x128<false>(
                 a0_scale_packs,
@@ -2943,15 +3042,47 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
 #if MXFP8_RCR_EXACT_PQ_PIPELINE_SCALE_ENABLE
         auto load_scale_buffer = [&](int k_pair) __attribute__((always_inline)) {
             if constexpr (PRESHUFFLED_QUANT) {
-                const uint32_t soff = static_cast<uint32_t>(k_pair) << 8;
-                a0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(a0p0_srsrc, lane_scale_byte_offset, soff, 0));
-                a1_scale_packs[0] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(a1p0_srsrc, lane_scale_byte_offset, soff, 0));
-                if constexpr (RBM / 32 > 1) {
-                    a0_scale_packs[1] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(a0p1_srsrc, lane_scale_byte_offset, soff, 0));
-                    a1_scale_packs[1] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(a1p1_srsrc, lane_scale_byte_offset, soff, 0));
+                if constexpr (SCALE_VERSION == 2) {
+                    // V2-RCR: per (k_pair, lane), one b128 fetches all 4 A
+                    // packs ({a0p0, a1p0, a0p1, a1p1}) and one b64 fetches
+                    // both B packs ({b0p0, b1p0}). Per the V2 layout spec
+                    // (PC=4, A side):
+                    //   voff = lane_kblk*256 + lane_nonk*16
+                    //   soff = k_pair * 1024
+                    // For PC=2, B side:
+                    //   voff = lane_kblk*128 + lane_nonk*8
+                    //   soff = k_pair * 512
+                    const uint32_t a_voff =
+                        (static_cast<uint32_t>(lane_kblk) << 8) |
+                        (static_cast<uint32_t>(lane_nonk) << 4);
+                    const uint32_t a_soff = static_cast<uint32_t>(k_pair) << 10;
+                    const __uint128_t a_raw =
+                        llvm_amdgcn_raw_buffer_load_b128(a_v2_srsrc, a_voff, a_soff, 0);
+                    a0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw      ));
+                    a1_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw >> 32));
+                    if constexpr (RBM / 32 > 1) {
+                        a0_scale_packs[1] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw >> 64));
+                        a1_scale_packs[1] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw >> 96));
+                    }
+                    const uint32_t b_voff =
+                        (static_cast<uint32_t>(lane_kblk) << 7) |
+                        (static_cast<uint32_t>(lane_nonk) << 3);
+                    const uint32_t b_soff = static_cast<uint32_t>(k_pair) << 9;
+                    const uint64_t b_raw =
+                        llvm_amdgcn_raw_buffer_load_b64(b_v2_srsrc, b_voff, b_soff, 0);
+                    b0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(b_raw      ));
+                    b1_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(b_raw >> 32));
+                } else {
+                    const uint32_t soff = static_cast<uint32_t>(k_pair) << 8;
+                    a0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(a0p0_srsrc, lane_scale_byte_offset, soff, 0));
+                    a1_scale_packs[0] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(a1p0_srsrc, lane_scale_byte_offset, soff, 0));
+                    if constexpr (RBM / 32 > 1) {
+                        a0_scale_packs[1] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(a0p1_srsrc, lane_scale_byte_offset, soff, 0));
+                        a1_scale_packs[1] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(a1p1_srsrc, lane_scale_byte_offset, soff, 0));
+                    }
+                    b0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(b0p0_srsrc, lane_scale_byte_offset, soff, 0));
+                    b1_scale_packs[0] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(b1p0_srsrc, lane_scale_byte_offset, soff, 0));
                 }
-                b0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(b0p0_srsrc, lane_scale_byte_offset, soff, 0));
-                b1_scale_packs[0] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(b1p0_srsrc, lane_scale_byte_offset, soff, 0));
             } else {
                 load_scale_packs_for_pair(k_pair);
             }
@@ -3266,7 +3397,16 @@ __host__ inline bool rcr_can_use_exact_8wave_scaled(const layout_globals& g) {
 template<bool PRESHUFFLED_QUANT>
 __host__ inline void dispatch_rcr_exact_8wave_scaled(const layout_globals& g) {
     const dim3 grid((g.m / BLK) * (g.n / BLK));
-    rcr_exact_8wave_scaled_kernel<PRESHUFFLED_QUANT><<<grid, dim3(_NUM_THREADS), 0, g.stream>>>(g);
+    rcr_exact_8wave_scaled_kernel<PRESHUFFLED_QUANT, 1><<<grid, dim3(_NUM_THREADS), 0, g.stream>>>(g);
+}
+
+// R21 milestone-2: V2-RCR scale layout dispatch (only valid when
+// PRESHUFFLED_QUANT=true and the host has preshuffled the scale tensors via
+// preshuffle_scale_matrix_mfma16_v2_rcr_a/b).
+template<bool PRESHUFFLED_QUANT>
+__host__ inline void dispatch_rcr_exact_8wave_scaled_v2(const layout_globals& g) {
+    const dim3 grid((g.m / BLK) * (g.n / BLK));
+    rcr_exact_8wave_scaled_kernel<PRESHUFFLED_QUANT, 2><<<grid, dim3(_NUM_THREADS), 0, g.stream>>>(g);
 }
 
 #endif
@@ -4946,6 +5086,10 @@ __global__ void gemm_tail_kernel(const layout_globals g) {
 
 template __global__ void gemm_kernel<Layout::RCR, false>(const layout_globals);
 template __global__ void gemm_kernel<Layout::RCR, true>(const layout_globals);
+#if MXFP8_RCR_EXACT_8WAVE_FAST_ENABLE
+// Explicit instantiation for R21 V2-RCR fastpath path (SCALE_VERSION=2).
+template __global__ void rcr_exact_8wave_scaled_kernel<true, 2>(const layout_globals);
+#endif
 template __global__ void gemm_kernel<Layout::RRR, false>(const layout_globals);
 template __global__ void gemm_kernel<Layout::RRR, true>(const layout_globals);
 template __global__ void gemm_kernel<Layout::CRR, false>(const layout_globals);
@@ -5076,6 +5220,25 @@ void dispatch_pq(layout_globals g) {
     dispatch<L, true>(g);
 }
 
+// R21 milestone-2: dispatch entry that routes RCR PRESHUFFLED_QUANT through
+// the V2-RCR fastpath (SCALE_VERSION=2). For non-RCR layouts this falls back
+// to the regular V1 PRESHUFFLED_QUANT path.
+template<Layout L>
+void dispatch_pq_v2(layout_globals g) {
+#if MXFP8_RCR_EXACT_8WAVE_FAST_ENABLE
+    if constexpr (L == Layout::RCR) {
+        g.m = static_cast<int>(g.c.rows());
+        g.n = static_cast<int>(g.c.cols());
+        g.k = static_cast<int>(g.a.cols());
+        if (rcr_can_use_exact_8wave_scaled(g)) {
+            dispatch_rcr_exact_8wave_scaled_v2<true>(g);
+            return;
+        }
+    }
+#endif
+    dispatch<L, true>(g);
+}
+
 __global__ void diag_load_transpose_kernel(
     _gl_fp8 g_b, fp8e4m3* __restrict__ out)
 {
@@ -5126,6 +5289,13 @@ PYBIND11_MODULE(tk_mxfp8_layouts, m) {
         &layout_globals::a_scale, &layout_globals::b_scale,
         &layout_globals::c);
     py::bind_function<dispatch_pq<Layout::CRR>>(m, "gemm_crr_pq",
+        &layout_globals::a, &layout_globals::b,
+        &layout_globals::a_scale, &layout_globals::b_scale,
+        &layout_globals::c);
+    // R21 milestone-2 V2-RCR: same signature as gemm_rcr_pq but expects the
+    // host-side scale tensors to be packed via
+    // preshuffle_scale_matrix_mfma16_v2_rcr_a/b.
+    py::bind_function<dispatch_pq_v2<Layout::RCR>>(m, "gemm_rcr_pq_v2",
         &layout_globals::a, &layout_globals::b,
         &layout_globals::a_scale, &layout_globals::b_scale,
         &layout_globals::c);

@@ -37,6 +37,10 @@ num_iters = int(os.environ.get("MXFP8_ITERS", "20"))
 determinism_runs = max(1, int(os.environ.get("MXFP8_DETERMINISM_RUNS", "1")))
 snr_threshold_db = float(os.environ.get("MXFP8_SNR_THRESHOLD_DB", "48.0"))
 use_preshuffle_quant = os.environ.get("MXFP8_PRESHUFFLE_QUANT", "0") != "0"
+# R21 milestone-2 V2-RCR runtime gate: when set, RCR-PQ uses the wave-tile
+# reordered V2 layout (option a) so the kernel can issue buffer_load_b128 /
+# buffer_load_b64 for scales.
+use_v2_rcr = os.environ.get("MXFP8_RCR_PRESHUFFLE_V2_RUNTIME", "1") != "0"
 requested_layouts = {
     layout.strip().lower()
     for layout in os.environ.get("MXFP8_LAYOUTS", "rcr,rrr,crr").split(",")
@@ -164,6 +168,125 @@ def preshuffle_scale_matrix_mfma16_v2(scale_exp, pack_count):
 
     # Per-slab flat byte count:
     #   PC * 32 (rows) * padded_k_blocks (cols) bytes
+    return shuffled.view(num_slabs, pack_count * 32 * padded_k_blocks)
+
+
+def preshuffle_scale_matrix_mfma16_v2_rcr_a(scale_exp,
+                                            blk=256, hb=128, rbm=64, warps_m=2):
+    """R21 milestone-2 V2-RCR-A layout (option a wave-tile reorder).
+
+    Repacks the A-side scale matrix so that each (br, wm) wave-tile owns one
+    contiguous slab of pack_count=4 row_groups in the order
+    {a0p0, a1p0, a0p1, a1p1}. This matches the kernel's pack-load order
+    (a0_scale_packs[i], a1_scale_packs[i] alternated as pack_idx=0,1) and
+    makes the four dwords needed per (k_pair, lane) contiguous in memory,
+    enabling a single buffer_load_b128 to fetch them all.
+
+    Layout: per-slab byte order is identical to V2 with PC=4, namely
+        slab(4*32 rows) -> k_pair -> lane_kblk -> lane_nonk -> pack(4) ->
+            byte_in_dword(4 = k_phase_lo*2 + half).
+    Slab indexing: slab(br, wm) = br * warps_m + wm.
+
+    The four 32-byte dwords inside slab(br, wm) at any (k_pair, lane) are
+    the V1 packs for physical row_groups
+        a0p0 = (br*BLK + 0  + wm*RBM + 0 ) >> 5
+        a1p0 = (br*BLK + HB + wm*RBM + 0 ) >> 5
+        a0p1 = (br*BLK + 0  + wm*RBM + 32) >> 5
+        a1p1 = (br*BLK + HB + wm*RBM + 32) >> 5
+    in that 'pack' index order (0..3).
+    """
+    pack_count = 4
+    rows, k_blocks_local = scale_exp.shape
+    padded_rows = math.ceil(rows / blk) * blk
+    padded_k_blocks = math.ceil(k_blocks_local / 8) * 8
+    if padded_rows % blk:
+        raise ValueError("padded_rows must be multiple of blk")
+    num_ctiles = padded_rows // blk
+    num_slabs = num_ctiles * warps_m
+
+    # Build raw per-CTA, per-wm wave-tile permutation.  rgs_per_ctile = blk/32
+    rgs_per_ctile = blk // 32  # 8 with blk=256
+    pack_a = rbm // 32  # 2 with rbm=64
+
+    raw = torch.full(
+        (padded_rows, padded_k_blocks),
+        0x7F,
+        dtype=torch.uint8,
+        device=scale_exp.device,
+    )
+    raw[:rows, :k_blocks_local] = encode_scale_matrix_raw(scale_exp)
+
+    # Build a contiguous tensor whose row order is the wave-tile permutation.
+    perm_rows = torch.empty_like(raw)
+    rg_view = raw.view(num_ctiles, rgs_per_ctile, 32, padded_k_blocks)
+    perm_view = perm_rows.view(num_ctiles, num_slabs // num_ctiles,
+                               pack_count, 32, padded_k_blocks)
+    # For each (br, wm) build the [a0p0, a1p0, a0p1, a1p1] slab.
+    for wm in range(warps_m):
+        rg_base = wm * (rbm // 32)  # in row_groups within the ctile
+        rg_hi = (hb // 32) + rg_base  # row offset for half=1
+        for pidx in range(pack_a):
+            # pack index 2*pidx -> a0p<pidx>; 2*pidx+1 -> a1p<pidx>
+            perm_view[:, wm, 2 * pidx, :, :]     = rg_view[:, rg_base + pidx, :, :]
+            perm_view[:, wm, 2 * pidx + 1, :, :] = rg_view[:, rg_hi   + pidx, :, :]
+
+    # Now perm_rows is shaped (num_slabs * pack_count * 32, padded_k_blocks)
+    # with row order matching V2 slab+pack ordering. Apply the same byte
+    # reshuffle as preshuffle_scale_matrix_mfma16_v2 (PC=4).
+    kp_count = padded_k_blocks // 8
+    rows_view = perm_rows.view(num_slabs, pack_count, 2, 16, kp_count, 2, 4)
+    shuffled = rows_view.permute(0, 4, 6, 3, 1, 5, 2).contiguous()
+    return shuffled.view(num_slabs, pack_count * 32 * padded_k_blocks)
+
+
+def preshuffle_scale_matrix_mfma16_v2_rcr_b(scale_exp,
+                                            blk=256, hb=128, rbn=32, warps_n=4):
+    """R21 milestone-2 V2-RCR-B layout (option a wave-tile reorder).
+
+    Repacks the B-side scale matrix so that each (bc, wn) wave-tile owns one
+    contiguous slab of pack_count=2 row_groups in the order {b0p0, b1p0}.
+    This matches the kernel's iteration order (b0_scale_packs[0],
+    b1_scale_packs[0]) and makes the two dwords contiguous, enabling
+    buffer_load_b64.
+
+    Slab indexing: slab(bc, wn) = bc * warps_n + wn.
+    The two dwords inside slab(bc, wn) are the V1 packs for row_groups
+        b0p0 = (bc*BLK + 0  + wn*RBN) >> 5
+        b1p0 = (bc*BLK + HB + wn*RBN) >> 5
+    in that 'pack' index order (0,1).
+    """
+    pack_count = 2
+    rows, k_blocks_local = scale_exp.shape
+    padded_rows = math.ceil(rows / blk) * blk
+    padded_k_blocks = math.ceil(k_blocks_local / 8) * 8
+    if padded_rows % blk:
+        raise ValueError("padded_rows must be multiple of blk")
+    num_ctiles = padded_rows // blk
+    num_slabs = num_ctiles * warps_n
+    rgs_per_ctile = blk // 32  # 8 with blk=256
+
+    raw = torch.full(
+        (padded_rows, padded_k_blocks),
+        0x7F,
+        dtype=torch.uint8,
+        device=scale_exp.device,
+    )
+    raw[:rows, :k_blocks_local] = encode_scale_matrix_raw(scale_exp)
+
+    perm_rows = torch.empty_like(raw)
+    rg_view = raw.view(num_ctiles, rgs_per_ctile, 32, padded_k_blocks)
+    perm_view = perm_rows.view(num_ctiles, warps_n, pack_count, 32,
+                               padded_k_blocks)
+    rbn_rg = rbn // 32  # 1 with rbn=32
+    rg_hi_offset = hb // 32  # 4 with hb=128
+    for wn in range(warps_n):
+        rg_base = wn * rbn_rg
+        perm_view[:, wn, 0, :, :] = rg_view[:, rg_base, :, :]
+        perm_view[:, wn, 1, :, :] = rg_view[:, rg_base + rg_hi_offset, :, :]
+
+    kp_count = padded_k_blocks // 8
+    rows_view = perm_rows.view(num_slabs, pack_count, 2, 16, kp_count, 2, 4)
+    shuffled = rows_view.permute(0, 4, 6, 3, 1, 5, 2).contiguous()
     return shuffled.view(num_slabs, pack_count * 32 * padded_k_blocks)
 
 
@@ -299,9 +422,14 @@ if "rcr" in requested_layouts:
     A_scale_exp = generate_scale_matrix(build_M, k_blocks, M)
     B_scale_exp = generate_scale_matrix(build_N, k_blocks, N)
     if use_preshuffle_quant:
-        A_scale = preshuffle_scale_matrix_mfma16(A_scale_exp)
-        B_scale = preshuffle_scale_matrix_mfma16(B_scale_exp)
-        run = lambda: tk_mxfp8_layouts.gemm_rcr_pq(A, B, A_scale, B_scale, C)
+        if use_v2_rcr:
+            A_scale = preshuffle_scale_matrix_mfma16_v2_rcr_a(A_scale_exp)
+            B_scale = preshuffle_scale_matrix_mfma16_v2_rcr_b(B_scale_exp)
+            run = lambda: tk_mxfp8_layouts.gemm_rcr_pq_v2(A, B, A_scale, B_scale, C)
+        else:
+            A_scale = preshuffle_scale_matrix_mfma16(A_scale_exp)
+            B_scale = preshuffle_scale_matrix_mfma16(B_scale_exp)
+            run = lambda: tk_mxfp8_layouts.gemm_rcr_pq(A, B, A_scale, B_scale, C)
     else:
         A_scale = A_scale_exp
         B_scale = B_scale_exp
