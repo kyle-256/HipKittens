@@ -482,6 +482,90 @@ CRR gate (2780.28 TFLOPS) 在当前架构下需要 multi-day 结构重写：
 
 **承认 gate 当前架构不可达**。已 commit 的 `8934e95c` PIPELINE_SCALE 默认开（+0.243%, 2740.55 TFLOPS）是 R7-R11 共 11 轮唯一 strict win。下一会话若续做 CRR：先开 `CRR_ROW_SHARED_TRANSPOSE` 在非 fastpath 跑通做 known-good baseline，再决定要不要投入 multi-day 重写；或转向 RCR 剩余 4.70% 差距。
 
+## 第二十一轮评审结果 (2026-04-17) — R21 Dev B SCALE_LDS REPLACE milestone-1.5：**STRUCTURAL NO-GO**（Fix A + Fix B 均无效，且 SCALE_LDS 即使绕过 correctness 也是 -270 TFLOPS regression vs baseline）
+
+### R21 Dev B (GPU2) — SCALE_LDS REPLACE milestone-1.5：**REJECT — STRUCTURAL NO-GO**
+
+Branch `r20-b-scale-lds` @ commit `5ac3229d` 沿用，worktree `/tmp/wt-r21-b` 已 revert（纯探索，0 commit）。
+
+**任务**：defeat R20-B 报告的 "compiler folds 6 LDS slot addresses to 3 VGPRs" miscompile，让 2048³/8192³ correctness PASS。
+
+**Fix A (opaque pointer wrap + memory barrier)** — 试 1：
+- `auto opaque_u32 = [](u32 v) { asm("v_mov_b32 %0, %1" : "=v"(out) : "v"(v)); return out; };`
+- 在每个 LDS 指针 reinterpret_cast 后过一遍 opaque
+- 加 `asm volatile("" ::: "memory")` barrier
+- **结果**：8192³ SNR=6.62 dB，DEBUG printf 直接观察到 `cached=(00020000,00020200) direct=(817e7d81,7e7e7e7f)` ⇒ ds_read dst register **持有 LDS 地址值** 而非 loaded data。Fix A 改写 root cause 假设。
+
+**Fix A2 (trailing s_waitcnt lgkmcnt(0) at end of load_scale_packs_from_stage)** — 试 2：
+- 强制 sync 在 6 个 ds_read 之后
+- **结果**：相同 cached=(00020000,...) pattern。waitcnt 来得太晚（compiler 已经 emit waitcnt 在 mfma 之前，但 dst register 在 unrolled 路径中已被读为 address）。
+
+**Fix B (`=&v` early-clobber + per-read waitcnt)** — 试 3：
+- 把 `macros::ds_read_b32` 局部展开为 inline asm，使用 `=&v` early-clobber 强制 dst VGPR ≠ smem_ptr VGPR
+- 在每个 ds_read 后立即 emit `s_waitcnt lgkmcnt(0)`
+- 8192³ SNR=6.63 dB **仍 FAIL**, det FAIL（max abs 0.94），TFLOPS 2340
+
+**核心实测**（R20-B 假说 verified FALSE）：
+
+读 `/tmp/scale_lds_fixB.s` (Fix B 编译产物) line 22639-22692 的 inner loop：
+```
+v_mov_b32_e32 v2, v151        ; v151 = 0x20000 + lane (slot 0 a0_pack0) ✓
+v_mov_b32_e32 v3, v188        ; v188 = 0x20200 + lane (slot 2 a1_pack0) ✓
+ds_read_b32 v159, v2          ; → a0_pack0 ✓
+s_waitcnt lgkmcnt(0)          ; ✓
+ds_read_b32 v175, v3          ; → a1_pack0 ✓
+s_waitcnt lgkmcnt(0)
+v_mov_b32_e32 v2, v189        ; v189 = 0x20100 + lane (slot 1 a0_pack1) ✓
+v_mov_b32_e32 v3, v190        ; v190 = 0x20300 + lane (slot 3 a1_pack1) ✓
+ds_read_b32 v178, v2          ; → a0_pack1 ✓
+s_waitcnt lgkmcnt(0)
+ds_read_b32 v176, v3          ; → a1_pack1 ✓
+s_waitcnt lgkmcnt(0)
+v_mov_b32_e32 v2, v191        ; v191 = 0x20800 (b0p0) ✓
+v_mov_b32_e32 v3, v192        ; v192 = 0x20900 (b1p0) ✓
+ds_read_b32 v171, v2          ; → b0_pack0 ✓
+s_waitcnt lgkmcnt(0)
+ds_read_b32 v177, v3          ; → b1_pack0 ✓
+s_waitcnt lgkmcnt(0)
+```
+v151, v188, v189, v190, v191, v192 = **6 distinct address VGPRs** holding `0x20000 + lane`, `0x20200 + lane`, `0x20100 + lane`, `0x20300 + lane`, `0x20800 + lane`, `0x20900 + lane` (verified at lines 22317-22324)。下游 mfma_scale 在 line 22757 用 `v159, v171` (a0_p0, b0_p0)，line 22761 用 `v178, v171` (a0_p1, b0_p0) — **dst register assignments to mfma operands 全部 correct**。
+
+**结论：R20-B 的 "compiler folds to 3 VGPRs" 假说 falsified**。assembly 没有 aliasing 问题。
+
+**Bug source 仍未 isolate**。可能性：
+1. Inter-wave LDS write/read 顺序 race（虽然 `s_barrier` 在两边都有，但 CTA-wide barrier 可能与 ds_write 的实际 sequencer commit 不同步）
+2. lane permutation 不匹配 — writer wave 的 lane L 写 LDS offset L*4，reader wave 的 lane L 期望 LDS offset L*4，但 preshuffled scale 在 register 中的 lane allocation 可能与 LDS read-back 不一致
+3. `volatile uint32_t scale_stage_dwords` 与 `ds_write_b32` macro 的 cache coherence — write 进 LDS bank 但 read pulls stale due to某种 SP/DC interaction
+
+**Performance NO-GO（独立于 correctness）**：
+即使绕过 correctness，**SCALE_LDS 8192³ TFLOPS = 2340 vs baseline (PIPELINE_SCALE) = 2610**，**Δ = -270 TFLOPS / -10.3% regression**。R19 Diagnostic 模型预测 +50-150 TFLOPS。模型与实测**矛盾**。可能原因：
+- LDS-issue 增量（CTA-wide ds_write 16 + ds_read 6 × 8 waves = 64 ds-issues/kpair）超过 R19 估算的 +0.34M / disp
+- s_barrier × 2 per kpair latency 远超 50-100 cyc 假设
+- VGPR 256 (was 254) + scratch 80 bytes/lane 触发 occupancy/regalloc 退化
+
+**最终判断**：
+1. R20-B + R21-B 的 milestone-1 + milestone-1.5 共投入 ~2 day，没有定位 correctness root cause
+2. 即便 fix correctness，performance 实测 **regression**，违反 R19 GO 路径前提
+3. **SCALE_LDS REPLACE 路径 KILL**
+
+### R21-B 综合产出 = 0 commit + 1 dead-end 永久封死 + R20-B 假说 falsified
+
+1. **R20-B "compiler folds to 3 VGPRs" 假说 falsified**：实测 assembly 6 distinct VGPRs，addresses correct，dst→mfma operand mapping correct
+2. **SCALE_LDS REPLACE 路径 STRUCTURAL NO-GO**：correctness root cause 未 isolate **且** performance regression -270 TFLOPS
+3. **新 dead-end**：cooperative LDS scale staging + per-wave 6 ds_read pattern under current geometry (BLK=256, BK=128, RBM=64, RBN=32, WARPS_M=2, WARPS_N=4) 永久关闭
+
+### R22+ 路径
+
+1. **集中精力 Dev A preshuffle V2 milestone-2**（`r20-a-preshuffle-v2` branch）— 唯一剩余结构 GO 路径
+2. **不要再尝试 SCALE_LDS REPLACE 任何变体**（cooperative staging + ds_write/ds_read 路径 R20-B + R21-B 已穷举主要 workaround）
+3. **R20-B 报告的 LDS-aliasing miscompile 不再视为有效假说**（R21-B 实测 assembly falsified）
+
+### R21-B 关键经验沉淀
+
+- **Assembly 必须实测**：R20-B 凭 DEBUG printf 推论"3 VGPRs folding"是误诊。R21-B 通过 hipcc -S 直接读 device assembly，定量驳斥。下次任何"compiler miscompile"假说都要附 .s 文件 line-level 证据
+- **early-clobber `=&v` 不是 silver bullet**：当下游 dst register 必须 alias 上游 src register 时（256 VGPR limit 下 register pressure 极高），early-clobber 只能让 compiler 多 emit 一次 v_mov，根本 bug 在别处
+- **Counter improvement ≠ TFLOPS improvement**：R20-B SQ_INSTS_VMEM -15.4% 看上去是 R18 paradigm 实证，但 R21-B 实测 TFLOPS -10.3% regression。R19 linear model（counter 改进 → TFLOPS 改进）需要 LDS-issue cost 修正
+
 ## 第二十轮评审结果 (2026-04-17) — R19 双 GO 路径 milestone-1 实测：preshuffle V2 PASS + SCALE_LDS REPLACE counter-PASS 但 correctness FAIL；R18 paradigm 实测 reaffirm（-15.4% VMEM cut）；2 commit on side branches，0 production fastpath touch
 
 ### R20 派 2 Dev (A/B) 并行（GPU1/2 隔离）
