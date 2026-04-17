@@ -29,7 +29,9 @@ struct layout_globals {
     size_t dynamic_shared_memory() { return MAX_SHARED_MEMORY; }
 };
 
-template<Layout L>
+// KI_HINT > 0: compile-time num_tiles (K / K_STEP) -> full #pragma unroll
+// KI_HINT == 0: dynamic num_tiles from g.ki, #pragma unroll 2
+template<Layout L, int KI_HINT>
 __global__ __launch_bounds__(NUM_THREADS, 2)
 void gemm_kernel(const layout_globals g) {
     extern __shared__ alignment_dummy __shm[];
@@ -65,19 +67,44 @@ void gemm_kernel(const layout_globals g) {
     const int total_tiles = g.bpr * g.bpc;
     int wgid = blockIdx.x;
 
-    // Block mapping with XCD swizzle
+    // Block mapping with XCD swizzle. Dual strategy: for tall-N problems
+    // (bpc > bpr), group-by-N so WGs in a super-block share pid_n and
+    // cycle pid_m — this optimizes B-reuse (B is larger than A on tall-N).
+    // For tall-M / square, use group-by-M so WGs share pid_m and cycle
+    // pid_n — this optimizes A-reuse. The user-specified group_m becomes
+    // WGM on tall-M path or WGN on tall-N path.
+    //
+    // The split encodes g.group_m meaning as a generic "super-block length
+    // along the narrower dimension". Threshold bpc > bpr picks tall-N vs
+    // non-tall-N. The two paths produce different (pid_m, pid_n) mappings
+    // but both preserve the XCD-swizzled traversal order.
     const int NUM_WGS = total_tiles;
     wgid = chiplet_transform_chunked(wgid, NUM_WGS, NUM_XCDS, 64);
     const int num_pid_m = g.bpr;
     const int num_pid_n = g.bpc;
-    const int WGM = g.group_m;
-    const int num_wgid_in_group = WGM * num_pid_n;
-    int group_id = wgid / num_wgid_in_group;
-    int first_pid_m = group_id * WGM;
-    int group_size_m = min(num_pid_m - first_pid_m, WGM);
-    if (group_size_m <= 0) return;
-    int pid_m = first_pid_m + ((wgid % num_wgid_in_group) % group_size_m);
-    int pid_n = (wgid % num_wgid_in_group) / group_size_m;
+    const int WG  = g.group_m;
+    int pid_m, pid_n;
+    if (g.bpc > g.bpr) {
+        // Tall-N: group-by-N. Super-block = all_M × WGN
+        const int WGN = WG;
+        const int num_wgid_in_group = num_pid_m * WGN;
+        int group_id = wgid / num_wgid_in_group;
+        int first_pid_n = group_id * WGN;
+        int group_size_n = min(num_pid_n - first_pid_n, WGN);
+        if (group_size_n <= 0) return;
+        pid_n = first_pid_n + ((wgid % num_wgid_in_group) % group_size_n);
+        pid_m = (wgid % num_wgid_in_group) / group_size_n;
+    } else {
+        // Tall-M / square: group-by-M. Super-block = WGM × all_N
+        const int WGM = WG;
+        const int num_wgid_in_group = WGM * num_pid_n;
+        int group_id = wgid / num_wgid_in_group;
+        int first_pid_m = group_id * WGM;
+        int group_size_m = min(num_pid_m - first_pid_m, WGM);
+        if (group_size_m <= 0) return;
+        pid_m = first_pid_m + ((wgid % num_wgid_in_group) % group_size_m);
+        pid_n = (wgid % num_wgid_in_group) / group_size_m;
+    }
     if (pid_m >= g.bpr || pid_n >= g.bpc) return;
     int row = pid_m;
     int col = pid_n;
@@ -85,13 +112,10 @@ void gemm_kernel(const layout_globals g) {
     const int warp_id = kittens::warpid();
     const int warp_row = warp_id / 4;
     const int warp_col = warp_id % 4;
-    #ifdef K_OVERRIDE
-    constexpr int total_ki = K_OVERRIDE / K_STEP;
-#else
-    const int total_ki = g.ki;
-#endif
-    const int k_offset = 0;
-    const int num_tiles = total_ki;
+
+    // K-specialization: compile-time vs dynamic.
+    // For the KI_HINT>0 path we use constexpr num_tiles so the main loop can unroll fully.
+    // For the KI_HINT==0 path we use dynamic g.ki and #pragma unroll 2 (limited).
 
     // Coordinate helpers: coords are in tile units, scaled by ST::rows / ST::cols
     auto a_coord = [&](int spatial, int k) {
@@ -164,36 +188,55 @@ void gemm_kernel(const layout_globals g) {
     };
 
     // MMA dispatch
+    // For CRR: use mma_AtB directly (A in col_l, B in col_l) — no register transpose needed.
+    // mma_AtB_base uses the same hardware instruction as mma_AB_base (mfma_f32_16x16x32_bf16)
+    // but interprets A as transposed, eliminating the register shuffle overhead.
+    // Expanded inline so the outer #pragma unroll on the main_loop_iter lambda
+    // can see through to the base MMA calls (matches JIT path).
     #define DO_MMA(D, A, B, C) \
         do { \
-            if constexpr (L == Layout::RCR) mma_ABt(D, A, B, C); \
-            else if constexpr (L == Layout::RRR) mma_AB(D, A, B, C); \
-            else mma_AtB(D, A, B, C); \
+            if constexpr (L == Layout::RCR) { mma_ABt(D, A, B, C); } \
+            else if constexpr (L == Layout::RRR) { mma_AB(D, A, B, C); } \
+            else { \
+                constexpr int NH = std::remove_reference_t<decltype(D)>::height; \
+                constexpr int NW = std::remove_reference_t<decltype(D)>::width; \
+                constexpr int KH = std::remove_reference_t<decltype(A)>::height; \
+                _Pragma("unroll") \
+                for (int _n = 0; _n < NH; _n++) { \
+                    _Pragma("unroll") \
+                    for (int _m = 0; _m < NW; _m++) { \
+                        mma_AtB_base(D.tiles[_n][_m], A.tiles[0][_n], B.tiles[0][_m], C.tiles[_n][_m]); \
+                        _Pragma("unroll") \
+                        for (int _k = 1; _k < KH; _k++) { \
+                            mma_AtB_base(D.tiles[_n][_m], A.tiles[_k][_n], B.tiles[_k][_m], D.tiles[_n][_m]); \
+                        } \
+                    } \
+                } \
+            } \
         } while(0)
 
     /********** Prologue: load first two K-tiles **********/
-    G::load(Bs[tic][0], g.b, b_coord(col*2, k_offset+0), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_00);
-    G::load(As[tic][0], g.a, a_coord(row*2, k_offset+0), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_00);
-    G::load(Bs[tic][1], g.b, b_coord(col*2+1, k_offset+0), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_01);
-    G::load(As[tic][1], g.a, a_coord(row*2+1, k_offset+0), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_01);
+    G::load(Bs[tic][0], g.b, b_coord(col*2, 0), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_00);
+    G::load(As[tic][0], g.a, a_coord(row*2, 0), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_00);
+    G::load(Bs[tic][1], g.b, b_coord(col*2+1, 0), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_01);
+    G::load(As[tic][1], g.a, a_coord(row*2+1, 0), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_01);
 
     if (warp_row == 1) { __builtin_amdgcn_s_barrier(); }
     asm volatile("s_waitcnt vmcnt(4)");
     __builtin_amdgcn_s_barrier();
 
-    G::load(Bs[toc][0], g.b, b_coord(col*2, k_offset+1), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_10);
-    G::load(As[toc][0], g.a, a_coord(row*2, k_offset+1), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_10);
-    G::load(Bs[toc][1], g.b, b_coord(col*2+1, k_offset+1), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_11);
+    G::load(Bs[toc][0], g.b, b_coord(col*2, 1), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_10);
+    G::load(As[toc][0], g.a, a_coord(row*2, 1), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_10);
+    G::load(Bs[toc][1], g.b, b_coord(col*2+1, 1), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_11);
 
     asm volatile("s_waitcnt vmcnt(6)");
     __builtin_amdgcn_s_barrier();
 
     /********** Main loop **********/
     auto main_loop_iter = [&](int tile) {
-        const int kt = tile + k_offset;
         load_b_subtile(B_tile_0, Bs[0][0], warp_col);
         load_a_subtile(A_tile, As[0][0], warp_row);
-        G::load(As[1][1], g.a, a_coord(row*2+1, kt+1), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_11);
+        G::load(As[1][1], g.a, a_coord(row*2+1, tile+1), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_11);
         asm volatile("s_waitcnt lgkmcnt(8)");
         __builtin_amdgcn_s_barrier();
 
@@ -205,7 +248,7 @@ void gemm_kernel(const layout_globals g) {
         __builtin_amdgcn_sched_barrier(0);
 
         load_b_subtile(B_tile_1, Bs[0][1], warp_col);
-        G::load(Bs[0][0], g.b, b_coord(col*2, kt+2), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_00);
+        G::load(Bs[0][0], g.b, b_coord(col*2, tile+2), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_00);
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
@@ -215,7 +258,7 @@ void gemm_kernel(const layout_globals g) {
         __builtin_amdgcn_s_barrier();
 
         load_a_subtile(A_tile, As[0][1], warp_row);
-        G::load(As[0][0], g.a, a_coord(row*2, kt+2), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_00);
+        G::load(As[0][0], g.a, a_coord(row*2, tile+2), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_00);
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
@@ -226,7 +269,7 @@ void gemm_kernel(const layout_globals g) {
         __builtin_amdgcn_sched_barrier(0);
 
         load_b_subtile(B_tile_0, Bs[1][0], warp_col);
-        G::load(Bs[0][1], g.b, b_coord(col*2+1, kt+2), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_01);
+        G::load(Bs[0][1], g.b, b_coord(col*2+1, tile+2), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_01);
         asm volatile("s_waitcnt vmcnt(6)");
         __builtin_amdgcn_s_barrier();
 
@@ -236,7 +279,7 @@ void gemm_kernel(const layout_globals g) {
         __builtin_amdgcn_s_barrier();
 
         load_a_subtile(A_tile, As[1][0], warp_row);
-        G::load(As[0][1], g.a, a_coord(row*2+1, kt+2), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_01);
+        G::load(As[0][1], g.a, a_coord(row*2+1, tile+2), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_01);
         asm volatile("s_waitcnt lgkmcnt(8)");
         __builtin_amdgcn_s_barrier();
 
@@ -248,7 +291,7 @@ void gemm_kernel(const layout_globals g) {
         __builtin_amdgcn_sched_barrier(0);
 
         load_b_subtile(B_tile_1, Bs[1][1], warp_col);
-        G::load(Bs[1][0], g.b, b_coord(col*2, kt+3), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_10);
+        G::load(Bs[1][0], g.b, b_coord(col*2, tile+3), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_10);
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
@@ -258,7 +301,7 @@ void gemm_kernel(const layout_globals g) {
         __builtin_amdgcn_s_barrier();
 
         load_a_subtile(A_tile, As[1][1], warp_row);
-        G::load(As[1][0], g.a, a_coord(row*2, kt+3), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_10);
+        G::load(As[1][0], g.a, a_coord(row*2, tile+3), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_10);
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
@@ -268,7 +311,7 @@ void gemm_kernel(const layout_globals g) {
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
-        G::load(Bs[1][1], g.b, b_coord(col*2+1, kt+3), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_11);
+        G::load(Bs[1][1], g.b, b_coord(col*2+1, tile+3), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_11);
         asm volatile("s_waitcnt vmcnt(6)");
         __builtin_amdgcn_s_barrier();
 
@@ -278,20 +321,33 @@ void gemm_kernel(const layout_globals g) {
         __builtin_amdgcn_s_barrier();
     };
 
-    #ifdef K_OVERRIDE
-    #pragma unroll
-#else
-    #pragma unroll 2
-#endif
-    for (int tile = 0; tile < num_tiles - 2; tile += 2) main_loop_iter(tile);
+    // Matching the JIT-path schedule:
+    //   RCR/RRR: use full #pragma unroll (compile-time KI_HINT).
+    //   CRR:     use #pragma unroll 2 (hides barrier latency). Some KI values
+    //            (128, 172, 296) see 7-26 SGPR spills under unroll 2, but the
+    //            barrier-hiding benefit still outweighs the spill cost.
+    // KI_HINT==0 dynamic fallback always uses unroll 2.
+    if constexpr (KI_HINT > 0) {
+        constexpr int num_tiles = KI_HINT;
+        if constexpr (L == Layout::CRR) {
+            #pragma unroll 2
+            for (int tile = 0; tile < num_tiles - 2; tile += 2) main_loop_iter(tile);
+        } else {
+            #pragma unroll
+            for (int tile = 0; tile < num_tiles - 2; tile += 2) main_loop_iter(tile);
+        }
+    } else {
+        const int num_tiles = g.ki;
+        #pragma unroll 2
+        for (int tile = 0; tile < num_tiles - 2; tile += 2) main_loop_iter(tile);
+    }
 
     /********** Epilog 1: second-to-last K-tile pair **********/
     {
-        const int tile = num_tiles - 2;
-        const int kt = tile + k_offset;
+        const int tile = (KI_HINT > 0) ? (KI_HINT - 2) : (g.ki - 2);
         load_b_subtile(B_tile_0, Bs[tic][0], warp_col);
         load_a_subtile(A_tile, As[tic][0], warp_row);
-        G::load(As[toc][1], g.a, a_coord(row*2+1, kt+1), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_11);
+        G::load(As[toc][1], g.a, a_coord(row*2+1, tile+1), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_11);
         __builtin_amdgcn_s_barrier();
         asm volatile("s_waitcnt lgkmcnt(0)");
 
@@ -374,10 +430,43 @@ void gemm_kernel(const layout_globals g) {
         col * 2 * WARPS_N + WARPS_N + warp_col});
 }
 
-// Explicit instantiations
-template __global__ void gemm_kernel<Layout::RCR>(const layout_globals);
-template __global__ void gemm_kernel<Layout::RRR>(const layout_globals);
-template __global__ void gemm_kernel<Layout::CRR>(const layout_globals);
+// ---- Explicit instantiations ----
+// KI_HINT = 0 dynamic fallback
+template __global__ void gemm_kernel<Layout::RCR, 0>(const layout_globals);
+template __global__ void gemm_kernel<Layout::RRR, 0>(const layout_globals);
+template __global__ void gemm_kernel<Layout::CRR, 0>(const layout_globals);
+// KI_HINT > 0: specialized for common LLM K values (K / K_STEP).
+// K values: 3584, 4096, 8192, 11008, 14336, 16384, 18944, 28672, 29568, 53248
+// -> ki = 56, 64, 128, 172, 224, 256, 296, 448, 462, 832
+#define INSTANTIATE_K(KI) \
+    template __global__ void gemm_kernel<Layout::RCR, KI>(const layout_globals); \
+    template __global__ void gemm_kernel<Layout::RRR, KI>(const layout_globals); \
+    template __global__ void gemm_kernel<Layout::CRR, KI>(const layout_globals)
+INSTANTIATE_K(56);
+INSTANTIATE_K(64);
+INSTANTIATE_K(128);
+INSTANTIATE_K(172);
+INSTANTIATE_K(224);
+INSTANTIATE_K(256);
+INSTANTIATE_K(296);
+INSTANTIATE_K(448);
+INSTANTIATE_K(462);
+INSTANTIATE_K(832);
+#undef INSTANTIATE_K
+
+template<Layout L, int KI>
+static inline void launch_one(layout_globals& g) {
+    unsigned long mem_size = g.dynamic_shared_memory();
+    // Set shared-mem attribute once per (L, KI) function pointer: idempotent,
+    // avoids per-launch HIP runtime overhead.
+    static bool attr_set = false;
+    if (!attr_set) {
+        hipFuncSetAttribute((void*)gemm_kernel<L, KI>, hipFuncAttributeMaxDynamicSharedMemorySize, mem_size);
+        attr_set = true;
+    }
+    int total_blocks = g.bpr * g.bpc;
+    gemm_kernel<L, KI><<<dim3(total_blocks), g.block(), mem_size, g.stream>>>(g);
+}
 
 template<Layout L>
 void dispatch_gemm(layout_globals g) {
@@ -388,10 +477,20 @@ void dispatch_gemm(layout_globals g) {
     g.ki = g.k / K_STEP;
     g.bpr = g.m / BLOCK_SIZE;
     g.bpc = g.n / BLOCK_SIZE;
-    unsigned long mem_size = g.dynamic_shared_memory();
-    hipFuncSetAttribute((void*)gemm_kernel<L>, hipFuncAttributeMaxDynamicSharedMemorySize, mem_size);
-    int total_blocks = g.bpr * g.bpc;
-    gemm_kernel<L><<<dim3(total_blocks), g.block(), mem_size, g.stream>>>(g);
+
+    switch (g.ki) {
+        case 56:  launch_one<L, 56> (g); return;
+        case 64:  launch_one<L, 64> (g); return;
+        case 128: launch_one<L, 128>(g); return;
+        case 172: launch_one<L, 172>(g); return;
+        case 224: launch_one<L, 224>(g); return;
+        case 256: launch_one<L, 256>(g); return;
+        case 296: launch_one<L, 296>(g); return;
+        case 448: launch_one<L, 448>(g); return;
+        case 462: launch_one<L, 462>(g); return;
+        case 832: launch_one<L, 832>(g); return;
+        default:  launch_one<L, 0>  (g); return;
+    }
 }
 
 static void gemm_dispatch(pybind11::object a, pybind11::object b, pybind11::object c,

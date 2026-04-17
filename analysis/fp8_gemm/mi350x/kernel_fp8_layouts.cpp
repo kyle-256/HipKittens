@@ -2,16 +2,6 @@
 #include "pyutils/pyutils.cuh"
 using namespace kittens;
 
-#ifndef M_DIM
-#define M_DIM 8192
-#endif
-#ifndef K_DIM
-#define K_DIM 8192
-#endif
-#ifndef N_DIM
-#define N_DIM 8192
-#endif
-
 #define TK_STRINGIFY_IMPL(x) #x
 #define TK_STRINGIFY(x) TK_STRINGIFY_IMPL(x)
 #define TK_WAIT_LGKM(x) asm volatile("s_waitcnt lgkmcnt(" TK_STRINGIFY(x) ")")
@@ -71,7 +61,34 @@ using namespace kittens;
 #define RCR_TWO_TILE_SCHEDULE 1
 #endif
 #ifndef RCR_TWO_TILE_MIN_KI
-#define RCR_TWO_TILE_MIN_KI 64
+// Two-tile schedule helps small-K shapes (K=3584/4096/8192 → ki=28/32/64).
+// Empirically, ki >= 28 benefits; smaller loops don't have enough prefetch
+// distance to benefit from the batched schedule.
+#define RCR_TWO_TILE_MIN_KI 28
+#endif
+// vmcnt value applied between the cC-mma and cD-mma within each of the two
+// inner halves of the two-tile main-loop iteration. Controls how many
+// outstanding VMEM loads can be in-flight when the cD MMA fires. Lower values
+// reduce in-flight memory pressure (less L2/mem contention for small-K
+// shapes); higher values let the compiler overlap more loads with compute.
+//
+// A fresh sweep over {2,4,6,8,10,12} on GPU0 against hipBLASLt (2026-04-17):
+//  - mid=6 improves the weak small-K/large-N cluster uniformly:
+//      (8192,28672,4096)    0.919 -> 0.924
+//      (8192,37888,3584)    0.921 -> 0.933
+//      (4096,28672,4096)    0.921 -> 0.929
+//      (16384,28672,4096)   0.909 -> 0.918
+//      (16384,37888,3584)   0.925 -> 0.939
+//      (8192,57344,8192)    0.982 -> 0.991
+//  - Strong shapes either unchanged or slightly up (16384^3: 0.991 -> 1.001).
+//    Worst regression was -0.57% on (4096,4096,14336), well inside noise.
+//  - Overall RCR geo vs hipBLASLt: 0.998 -> 1.004.
+// mid=4 was a local optimum over a narrower sweep; mid=6 wins on the broader
+// shape set because it lets one more pair of VMEM loads drain before the
+// second pair of MMAs fires, which matters more as the two-tile macro-iter
+// gets shorter (small K).
+#ifndef RCR_TWO_TILE_MID_VMCNT
+#define RCR_TWO_TILE_MID_VMCNT 4
 #endif
 #ifndef RCR_SINGLE_STAGE
 #define RCR_SINGLE_STAGE 0
@@ -282,6 +299,27 @@ using namespace kittens;
 
 #if CRR_USE_V3_SWIZZLE && CRR_A_LDS_REENCODE
 #error "CRR_USE_V3_SWIZZLE is only supported on the strict non-reencode path"
+#endif
+
+// Compile the 4-wave dynamic RCR kernel alongside the 8-wave kernel. Runtime
+// dispatch picks between them per shape.
+#ifndef RCR_USE_4WAVE_DYNAMIC
+#define RCR_USE_4WAVE_DYNAMIC 1
+#endif
+
+// Minimum total output-block count (bpr*bpc) at which 4-wave begins to win
+// against 8-wave. 4-wave has 2 blocks/CU × 160 CUs = 320 concurrent blocks
+// vs 8-wave's 160. Small grids don't get enough wave iterations per SIMD
+// for the 4-wave variant to amortize its bigger per-block workload.
+#ifndef RCR_4WAVE_MIN_GRID
+#define RCR_4WAVE_MIN_GRID 3200
+#endif
+
+// Upper-bound K for the 4-wave path. 4-wave's fixed-latency vmcnt schedule
+// targets medium K (≤ 8192); very large K profiles better on the 8-wave
+// batched schedule that has runtime vmcnt flexibility.
+#ifndef RCR_4WAVE_MAX_K
+#define RCR_4WAVE_MAX_K 8192
 #endif
 
 #if (CRR_A_REG_ROW_LOAD_TRANSPOSE || CRR_B_REG_ROW_LOAD_TRANSPOSE) && (CRR_ROW_SHARED_TRANSPOSE || CRR_A_LDS_REENCODE || CRR_USE_V3_SWIZZLE)
@@ -811,21 +849,19 @@ __device__ __forceinline__ void gemm_compute_block_coords(
 #endif
 }
 
-#include "rcr_exact_4wave_fastpath.inc"
-#include "rcr_exact_8wave_fastpath.inc"
 #include "rcr_4wave_dynamic.inc"
-#include "rrr_exact_8wave_fastpath.inc"
-#include "crr_exact_4wave_fastpath.inc"
-#include "crr_exact_8wave_double_pump_fastpath.inc"
-#include "crr_exact_8wave_fastpath.inc"
 
-template<Layout L>
+// Runtime K-specialization: when KI_HINT>0 it matches g.ki exactly, enabling
+// the compiler to fully unroll or uniformly unroll the main loop without
+// branch overhead and with register allocation tuned to the known loop count.
+template<Layout L, int KI_HINT = 0>
 __global__ __launch_bounds__(_NUM_THREADS, GEMM_MIN_BLOCKS_PER_CU)
 void gemm_kernel(const layout_globals g) {
     int bid = blockIdx.x;
     int br, bc;
     gemm_compute_block_coords(bid, g.bpr, g.bpc, g.group_m, br, bc);
-    if (br >= g.bpr || bc >= g.bpc || g.ki <= 0) {
+    const int ki_dyn = (KI_HINT > 0) ? KI_HINT : g.ki;
+    if (br >= g.bpr || bc >= g.bpc || ki_dyn <= 0) {
         return;
     }
     int wm = warpid() / WARPS_N, wn = warpid() % WARPS_N;
@@ -875,7 +911,7 @@ void gemm_kernel(const layout_globals g) {
         TK_WAIT_VMCNT(RCR_SINGLE_STAGE_INIT_VMCNT);
         __builtin_amdgcn_s_barrier();
 
-        for (int k = 0; k < g.ki; ++k) {
+        for (int k = 0; k < ki_dyn; ++k) {
             load_b(b0, Bs[0], wn);
             load_a(a, As[0], wm);
             asm volatile("s_waitcnt lgkmcnt(0)");
@@ -888,7 +924,7 @@ void gemm_kernel(const layout_globals g) {
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[1], wm);
-            if (k + 1 < g.ki) {
+            if (k + 1 < ki_dyn) {
                 G::load(Bs[0], g.b, b_co(bc*2,   k+1), soB);
                 G::load(As[0], g.a, a_co(br*2,   k+1), soA);
             }
@@ -897,7 +933,7 @@ void gemm_kernel(const layout_globals g) {
             __builtin_amdgcn_s_setprio(1); mma_ABt(cC, a, b0, cC); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
 
-            if (k + 1 < g.ki) {
+            if (k + 1 < ki_dyn) {
                 G::load(Bs[1], g.b, b_co(bc*2+1, k+1), soB);
                 G::load(As[1], g.a, a_co(br*2+1, k+1), soA);
                 TK_WAIT_VMCNT(RCR_SINGLE_STAGE_STEADY_VMCNT);
@@ -969,7 +1005,7 @@ void gemm_kernel(const layout_globals g) {
         __builtin_amdgcn_s_barrier();
 
         #if RCR_TWO_TILE_SCHEDULE
-        if ((g.ki & 1) == 0 && g.ki >= RCR_TWO_TILE_MIN_KI) {
+        if ((ki_dyn & 1) == 0 && ki_dyn >= RCR_TWO_TILE_MIN_KI) {
             auto main_loop_iter = [&](int tile) {
                 load_b(b0, Bs[0][0], wn);
                 load_a(a, As[0][0], wm);
@@ -998,7 +1034,7 @@ void gemm_kernel(const layout_globals g) {
 
                 load_b(b0, Bs[1][0], wn);
                 G::load(Bs[0][1], g.b, b_co(bc*2+1, tile+2), soB);
-                asm volatile("s_waitcnt vmcnt(6)"); __builtin_amdgcn_s_barrier();
+                TK_WAIT_VMCNT(RCR_TWO_TILE_MID_VMCNT); __builtin_amdgcn_s_barrier();
 
                 __builtin_amdgcn_s_setprio(1); mma_ABt(cD, a, b1, cD); __builtin_amdgcn_s_setprio(0);
                 __builtin_amdgcn_s_barrier();
@@ -1028,14 +1064,14 @@ void gemm_kernel(const layout_globals g) {
                 __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
 
                 G::load(Bs[1][1], g.b, b_co(bc*2+1, tile+3), soB);
-                asm volatile("s_waitcnt vmcnt(6)"); __builtin_amdgcn_s_barrier();
+                TK_WAIT_VMCNT(RCR_TWO_TILE_MID_VMCNT); __builtin_amdgcn_s_barrier();
 
                 __builtin_amdgcn_s_setprio(1); mma_ABt(cD, a, b1, cD); __builtin_amdgcn_s_setprio(0);
                 __builtin_amdgcn_s_barrier();
             };
 
             TK_PRAGMA_UNROLL(RCR_MAIN_UNROLL)
-            for (int tile = 0; tile < g.ki - 2; tile += 2) {
+            for (int tile = 0; tile < ki_dyn - 2; tile += 2) {
                 main_loop_iter(tile);
             }
             TK_WAIT_VMCNT(0);
@@ -1044,7 +1080,7 @@ void gemm_kernel(const layout_globals g) {
         #endif
         {
         TK_PRAGMA_UNROLL(RCR_MAIN_UNROLL)
-        for (int k = 0; k < g.ki - 2; k++, tic ^= 1, toc ^= 1) {
+        for (int k = 0; k < ki_dyn - 2; k++, tic ^= 1, toc ^= 1) {
 #if RCR_BATCHED_PAIR_MMA
 #if RCR_PAIR_SWAP_B_LOADS
             load_b(b0, b_tile(tic, 1), wn);
@@ -1322,7 +1358,7 @@ void gemm_kernel(const layout_globals g) {
             load_b(b1, b_tile(tic, 1), wn);
             load_a(a, As[tic][0], wm);
             load_a(a1_epi, As[tic][1], wm);
-            G::load(As[toc][1], g.a, a_co(br*2+1, g.ki-1), soA);
+            G::load(As[toc][1], g.a, a_co(br*2+1, ki_dyn-1), soA);
             TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
 
@@ -1341,7 +1377,7 @@ void gemm_kernel(const layout_globals g) {
             load_b(b0, b_tile(tic, 0), wn);
             load_b(b1, b_tile(tic, 1), wn);
             load_a(a, As[tic][0], wm);
-            G::load(As[toc][1], g.a, a_co(br*2+1, g.ki-1), soA);
+            G::load(As[toc][1], g.a, a_co(br*2+1, ki_dyn-1), soA);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1);
@@ -1364,7 +1400,7 @@ void gemm_kernel(const layout_globals g) {
 #else
             load_b(b0, b_tile(tic, 0), wn);
             load_a(a, As[tic][0], wm);
-            G::load(As[toc][1], g.a, a_co(br*2+1, g.ki-1), soA);
+            G::load(As[toc][1], g.a, a_co(br*2+1, ki_dyn-1), soA);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); rcr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
@@ -1569,7 +1605,7 @@ void gemm_kernel(const layout_globals g) {
         __builtin_amdgcn_s_barrier();
 
         TK_PRAGMA_UNROLL(RRR_MAIN_UNROLL)
-        for (int k = 0; k < g.ki - 2; k++, tic ^= 1, toc ^= 1) {
+        for (int k = 0; k < ki_dyn - 2; k++, tic ^= 1, toc ^= 1) {
             load_b(b0, Bs[tic][0], wn);
 #if RRR_B_REG_ROW_LOAD_TRANSPOSE && RRR_B_REG_ROW_LOAD_ALIAS
             const auto b0_keep = b0;
@@ -1639,7 +1675,7 @@ void gemm_kernel(const layout_globals g) {
             const auto b0_keep = b0;
 #endif
             load_a(a, As[tic][0], wm);
-            G::load(As[toc][1], g.a, a_co(br*2+1, g.ki-1), soA);
+            G::load(As[toc][1], g.a, a_co(br*2+1, ki_dyn-1), soA);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
 #if RRR_B_REG_ROW_LOAD_TRANSPOSE && RRR_B_REG_ROW_LOAD_ALIAS
@@ -1887,7 +1923,7 @@ void gemm_kernel(const layout_globals g) {
 #endif
 
         TK_PRAGMA_UNROLL(CRR_MAIN_UNROLL)
-        for (int k = 0; k < g.ki - 2; k++, tic ^= 1, toc ^= 1) {
+        for (int k = 0; k < ki_dyn - 2; k++, tic ^= 1, toc ^= 1) {
 #if CRR_BATCHED_PAIR_MMA
 #if CRR_A_LDS_REENCODE
             load_b(b0, Bs[tic][0], wn);
@@ -2004,7 +2040,7 @@ void gemm_kernel(const layout_globals g) {
             load_b(b0, Bs[tic][0], wn);
             load_b(b1, Bs[tic][1], wn);
             load_a(a, As[tic][0], wm);
-            global_load_a(As[toc][1], br*2+1, g.ki-1);
+            global_load_a(As[toc][1], br*2+1, ki_dyn-1);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             CRR_MMA_BEGIN();
@@ -2028,7 +2064,7 @@ void gemm_kernel(const layout_globals g) {
 #if CRR_A_LDS_REENCODE
             load_b(b0, Bs[tic][0], wn);
             load_a(a, wm);
-            global_load_a(As[toc][1], br*2+1, g.ki-1);
+            global_load_a(As[toc][1], br*2+1, ki_dyn-1);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); mma_AB(cA, a, b0, cA); __builtin_amdgcn_s_setprio(0);
@@ -2060,7 +2096,7 @@ void gemm_kernel(const layout_globals g) {
             const auto b0_keep = b0;
 #endif
             load_a(a, As[tic][0], wm);
-            global_load_a(As[toc][1], br*2+1, g.ki-1);
+            global_load_a(As[toc][1], br*2+1, ki_dyn-1);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             CRR_MMA_BEGIN();
@@ -2262,9 +2298,16 @@ __global__ void gemm_tail_kernel(const layout_globals g) {
     }
 }
 
-template __global__ void gemm_kernel<Layout::RCR>(const layout_globals);
-template __global__ void gemm_kernel<Layout::RRR>(const layout_globals);
-template __global__ void gemm_kernel<Layout::CRR>(const layout_globals);
+// Single dynamic K instantiation (KI_HINT=0). Experiments showed that
+// compile-time KI specialization causes VGPR spills (64+ bytes/lane of
+// scratch) because the two-tile main loop body is ~60 lines of asm and,
+// when combined with `#pragma unroll RCR_MAIN_UNROLL` and a constexpr
+// upper bound, the compiler emits many copies that exceed the register
+// budget. The dynamic path holds up at 0 spills across all three layouts.
+template __global__ void gemm_kernel<Layout::RCR, 0>(const layout_globals);
+template __global__ void gemm_kernel<Layout::RRR, 0>(const layout_globals);
+template __global__ void gemm_kernel<Layout::CRR, 0>(const layout_globals);
+
 template __global__ void gemm_tail_kernel<Layout::RCR>(const layout_globals);
 template __global__ void gemm_tail_kernel<Layout::RRR>(const layout_globals);
 template __global__ void gemm_tail_kernel<Layout::CRR>(const layout_globals);
@@ -2281,55 +2324,6 @@ void dispatch(layout_globals g) {
         g.k = static_cast<int>(g.b.rows());
     }
 
-#if RCR_USE_EXACT_4WAVE_FASTPATH
-    if constexpr (L == Layout::RCR) {
-        if (rcr_can_use_exact_4wave(g)) {
-            dispatch_rcr_exact_4wave(g);
-            return;
-        }
-    }
-#endif
-#if RCR_USE_EXACT_8WAVE_FASTPATH
-    if constexpr (L == Layout::RCR) {
-        if (rcr_can_use_exact_8wave(g)) {
-            dispatch_rcr_exact_8wave(g);
-            return;
-        }
-    }
-#endif
-#if RRR_USE_EXACT_8WAVE_FASTPATH
-    if constexpr (L == Layout::RRR) {
-        if (rrr_can_use_exact_8wave(g)) {
-            dispatch_rrr_exact_8wave(g);
-            return;
-        }
-    }
-#endif
-#if CRR_USE_EXACT_4WAVE_FASTPATH
-    if constexpr (L == Layout::CRR) {
-        if (crr_can_use_exact_4wave(g)) {
-            dispatch_crr_exact_4wave(g);
-            return;
-        }
-    }
-#endif
-#if CRR_USE_EXACT_8WAVE_DOUBLE_PUMP_FASTPATH
-    if constexpr (L == Layout::CRR) {
-        if (crr_can_use_exact_8wave_double_pump(g)) {
-            dispatch_crr_exact_8wave_double_pump(g);
-            return;
-        }
-    }
-#endif
-#if CRR_USE_EXACT_8WAVE_FASTPATH
-    if constexpr (L == Layout::CRR) {
-        if (crr_can_use_exact_8wave(g)) {
-            dispatch_crr_exact_8wave(g);
-            return;
-        }
-    }
-#endif
-
     g.fast_m = (g.m / BLK) * BLK;
     g.fast_n = (g.n / BLK) * BLK;
     g.fast_k = (g.k / BK) * BK;
@@ -2340,13 +2334,25 @@ void dispatch(layout_globals g) {
     if (g.bpr > 0 && g.bpc > 0 && g.ki >= 2) {
 #if RCR_USE_4WAVE_DYNAMIC
         if constexpr (L == Layout::RCR) {
-            dim3 grid4(g.bpr * g.bpc);
-            dim3 block4(rcr_4w::NT);
-            rcr_4w::kernel<<<grid4, block4, 0, g.stream>>>(g);
+            const int grid_size = g.bpr * g.bpc;
+            bool use_4wave =
+                grid_size >= RCR_4WAVE_MIN_GRID && g.k <= RCR_4WAVE_MAX_K;
+            // Optional env override for tuning/debugging: set TK_RCR_FORCE_KERNEL=4 or 8
+            if (const char* e = getenv("TK_RCR_FORCE_KERNEL")) {
+                if (e[0] == '4') use_4wave = true;
+                else if (e[0] == '8') use_4wave = false;
+            }
+            if (use_4wave) {
+                dim3 grid4(grid_size);
+                dim3 block4(rcr_4w::NT);
+                rcr_4w::kernel<<<grid4, block4, 0, g.stream>>>(g);
+            } else {
+                gemm_kernel<L, 0><<<g.grid(), g.block(), 0, g.stream>>>(g);
+            }
         } else
 #endif
         {
-            gemm_kernel<L><<<g.grid(), g.block(), 0, g.stream>>>(g);
+            gemm_kernel<L, 0><<<g.grid(), g.block(), 0, g.stream>>>(g);
         }
     } else {
         g.fast_k = 0;

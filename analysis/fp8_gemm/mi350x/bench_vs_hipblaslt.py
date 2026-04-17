@@ -120,7 +120,14 @@ def make_tensors(M, N, K, layout):
 def bench_hipkittens(A, B, M, N, K, layout, warmup, iters):
     C = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
     fn = TK_FNS[layout]
-    gm = _autotuner.get_group_m(M, N, K, layout, A, B)
+    # This both populates the cache (if missing) and returns the (group_m,
+    # kernel) pair. For RCR we then pin TK_RCR_FORCE_KERNEL so the timed
+    # measurement uses the same variant the autotuner picked.
+    gm, kernel = _autotuner._get_entry(M, N, K, layout, A, B)
+    if layout == "rcr":
+        os.environ["TK_RCR_FORCE_KERNEL"] = kernel
+    else:
+        os.environ.pop("TK_RCR_FORCE_KERNEL", None)
     run = lambda: fn(A, B, C, 1.0, 1.0, gm)
 
     for _ in range(warmup):

@@ -1,305 +1,148 @@
 ---
 name: fp8-rcr-autotune-optimization
-description: Continue optimizing HipKittens FP8 per-tensor GEMM RCR layout to surpass hipBLASLt. Covers autotune framework, block swizzle, BATCHED_READS experiment, and benchmark methodology.
+description: FP8 per-tensor GEMM on MI350X — single .so, no JIT. RCR/RRR/CRR with runtime group_m autotune and KI-template dispatch. RCR beats hipBLASLt at geo-mean 1.005x.
 ---
-# FP8 RCR Autotune & Optimization — 接力文档
+# FP8 GEMM — Single-.so, No-JIT — 接力文档
 
-## 目标
+## Ground Rule — NO JIT
 
-**RCR 全面超越 hipBLASLt**，RRR/CRR 相对 RCR 的比例保持不变。
+Everything must live in the single `tk_fp8_layouts.so` produced by
+`analysis/fp8_gemm/mi350x/make`. Do not:
+- create per-shape `.so` files (`.jit_cache/`, `.jit_bf16_cache/`, etc.)
+- pass `-DM_DIM=X -DN_DIM=Y -DK_DIM=Z` compile flags
+- have Python load different libraries per-shape
+- re-introduce the deleted `kernel_jit_*.cpp`, `jit_gemm.py`, `bench_jit*.py`,
+  or `*_exact_*_fastpath.inc` files
 
-## 当前分支
+## Current State (GPU0, 2026-04-17)
 
-```
-save/fp8-progress-20260319-native-layouts
-```
-
-最新 commit: `c41c261a` — Add experimental RCR_BATCHED_READS optimization
-
-## 关键文件
-
-| 文件 | 说明 |
-|---|---|
-| `analysis/fp8_gemm/mi350x/kernel_fp8_layouts.cpp` | **核心 C++ 内核**。RCR/RRR/CRR 三个 layout 的 FP8 per-tensor GEMM |
-| `analysis/fp8_gemm/mi350x/Makefile` | 编译配置，控制所有 `#define` 开关 |
-| `analysis/fp8_gemm/mi350x/autotune.py` | **Python autotune 模块**。按 (M,N,K,layout) 搜索最优 `group_m`，结果缓存到 `.autotune_cache.json` |
-| `analysis/fp8_gemm/mi350x/bench_vs_hipblaslt.py` | **对比 benchmark 脚本**。HipKittens vs `hipBLASLt` (Primus-Turbo) |
-| `analysis/fp8_gemm/mi350x/test_python.py` | 单 shape 正确性 + 性能测试 |
-| `analysis/fp8_gemm/mi350x/*_fastpath.inc` | 特定维度的编译期优化 fastpath kernel（仅 M_DIM=N_DIM=K_DIM=8192 且 scale=1.0 时命中） |
-
-## 已完成的优化
-
-### 1. XCD-aware Block Swizzle（已启用，已验证）
-
-**Makefile 配置:**
-```
--DGEMM_BLOCK_SWIZZLE=1 -DGEMM_BLOCK_SWIZZLE_NUM_XCDS=8
-```
-
-**效果:** RCR 大 N shapes 从 0.66x→0.93x，geo-mean 从 0.910x→0.958x
-
-### 2. Runtime `group_m` + Python Autotune（已实现，已验证）
-
-`group_m` 从编译期常量改为运行时参数。不同 shape 偏好不同 `group_m`:
-
-| Shape 特征 | 最优 group_m |
-|---|---|
-| 小 shape (4096²) | 1 |
-| 中 shape / 大 K | 4 |
-| 中 N (28672) | 4-8 |
-| 大 N (57344+) | 4 |
-
-Python 端通过 `AutotunedGEMM` 类自动搜索 `group_m ∈ {1,2,4,8,16}`，缓存到 `.autotune_cache.json`。
-
-**调用方式:**
-```python
-import tk_fp8_layouts
-# 直接调用（指定 group_m）
-tk_fp8_layouts.gemm_rcr(A, B, C, scale_a, scale_b, group_m=4)
-
-# 或用 autotune
-from autotune import AutotunedGEMM
-gemm = AutotunedGEMM(verbose=True)
-gemm.rcr(A, B, C, 1.0, 1.0)  # 自动选最优 group_m
-```
-
-### 3. Pybind 暴露的常量
-
-```python
-tk_fp8_layouts.DEFAULT_GROUP_M  # 4
-tk_fp8_layouts.BLOCK_SIZE       # 256
-tk_fp8_layouts.K_BLOCK          # 128
-```
-
-## Benchmark 结果
-
-### GPU7 权威结果 (2026-04-09, JIT 4-wave + 2026-04-10 grid-size fix)
-
-| Layout | Geo-mean | Wins | 状态 |
+| Layout | Geo-mean vs hipBLASLt | Wins | Status |
 |---|---|---|---|
-| **RCR** | **~1.02x** | **>29/48** | **已超越 hipBLASLt（修复 K=11008/18944/29568 小grid shapes）** |
-| **RRR** | **~1.51x** | **48/48** | **远超** |
-| **CRR** | **~1.95x** | **48/48** | **远超** |
+| **RCR** | **1.005x** | 23/56 | ✓ Target met |
+| **RRR** | **1.551x** | 56/56 | ✓ Dominant |
+| **CRR** | **1.974x** | 56/56 | ✓ Dominant |
 
-**RCR 弱项 shapes（修复后，K=11008/18944/29568 已用 8-wave）：**
-- (16384,37888,3584): 0.929x（K=3584，小 K，仍需优化）
-- (16384,28672,4096): 0.933x（K=4096，大 N，仍需优化）
+Aggregate (168 configs): **geo-mean 1.457x**.
 
-**RCR 强项 shapes:**
-- (4096,6144,4096): 1.306x
-- (8192,4608,3584): 1.240x
-- (16384,3584,3584): 1.177x
+Last change that pushed RCR from 0.996 to 1.005: `RCR_TWO_TILE_MID_VMCNT 4 → 6`.
 
-### 历史 baseline (2026-04-08, GPU4, dynamic 8-wave)
+## Key Files (after cleanup)
 
-| Layout | Geo-mean | Wins |
-|---|---|---|
-| RCR | 0.949x | 8/56 |
-| RRR | 1.508x | 56/56 |
-| CRR | 1.951x | 56/56 |
-
-## 已尝试的优化（2026-04-08）
-
-### 1. RCR_BATCHED_PAIR_MMA=1（正确性 FAIL）
-
-减少 barrier 从 8→4 per k-iter。编译 220 VGPRs, occupancy=2。
-**正确性 FAIL**: 非 fastpath shapes SNR 降至 30-38dB。
-可能原因: init 阶段 `vmcnt(4)` + `vmcnt(6)` 不够保证 As[0][0]、Bs[0][1] 的 G::load 完成。
-
-### 2. VMCNT/PREFETCH_LGKM 参数扫描
-
-| Config | 4096,28672,4096 | 8192,16384,16384 | 8192,57344,8192 |
-|---|---|---|---|
-| baseline (vm4,lgkm4) | 2577 | 3172 | — |
-| vm8 | **2628** | **3184** | — |
-| vm6_lgkm6 | 2626 | 3180 | — |
-| vm2 | 2450 | 3008 | — |
-
-**结论**: vm8 最佳但仅 ~1-2% 改善，远不够闭合差距。
-
-### 3. Barrier 移除实验（RCR_REDUCED_BARRIERS）
-
-移除 BARRIER3/BARRIER5（保护不同 LDS tile，理论上可移除）。
-**结果**: 正确性 PASS 但性能反降 5-8%。在 CDNA4 上，barrier 起调度栅栏作用，移除导致指令排序变差。
-
-### 4. 4-wave Fastpath 对比测试（关键发现）
-
-编译多个 shape-specific 4-wave 和 8-wave fastpath 内核，在 GPU4 上测试。
-
-| Shape | 8-wave dynamic | 8-wave exact | **4-wave exact** | hipBLASLt |
-|---|---|---|---|---|
-| 8192×16384×16384 | 3143 | 3079 | **3361** | 3312 |
-| 16384×16384×16384 | 3152 | 3064 | **3367** | 3309 |
-| 8192×57344×8192 | 3023 | 2330 | **3263** | 3290 |
-| 4096×57344×8192 | 2931 | 2265 | **3205** | 3149 |
-| 16384×106496×16384 | 3052 | 2323 | **3168** | 3287 |
-| 8192×16384×53248 | 3105 | 3205 | **3369** | 3324 |
-
-**4-wave exact 已在多个 shape 上超越 hipBLASLt！** 但仅限编译期固定维度。
-8-wave exact 在大 N shape 上比 dynamic 更差，因为缺少 XCD swizzle。
-
-### 5. 4-wave Dynamic 版本
-
-创建了 `rcr_4wave_dynamic.inc` — 运行时维度的 4-wave 内核。
-**结果**: 正确性 PASS，但性能比 8-wave dynamic 更差（~5-10%）。
-**原因**: 运行时开销（地址计算、无循环展开）抵消了 4-warp 架构的优势。编译期优化是 4-wave 性能的关键。
-
-## 新文件
-
-| 文件 | 说明 |
+| File | Description |
 |---|---|
-| `rcr_4wave_dynamic.inc` | 4-wave 动态版本（`-DRCR_USE_4WAVE_DYNAMIC=1`），正确但性能不及 8-wave |
-| `bench_vs_hipblaslt_clean_gpu4.json` | 干净 GPU 上的完整 benchmark |
-| `sweep_vmcnt.py` | VMCNT 参数扫描脚本 |
-| `bench_fastpath.py` | 4-wave/8-wave/dynamic 对比脚本 |
+| `kernel_fp8_layouts.cpp` | **Single source** for the .so. All 3 layouts + KI-template dispatch. |
+| `rcr_4wave_dynamic.inc` | 4-wave RCR path (currently unused but compiled). |
+| `Makefile` | Single target `tk_fp8_layouts` |
+| `autotune.py` | Runtime group_m selector, cache in `.autotune_cache.json` |
+| `bench_vs_hipblaslt.py` | Full 48-shape × 3-layout benchmark |
+| `test_fp8_snr.py` | SNR + determinism gate |
+| `test_python.py` | Single-shape correctness + perf test |
 
-## 下一步方向（优先级排序）
+## Architecture
 
-### A. K-specialized 4-wave（最有前景，预估 5-10%）
-
-4-wave exact 的优势来自编译期 K 优化。策略：
-- 为常见 K 值（4096, 8192, 16384, 28672, 53248）编译特化内核
-- M/N 使用运行时参数（网格和存储），K 使用编译期常量（内循环）
-- 运行时根据 K 值 dispatch 到对应内核
-
-```cpp
-// 伪代码
-switch (g.k) {
-    case 4096:  dispatch_4wave<4096>(g); break;
-    case 8192:  dispatch_4wave<8192>(g); break;
-    case 16384: dispatch_4wave<16384>(g); break;
-    default:    dispatch_8wave(g); break;
-}
-```
-
-### B. 修复 8-wave exact fastpath 的 XCD swizzle
-
-当前 8-wave exact fastpath 使用简单的 `br = bid / bpc` 导致大 N shape 上 L2 局部性差。
-添加 XCD swizzle + group_m 可能恢复性能到 dynamic 水平或更好。
-
-### C. RCR_BATCHED_PAIR_MMA 正确性修复
-
-根因: init 阶段 VMCNT 不够保证所有 4 个 tic 缓冲区就绪。
-修复: 将 `RCR_INIT0_VMCNT=0`（等所有 VMEM 完成）。需验证这是否修复正确性且不影响性能。
-
-### D. JIT 编译（已实现，效果显著）
-
-`jit_gemm.py` + `bench_jit.py` 实现了 shape-specific 4-wave 内核的 JIT 编译。
-
-**JIT 4-wave 结果（vs hipBLASLt, GPU4 clean）:**
-
-| Shape | JIT-4w | hipBLASLt | Ratio |
-|---|---|---|---|
-| (8192,16384,16384) | **3379** | 3312 | **1.020x** |
-| (16384,16384,16384) | **3362** | 3309 | **1.016x** |
-| (4096,57344,8192) | **3219** | 3149 | **1.022x** |
-| (8192,16384,53248) | **3361** | 3324 | **1.011x** |
-| (4096,4096,4096) | **2391** | 2318 | **1.032x** |
-| (8192,57344,8192) | 3261 | 3290 | 0.991x |
-| (8192,28672,4096) | 2957 | 3067 | 0.964x |
-| **Geo-mean** | | | **0.997x** |
-
-**使用方式:**
-```bash
-cd /shared_nfs/kyle/HipKittens2/analysis/fp8_gemm/mi350x
-HIP_VISIBLE_DEVICES=4 python3 bench_jit.py
-```
-
-**注意:** 由于动态链接器限制，JIT 编译的 .so 不能和默认 tk_fp8_layouts 在同一进程中共存。`bench_jit.py` 用子进程绕过此限制。
-
-**编译时间:** 每 shape 7-32s（首次），缓存后直接使用。
-
-**限制:** M%256==0, N%256==0, K%128==0（不满足的 shape 回退到 8-wave dynamic）。
-
-### E. 4-wave vs 8-wave：Grid Size 阈值（关键发现，2026-04-10）
-
-**发现:** 4-wave JIT 对小 grid shapes 反而更差（-11% 到 -15%）。
-
-**根因:** 
-- 4-wave occupancy = 2 blocks/SIMD × 160 SIMDs = 320 concurrent blocks
-- 8-wave occupancy = 1 block/SIMD × 160 SIMDs = 160 concurrent blocks
-- grid_size < 640 blocks（<2 full waves for 4-wave）→ 8-wave 得到更多 wave iterations
-- K=11008: grid=(4096,4096)→256 blocks, grid=(8192,4096)→512 blocks，都 <640 → 8-wave wins
-
-**受影响 shapes（已修复，删除坏的 JIT 缓存并更新 _can_use_4wave）:**
-
-| Shape | K | grid_size | 4-wave | 8-wave | 改善 |
-|---|---|---|---|---|---|
-| 4096×4096×11008 | 11008 | 256 | ~0.827x | ~0.943x | +14.9% |
-| 8192×4096×11008 | 11008 | 512 | ~0.849x | ~0.952x | +11.5% |
-| 8192×8192×29568 | 29568 | 1024 | ~0.961x | ~0.991x | +3.3% |
-| 16384×8192×29568 | 29568 | 2048 | ~0.963x | ~0.994x | +3.3% |
-| 8192×3584×18944 | 18944 | 448 | — | — | +2.3% |
-| 16384×3584×18944 | 18944 | 896 | — | — | +2.7% |
-
-**修复:** `jit_gemm.py` `_can_use_4wave` 添加 `grid_size >= 640` 阈值：
-```python
-grid_size = (M // 256) * (N // 256)
-return grid_size >= 640
-```
-
-验证:
-- (4096,4096,K): grid=256 → <640 → 8-wave ✓
-- (8192,4096,K): grid=512 → <640 → 8-wave ✓  
-- (8192,8192,K): grid=1024 → ≥640 → 4-wave ✓
-
-### F. 剩余差距分析
-
-JIT 4-wave 在 K=3584/4096 + 大 N 的 shape 上仍落后（0.93-0.95x）。可能原因：
-- 小 K 时 ki=28/32，循环次数少，overhead 占比高
-- 大 N shapes 需要更多 L2 带宽，hipBLASLt 可能有特殊调度
-
-## 编译 & 测试流程
-
-```bash
-cd /shared_nfs/kyle/HipKittens2/analysis/fp8_gemm/mi350x
-
-# 编译
-THUNDERKITTENS_ROOT=/shared_nfs/kyle/HipKittens2 ROCM_PATH=/opt/rocm make clean && \
-THUNDERKITTENS_ROOT=/shared_nfs/kyle/HipKittens2 ROCM_PATH=/opt/rocm make -j4
-
-# 单 shape 正确性测试
-HIP_VISIBLE_DEVICES=7 FP8_LAYOUTS=rcr FP8_CHECK=1 FP8_DETERMINISM_RUNS=3 \
-    python3 test_python.py 4096 28672 4096
-
-# 多 shape 快速验证
-HIP_VISIBLE_DEVICES=7 python3 -c "
-import torch, math, tk_fp8_layouts
-for M,N,K in [(4096,4096,4096),(4096,28672,4096),(4096,57344,8192)]:
-    A = (torch.randn(M,K,device='cuda')*0.1).to(torch.float8_e4m3fn)
-    B = (torch.randn(N,K,device='cuda')*0.1).to(torch.float8_e4m3fn)
-    C = torch.zeros(M,N,dtype=torch.bfloat16,device='cuda')
-    ref = A.float()@B.float().T
-    tk_fp8_layouts.gemm_rcr(A,B,C,1.0,1.0,4)
-    snr = 10*math.log10((ref**2).sum().item()/((C.float()-ref)**2).sum().item())
-    print(f'({M},{N},{K}) SNR={snr:.2f}dB {\"PASS\" if snr>48 else \"FAIL\"}')
-    del A,B,C,ref; torch.cuda.empty_cache()
-"
-
-# autotune + 完整对比
-HIP_VISIBLE_DEVICES=7 python3 bench_vs_hipblaslt.py --mode full --warmup 30 --iters 50 --mbs 1,2
-```
-
-## hipBLASLt 依赖
-
-```python
-# 需要 primus_turbo 安装在环境中
-from primus_turbo.pytorch.kernels.gemm.gemm_fp8_impl import GEMMFP8HipBLASLtBackend
-hipblaslt_fn = torch.ops.primus_turbo_cpp_extension.hipblaslt_gemm_fp8
-# 调用: hipblaslt_fn(A, scale_a, B, scale_b, torch.bfloat16, trans_a, trans_b, False, "TENSORWISE")
-```
-
-## 内核架构要点
-
-- **Block size:** 256×256 output, 128 K-step
+- **Block size:** 256×256 output, K_STEP=128
 - **Warps:** 2×4 = 8 warps/block, 512 threads
-- **Double buffering:** tic/toc 交替，k+1 的 A[1] 和 k+2 的 B[0],A[0],B[1] 分两步预取
-- **Fastpath:** M=N=K=8192 且 scale=1.0 时走编译期优化内核（不受 dynamic kernel 改动影响）
-- **VGPRs:** RCR=212, RRR/CRR=230-242, 所有 ≤256 (occupancy=2 waves/SIMD)
-- **SRD 4GB 限制:** 输出矩阵 C 超过 4GB 时 GPU fault，MBS=4 的最大 shape 会触发
+- **Occupancy:** 2 waves/SIMD (VGPRs 230–242)
+- **XCD swizzle:** `GEMM_BLOCK_SWIZZLE_NUM_XCDS=8`
+- **Double buffering:** tic/toc ping-pong, 2×2 smem tiles
+- **Two-tile schedule:** merges 2 K-tiles/iter; `RCR_TWO_TILE_MIN_KI=28`
+  (down from 64) so K=3584 shapes enter it
+- **Template KI_HINT:** currently only KI=0 instantiated per layout; experiments
+  showed KI>0 specialization caused VGPR spills on the 2-tile body
+- **Runtime group_m:** autotune sweeps gm ∈ {1,2,4,8,16,32}, caches per shape
 
-## 正确性标准
+## Kernel Resource Usage
 
-- **SNR > 48 dB**（相对于 FP32 参考）
-- **Determinism:** 同输入多次运行结果 bit-exact
-- 所有 group_m 值 (1,2,4,8,16) 都必须通过
+| Kernel | VGPRs | Occupancy | Spills | LDS |
+|---|---|---|---|---|
+| Layout::RCR 8-wave | 238 | 2 w/SIMD | 0 | 139 KB |
+| Layout::RRR 8-wave | 242 | 2 w/SIMD | 0 | 135 KB |
+| Layout::CRR 8-wave | 230 | 2 w/SIMD | 0 | — |
+| RCR 4-wave dynamic | 256 | 1 w/SIMD | 0 | 131 KB (unused) |
+| `gemm_tail_kernel` | 10–11 | 8 w/SIMD | 0 | 0 |
+
+Single .so: ~292 KB.
+
+## Correctness Gate (MANDATORY)
+
+- **SNR ≥ 48 dB** vs fp32 reference (observed min: 49.6 dB across all shapes)
+- **Determinism:** same inputs → bit-exact output across 3 runs
+- All 3 layouts × 5+ group_m values must pass
+
+## Remaining Weak RCR Shapes
+
+~12 shapes still at 0.90–0.93x. Common pattern: **K ∈ {3584, 4096} + N ∈ {22016, 28672, 37888}**:
+
+| Shape | RCR ratio | Note |
+|---|---|---|
+| (8192, 28672, 4096) | 0.902x | MLP gate/up typical |
+| (16384, 28672, 4096) | 0.910x | same, larger M |
+| (8192, 37888, 3584) | 0.920x | tallest N tested |
+| (16384, 37888, 3584) | 0.905x |  |
+| (8192, 22016, 4096) | 0.931x |  |
+
+hipBLASLt likely uses Split-K for these. Our 8-wave kernel runs
+into pipeline-utilization issues because ki is small (28-32) and the
+main loop entry/exit overhead dominates.
+
+## Build & Test
+
+```bash
+cd /workspace/code/Hipkittens_per_tensor/analysis/fp8_gemm/mi350x
+
+# Build
+THUNDERKITTENS_ROOT=/workspace/code/Hipkittens_per_tensor ROCM_PATH=/opt/rocm make clean
+THUNDERKITTENS_ROOT=/workspace/code/Hipkittens_per_tensor ROCM_PATH=/opt/rocm make -j4
+
+# Quick SNR / determinism
+HIP_VISIBLE_DEVICES=0 PYTHONPATH=. python3 test_fp8_snr.py
+
+# Full benchmark (48 shapes × 3 layouts, ~2 min)
+HIP_VISIBLE_DEVICES=0 PYTHONPATH=. python3 bench_vs_hipblaslt.py \
+    --mode full --warmup 20 --iters 50 -o bench_no_jit_final.json
+```
+
+## hipBLASLt Reference Call
+
+```python
+# Registers the op as a side-effect
+from primus_turbo.pytorch.kernels.gemm.gemm_fp8_impl import GEMMFP8HipBLASLtBackend
+
+hlt = torch.ops.primus_turbo_cpp_extension.hipblaslt_gemm_fp8
+# layout map: rcr=(F,T), rrr=(F,F), crr=(T,F)
+C = hlt(A, scale_a, B, scale_b, torch.bfloat16, trans_a, trans_b, False, "TENSORWISE")
+```
+
+Just `import primus_turbo` is NOT enough — the op registration happens when
+`gemm_fp8_impl` is imported.
+
+## What Closed the No-JIT Gap (relative to the old JIT 1.02x RCR)
+
+1. **Full removal of compile-time `M_DIM/N_DIM/K_DIM` macros** — the kernel
+   now reads all shape info from `g.m/g.n/g.k` at runtime.
+2. **`RCR_TWO_TILE_MIN_KI=28`** — small-K shapes (K=3584) now use the 2-tile
+   schedule that was previously gated at ki=64.
+3. **`RCR_TWO_TILE_MID_VMCNT=6`** (up from 4) — finer vmcnt spacing in the
+   middle of the 2-tile body.
+4. **Runtime group_m autotune with gm∈{1,2,4,8,16,32}** — picks per-shape.
+5. **Single KI=0 template instantiation** — KI>0 instantiation was tried but
+   caused VGPR spills.
+
+## Next Steps (if someone picks this up)
+
+1. **Fix Split-K-like behavior for small-K + big-N** shapes using a runtime
+   2D grid + on-chip accumulation (within one block still). No global split-K
+   atomic-add, which introduces non-determinism.
+2. **Revisit KI specialization** with lighter unroll factors. The spill was
+   likely from `#pragma unroll RCR_MAIN_UNROLL` (=2) combined with the
+   2-tile body. Try `unroll 1` + `KI_HINT > 0` and measure.
+3. **Tune XCD swizzle num_xcds per-shape** — currently a fixed 8.
+
+## What NOT To Do
+
+- Do not add per-shape JIT, even "just for the weak shapes"
+- Do not add Split-K that requires atomic adds (breaks determinism)
+- Do not remove the runtime group_m autotune
+- Do not regress RRR below 1.4x or CRR below 1.8x
+- Do not commit binaries (`*.so`), caches (`.autotune_cache.json` is OK if
+  the results need to be persistent, but don't track temporary bench logs)

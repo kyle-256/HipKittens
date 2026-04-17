@@ -234,7 +234,7 @@ __device__ __forceinline__ void load_full_rt(RT& dst, const ST& src) {
     }
 }
 
-__global__ __launch_bounds__(NT, 1)
+__global__ __launch_bounds__(NT, 2)
 void kernel(const layout_globals g) {
     int br, bc;
     gemm_compute_block_coords(blockIdx.x, g.bpr, g.bpc, g.group_m, br, bc);
