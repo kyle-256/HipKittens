@@ -103,6 +103,70 @@ def preshuffle_scale_matrix_mfma16(scale_exp):
     return shuffled.view(padded_rows // 32, padded_k_blocks * 32)
 
 
+def preshuffle_scale_matrix_mfma16_v2(scale_exp, pack_count):
+    """R20 V2 layout: interleave `pack_count` consecutive row_groups within
+    each wave-tile slab so that the per-(lane, k_pair) dword group becomes
+    contiguous, enabling buffer_load_b{64,128} on the kernel side.
+
+    Per-slab byte order (outer -> inner stride):
+        slab(pc*32 rows) -> k_pair(K/8) -> lane_kblk(4) -> lane_nonk(16)
+            -> pack(pack_count) -> byte_in_dword(4 = k_phase_lo*2 + half)
+
+    Strides (bytes), for parameter pack_count = PC:
+        slab            = PC * 32 * padded_k_blocks
+        k_pair          = PC * 256
+        lane_kblk       =  PC *  64
+        lane_nonk       =  PC *   4
+        pack            =        4
+        byte_in_dword   =        1   (encodes (k_phase_lo, half) like V1)
+
+    The 4 bytes within one (slab, k_pair, lane_kblk, lane_nonk, pack)
+    dword are identical to V1's 32-bit pack for the corresponding
+    physical row_group = slab * pack_count + pack.
+
+    Consumer can issue a single buffer_load_b{32 * PC} at byte offset
+        slab_base + k_pair * (PC*256) + lane_kblk * (PC*64) + lane_nonk * (PC*4)
+    to retrieve all `pack_count` dwords for the wave-tile in one VMEM op.
+    For PC=4 this matches the R19 spec (k_pair*1024 + lane_kblk*256 +
+    lane_nonk*16); for PC=2 it yields k_pair*512 + lane_kblk*128 +
+    lane_nonk*8 enabling buffer_load_b64.
+    """
+    if pack_count <= 0:
+        raise ValueError("pack_count must be positive")
+    rows, k_blocks_local = scale_exp.shape
+    padded_rows = math.ceil(rows / 32) * 32
+    padded_k_blocks = math.ceil(k_blocks_local / 8) * 8
+    row_groups = padded_rows // 32
+    if row_groups % pack_count != 0:
+        # Pad row_groups up to a multiple of pack_count.
+        row_groups = math.ceil(row_groups / pack_count) * pack_count
+        padded_rows = row_groups * 32
+    num_slabs = row_groups // pack_count
+
+    raw = torch.full(
+        (padded_rows, padded_k_blocks),
+        0x7F,
+        dtype=torch.uint8,
+        device=scale_exp.device,
+    )
+    raw[:rows, :k_blocks_local] = encode_scale_matrix_raw(scale_exp)
+
+    # raw[r, k] with r = (slab * PC + pack) * 32 + h * 16 + lane_nonk
+    #              and k = k_pair * 8 + k_phase_lo * 4 + lane_kblk
+    # View raw as [num_slabs, PC, 2(h), 16(ln), num_kpairs, 2(kp), 4(lk)].
+    kp_count = padded_k_blocks // 8
+    rows_view = raw.view(num_slabs, pack_count, 2, 16, kp_count, 2, 4)
+
+    # Permute so byte ordering becomes:
+    #   [slab, kpair, lk, ln, pack, kp, h]
+    # which gives the V2 strides described above.
+    shuffled = rows_view.permute(0, 4, 6, 3, 1, 5, 2).contiguous()
+
+    # Per-slab flat byte count:
+    #   PC * 32 (rows) * padded_k_blocks (cols) bytes
+    return shuffled.view(num_slabs, pack_count * 32 * padded_k_blocks)
+
+
 def expand_row_scales(scale_exp, cols):
     return torch.pow(2.0, scale_exp.float()).repeat_interleave(32, dim=1)[:, :cols]
 

@@ -1718,6 +1718,144 @@ __device__ __forceinline__ fp8e8m0_4 load_scale_pair_pack_16x128_preshuffled_fro
     );
 }
 
+// ============================================================================
+// R20 milestone-1: preshuffle V2 layout reference consumer
+// ----------------------------------------------------------------------------
+// Per-slab byte order (outer -> inner stride):
+//   slab(pc*32 rows) -> k_pair(K/8) -> lane_kblk(4) -> lane_nonk(16)
+//       -> pack(pack_count) -> byte_in_dword(4 = k_phase_lo*2 + half)
+// Strides for pack_count = PC:
+//   slab           = PC * 32 * padded_k_blocks
+//   k_pair         = PC * 256
+//   lane_kblk      = PC *  64
+//   lane_nonk      = PC *   4
+//   pack           =        4
+// One b128 / b64 fetches all `pack_count` dwords for the wave-tile in a
+// single VMEM op. `MXFP8_RCR_PRESHUFFLE_V2_ENABLE` only gates the verifier
+// kernel; the helpers themselves are always compiled in so the production
+// fast path remains untouched.
+// ============================================================================
+
+#ifndef MXFP8_RCR_PRESHUFFLE_V2_ENABLE
+#define MXFP8_RCR_PRESHUFFLE_V2_ENABLE 0
+#endif
+
+template<int PACK_COUNT>
+__device__ __forceinline__ uint32_t preshuffle_v2_lane_byte_offset(
+    int lane_kblk, int lane_nonk)
+{
+    return static_cast<uint32_t>(lane_kblk) * (PACK_COUNT * 64u)
+         + static_cast<uint32_t>(lane_nonk) * (PACK_COUNT *  4u);
+}
+
+template<int PACK_COUNT>
+__device__ __forceinline__ uint32_t preshuffle_v2_kpair_byte_offset(
+    int k_pair, int lane_kblk, int lane_nonk)
+{
+    return static_cast<uint32_t>(k_pair) * (PACK_COUNT * 256u)
+         + preshuffle_v2_lane_byte_offset<PACK_COUNT>(lane_kblk, lane_nonk);
+}
+
+// b128 variant: reads 4 contiguous dwords (pack_count=4) covering the entire
+// wave-tile for one (k_pair, lane). Decomposes into 4 fp8e8m0_4 packs in
+// slab order. With slab packing of {a0p0, a1p0, a0p1, a1p1} the result
+// matches V1's a0_scale_packs[0], a1_scale_packs[0], a0_scale_packs[1],
+// a1_scale_packs[1].
+__device__ __forceinline__ void load_scale_quad_pack_16x128_preshuffled_v2_b128(
+    const uint8_t* slab_base,
+    int k_pair, int lane_kblk, int lane_nonk,
+    fp8e8m0_4& out0, fp8e8m0_4& out1, fp8e8m0_4& out2, fp8e8m0_4& out3)
+{
+    const uint32_t byte_offset = preshuffle_v2_kpair_byte_offset<4>(
+        k_pair, lane_kblk, lane_nonk);
+    const __uint128_t raw =
+        *reinterpret_cast<const __uint128_t*>(slab_base + byte_offset);
+    out0 = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(raw      ));
+    out1 = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(raw >> 32));
+    out2 = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(raw >> 64));
+    out3 = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(raw >> 96));
+}
+
+// b64 variant: reads 2 contiguous dwords (pack_count=2) for B-side wave-tile.
+__device__ __forceinline__ void load_scale_pair_pack_16x128_preshuffled_v2_b64(
+    const uint8_t* slab_base,
+    int k_pair, int lane_kblk, int lane_nonk,
+    fp8e8m0_4& out0, fp8e8m0_4& out1)
+{
+    const uint32_t byte_offset = preshuffle_v2_kpair_byte_offset<2>(
+        k_pair, lane_kblk, lane_nonk);
+    const uint64_t raw =
+        *reinterpret_cast<const uint64_t*>(slab_base + byte_offset);
+    out0 = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(raw      ));
+    out1 = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(raw >> 32));
+}
+
+#if MXFP8_RCR_PRESHUFFLE_V2_ENABLE
+// Standalone verifier kernel: for each lane in a wave, compares V2-loaded
+// packs (b128 for A pc=4, b64 for B pc=2) against V1-loaded packs (per
+// row_group). Atomically increments `mismatch_count` on disagreement. Used
+// by `verify_v2_consumer` pybind entry to satisfy the milestone-1 256^3
+// correctness gate without touching the production hot path.
+__global__ void verify_preshuffle_v2_consumer_kernel(
+    _gl_scale v1_a, _gl_scale v1_b,
+    const uint8_t* __restrict__ v2_a, // V2 A layout (pack_count=4)
+    const uint8_t* __restrict__ v2_b, // V2 B layout (pack_count=2)
+    int num_slabs_a, int num_slabs_b,
+    int num_kpairs,
+    int padded_k_blocks,
+    unsigned int* __restrict__ mismatch_count)
+{
+    const int slab_a = blockIdx.x;
+    const int slab_b = blockIdx.y;
+    if (slab_a >= num_slabs_a || slab_b >= num_slabs_b) return;
+    if (threadIdx.x >= 64) return;
+    const int lane_nonk = threadIdx.x % 16;
+    const int lane_kblk = threadIdx.x / 16;
+
+    constexpr int PC_A = 4;
+    constexpr int PC_B = 2;
+    const size_t slab_bytes_a = static_cast<size_t>(PC_A) * 32u * padded_k_blocks;
+    const size_t slab_bytes_b = static_cast<size_t>(PC_B) * 32u * padded_k_blocks;
+    const uint8_t* slab_a_ptr = v2_a + slab_a * slab_bytes_a;
+    const uint8_t* slab_b_ptr = v2_b + slab_b * slab_bytes_b;
+
+    for (int k_pair = 0; k_pair < num_kpairs; ++k_pair) {
+        // V2 b128 fetch, A side.
+        fp8e8m0_4 a_v2[4];
+        load_scale_quad_pack_16x128_preshuffled_v2_b128(
+            slab_a_ptr, k_pair, lane_kblk, lane_nonk,
+            a_v2[0], a_v2[1], a_v2[2], a_v2[3]);
+
+        // V2 b64 fetch, B side.
+        fp8e8m0_4 b_v2[2];
+        load_scale_pair_pack_16x128_preshuffled_v2_b64(
+            slab_b_ptr, k_pair, lane_kblk, lane_nonk,
+            b_v2[0], b_v2[1]);
+
+        #pragma unroll
+        for (int pack = 0; pack < PC_A; ++pack) {
+            const int row_group_a = slab_a * PC_A + pack;
+            const fp8e8m0_4 ref =
+                load_scale_pair_pack_16x128_preshuffled(
+                    v1_a, row_group_a * 32, k_pair, lane_nonk, lane_kblk);
+            if (std::bit_cast<uint32_t>(ref) != std::bit_cast<uint32_t>(a_v2[pack])) {
+                atomicAdd(mismatch_count, 1u);
+            }
+        }
+        #pragma unroll
+        for (int pack = 0; pack < PC_B; ++pack) {
+            const int row_group_b = slab_b * PC_B + pack;
+            const fp8e8m0_4 ref =
+                load_scale_pair_pack_16x128_preshuffled(
+                    v1_b, row_group_b * 32, k_pair, lane_nonk, lane_kblk);
+            if (std::bit_cast<uint32_t>(ref) != std::bit_cast<uint32_t>(b_v2[pack])) {
+                atomicAdd(mismatch_count, 1u);
+            }
+        }
+    }
+}
+#endif // MXFP8_RCR_PRESHUFFLE_V2_ENABLE
+
 __device__ __forceinline__ void store_bf16_scalar(const _gl_bf16& dst, int row, int col, float value) {
     dst[coord<>(row, col)] = base_types::convertor<bf16, float>::convert(value);
 }
@@ -4991,6 +5129,50 @@ PYBIND11_MODULE(tk_mxfp8_layouts, m) {
         &layout_globals::a, &layout_globals::b,
         &layout_globals::a_scale, &layout_globals::b_scale,
         &layout_globals::c);
+
+#if MXFP8_RCR_PRESHUFFLE_V2_ENABLE
+    m.def("verify_preshuffle_v2_consumer", [](
+        pybind11::object v1_a_obj, pybind11::object v1_b_obj,
+        pybind11::object v2_a_obj, pybind11::object v2_b_obj,
+        int padded_k_blocks,
+        int num_slabs_a, int num_slabs_b,
+        int num_kpairs)
+    {
+        uint64_t v1_a_ptr = v1_a_obj.attr("data_ptr")().cast<uint64_t>();
+        uint64_t v1_b_ptr = v1_b_obj.attr("data_ptr")().cast<uint64_t>();
+        uint64_t v2_a_ptr = v2_a_obj.attr("data_ptr")().cast<uint64_t>();
+        uint64_t v2_b_ptr = v2_b_obj.attr("data_ptr")().cast<uint64_t>();
+
+        auto v1_a_shape = v1_a_obj.attr("shape").cast<pybind11::tuple>();
+        const int v1_a_rows = pybind11::cast<int>(v1_a_shape[0]);
+        const int v1_a_cols = pybind11::cast<int>(v1_a_shape[1]);
+        auto v1_b_shape = v1_b_obj.attr("shape").cast<pybind11::tuple>();
+        const int v1_b_rows = pybind11::cast<int>(v1_b_shape[0]);
+        const int v1_b_cols = pybind11::cast<int>(v1_b_shape[1]);
+
+        _gl_scale gA(reinterpret_cast<fp8e8m0*>(v1_a_ptr), 1, 1, v1_a_rows, v1_a_cols);
+        _gl_scale gB(reinterpret_cast<fp8e8m0*>(v1_b_ptr), 1, 1, v1_b_rows, v1_b_cols);
+
+        unsigned int* d_mismatch = nullptr;
+        hipMalloc(&d_mismatch, sizeof(unsigned int));
+        hipMemset(d_mismatch, 0, sizeof(unsigned int));
+
+        dim3 grid(num_slabs_a, num_slabs_b, 1);
+        dim3 block(64, 1, 1);
+        verify_preshuffle_v2_consumer_kernel<<<grid, block>>>(
+            gA, gB,
+            reinterpret_cast<const uint8_t*>(v2_a_ptr),
+            reinterpret_cast<const uint8_t*>(v2_b_ptr),
+            num_slabs_a, num_slabs_b,
+            num_kpairs, padded_k_blocks,
+            d_mismatch);
+        hipDeviceSynchronize();
+        unsigned int h_mismatch = 0;
+        hipMemcpy(&h_mismatch, d_mismatch, sizeof(unsigned int), hipMemcpyDeviceToHost);
+        hipFree(d_mismatch);
+        return h_mismatch;
+    });
+#endif // MXFP8_RCR_PRESHUFFLE_V2_ENABLE
 
     m.def("diag_load_transpose", [](pybind11::object b_obj, pybind11::object out_obj) {
         uint64_t b_ptr = b_obj.attr("data_ptr")().cast<uint64_t>();
