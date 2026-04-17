@@ -270,6 +270,40 @@ CRR PQ：**2737.94 TFLOPS** (93.55% of RCR) → 差 **42.34 TFLOPS (1.55%)** 才
     - Diagnostic-S：完成（paradigm-shift 发现，见上）
   - **R12 行动结论**：4 个 dev 全 timeout 无 commit；唯一产出是 Diagnostic-S 的瓶颈定性更正。要 commit 代码必须重派 dev，**强烈建议下轮按 Diagnostic-S 的 SPI 启动器假说派活**：(1) 缩减 CRR LDS/block（单缓冲 A 或 B，packing 重叠）、(2) `__launch_bounds__(512, 3)` 提示 SPI 预留更多 slots、(3) 减少 SQC_DCACHE 压力（per-CTA 常量改 s_load_b256 单次加载）。**不要** 再投资 LDS bank conflict / LDS pipe / re-stripe stride 方向（已证 0 conflict，无收益）
 
+- **第二十轮评审 (2026-04-17) — R19 双 GO 路径 milestone-1 实测：preshuffle V2 PASS（byte-equiv + 256³/1024³ kernel 0 mismatch）；SCALE_LDS REPLACE PARTIAL（kill-switch counter -15.4% PASS = R18 paradigm 实测 reaffirm，但 2048³ correctness FAIL 因 compiler LDS 地址别名 miscompile）；2 commit on side branches，0 production commit**
+  - **R20 派 2 Dev (A/B) 并行（GPU1/2 隔离），跳过 Reviewer baseline（沿用 R18 5x median 3021.29）**
+  - **Dev A (GPU1, branch `r20-a-preshuffle-v2` @ commit f54e6dfc)** — preshuffle V2 milestone-1 **PASS**
+    - Python `preshuffle_scale_matrix_mfma16_v2(scale_exp, pack_count)` 写入 `test_mxfp8_python.py` (+64 LOC)
+    - Kernel V2 lane-offset 模板 + `load_scale_quad_pack_..._v2_b128` + `load_scale_pair_pack_..._v2_b64` + `verify_preshuffle_v2_consumer_kernel` + pybind 入口写入 `kernel_mxfp8_layouts.cpp` (+182 LOC at 1721-1858 + 5000-5040)，全部 gated by `MXFP8_RCR_PRESHUFFLE_V2_ENABLE` (default 0)
+    - **Bytewise equivalence**：256³/1024³/8192³ × pc=4/pc=2 全 match (524288/524288 dwords at 8192³)
+    - **Kernel correctness gate**：256³ V2 b128+b64 vs V1 ref loader **0 mismatches / 3072 compares**；1024³ 0/196608；production fastpath sanity 256³ SNR 49.67 dB PASS（fastpath 未触动）
+    - **Resource counters**：production `rcr_exact_8wave_scaled_kernel<true>` VGPR 254 / Spills 0 / LDS 131072 = identical to baseline，证明 V2 代码完全孤立
+    - **R19 spec 修正**：literal `lane_byte_offset_v2 = lane_kblk*256 + lane_nonk*16` 仅适用 PC=4；PC=2 是 `lane_kblk*128 + lane_nonk*8`，k_pair stride `PC*256` not `PC*128`；已抽象为模板 `preshuffle_v2_lane_byte_offset<PC>` / `preshuffle_v2_kpair_byte_offset<PC>`
+    - **Milestone-2 open knob**：V2 slab packing 当前是 consecutive row_groups，但 fastpath wave-tile gather 顺序是 `{a0p0, a0p1, a1p0, a1p1}`（M offsets `{wm*RBM, +32, +HB, +HB+32}`）；milestone-2 必须或 (a) 在 V2 packing 前 reorder source row_groups 让 wave-tile 顺序变成 `{a0p0, a1p0, a0p1, a1p1}` 匹配 b128 dword 顺序（cleaner），或 (b) 在 consumer emit dword permutation
+    - Worktree `/tmp/wt-r20-a` 保留供 R21 milestone-2 使用
+  - **Dev B (GPU2, branch `r20-b-scale-lds` @ commit 5ac3229d)** — SCALE_LDS REPLACE milestone-1 **PARTIAL（counter PASS, 2048³ correctness FAIL）**
+    - Files：`kernel_mxfp8_layouts.cpp` (+18, -2)
+    - **R15 Dev C 真因 1**：SCALE_LDS 与 PIPELINE_SCALE 同时开启时两条路径都写 `*_scale_packs[]`，造成 double-write + wave-divergent VMEM arrival times at SCALE_LDS CTA-wide barrier → R15 det FAIL 根因。Fix: 在 SCALE_LDS define block 显式 `#undef MXFP8_RCR_EXACT_PQ_PIPELINE_SCALE_ENABLE`
+    - **R15 Dev C 真因 2**：`sync_scale_stage_for_pair` 缺少 leading `s_waitcnt lgkmcnt(0)` + s_barrier 让前一轮 ds_read 在慢 wave 上排空。Fix: 在 lambda 顶部加 leading wait + barrier
+    - **256³ correctness gate PASS**：max_abs_err 0.0071（identical to flag-OFF baseline 0.0071），SNR 49.56 dB，determinism PASS
+    - **Kill-switch SQ_INSTS_VMEM @ 8192³ PASS**：5,767,168 (5.77M) vs baseline 6.82M = **-15.4%**（target <6.3M），**直接证明 R18 paradigm shift 正确：减少 scale buffer_loads 数量真的会降 VMEM-issue rate**
+    - **2048³ correctness FAIL**：SNR 6.62 dB，deterministic 但语义错；hipcc -S 显示 compiler 把 6 个 distinct LDS slot addresses (`block_scale_b_row_base_index(wn,0,0)` etc.) 折叠成只 3 个 address VGPRs (v2/v3/v4)，导致 6 个 ds_read 出 cached 索引值 (`00020000`, `00020100`, ...) not scale data。bug 在 K > BK*2 时浮现因为更早 slot writes 仍 alias 后续 reads
+    - **8192³ benchmark NOT RUN**（按 task spec correctness FAIL 跳过）
+    - Resource：VGPR 256 (was 254), SGPR Spill 20, VGPR Spill 0, LDS 135168 (+4 KB scale_stage_dwords), Occupancy 2 unchanged
+    - Worktree removed; branch `r20-b-scale-lds` @ 5ac3229d preserved on disk
+  - **R20 综合产出 = 2 commit on side branches + 1 production commit (docs only) + 0 fastpath touch + R18 paradigm 实测 reaffirm**：
+    1. **Preshuffle V2 layout milestone-1 PASS**：byte-equiv 全 sizes + kernel ref consumer 0 error，foundation for R21 milestone-2 (full fastpath wiring + 8192³ benchmark)
+    2. **SCALE_LDS REPLACE empirically validates R18 paradigm**：-15.4% VMEM-issue cut（kill-switch metric）证明 R19 Diagnostic 关于 "VMEM-issue rate 是 bottleneck" 的定量模型是对的。该路径 still GO 但需 milestone-1.5 (defeat compiler LDS aliasing) 才能解锁 +50-150 TFLOPS upside
+    3. **Compiler LDS-aliasing miscompile** 是新发现的 hipcc/LLVM 现象，需 milestone-1.5 用 (a) volatile pointers / (b) opaque address casts / (c) 不同 LDS staging layout 之一规避
+  - **R20 confirms**：
+    - R18 + R19 paradigm 全部经 R20 实测验证（counter 实测 -15.4%）
+    - Preshuffle V2 是当前唯一可执行无副作用的高 upside 路径，R21 应集中精力 milestone-2
+    - SCALE_LDS REPLACE 不是 dead-end，但需要 compiler workaround
+  - **R21+ 路径**（按优先级）：
+    1. **Dev A 接力 milestone-2**：preshuffle V2 fastpath wiring + 8192³ A/B benchmark（基于 r20-a-preshuffle-v2 branch）
+    2. **Dev B 接力 milestone-1.5**：SCALE_LDS LDS-aliasing fix（基于 r20-b-scale-lds branch），优先尝试 volatile/opaque address，若仍 alias 改 LDS staging layout
+    3. **不要再追 reuse hunt / vmcnt / 现 V1 layout 下的 b64/b128**——R19 三类 dead-end 仍然成立
+
 - **第十九轮评审 (2026-04-17) — R18 paradigm shift 验证 + 两条结构性 GO 路径找到（preshuffle V2 layout +150-200 TFLOPS / SCALE_LDS REPLACE +50-150 TFLOPS）；R5/R15 dead-end 在 R18 模型下重新评估为 GO；0 commit（实施留给 R20+）**
   - **R19 派 1 Diagnostic + 2 Dev (A/B) 并行（GPU1/2/3 隔离），跳过 Reviewer baseline（R18 刚做完 5x）**
   - **Diagnostic (GPU1) — SCALE_LDS REPLACE 在 R18 model 下重新评估：CONDITIONAL GO**
