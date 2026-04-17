@@ -315,6 +315,18 @@ Decider 提出 5 个 untested vectors, 3 个 in-session 可执行. 启动 3 个 
 
 **Round 5 净增**: 0 WIN, 0 gap reduction. 触发用户的 GOAL PIVOT 指令 (见文档顶部).
 
+## Round 7 (2026-04-17) — 3 parallel optimizers, all DEAD END / INFEASIBLE
+GOAL PIVOT 第二轮, 在 Round 6 methodology rule 下:
+- **Optimizer A** (STEP12_BR_LGKMCNT∈{0,2,4} sweep on 3 P1 shapes: 4096×32768×28672, 28672×4096×16384, 4096×28672×32768): **DEAD END**. Round 6 C 在 16384×4096×28672 上的 brlgk2 directionally-positive 信号**不泛化**. 9 个 variant 单 GPU 测量, 全部 -0.03 ~ -0.14pp (<<+0.6pp noise). brlgk0 是 default value.
+- **Optimizer B** (STATIC_XCD_REMAP on mega-M 128256×32768×4096): **DEAD END**. 实现 atomic-free static remap (each XCD owns N-strip of width bpc/NUM_XCDS=16, walks GROUP_M×16 tiles). 6 variant grid (baseline_dc/gm4/gm8 × static_xcd_remap{,_gm4,_gm8}): best STATIC variant -0.37pp vs baseline. 失败原因: **mega-M shape 是 A-bound, 不是 B-bound** — A traffic dominates (M=128256 vs N=32768), 缩 B working set 8x 反而损失 8x A reuse. 与 Round 4 PERSISTENT_XCD_QUEUE 同源结论, 进一步确认 mega-M 92.9% gap 是 register-pressure / occupancy 结构性 bound. Code 留在 `STATIC_XCD_REMAP=1` flag (default 0) 作为 documented dead-end.
+- **Optimizer C** (B-tile L2 prefetch via `__builtin_amdgcn_global_load_lds` on 4096×28672×32768 / 4096×32768×14336): **INFEASIBLE — premise wrong**. 现有 `emit_one_pf()` (line 466-472) **已经是** `__builtin_amdgcn_global_load_lds` 的 buffer-SRD 形式 (`llvm_amdgcn_raw_buffer_load_lds`, emits `BUFFER_LOAD_DWORDX4 lds:1`), 已 prefetch B `bt+2` look-ahead 直接进 LDS. 三种"扩展"方案都不可行: (1) 加 redundant 16B/thread 到 scratch LDS = 纯 VMEM duplication 在已 B-VMEM-bound 的端口上, 必退化; (2) bump look-ahead `bt+2` → `bt+3/4` 不是新机制只是常数, 且 LDS 双缓冲 +50% 超 160KB cap; (3) GLOBAL_LOAD_LDS 没有 discard sink mode (硬件强制写到 LDS dest). 未跑 bench, 25 min 提早终止, 0 文件创建. **重要文档**: future agents 不要再提 "L2 prefetch via global_load_lds" 这个 vector — 已 deployed.
+
+**Round 7 净增**: 0 WIN, 0 gap reduction. 5 轮饱和确认 (R2 ceiling + deep-LOSE分析员 + R4 + R5 + R6 + R7).
+**新教训** (扩展 Round 6 methodology):
+- mega-M shape 是 A-bound, 缩 B-locality 必失败 (Round 4 PERSISTENT_XCD_QUEUE + R7 STATIC_XCD_REMAP 双重证实)
+- `emit_one_pf` IS `__builtin_amdgcn_global_load_lds` (buffer-SRD form), B 已 bt+2 prefetch 进 LDS, 没有 "未利用的 prefetch 机制"
+- "Round 6 C 的 STEP12_BR_LGKMCNT=2 directionally-positive 信号" 是 single-shape 边际, 不可泛化
+
 ## Round 6 (2026-04-17) — 3 parallel optimizers, all DEAD END / MARGINAL (REVERTED)
 GOAL PIVOT 后第一轮, 直接攻 deep-LOSE shapes:
 - **Optimizer A** (4096×32768×128256 / compiler flags + L2 prefetch): **DEAD END**. gfx950 无 L2 prefetch instruction; igroup-lp 不可用; 单次 +0.29pp, 5-run 中位 -0.5pp (in noise).

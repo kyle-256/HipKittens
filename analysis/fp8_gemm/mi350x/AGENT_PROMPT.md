@@ -32,14 +32,14 @@
 - **大 K (≥14336) shapes** 是主战场: 该类的 gap 主要来自 LDS broadcast bandwidth 不足 + B tile reuse 效率低.
 - **mega-M shape 128256×32768×4096** 已被验证为 **register-pressure / MFMA-pipeline bound** (Round 4 PERSISTENT_XCD_QUEUE 实证), **不是 launch-bound**. 不要再尝试 dispatch 优化.
 
-### 推荐探索方向 (按可行性)
+### 推荐探索方向 (按可行性, Round 7 后更新)
 | 方向 | 风险 | 预期 | 备注 |
 |------|------|------|------|
 | **per-shape compiler flag** (LLVM 调度策略 per-K-bucket) | 低 | +0.5-2pp | 之前 ±0.4% 是 average, 单 deep-LOSE shape 可能更大 |
-| **per-shape K-loop unrolling** (UNROLL=8/16 仅 K≥14336) | 低 | +0.3-1.2pp | 之前测过有效, 现在重新算作改进 |
-| **B-tile L2 software prefetch** (针对 N≥28672 shape) | 中 | +0.5-2pp | 用 `__builtin_amdgcn_global_load_lds` 或 `s_prefetch_data` 提前把 B 拉进 L2 |
-| **K-loop epilogue 专项调优** (尾部 K 迭代 PF/barrier) | 中 | +0.5-1pp | 大 K shape 最后一组 K iter 的 barrier/VMCNT |
-| **static XCD-aware block_id remap** (mega-M shape, 不用 atomic) | 中 | +1-3pp on 1 shape | PERSISTENT_XCD 失败因 atomic 开销, static remap 无该问题 |
+| **per-shape K-loop unrolling** (UNROLL=8/16 仅 K≥14336) | 低 | +0.3-1.2pp | Round 6 B 在单 GPU 5-run 下证伪了 14336×4096×32768 上 UNROLL_K knob (within ±0.16pp). 仅可能在 K=128256 上还有 untested space |
+| ~~**B-tile L2 software prefetch**~~ | — | DEAD END | Round 7 C: `emit_one_pf` 已经是 `__builtin_amdgcn_global_load_lds`, B 已 bt+2 prefetch 进 LDS. 不是新 vector |
+| **K-loop epilogue 专项调优** (尾部 K 迭代 PF/barrier) | 中 | +0.5-1pp | 大 K shape 最后一组 K iter 的 barrier/VMCNT — 仅 STEP12_BR_LGKMCNT 测过, 还有 TAIL_BARRIER_VMCNT × shape 维度未覆盖 |
+| ~~**static XCD-aware block_id remap**~~ | — | DEAD END | Round 7 B: -0.37pp. mega-M 是 A-bound 不是 B-bound. 任何 dispatch/L2-locality 改动都不会有用 |
 | **MFMA_32X32X64_TILING** (大重构, ~1天 asm 重写) | 高 | +2-5pp on deep-LOSE | 唯一未试的内核级重构, AGPR 256→256 (per-warp 输出仍 128×128, 不省 AGPR), 但 K loop 调度自由度可能更高 |
 
 ## 项目位置
@@ -221,6 +221,17 @@
   - **EARLY_SCALE_PF (E)**: **BROKEN + no perf gain**. Compiler aliases `pf_*` and shadow `nxt_pf_*` to same VGPRs → race; baseline ASM already issues scale loads at iter top with ~512 cyc hiding > ~400 cyc VMEM latency, no untapped scheduling room. Code has `#error` guard if enabled. See `test_early_scale_pf.py`.
   - **F, G**: INFEASIBLE in single session.
   Triggered the user's GOAL PIVOT directive at the top of this file.
+- **Round 7 (2026-04-17, GOAL PIVOT 后第二轮)**: 3 parallel optimizers, all DEAD END / INFEASIBLE:
+  - **A** (STEP12_BR_LGKMCNT sweep on 3 P1 shapes 4096×32768×28672 / 28672×4096×16384 / 4096×28672×32768): DEAD END. Round 6 C 在 16384×4096×28672 上的 brlgk2 directionally-positive 信号**不泛化** — 9 variants 全部 -0.03~-0.14pp on GPU 1 (single-shot, warmup=200/iters=500). brlgk0 是 default value. brlgk knob 不再继续探索.
+  - **B** (STATIC_XCD_REMAP on mega-M 128256×32768×4096): DEAD END. Atomic-free static remap (each XCD owns N-strip width bpc/NUM_XCDS=16, walks GROUP_M×16 tiles). 6 variants × baseline_dc/gm{2,4,8} crossed with static_xcd_remap variants: best `_static_xcd_remap_gm4` at -0.37pp. **关键架构 finding**: mega-M shape **是 A-bound, 不是 B-bound** — A traffic dominates (M=128256 vs N=32768), 缩 B working set 8x 反而损失 8x A reuse. Round 4 PERSISTENT_XCD_QUEUE 失败 + Round 7 STATIC_XCD_REMAP 失败 双重证实: mega-M 92.9% 是 register-pressure / occupancy 结构性 bound, 任何 dispatch/L2-locality 改动都不可能有用. Code 留在 `STATIC_XCD_REMAP=1` flag (default 0) 作为 documented dead-end.
+  - **C** (B-tile L2 prefetch via `__builtin_amdgcn_global_load_lds` on P2 shapes): **INFEASIBLE — premise wrong**. **重要文档**: 现有 `emit_one_pf()` (line 466-472) **已经是** `__builtin_amdgcn_global_load_lds` 的 buffer-SRD 形式 (`llvm_amdgcn_raw_buffer_load_lds`, emits `BUFFER_LOAD_DWORDX4 lds:1`), 已 prefetch B `bt+2` look-ahead 直接进 LDS. 三种"扩展"全部不可行: (1) 加 redundant 16B/thread 到 scratch LDS = 纯 VMEM duplication 在已 B-VMEM-bound 端口上, 必退化; (2) bump look-ahead `bt+2` → `bt+3/4` 不是新机制只是常数, 且 LDS 双缓冲 +50% 超 160KB cap; (3) GLOBAL_LOAD_LDS 没有 discard sink mode (硬件强制写到 LDS dest). 25 min 提早终止, 0 文件创建. **未来 agents 不要再提 "L2 prefetch via global_load_lds" — 已 deployed**.
+  Round 7 net: 0 WIN, 0 gap reduction. 5 轮饱和 (R2/R4/R5/R6/R7) 全部 0 净增. 在 Round 6 methodology rule 下, 即使针对 P1/P2 (不仅 P0) 也无法找出 +1pp 改进.
+
+  **新增 dead-end vectors (Round 7)**:
+  - **STEP12_BR_LGKMCNT sweep on P1 shapes**: -0.03~-0.14pp (Round 6 C 信号 shape-specific, 不泛化)
+  - **STATIC_XCD_REMAP for mega-M (atomic-free)**: -0.37pp; 证实 mega-M 是 A-bound, 不是 B-bound, 任何 L2-locality 改动都不会有用
+  - **`__builtin_amdgcn_global_load_lds` 作为 "新" L2-prefetch 机制**: 已 deployed in `emit_one_pf` (buffer-SRD form) with `bt+2` look-ahead. 不是新 vector, 不要再提
+
 - **Round 6 (2026-04-17, GOAL PIVOT 后第一轮)**: 3 parallel optimizers, all DEAD END / MARGINAL (REVERTED):
   - **A** (4096×32768×128256 / compiler flags + L2 prefetch): DEAD END.
     - **gfx950 has NO L2 prefetch instruction**: `__builtin_amdgcn_s_prefetch_data` and `s_buffer_prefetch_data` are tagged `gfx12-insts` only (verified `BuiltinsAMDGPU.def`). Don't propose software L2 prefetch on this arch.

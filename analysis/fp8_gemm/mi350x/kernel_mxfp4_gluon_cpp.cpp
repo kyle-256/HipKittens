@@ -130,6 +130,14 @@ using namespace kittens;
 #ifndef PERSISTENT_XCD
 #define PERSISTENT_XCD 0
 #endif
+
+// STATIC_XCD_REMAP (Round 7, Optimizer B): atomic-free static bid->(m,n) remap
+// that constrains each XCD to a narrow N-strip of width (bpc / NUM_XCDS).
+// Within the XCD: GROUP_M m-tiles × n_per_xcd n-tiles tiled walk for L2 B-tile reuse.
+// Requires bpc % NUM_XCDS == 0 — falls back to default mapping otherwise.
+#ifndef STATIC_XCD_REMAP
+#define STATIC_XCD_REMAP 0
+#endif
 #ifndef PERSISTENT_GRID
 // Default: 8 XCDs * 38 CUs * 2 WGs/CU = 608.  MI355X has 304 CUs total.
 #define PERSISTENT_GRID 608
@@ -1788,13 +1796,49 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     if (bid >= total_blocks) return;
 #endif
 
+    int br, bc;
+#if STATIC_XCD_REMAP
+    // Round 7: atomic-free static remap.
+    // Each XCD owns a narrow N-strip of width n_per_xcd = bpc / NUM_XCDS.
+    // The original `bid` is a contiguous range in [xcd*pids_per_xcd, ..),
+    // length pids_per_xcd. We re-interpret it as a (M-stripe × n_per_xcd) walk:
+    //   inner_bid = bid - xcd * pids_per_xcd   (0..pids_per_xcd-1)
+    //   gid_m  = inner_bid / (GROUP_M * n_per_xcd)
+    //   in_gp  = inner_bid % (GROUP_M * n_per_xcd)
+    //   br     = gid_m*GROUP_M + (in_gp % gsm)
+    //   bc_loc = in_gp / gsm
+    //   bc     = xcd * n_per_xcd + bc_loc
+    // Falls back to default if bpc not divisible by NUM_XCDS or tile counts mismatch.
+    constexpr int n_per_xcd_const = (bpc) / NUM_XCDS;  // bpc is constexpr
+    if constexpr ((bpc) % NUM_XCDS == 0) {
+        const int xcd_pid_base = xcd * pids_per_xcd;
+        const int inner_bid = bid - xcd_pid_base;
+        const int g_m_size = GROUP_M * n_per_xcd_const;
+        const int gid_m = inner_bid / g_m_size;
+        const int in_gp = inner_bid - gid_m * g_m_size;
+        const int fpm = gid_m * GROUP_M;
+        const int gsm = (bpr - fpm < GROUP_M) ? (bpr - fpm) : GROUP_M;
+        br = fpm + (in_gp % gsm);
+        const int bc_loc = in_gp / gsm;
+        bc = xcd * n_per_xcd_const + bc_loc;
+    } else {
+        // Non-divisible fallback: default GROUP_M swizzle on full bid space
+        const int num_pig = GROUP_M * bpc;
+        const int gid = bid / num_pig;
+        const int fpm = gid * GROUP_M;
+        const int gsm = (bpr - fpm < GROUP_M) ? (bpr - fpm) : GROUP_M;
+        br = fpm + (bid % gsm);
+        bc = (bid % num_pig) / gsm;
+    }
+#else
     // GROUP_SIZE_M swizzle within XCD's block range
     const int num_pig = GROUP_M * bpc;
     const int gid = bid / num_pig;
     const int fpm = gid * GROUP_M;
     const int gsm = (bpr - fpm < GROUP_M) ? (bpr - fpm) : GROUP_M;
-    const int br = fpm + (bid % gsm);
-    const int bc = (bid % num_pig) / gsm;
+    br = fpm + (bid % gsm);
+    bc = (bid % num_pig) / gsm;
+#endif
     const int wm = warpid() / WARPS_N, wn = warpid() % WARPS_N;
 
     uint32_t so_a[PF_MPT], so_b[PF_MPT];
