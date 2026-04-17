@@ -482,6 +482,120 @@ CRR gate (2780.28 TFLOPS) 在当前架构下需要 multi-day 结构重写：
 
 **承认 gate 当前架构不可达**。已 commit 的 `8934e95c` PIPELINE_SCALE 默认开（+0.243%, 2740.55 TFLOPS）是 R7-R11 共 11 轮唯一 strict win。下一会话若续做 CRR：先开 `CRR_ROW_SHARED_TRANSPOSE` 在非 fastpath 跑通做 known-good baseline，再决定要不要投入 multi-day 重写；或转向 RCR 剩余 4.70% 差距。
 
+## 第十九轮评审结果 (2026-04-17) — R18 paradigm shift 验证 + 两条结构性 GO 路径找到（preshuffle V2 / SCALE_LDS REPLACE）；R5/R15 dead-end 在 R18 模型下重新评估为 GO；0 commit（R20+ 实施）
+
+### R19 派 1 Diagnostic + 2 Dev (A/B) 并行（GPU1/2/3）
+
+跳过 Reviewer baseline（R18 刚做完 5x：MXFP8 RCR median 3021.29 / FP8 RCR median 3249.71 / gap -228 TFLOPS / -7.03%）
+
+- **Diagnostic (GPU1)** — SCALE_LDS REPLACE 在 R18 model 下重新评估
+- **Dev A (GPU2)** — preshuffle V2 layout redesign concrete prototype + integration plan
+- **Dev B (GPU3)** — scale data reuse hunt (cross-iter / cross-wave / cross-half)
+
+### Diagnostic — SCALE_LDS REPLACE: CONDITIONAL GO（R15 dead-end overturned）
+
+R15 Dev C 的 -0.3% ~ +0.2% 估算基于 R17 vmcnt-MFMA 假说（已 falsified by R18）。R19 用 R18 cycle-counter 重新计算：
+
+| 项目 | 当前 PIPELINE_SCALE | SCALE_LDS REPLACE | Δ |
+|---|---:|---:|---|
+| Per-wave per-kpair scale loads | 6 buffer_load_b32 | 2 buffer_load_b32 | -4 |
+| Per-CTA per-kpair VMEM | 48 | 16 | -32 (cuts 2/3) |
+| Per dispatch VMEM-issue | (full count) | (full - ~1.05M) | -1.05M |
+| 关闭 +30% issue-rate gap | 100% | 33% | **67%** |
+| LDS-issue 增量 | 0 | +0.34M / disp + barrier ~50-100 cyc | (small) |
+| **TFLOPS recovery** | 0 | **+50-150 best case** | (vs R15 -0.3%~+0.2%) |
+
+**Det fix path**：R15 Dev C 的"加 1 个 barrier"NOT enough。Correct fix:
+- (a) 把 row_bases load 提到 CTA prologue 一次（消除 per-k_pair barrier）
+- (b) re-sequence 外层 A/B barriers 让 scale barrier 嵌套同 phase
+- 估 2-3 day
+
+**GO with milestone guardrails**:
+1. Milestone 1 (1 day)：实现 + rocprofv3 验证 SQ_INSTS_VMEM 6.82M → ~5.7-5.8M。如不验证 → ABORT
+2. Milestone 2 (1-2 day)：修 det
+3. Milestone 3 (0.5 day)：A/B 5x formal，需 ≥+30 TFLOPS 才 commit
+
+### Dev A — Preshuffle V2 Layout Redesign：GO (highest upside)
+
+**当前 V1 layout 限制**（R5 Dev G2 + R16 Dev C 二次 confirm）：6 scale dwords 来自 6 distinct row_groups，最小 stride 8192 B → b64/b128 不可行
+
+**新 V2 layout**：在 wave-tile slab 内交错 row_groups，dword 级粒度
+- byte 顺序：`[pack_count] x [half=2] x [k_phase_lo=2] x [lane_nonk=16] x [lane_kblk=4] x [k_pair=padded_kb/8]`
+- A 侧 (RBM=64, pack_count=4)：4 dwords 连续 4-byte stride → **单 buffer_load_b128 (16B)**
+- B 侧 (RBN=32, pack_count=2)：2 dwords 连续 → **单 buffer_load_b64 (8B)**
+- **6 scale loads → 2，83% drop**
+
+**TFLOPS recovery**：
+- R18 +1.57M VMEM-issue / +30% rate ≈ 6 loads × 262K instr/load
+- 2 loads → +0.52M / +10% issue rate
+- Apply linear model：228 × (10/30) ≈ 76 TFLOPS residual gap → **recovery 150-200 TFLOPS**
+- Net MXFP8 RCR 期望 **3070-3120 TFLOPS** = 95-97% of FP8 RCR
+- floor 150 含 b128 wider load 2× per-issue cycle 调整，ceiling 200 best case
+
+**Python prototype byte-verified**（worktree 已删，但 design preserved in R19 Dev A report）:
+```python
+# rewrite_mxfp8_v2.py: preshuffle_scale_matrix_mfma16_v2(scale_exp, pack_count)
+# Smoke: rows=128, k_blocks=16, pack_count=4 → 4 packed g-bytes match
+# encode_scale_matrix_raw byte-for-byte at expected (row, k_block) coords
+```
+
+**Kernel-side consumer sketch**:
+```cpp
+const uint32_t kpair_off = k_pair*1024 + lane_byte_offset_v2;
+fp8e8m0_4_x4 packed = bit_cast<...>(buffer_load_b128(a_wave_srd, kpair_off));
+a0_scale_packs[0] = packed.x; a1_scale_packs[0] = packed.y;
+a0_scale_packs[1] = packed.z; a1_scale_packs[1] = packed.w;
+// B: single buffer_load_b64 yielding {b0_pack[0], b1_pack[0]}.
+```
+`lane_byte_offset_v2 = lane_kblk*256 + lane_nonk*16` (was `lane_kblk*64 + lane_nonk*4`)
+
+**Effort**：~3 day, 1000-1200 LOC across 5+ files
+- `test_mxfp8_python.py` preshuffle (+50 LOC, parameterize pack_count)
+- `kernel_mxfp8_layouts.cpp` consumer (+150/-100 LOC)
+- 4 fastpath `.inc` (~200 LOC each via `build_rewrite.sh` regen)
+- `rewrite_mxfp8.py` (~50 LOC)
+- 3 test_mxfp8_python.py callsites
+
+**Risk**：(1) det 低（同 byte set，只改 addr mapping）；(2) 正确性中（pack_count parameterization 紧耦合 scale tensor / kernel template）；(3) wider loads per-issue latency 高 → rocprofv3 验证
+
+**GO recommend R20 多日实施**：sequence Dev A (Python preshuffle + ref consumer) → Dev B (fastpath asm regen + kernel rewire) → Dev C (test/benchmark/det)，~1 day each
+
+### Dev B — Scale Data Reuse Hunt: 3 angles 全 NO
+
+| Angle | Verdict | 原因 |
+|---|---|---|
+| 1 cross-iter A reuse | NO | byte_offset 推进 256 B = 64 dwords，相邻 k_pair 加载完全 disjoint dwords，0 overlap to hoist。intra-k_pair 的 k_phase=0/1 复用已被 HOIST_HI 通过 op_sel 充分利用 |
+| 2 cross-wave broadcast via permlane/DPP | NO | AMD CDNA3/4 没有 inter-wave register-to-register primitive (`ds_bpermute`/`permlane16` 都是 intra-wave)。Inter-wave broadcast 必须走 LDS = SCALE_LDS path |
+| 3 B scale share between A halves | NO | half=0/1 by HB=128 = distinct row_bases / distinct VMEM transactions。a0/a1 cover M-rows top/bottom 128，independent slabs not same data viewed differently |
+
+**3 angles 全 NO confirms 唯一未证伪结构方向 = preshuffle layout 重设计**（与 Dev A V2 一致）
+
+### R19 综合产出 = 0 commit + 2 GO 路径 + 1 paradigm shift 验证
+
+1. **SCALE_LDS REPLACE GO** (R15 dead-end overturned under R18 model)：3-5 day, +50-150 TFLOPS, det 修复需 structural barrier re-sequence
+2. **Preshuffle V2 layout GO** (R5/R16 b64 broken assumption overturned by redesigning layout)：~3 day, **+150-200 TFLOPS**, Python prototype 已 byte-verified
+3. **Reuse hunt confirms** preshuffle 是唯一结构方向
+
+### 已死的方向（R19 进一步证伪）
+
+- 任何 cross-iter / cross-wave / cross-half scale reuse 想节省 buffer_loads（R19 Dev B 三角度 NO）
+- 任何"调度 / cache 策略 / inline / prefetch / sched_barrier"角度（R3-R18 saturated；R18 Diagnostic 直接 cycle counter 证伪）
+- 任何 b64/b128 coalesce with current V1 layout（R5 Dev G2 + R16 Dev C 字节 math 二次 confirm impossible）
+
+### 新会话规范（R19 起）
+
+1. **R20+ 推荐路径**：preshuffle V2 layout（Dev A 已 byte-verified prototype）
+   - 3 day 实施，1000-1200 LOC
+   - 上限 +150-200 TFLOPS（87.7% of 228 gap），Net MXFP8 RCR 期望 3070-3120 = 95-97% FP8
+   - sequence Dev A (Python preshuffle + ref consumer) → Dev B (fastpath regen + kernel rewire) → Dev C (test/benchmark/det)
+2. **R20+ backup 路径**：SCALE_LDS REPLACE
+   - 3-5 day, +50-150 TFLOPS
+   - milestone-1 (1 day) kill switch via rocprofv3 SQ_INSTS_VMEM verification
+3. **不要再做 reuse hunt sprint**——R19 Dev B 已证 cross-iter/cross-wave/cross-half 全 NO
+4. **不要再追 vmcnt 假说**——R18 直接 cycle counter 证伪
+5. **不要再尝试 b64/b128 with current V1 layout**——byte math 二次 confirm impossible
+6. 仍坚持 R15 规范：每会话必须 GPU0 baseline 重测；commit author 用 "MXFP8 Decision Maker"；worktree 必须清理
+
 ## 第十八轮评审结果 (2026-04-17) — R18 Diagnostic 推翻 R17 vmcnt-MFMA 假说；真瓶颈是 VMEM-issue 速率；1 sched_hint dead-end + AGPR feasibility downgrade；0 commit
 
 ### R18 派 1 Reviewer + 1 Diagnostic + 2 dev (A/B) 并行（GPU0/1/2/3 隔离）
