@@ -29,15 +29,26 @@
 5. 禁止提交 `*.so`、`*.s`、`*_layout_results_*.json`、`.bak*`、`gpucore.*`、`__pycache__` 等（`.gitignore` 已覆盖）
 6. 每个子 agent 使用不同 `HIP_VISIBLE_DEVICES` 以免 GPU 冲突：Dev A → 0，Dev B → 1，Dev C → 2，Reviewer/formal → 7
 
-## Baseline (R18 2026-04-17 GPU0 confirmed，pure source defaults)
+## Baseline (R21 2026-04-17 GPU0 confirmed，★ V2 SHIPPED default-on)
 
 | 版本 | TFLOPS | SNR | 备注 |
 | --- | ---: | --- | --- |
-| **FP8 RCR (长期 target)** | **3249.71** | 49.61 PASS | R18 5x median, std 51.44 (含 2 cold-start 低尾) |
-| **MXFP8 RCR KPAIR+PIPELINE+HOIST_HI+8WAVE_FAST** | **3021.29** | 49.60 PASS | R18 5x median, std 10.45, very tight |
-| **MXFP8 RRR EXACT_8WAVE_FAST** | **2862.99** | 49.59 PASS | static ✅ (+82.71) / dynamic ✅ |
-| **MXFP8 CRR PIPELINE_SCALE+8WAVE_FAST (R17 5x median)** | **2822.30** | 49.60 PASS | std 16.67, min 2796.5 max 2841.7 — static ✅ (+42.02) / dynamic ❌ -42.6 |
-| RCR 差距 vs FP8 | **−228.42 (−7.03%)** | | 长期目标，R17 是 -219/-6.79% |
+| **FP8 RCR (长期 target)** | **3243.67** | 49.61 PASS | R21 5x median, std 6.86 |
+| **★ MXFP8 RCR PRESHUFFLE V2 + KPAIR+PIPELINE+HOIST_HI+8WAVE_FAST (default on)** | **3078.09** | 49.60 PASS | R21 5x median, std 4.63, +55.66 TFLOPS / +1.84% over V1 (Welch t=23.33) |
+| MXFP8 RCR V1 (RUNTIME=0 fallback, R21 5x median) | 3022.43 | 49.60 PASS | std 3.19; -0.094% drift vs R18 3021.29 (stable) |
+| **MXFP8 RRR EXACT_8WAVE_FAST** | **2862.99** | 49.59 PASS | static ✅ (+82.71) — V2 NOT yet wired to RRR (R22+) |
+| **MXFP8 CRR PIPELINE_SCALE+8WAVE_FAST (R17 5x median)** | **2822.30** | 49.60 PASS | static ✅ (+42.02) — V2 NOT yet wired to CRR (R22+) |
+| **RCR V2 差距 vs FP8** | **−165.58 (−5.10%)** | | **R21 close from -228.42 to -165.58, 27% gap closed in 1 round** |
+
+**R21 VERIFIED PASS metrics (Reviewer GPU0 indep reproduction)**: V2 mean 3080.18 / median 3078.09 / std 4.63；V1 mean 3021.53 / median 3022.43 / std 3.19；Δ +55.66 TFLOPS / +1.84%；Welch t=23.33 (p<<0.001)；rocprofv3 SQ_INSTS_VMEM byte-exact match V1=6,815,744 → V2=5,767,168 (-15.38%)；correctness 256³/1024³/8192³ 全 SNR ≥49.5 + det 3/3 PASS, 67108864/67108864 element pass-rate at 8192³。
+
+**R21 cherry-picked commits (production)**: `4abd4f62` (V2 layout foundation + Python preshuffle + verify drivers) + `efc389ff` (V2 fastpath wiring with `llvm_amdgcn_raw_buffer_load_b128`/`b64` + `dispatch_pq_v2<RCR>` + `gemm_rcr_pq_v2` pybind + `MXFP8_RCR_PRESHUFFLE_V2_RUNTIME` runtime gate).
+
+**V2 implementation 关键 fact** (供未来调试):
+- 新 kernel template parameter `SCALE_VERSION` (1=V1, 2=V2)；hot symbol `rcr_exact_8wave_scaled_kernel<true, 2>` VGPR **246** (V1: 254, **-8 VGPR**), occupancy 2 unchanged, LDS 131072 unchanged
+- Python `preshuffle_scale_matrix_mfma16_v2_rcr_a/_b` 在 V2 packing 前 reorder source row_groups → wave-tile 顺序匹配 b128 dword 顺序 (option a from R20)
+- 必须同时 patch `load_scale_buffer` (main loop) AND `load_scale_packs_for_pair` (warmup/pre-tail/tail)；R21 Dev A 初始 256³ FAIL 真因是后者漏掉
+- `--offload-device-only -S` 必须 emit `buffer_load_dwordx4` (A) + `buffer_load_dwordx2` (B), 不是 b32 chains
 
 **R18 真瓶颈定性纠正（推翻 R17 假说）**：rocprofv3 cycle-counter 证明 MXFP8 vmcnt + lgkmcnt 等待 cycles 反而比 FP8 少 -157K + -85K = -242K，但 GRBM_GUI_ACTIVE 多 +845K cyc。差异 100% 由 +30% VMEM-issue 速率（6 extra scale buffer_loads/K-block）造成的 dispatch back-pressure (`SQ_WAIT_ANY +1.14M cyc`) 引起。MFMA cycles 完全相同。SQ_LDS_BANK_CONFLICT = 0。**R17 vmcnt-MFMA critical path 假说 FALSIFIED**——compiler scheduler 已经在最优位。
 
@@ -482,7 +493,107 @@ CRR gate (2780.28 TFLOPS) 在当前架构下需要 multi-day 结构重写：
 
 **承认 gate 当前架构不可达**。已 commit 的 `8934e95c` PIPELINE_SCALE 默认开（+0.243%, 2740.55 TFLOPS）是 R7-R11 共 11 轮唯一 strict win。下一会话若续做 CRR：先开 `CRR_ROW_SHARED_TRANSPOSE` 在非 fastpath 跑通做 known-good baseline，再决定要不要投入 multi-day 重写；或转向 RCR 剩余 4.70% 差距。
 
-## 第二十一轮评审结果 (2026-04-17) — R21 Dev B SCALE_LDS REPLACE milestone-1.5：**STRUCTURAL NO-GO**（Fix A + Fix B 均无效，且 SCALE_LDS 即使绕过 correctness 也是 -270 TFLOPS regression vs baseline）
+## 第二十一轮评审结果 (2026-04-17) — ★ V2 SHIPPED ★ Dev A milestone-2 PASS (+55.66 TFLOPS / +1.84% / Welch t=23.33), cherry-picked 到 main (4abd4f62 + efc389ff), default-on; Dev B SCALE_LDS REPLACE 永久 KILLED；首次 21 轮 sub-200 gap 关闭（gap -228→-166）
+
+### R21 派 1 Reviewer + 2 Dev (A/B) 并行（GPU0/1/2）
+
+跳过 Diagnostic（R18+R19+R20 paradigm 已 triple-confirmed）。
+
+- **Reviewer (GPU0)** — Task 1: 5x baseline；Task 2: standby for milestone PASS verify
+- **Dev A (GPU1)** — preshuffle V2 milestone-2: fastpath wiring + 8192³ A/B benchmark from `r20-a-preshuffle-v2 @ f54e6dfc`
+- **Dev B (GPU2)** — SCALE_LDS REPLACE milestone-1.5: defeat compiler LDS aliasing from `r20-b-scale-lds @ 5ac3229d`
+
+### Reviewer Task 1 — baseline stable
+
+- MXFP8 RCR median **3018.44** (std 3.00, very tight, 5 runs in [3015.46, 3022.61])
+- FP8 RCR median **3243.67** (std 6.86, 5 runs in [3235.08, 3250.74])
+- Gap **-225.23 / -6.94%**, drift vs R18 < 0.2% — STABLE
+- 全 SNR + det 3/3 PASS
+
+### Dev A — preshuffle V2 milestone-2: ★ PASS, COMMITTED ★
+
+Branch `r20-a-preshuffle-v2` @ commit `1a29c562`, cherry-picked to `feat/mxfp8-only` as `efc389ff` (with foundation `4abd4f62` from R20-A milestone-1).
+
+**Wave-tile order fix (option a from R20)**: Python `preshuffle_scale_matrix_mfma16_v2_rcr_a/_b` 在 V2 packing 前 reorder source row_groups → wave-tile gather 顺序变成 `{a0p0, a1p0, a0p1, a1p1}` (A pc=4) / `{b0p0, b1p0}` (B pc=2)，与 b128 dword 顺序匹配。
+
+**Production wiring**:
+- 新增 kernel template parameter `SCALE_VERSION` (1=V1, 2=V2)
+- 新 V2 path 用 explicit `llvm_amdgcn_raw_buffer_load_b128` (A) + `llvm_amdgcn_raw_buffer_load_b64` (B) 替换 4+2 b32 chains
+- 一个 wave-tile slab SRD per A and per B
+- 新 dispatch `dispatch_pq_v2<RCR>` + pybind `gemm_rcr_pq_v2`
+- Runtime gate `MXFP8_RCR_PRESHUFFLE_V2_RUNTIME` (default 1 = V2 on)
+
+**关键 bug fix (worth remembering for R22+)**: 初始 256³ FAIL (SNR -0.40 dB) 真因是 `load_scale_packs_for_pair` 缺 SCALE_VERSION==2 branch；warmup/pre-tail/tail 用 V2 memory through V1 row-base pointers → garbage。**Mirror V2 b128/b64 logic 进 helper** 修复。任何 V2 推广到 RRR/CRR 都必须双 patch (main loop + helper)。
+
+**b128/b64 emission verified** via `--offload-device-only -S`：
+```
+buffer_load_dwordx4 v[18:21], v175, s[28:31], s26 offen
+buffer_load_dwordx2 v[192:193], v176, s[36:39], s25 offen
+```
+
+**Resource usage (V2)**: VGPR **246** (V1: 254, **-8 VGPR**), SGPR 52, 0 spills, occupancy 2 unchanged, LDS 131072 unchanged.
+
+**Correctness gates** (HIP_VISIBLE_DEVICES=1, det 3/3 PASS, 100% pass-rate):
+| Size | SNR |
+|---|---|
+| 256³ | 49.56 dB |
+| 1024³ | 49.62 dB |
+| 8192³ | **49.60 dB** |
+
+**rocprofv3 SQ_INSTS_VMEM @ 8192³**: V1=6,815,744 → V2=5,767,168 = **-15.38%** (matches R18 model prediction exactly).
+
+**8192³ 5x A/B (Dev A GPU1)**: V1 mean 2986.44 (std 5.77), V2 mean 3046.35 (std 4.08), Δ +59.90 / +2.0%, Welch t=18.95.
+
+### Reviewer Task 2 — independent verify on GPU0: VERIFIED PASS
+
+干净 worktree `/tmp/wt-r21-rev` @ HEAD `1a29c5628cbca6824f96993905c053c4ca129d4c` 重建。
+
+**Correctness gates** (GPU0): 256³/1024³/**8192³ 49.60 dB**, 67108864/67108864 (100.00%) at 8192³, det 3/3 全 PASS。
+
+**rocprofv3 byte-exact 匹配 Dev A**: V1 6,815,744 / V2 5,767,168 / -15.38%。
+
+**8192³ 5x A/B (Reviewer GPU0)**:
+| Path | Run 1 | Run 2 | Run 3 | Run 4 | Run 5 | Median | Std |
+|---|---|---|---|---|---|---|---|
+| V1 | 3023.62 | 3022.43 | 3016.12 | 3021.44 | 3024.03 | **3022.43** | 3.19 |
+| V2 | 3087.46 | 3078.09 | 3081.97 | 3076.06 | 3077.33 | **3078.09** | 4.63 |
+
+**Δ median = +55.66 TFLOPS / +1.84%, Welch t = 23.33** (p<<0.001), df ≈ 7.10。
+
+GPU0 数字略低于 Dev A GPU1 (V1 -36 / V2 -32) 是 cross-GPU drift；session-internal Δ 一致 (Dev A: +59.90 / Reviewer: +55.66)。
+
+**Gap closure**: V2 vs FP8 RCR 3243.67 = **-165.58 / -5.10%**（vs R18 -228.42 / -7.03%；vs Reviewer Task 1 V1 -225.23 / -6.94%）→ **第一次 21 轮把 gap 关到 sub-200**。
+
+Decision rule (Δ ≥ +30 TFLOPS AND Welch t > 3.0 AND correctness PASS): **MET on all three**, recommend MERGE.
+
+### R21 综合产出
+
+1. **★ V2 preshuffle SHIPPED ★** — 真实 production-impacting MXFP8 RCR 优化，+55.66 TFLOPS / +1.84% / Welch t=23.33, gap close to -165.58, 默认开启
+2. **VGPR 254→246 (-8)** with same occupancy → V2 留出 future optimization headroom
+3. **SCALE_LDS REPLACE 永久 KILLED** (Dev B 见下)
+
+### R21 confirms
+
+- V2 layout 是 21 轮唯一真实 production-impacting MXFP8 优化
+- VMEM-issue rate 还是核心 bottleneck（R18 paradigm 第三次 reaffirm），但减少手段必须 native VMEM-cut（如 V2 b128/b64），不能借 LDS 中转
+- V2 留 1.84% / +55.66 TFLOPS gap residual：剩余 -165.58 vs FP8 RCR
+
+### R22+ 路径（按优先级）
+
+1. **V2 推广到 RRR/CRR layouts**（R21 仅 wired RCR；RRR/CRR fastpath 同结构应该也能 +1-2%；effort 估 1-2 day each）
+2. **V2 milestone-3：进一步压 VMEM**（V2 已 -15.4%；可能还能用 sched hints 让 b128/b64 更早 issue 来 hide 更多 latency）
+3. **不要再** revisit SCALE_LDS / reuse hunt / vmcnt 假说 / 现 V1 layout 下的 b64/b128 — 全 dead-end
+
+### R21 关键经验沉淀
+
+- **Side-branch + Reviewer-confirm-then-cherry-pick pattern**: Dev A side branch commit → Reviewer GPU0 独立 reproduce → Decision Maker cherry-pick to main。R21 第一次成功完整跑通 production-grade workflow
+- **Counter delta + correctness PASS 不足以判 GO**: SCALE_LDS counter PASS (-15.4%) 仍然 -270 TFLOPS regression。necessary but not sufficient
+- **R19 linear counter-to-TFLOPS model 在 LDS path 下偏差 ~3-5x**：减 1 VMEM-issue 不等价加 1 LDS-issue + barrier cycle。仅适用 native VMEM-cut path
+- **V2 推广必须 dual-patch**: main loop + warmup/pre-tail/tail helper 同时改，否则小尺寸 silent corruption (Dev A 初始 256³ FAIL 真因)
+
+---
+
+### R21 Dev B SCALE_LDS REPLACE milestone-1.5：**STRUCTURAL NO-GO**（Fix A + Fix B 均无效，且 SCALE_LDS 即使绕过 correctness 也是 -270 TFLOPS regression vs baseline）
 
 ### R21 Dev B (GPU2) — SCALE_LDS REPLACE milestone-1.5：**REJECT — STRUCTURAL NO-GO**
 
