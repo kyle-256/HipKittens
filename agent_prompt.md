@@ -134,6 +134,15 @@ stash@{0} 已 pop 并逐条评审。三条路径：
 
 下一轮建议**不再并行派 3 dev**，选 1 条结构路径深入做 1-2 周。本轮所有 dead-ends 已写入 SKILL。
 
+## 第六轮评审结果 (2026-04-17)
+
+Dev H 单条路径：**强制 occupancy=1 架构性不可能**：
+
+- **Dev H** — FORCE_OCC1 flag：编译器忽略 request（物理事实：512-thread block 在 4-SIMD CU 上最少 2 waves/SIMD），A/B +0.023% 噪声；叠加 pipeline 扩展 → 63 spills −63.36%。**Occupancy-knob 轴已关闭**。
+- **结论更新**：occupancy=1 不是"难"也不是"高风险"，是**算术不可能**。要 occ=1 只能改 block 大小（不同 kernel 结构，基本是整个项目重写）。下一轮可行的结构方向收窄到 3 条：SCALE_LDS 完全替代 / AGPR fused-asm block / preshuffle layout 重设计。
+
+**6 轮 / 8 dev agents 全 reject**。SKILL dead-ends 列表再 +1（FORCE_OCC1 的架构不可行证明）。
+
 ## 工作流
 
 1. Decision maker 每轮选 1–3 个最有把握的方向（不要 4 个同时开花）

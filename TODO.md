@@ -91,16 +91,22 @@ Main loop 已无 v_lshr，结构上与 FP8 几乎一致（仅多 6 个 scale buf
 | Dev G — scale L2 cache-policy hint sc0 (MXFP8_RCR_EXACT_PQ_SCALE_L2_HINT_ENABLE) | 12/238 buffer_load 用 sc0，正确+资源不变；GPU4 A/B 15/20 清理后 Δ +0.066% Welch-t 0.20。sc1/nt 更差。cache-policy 轴已饱和 | **拒绝（marginal）** |
 | Dev G2 — scale buffer_load b32×2 → b64 合并 (MXFP8_RCR_EXACT_PQ_SCALE_LOAD_B64_ENABLE) | 6 scale dwords 分布在 6 个独立 SRD，最小间距 8192 B，b64 需要 X 与 X+4 同 SRD → **结构不可行**；需重设计 `preshuffle_scale_matrix_mfma16` 影响所有 MXFP8 变体 | **拒绝（broken）** |
 
+**第六轮评审 (2026-04-17) — 一条路径 REJECT**
+
+| 路径 | 结果 | 采纳？ |
+|---|---|---|
+| Dev H — 强制 occupancy=1 (MXFP8_RCR_EXACT_PQ_FORCE_OCC1_ENABLE) | **编译器忽略 request**（occ 仍是 2 waves/SIMD）：一个 512-thread block 在 4 SIMD CU 上**算术最小** occupancy 就是 2 waves/SIMD，无法再降。Step 1 A/B +0.023% 噪声；Step 2 尝试叠加 pipeline 扩展 → 63 spills / −63.36%。Occupancy-knob 轴已饱和 | **拒绝（broken）** |
+
 ### 还没被验证为死路的方向（下一轮唯一剩余）
 
 - [ ] **SCALE_LDS 替代式实现**（非叠加）：彻底替代 PIPELINE_SCALE 的 SGPR-SRD path；用真正的 `__builtin_amdgcn_s_barrier()` 前后包 ds_write/ds_read 解决 determinism；<100 行改不完，高风险结构改造
 - [ ] **AGPR accumulator fused asm block**（8-32 MFMA 融进单 asm）：破 Dev F 的 per-MFMA 边界开销；改写 `rcr_mma_scaled_from_packs_opsel_phase_{row,impl}`；会破坏 HOIST_HI 的 templated-lambda 约定；高风险大改造
 - [ ] **preshuffle_scale_matrix_mfma16 layout 重设计**：让 6 scale dwords 相邻 8-byte 组装载入 → `buffer_load_b64` 可用；影响 RRR/CRR/4-wave + Python 参考
-- [ ] **主动下调到 occupancy=1**：160 KB LDS 允许 ≥128 KB 留给一个 wave；释放所有 register/LDS 压力做更深 cross-iter pipeline
+- ~~主动下调到 occupancy=1~~ **已证明不可能**：8-wave 512-thread block 在 4-SIMD CU 上算术最小 occ 就是 2 waves/SIMD，不是 flag 能改的。要 occ=1 需换成 4-wave 256-thread block（另一个 kernel），或 2-wave 128-thread block（完全重写）
 - [ ] **bank conflict / MFMA utilization profiling**（`rocprofv3 -i`）：145 TFLOPS 里有多少是 MFMA 利用率，多少是 latency stall
 
 ### 本轮结论
-MXFP8 从 `feat/mxfp8-only` 分支的起点 2737 TFLOPS 一路推到 2925.64 TFLOPS，**已达到当前结构约束下可微调的上限**。剩余 145 TFLOPS 差距只能靠**结构性重构**（任选一条高风险大改造）去摸。非结构性的调度/cache/小 flag 尝试全部饱和。建议下一轮只选 1 条结构路径深入，不再并行派多 dev。
+MXFP8 从 `feat/mxfp8-only` 分支的起点 2737 TFLOPS 一路推到 2925.64 TFLOPS，**已达到当前结构约束下可微调的上限**。剩余 145 TFLOPS 差距只能靠**结构性重构**（任选一条高风险大改造）去摸。非结构性的调度/cache/小 flag/occupancy 尝试全部饱和。建议下一轮只选 1 条结构路径深入，不再并行派多 dev。
 
 ## 成功条件
 
@@ -119,3 +125,5 @@ MXFP8 从 `feat/mxfp8-only` 分支的起点 2737 TFLOPS 一路推到 2925.64 TFL
 - **第四轮 (2026-04-17)**：两条路径全 reject。Dev D 实测 SCALE_LDS 叠加：−0.76% 且 determinism FAIL（此前仅"未验证"，现有硬数据）。Dev E 实测 sched_barrier v2 `vmcnt(6→8)`：+0.11% 噪声级。写入 SKILL dead-ends，不 commit 代码。
 - `3fe9c759` Round-4 dead-ends: SCALE_LDS measured (regression + det fail), SCHED V2 noise（仅文档 commit）
 - **第五轮 (2026-04-17)**：三条路径全 reject。Dev F 实测 AGPR per-MFMA `"+a"`：−2.19%（per-MFMA 边界 V↔A 切换爆 285 次 shuffle + 13 spills）。Dev G 实测 sc0 cache hint：+0.066% 噪声。Dev G2 证明 `buffer_load_b64` 合并在当前 scale layout 下**结构不可行**（6 SRD 间距 8192 B）。剩余只能靠结构性重构。
+- `5d31c742` Round-5 dead-ends: AGPR per-MFMA, scale L2 hint, b64 merge broken（仅文档 commit）
+- **第六轮 (2026-04-17)**：Dev H 证明 occupancy=1 在 512-thread 8-wave block 上**架构性不可能**（CU 只有 4 SIMD，一个 512-thread block 最少占 2 waves/SIMD）。加 pipeline 扩展反而 63 spills / −63%。Occupancy 轴彻底关闭。
