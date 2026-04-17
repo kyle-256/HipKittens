@@ -1,22 +1,35 @@
 # MXFP4 GEMM Optimization TODO
 
-## Current State (2026-04-16)
+## Current State (2026-04-17)
 - **Repo**: `/shared_nfs/kyle/test/HipKittens`
 - **Branch**: `mxfp4`
-- **42-shape result**: **19/42 WIN** (warmup=200, iters=500, 4-GPU parallel, 95 variants)
-- **上一轮**: 19/42 WIN (confirmed stable — all cross-product expansions exhausted)
-- **Cursor (Hipkittens2)**: 16/42 WIN (同参数, confirmed 2026-04-16T06:26)
-- **我们领先**: 3 WIN
-- **Avg ratio**: 100.8%
-- **Auto-tune variants**: 95 (expanded from 90: +TAIL_BARRIER_VMCNT, +GM×LGK cross-products; exhaustively saturated)
+- **42-shape result**: **24/42 WIN** (warmup=200, iters=500, 4-GPU parallel, 115 variants)
+- **上一轮**: 19/42 WIN → 24/42 WIN (+5 LOSE→WIN flip in Round 1, 0 regressions)
+- **Cursor (Hipkittens2)**: 16/42 WIN (同参数, 2026-04-16T06:26)
+- **我们领先**: **8 WIN**
+- **Auto-tune variants**: 115 (expanded from 95 with memclause family + Optimizer A discoveries + ceiling sweep)
+- **Saturation**: Round 2 (+28 ceiling variants) + deep-LOSE分析员 (+44 targeted variants on 10 stuck shapes) BOTH yielded **+0 LOSE→WIN flip**
 
 ## Recent Commits
 ```
+f886d940 MXFP4: Round 1 final 24/42 WIN (+5 vs baseline 19/42)
+06a416a8 TAIL_BARRIER_VMCNT + GM×LGK cross-products → 95 variants
+03d3ba0a 62-variant auto-tune space saturated (docs)
 78593c0c STEP12_BR_LGKMCNT tunable + expanded auto-tune (62 variants)
 80b736b5 update docs + results for 19/42 WIN
 4820d632 STEP4_EXTERNAL_BR_PREFETCH + expanded auto-tune → 19/42 WIN
-887bbad9 NVS=1 default + expanded auto-tune (32 variants) + fixes
 ```
+
+## Round 1 LOSE→WIN flips (+5)
+| Shape | Best Variant | Before → After |
+|-------|-------------|----------------|
+| 32768×28672×2048 | ts_gm2_v12_memc_dc | 99.1% → 100.3% |
+| 4096×14336×8192 | u8 | 98.9% → 101.0% |
+| 4096×32768×4096 | ts_no_embed_tv16_memc | 98.6% → 103.0% |
+| 6144×32768×4096 | ts_v4_memc | 99.5% → 101.1% |
+| 16384×4096×14336 | ts_v12_tv0_memc | 98.4% → 101.7% |
+
+memclause family (`-mllvm -amdgpu-sched-strategy=max-memory-clause`) is the dominant new winner — appears in 14/24 WIN best variants.
 
 ## 已做的优化
 1. **Store block reorder** (A0Bl,A0Br,A1Bl,A1Br) — +0.8% 全局
@@ -34,7 +47,66 @@
 13. **TAIL_BARRIER_VMCNT** — 尾部K迭代单独barrier VMCNT调优 (ts_tv16 在2个shapes上最优)
 14. **GM×LGK cross-products** — gm8_lgk2, ts_gm2_lgk2, ts_gm2_lgk2_v12 (提供 0.1-0.3pp 边际提升)
 
-## 19 WIN shapes (62-variant benchmark)
+## 24 WIN shapes (115-variant benchmark, Round 2 final)
+| Shape | TFLOPS | Ratio | Best Variant |
+|-------|--------|-------|-------------|
+| 16384×4096×2048 | 3264 | 109.0% | ts_v12_tv0_memc |
+| 16384×4096×3072 | 3802 | 108.9% | ts_pf6_6_lgk2_memc |
+| 16384×6144×2048 | 3494 | 114.6% | ts_v4_tv0 |
+| 32768×4096×2048 | 3465 | 110.6% | ts_v12_tv0_memc |
+| 32768×4096×3072 | 3927 | 108.2% | ts_lgk2_memc |
+| 32768×6144×2048 | 3428 | 105.8% | ts_gm8_v12 |
+| 16384×14336×2048 | 3553 | 107.6% | ts_lgk2_v20 |
+| 32768×14336×2048 | 3478 | 103.8% | ts_gm2_v12_memc |
+| **32768×28672×2048** | 3365 | **100.3%** | **ts_gm2_v12_memc_dc** ← R1 flip |
+| 16384×4096×4096 | — | 106.3% | ts_lgk2_memc_dc |
+| 16384×6144×4096 | — | 106.4% | ts_v12_tv0_memc |
+| 16384×14336×4096 | — | 104.3% | ts_lgk2_v20_memc |
+| 4096×4096×8192 | — | 110.9% | default |
+| **4096×14336×8192** | — | **101.0%** | **u8** ← R1 flip |
+| 6144×4096×8192 | — | 102.7% | v32 |
+| **4096×32768×4096** | — | **103.0%** | **ts_no_embed_tv16_memc** ← R1 flip |
+| **6144×32768×4096** | — | **101.1%** | **ts_v4_memc** ← R1 flip |
+| 16384×4096×6144 | — | 107.7% | ts_lgk2_v20_memc |
+| 16384×4096×7168 | — | 104.7% | ts_lgk2_v20_memc |
+| 4096×4096×16384 | — | 104.4% | ts_v24 |
+| **16384×4096×14336** | — | **101.7%** | **ts_v12_tv0_memc** ← R1 flip |
+| 4096×4096×32768 | — | 100.9% | ts |
+| 4096×6144×32768 | — | 124.3% | v16 |
+| 4096×128256×32768 | — | 161.2% | memc |
+
+## 18 LOSE shapes (Round 2 final)
+### Near-threshold (≥98%, 3 shapes)
+| Shape | Ratio | Best | Δ to WIN |
+|-------|-------|------|----------|
+| 32768×4096×7168 | 99.3% | ts_gm8_v12 | 0.7pp |
+| 4096×14336×16384 | 98.6% | ts_lgk2 | 1.4pp |
+| 6144×4096×16384 | 98.6% | ts_lgk2 | 1.4pp |
+
+### Mid-LOSE (95-97%, 5 shapes)
+| Shape | Ratio | Best |
+|-------|-------|------|
+| 16384×28672×2048 | 96.4% | ts_gm2_v12_memc_dc |
+| 4096×32768×6144 | 96.4% | ts_pf4_memc |
+| 16384×28672×4096 | 96.5% | ts_gm2_v12_memc |
+| 28672×4096×8192 | 96.6% | ts_lgk2_memc_dc |
+| 14336×32768×4096 | 96.9% | ts_v12_tv0_memc |
+
+### Deep-LOSE (<95%, 10 shapes — confirmed STRUCTURAL by deep-LOSE分析员)
+| Shape | Ratio | Best | 类别 |
+|-------|-------|------|------|
+| 4096×32768×128256 | 88.3% | ts_gm8 | mega-K + 大N |
+| 14336×4096×32768 | 89.6% | lgk2_dc | 大K + 大M |
+| 16384×4096×28672 | 90.1% | u32 | 大K + 大M |
+| 128256×32768×4096 | 92.9% | ts_gm2_v12_memc_dc | mega-M+N |
+| 4096×32768×28672 | 93.7% | v20_memc | 大K + 大N |
+| 28672×4096×16384 | 93.7% | ts_gm8 | 大K + 大M |
+| 4096×28672×32768 | 94.1% | u16 | 大K + 大N |
+| 32768×4096×14336 | 94.1% | ts_gm8_v12 | 大K + 大M |
+| 4096×32768×14336 | 94.5% | ts_lgk2_memc | 大K + 大N |
+| 28672×32768×4096 | 94.5% | ts_lgk2_v12_memc | 大M+N |
+
+## DEPRECATED — 19 WIN shapes (62-variant benchmark, pre-Round 1)
 | Shape | TFLOPS | Ratio | Best Variant |
 |-------|--------|-------|-------------|
 | 16384×4096×2048 | 3147 | 105.1% | ts_no_embed_v12 |
@@ -149,7 +221,22 @@
 7. ~~**Compiler flag tuning**~~ — DEAD END, ±0.4% noise
 8. ~~**Extended variant combos (18 new)**~~ — DEAD END, 0 WINs
 
-**结论**: 当前内核架构 (B-through-LDS) 下所有已知优化方向已穷尽. 19/42 WIN 是当前架构的性能天花板. 要突破需要根本性的内核重构 (如 aiter 架构: 只有 A 走 LDS, B 通过深度软件流水直接从 global 加载, 需要 >256 VGPRs 的寄存器预算)
+**结论 (2026-04-17 更新)**: 24/42 WIN 是当前内核架构 (B-through-LDS, 4-step K-loop, 256 AGPR) 的性能天花板. memclause + Round 2 ceiling sweep + deep-LOSE 分析员 (44 targeted variants) 全部确认: 18 个 LOSE shape 的剩余 gap 是结构性的, flag-axis 关不上.
+
+**Round 2 (115 variants × 42 shapes) 与 deep-LOSE 分析员 (44 variants × 10 stuck shapes) 双重验证后**:
+- 0 个 LOSE→WIN flip
+- deep-LOSE 最大边际增益 1.2pp (16384×4096×28672: ts_v12 89.2% → u8 90.4%)
+- 突破需要根本性的内核重构 (aiter 架构: 只有 A 走 LDS, B 通过深度软件流水直接从 global 加载, 需要 >256 VGPRs 的寄存器预算)
+
+## Round 2 + Deep-LOSE 新增 dead-end (2026-04-17)
+- **memclause × 28 ceiling variants** (Round 2): 0 LOSE→WIN flip vs Round 1, 边际 ±25 TFLOPS movement only. WIN shapes 上 best variant 漂移 (e.g., `ts_lgk2_v12_memc` → `ts_lgk2_v20_memc` on 16384×14336×4096) 但 ratio 几乎不变
+- **VMCNT ceiling sweep (v20/v24/v32)**: v20 在已 WIN shape 上偶尔最优, 但不翻 LOSE
+- **TAIL_BARRIER_VMCNT × VMCNT cross**: tv0/tv16 × v4/v12 — `_ts_v12_tv0_memc` 在 4 个 WIN shape 上是 best variant, 但不翻任何 LOSE
+- **PF asymmetric (pf4_6, pf6_4, pf3_8)**: pf6_6 对称在 4096×32768×28672 等 2 shape 边际最优, 不对称无效
+- **waves_per_eu(2,2) attribute**: deep-LOSE 上 +0.4pp 仅 1 shape, 其余 sub-best — REFUTED
+- **AGPR hint (amdgpu_num_agpr=192)**: 全部 sub-best — FAILED
+- **UNROLL_K=8/16 × LGK × VMCNT × memc cross**: 在 deep-LOSE 上 +0.3-1.2pp 边际 (4 个 shape), 不翻 LOSE (推翻 AGENT_PROMPT 之前 "UNROLL=1,2,4 worse" 的过早结论 — 8/16 配合 lgk/v12/memc 才有效, 但仍不够)
+- **128256×32768×4096 (mega-M)**: 完全 IMPENETRABLE — Round 2 + deep-LOSE 都无法逼近 R1 best (`ts_gm2_v12_memc_dc` 92.9%)
 
 ## Rocprof 分析结论 (2026-04-16)
 对生产 .s (N=32768, K=4096, TS=1, LGK2) 做了 PC sampling 和 assembly 分析:
@@ -175,7 +262,13 @@
 | `build_all42_parallel.py` | 并行编译器 (62 variants × 26 N,K pairs) |
 | `spot_test.py` | 单shape多variant测试 (95 variants) |
 | `spot_new_variants.py` | 新variant快速spot测试 (30 new + 9 reference) |
-| `bench_all42_results.json` | 最新42-shape结果 (19/42 WIN, 62 variants) |
+| `bench_all42_results.json` | 最新42-shape结果 (24/42 WIN, 115 variants, Round 2) |
+| `bench_all42_results_round1.json` | Round 1 snapshot (24/42 WIN, 87 variants) |
+| `bench_all42_results_round2.json` | Round 2 snapshot (24/42 WIN, 115 variants) |
+| `build_new_variants.py` | 并行编译 (memclause + Optimizer A 21 variants) |
+| `build_round2_variants.py` | 并行编译 (Round 2 ceiling 28 variants) |
+| `build_deep_lose_variants.py` | 并行编译 (deep-LOSE 44 targeted variants) |
+| `bench_deep_lose.py` / `bench_deep_lose_results.json` | 10-shape spot bench (deep-LOSE 分析员) |
 
 ## 环境设置 (换机器必读)
 ```bash

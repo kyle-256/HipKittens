@@ -8,12 +8,12 @@
 - **工作目录**: `analysis/fp8_gemm/mi350x`
 - **Cursor Repo**: `/shared_nfs/kyle/test/Hipkittens2` (只读参考)
 
-## 当前成绩
-- **我们**: **19/42 WIN** (warmup=200, iters=500, 66 variants)
-- **Cursor**: 16/42 WIN (同参数, 25 variants)
-- **我们领先 3 WIN**
-- **Avg ratio**: 100.8%
-- **Auto-tune variants**: 95 (已饱和，所有交叉积均已穷举)
+## 当前成绩 (2026-04-17)
+- **我们**: **24/42 WIN** (warmup=200, iters=500, 115 variants, Round 2 final)
+- **Cursor**: 16/42 WIN (同参数)
+- **我们领先 8 WIN**
+- **Auto-tune variants**: 115 (115 variants × 42 shapes 全sweep + 44 deep-LOSE targeted variants 双重确认饱和)
+- **Round 1 → Round 2 → deep-LOSE**: +5 / +0 / +0 LOSE→WIN flip — 已彻底饱和
 
 ## 已做的优化 (19项)
 1. Store block reorder (A0Bl,A0Br,A1Bl,A1Br) — +0.8%
@@ -105,7 +105,19 @@
 8. ~~**Compiler flag tuning**~~ — DEAD END (noise level)
 9. ~~**18 new variant combos**~~ — DEAD END (0 WINs)
 
-**性能天花板结论**: 当前内核架构 (B-through-LDS, 4-step K-loop pipeline, 256 AGPR/256 VGPR) 下所有已知优化方向已穷尽. 19/42 WIN 是天花板. 突破需要根本性重构 (aiter 架构: A-only-LDS + B-direct-from-global + deep SW pipeline, 需 >256 VGPRs 不可行 on gfx950)
+**性能天花板结论 (2026-04-17 三轮验证)**: 当前内核架构下所有已知优化方向已穷尽. **24/42 WIN 是天花板**. 突破需要根本性重构 (aiter 架构: A-only-LDS + B-direct-from-global + deep SW pipeline, 需 >256 VGPRs 不可行 on gfx950).
+
+三轮饱和验证:
+- Round 1 (87 variants, agent-team auto-tune): 19→24 WIN (+5 flip, memclause family 主导)
+- Round 2 (115 variants, ceiling sweep): 24→24 WIN (+0 flip, ±25 TFLOPS noise)
+- Deep-LOSE 分析员 (44 targeted variants on 10 stuck shapes): +0 flip, 最大边际 +1.2pp
+
+新增 dead-end:
+- memclause × VMCNT ceiling (v20/v24/v32) × tv0/tv16 cross
+- waves_per_eu attribute (REFUTED)
+- amdgpu_num_agpr=192 hint (FAILED)
+- UNROLL_K=8/16 × LGK × memc cross (边际 +0.3-1.2pp 但不翻 WIN)
+- 128256×32768×4096 mega-M shape: IMPENETRABLE
 
 ## Benchmark 规则
 - **warmup=200, iters=500**, trimmed mean 10%
@@ -120,4 +132,7 @@
 - `build_all42_parallel.py` — 并行编译器 (93 variants × 26 N,K pairs)
 - `spot_test.py` — 单shape多variant测试 (95 variants)
 - `spot_new_variants.py` — 新variant快速spot测试 (30 new + 9 reference)
-- `bench_all42_results.json` — 最新结果 (19/42 WIN)
+- `bench_all42_results.json` — 最新结果 (24/42 WIN, Round 2)
+- `bench_all42_results_round1.json` / `bench_all42_results_round2.json` — snapshots
+- `bench_deep_lose.py` / `bench_deep_lose_results.json` — 10-shape stuck-shape spot bench
+- `build_new_variants.py` / `build_round2_variants.py` / `build_deep_lose_variants.py` — 并行编译 infra (per-variant PYBIND11_MODULE patching, ThreadPoolExecutor)
