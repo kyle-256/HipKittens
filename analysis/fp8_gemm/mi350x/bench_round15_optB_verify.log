@@ -1,0 +1,49 @@
+R15B 5-run verify. GPU=3 warmup=200 iters=500
+==============================================================================================================
+
+P1  shape=28672x4096x16384  comp=5273.0  parent=_ts_gm8  tag=nosink
+  baseline run1: 5011.76
+  baseline run2: 5014.89
+  baseline run3: 5013.51
+  baseline run4: 4989.10
+  baseline run5: 4992.03
+  candidate run1: 5012.67
+  candidate run2: 5009.69
+  candidate run3: 4986.70
+  candidate run4: 5014.64
+  candidate run5: 5016.22
+  baseline  mean=5004.26 max=5014.89 min=4989.10
+  candidate mean=5007.98 max=5016.22 min=4986.70
+  delta_mean=+3.72 TFLOPS  (+0.07pp)  gate(mean>=base.max)=FAIL  gate(>=+1pp)=FAIL
+
+DLA1  shape=4096x32768x128256  comp=5781.1  parent=_ts_pf6_6_v12_memc  tag=noemxpre
+  baseline run1: 5103.59
+  baseline run2: 5105.13
+  baseline run3: 5098.66
+  baseline run4: 5099.26
+  baseline run5: 5105.50
+  candidate run1: 5105.34
+  candidate run2: 5091.79
+  candidate run3: 5095.95
+  candidate run4: 5104.61
+  candidate run5: 5097.97
+  baseline  mean=5102.43 max=5105.50 min=5098.66
+  candidate mean=5099.13 max=5105.34 min=5091.79
+  delta_mean=-3.30 TFLOPS  (-0.06pp)  gate(mean>=base.max)=FAIL  gate(>=+1pp)=FAIL
+
+DLA1  shape=4096x32768x128256  comp=5781.1  parent=_ts_pf6_6_v12_memc  tag=largeivf2
+  baseline run1: 5102.86
+  baseline run2: 5100.99
+  baseline run3: 5101.27
+  baseline run4: 5092.57
+  baseline run5: 5099.96
+  candidate run1: 5101.53
+  candidate run2: 5106.13
+  candidate run3: 5094.49
+  candidate run4: 5092.75
+  candidate run5: 5102.64
+  baseline  mean=5099.53 max=5102.86 min=5092.57
+  candidate mean=5099.51 max=5106.13 min=5092.75
+  delta_mean=-0.02 TFLOPS  (-0.00pp)  gate(mean>=base.max)=FAIL  gate(>=+1pp)=FAIL
+
+Saved bench_round15_optB_verify.json

@@ -1,0 +1,18 @@
+Round 15 OptC verify (parent vs variant SNR)
+==================================================================================================================================
+  DLA7 _r15c_p1_lgkm0                                     snr=nandB  fin_p=0.790 fin_v=0.787  diff  [FAIL]
+  DLA7 _r15c_p1_lgkm2                                     snr=nandB  fin_p=0.799 fin_v=0.776  diff  [FAIL]
+  DLA7 _r15c_p1_lgkm4                                     snr=nandB  fin_p=0.793 fin_v=0.782  diff  [FAIL]
+  DLA1 _r15c_p2_s4v4                                      snr=nandB  fin_p=0.777 fin_v=0.784  diff  [FAIL]
+  DLA1 _r15c_p2_s4v8                                      snr=nandB  fin_p=0.777 fin_v=0.771  diff  [FAIL]
+  DLA1 _r15c_p2_s4v12                                     snr=nandB  fin_p=0.779 fin_v=0.771  diff  [FAIL]
+  DLA1 _r15c_p2_s4v16                                     snr=nandB  fin_p=0.779 fin_v=0.768  diff  [FAIL]
+  DLA1 _r15c_p2_s4v20                                     snr=nandB  fin_p=0.777 fin_v=0.771  diff  [FAIL]
+  DLA7 _r15c_p2_s4v4                                      snr=nandB  fin_p=0.834 fin_v=0.822  diff  [FAIL]
+  DLA7 _r15c_p2_s4v8                                      snr=nandB  fin_p=0.846 fin_v=0.801  diff  [FAIL]
+  DLA7 _r15c_p2_s4v12                                     snr=nandB  fin_p=0.764 fin_v=0.735  diff  [FAIL]
+  DLA7 _r15c_p2_s4v16                                     snr=nandB  fin_p=0.787 fin_v=0.767  diff  [FAIL]
+  DLA7 _r15c_p2_s4v20                                     snr=nandB  fin_p=0.812 fin_v=0.821  diff  [FAIL]
+  DLA1 _r15c_p3_pfg_neg1                                  snr=nandB  fin_p=0.777 fin_v=0.767  diff  [FAIL]
+  DLA1 _r15c_p3_pfg_pos1                                  snr=nandB  fin_p=0.778 fin_v=0.771  diff  [FAIL]
+Saved bench_round15_optC_verify.json

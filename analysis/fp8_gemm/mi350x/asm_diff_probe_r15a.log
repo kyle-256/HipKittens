@@ -1,0 +1,23 @@
+Shape  Variant suffix                                           cand_hash           parent_hash         verdict
+----------------------------------------------------------------------------------------------------------------------------------
+DLA1   _ts_pf6_6_v12_memc_r15a_regclassglob                     ea8116ac3a57d6d1    c2400812e33eec5c    DIFF
+DLA2   _ts_gm2_v12_memc_dc_r15a_regclassglob                    757f1bada390a57a    4bd4d79ff4b044c1    DIFF
+DLA7   _ts_lgk2_v12_memc_r15a_regclassglob                      ca6bef434e541075    25110f2c98d70d4a    DIFF
+P1     _ts_gm8_r15a_regclassglob                                e6ae56adfa140207    186aeff97eb705a9    DIFF
+
+P1 parent (_ts_gm8) hash:           186aeff97eb705a9
+P1 bare-regclassglob hash:          e6ae56adfa140207
+
+Shape  Variant suffix                                           cand_hash           vs_parent   vs_rcg    
+----------------------------------------------------------------------------------------------------------------------------------
+P1     _ts_gm8_r15a_regclassglob_v20                            f200fb6777fc3258    DIFF        DIFF      
+P1     _ts_gm8_r15a_regclassglob_v24                            71862adca6ee8476    DIFF        DIFF      
+P1     _ts_gm8_r15a_regclassglob_lgk2                           2c8bcc7fd29614ea    DIFF        DIFF      
+P1     _ts_gm8_r15a_regclassglob_extbr                          777f28809c5d5c02    DIFF        DIFF      
+P1     _ts_gm8_r15a_regclassglob_noembed                        e6ae56adfa140207    DIFF        NOOP      
+P1     _ts_gm8_r15a_regclassglob_tv0                            8d951e539de50004    DIFF        DIFF      
+P1     _ts_gm8_r15a_regclassglob_tv16                           dac7b21fd99d8e8e    DIFF        DIFF      
+
+----------------------------------------------------------------------------------------------------------------------------------
+Summary: {'DIFF': 11, 'NOOP': 0, 'MISSING': 0}
+Saved asm_diff_probe_r15a.json

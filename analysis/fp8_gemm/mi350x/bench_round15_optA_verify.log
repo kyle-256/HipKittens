@@ -1,0 +1,68 @@
+R15A 5-run verify. GPU=1 warmup=200 iters=500
+==============================================================================================================
+
+P1  shape=28672x4096x16384  comp=5273.0  parent=_ts_gm8  tag=regclassglob
+  WARMUP (discarded): parent=5002.52  cand=5001.53
+  baseline run1: 4986.49
+  baseline run2: 4993.82
+  baseline run3: 4984.12
+  baseline run4: 4991.26
+  baseline run5: 5011.66
+  candidate run1: 4976.00
+  candidate run2: 5003.52
+  candidate run3: 5004.83
+  candidate run4: 5015.99
+  candidate run5: 5029.13
+  baseline  mean=4993.47 max=5011.66 min=4984.12
+  candidate mean=5005.89 max=5029.13 min=4976.00
+  delta_mean=+12.42 TFLOPS  (+0.236pp)  gate(mean>=base.max)=FAIL  gate(>=+1.0pp)=FAIL
+
+P1c  shape=28672x4096x16384  comp=5273.0  parent=_ts_gm8  tag=regclassglob_v20
+  WARMUP (discarded): parent=4988.64  cand=5002.17
+  baseline run1: 5004.96
+  baseline run2: 4995.12
+  baseline run3: 4979.93
+  baseline run4: 4981.78
+  baseline run5: 4996.76
+  candidate run1: 4977.31
+  candidate run2: 4975.40
+  candidate run3: 5009.17
+  candidate run4: 5005.85
+  candidate run5: 4998.95
+  baseline  mean=4991.71 max=5004.96 min=4979.93
+  candidate mean=4993.34 max=5009.17 min=4975.40
+  delta_mean=+1.63 TFLOPS  (+0.031pp)  gate(mean>=base.max)=FAIL  gate(>=+1.0pp)=FAIL
+
+P1c  shape=28672x4096x16384  comp=5273.0  parent=_ts_gm8  tag=regclassglob_tv16
+  WARMUP (discarded): parent=4977.65  cand=5012.0
+  baseline run1: 4996.68
+  baseline run2: 5004.88
+  baseline run3: 4984.02
+  baseline run4: 4992.35
+  baseline run5: 4990.82
+  candidate run1: 4975.21
+  candidate run2: 5011.38
+  candidate run3: 5015.75
+  candidate run4: 5016.95
+  candidate run5: 5008.71
+  baseline  mean=4993.75 max=5004.88 min=4984.02
+  candidate mean=5005.60 max=5016.95 min=4975.21
+  delta_mean=+11.85 TFLOPS  (+0.225pp)  gate(mean>=base.max)=PASS  gate(>=+1.0pp)=FAIL
+
+P1c  shape=28672x4096x16384  comp=5273.0  parent=_ts_gm8  tag=regclassglob_lgk2
+  WARMUP (discarded): parent=4996.39  cand=4988.69
+  baseline run1: 5001.00
+  baseline run2: 5004.98
+  baseline run3: 4992.90
+  baseline run4: 5001.99
+  baseline run5: 4979.65
+  candidate run1: 5006.23
+  candidate run2: 4971.64
+  candidate run3: 4981.57
+  candidate run4: 4985.68
+  candidate run5: 4992.71
+  baseline  mean=4996.10 max=5004.98 min=4979.65
+  candidate mean=4987.57 max=5006.23 min=4971.64
+  delta_mean=-8.53 TFLOPS  (-0.162pp)  gate(mean>=base.max)=FAIL  gate(>=+1.0pp)=FAIL
+
+Saved bench_round15_optA_verify.json

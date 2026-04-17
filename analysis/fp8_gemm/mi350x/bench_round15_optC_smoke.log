@@ -1,0 +1,24 @@
+Round 15 OptC smoke. warmup=20 iters=50
+Variants: 15; parents: 2
+==================================================================================================================================
+  PARENT DLA1  M= 4096 N=32768 K=128256  tflops=5126.28  (88.67% aiter)  snr=nandB
+  PARENT DLA7  M=28672 N=32768 K=  4096  tflops=4202.60  (88.61% aiter)  snr=nandB
+
+Candidates:
+  P1 DLA7 _r15c_p1_lgkm2                                            tflops=4162.83 (87.78% aiter, Δ-0.95pp parent) snr=nandB [SNR_FAIL]
+  P1 DLA7 _r15c_p1_lgkm0                                            tflops=4167.42 (87.87% aiter, Δ-0.84pp parent) snr=nandB [SNR_FAIL]
+  P1 DLA7 _r15c_p1_lgkm4                                            tflops=4193.92 (88.43% aiter, Δ-0.21pp parent) snr=nandB [SNR_FAIL]
+  P2 DLA1 _r15c_p2_s4v4                                             tflops=4646.33 (80.37% aiter, Δ-9.36pp parent) snr=nandB [SNR_FAIL]
+  P2 DLA1 _r15c_p2_s4v8                                             tflops=4985.02 (86.23% aiter, Δ-2.76pp parent) snr=nandB [SNR_FAIL]
+  P2 DLA1 _r15c_p2_s4v12                                            tflops=5117.58 (88.52% aiter, Δ-0.17pp parent) snr=nandB [SNR_FAIL]
+  P2 DLA1 _r15c_p2_s4v16                                            tflops=5104.03 (88.29% aiter, Δ-0.43pp parent) snr=nandB [SNR_FAIL]
+  P2 DLA1 _r15c_p2_s4v20                                            tflops=5110.99 (88.41% aiter, Δ-0.30pp parent) snr=nandB [SNR_FAIL]
+  P2 DLA7 _r15c_p2_s4v4                                             tflops=4006.90 (84.49% aiter, Δ-4.66pp parent) snr=nandB [SNR_FAIL]
+  P2 DLA7 _r15c_p2_s4v8                                             tflops=4094.20 (86.33% aiter, Δ-2.58pp parent) snr=nandB [SNR_FAIL]
+  P2 DLA7 _r15c_p2_s4v12                                            tflops=4126.85 (87.02% aiter, Δ-1.80pp parent) snr=nandB [SNR_FAIL]
+  P2 DLA7 _r15c_p2_s4v16                                            tflops=4134.90 (87.19% aiter, Δ-1.61pp parent) snr=nandB [SNR_FAIL]
+  P2 DLA7 _r15c_p2_s4v20                                            tflops=4158.17 (87.68% aiter, Δ-1.06pp parent) snr=nandB [SNR_FAIL]
+  P3 DLA1 _r15c_p3_pfg_neg1                                         tflops=5136.44 (88.85% aiter, Δ+0.20pp parent) snr=nandB [SNR_FAIL]
+  P3 DLA1 _r15c_p3_pfg_pos1                                         tflops=5125.28 (88.66% aiter, Δ-0.02pp parent) snr=nandB [SNR_FAIL]
+==================================================================================================================================
+Saved bench_round15_optC_smoke.json

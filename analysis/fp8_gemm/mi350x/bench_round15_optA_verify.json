@@ -1,0 +1,165 @@
+{
+  "warmup": 200,
+  "iters": 500,
+  "trim": 0.1,
+  "gpu": 1,
+  "n_runs": 5,
+  "shapes": [
+    {
+      "label": "P1",
+      "M": 28672,
+      "N": 4096,
+      "K": 16384,
+      "comp": 5273.0,
+      "parent": "_ts_gm8",
+      "cand_tag": "regclassglob",
+      "candidate": "_ts_gm8_r15a_regclassglob",
+      "baseline": {
+        "runs": [
+          4986.49,
+          4993.82,
+          4984.12,
+          4991.26,
+          5011.66
+        ],
+        "mean": 4993.47,
+        "min": 4984.12,
+        "max": 5011.66,
+        "n": 5
+      },
+      "candidate_stats": {
+        "runs": [
+          4976.0,
+          5003.52,
+          5004.83,
+          5015.99,
+          5029.13
+        ],
+        "mean": 5005.89,
+        "min": 4976.0,
+        "max": 5029.13,
+        "n": 5
+      },
+      "gate_mean_ge_max": false,
+      "gate_pp_ge_1": false,
+      "commit_eligible": false
+    },
+    {
+      "label": "P1c",
+      "M": 28672,
+      "N": 4096,
+      "K": 16384,
+      "comp": 5273.0,
+      "parent": "_ts_gm8",
+      "cand_tag": "regclassglob_v20",
+      "candidate": "_ts_gm8_r15a_regclassglob_v20",
+      "baseline": {
+        "runs": [
+          5004.96,
+          4995.12,
+          4979.93,
+          4981.78,
+          4996.76
+        ],
+        "mean": 4991.71,
+        "min": 4979.93,
+        "max": 5004.96,
+        "n": 5
+      },
+      "candidate_stats": {
+        "runs": [
+          4977.31,
+          4975.4,
+          5009.17,
+          5005.85,
+          4998.95
+        ],
+        "mean": 4993.34,
+        "min": 4975.4,
+        "max": 5009.17,
+        "n": 5
+      },
+      "gate_mean_ge_max": false,
+      "gate_pp_ge_1": false,
+      "commit_eligible": false
+    },
+    {
+      "label": "P1c",
+      "M": 28672,
+      "N": 4096,
+      "K": 16384,
+      "comp": 5273.0,
+      "parent": "_ts_gm8",
+      "cand_tag": "regclassglob_tv16",
+      "candidate": "_ts_gm8_r15a_regclassglob_tv16",
+      "baseline": {
+        "runs": [
+          4996.68,
+          5004.88,
+          4984.02,
+          4992.35,
+          4990.82
+        ],
+        "mean": 4993.75,
+        "min": 4984.02,
+        "max": 5004.88,
+        "n": 5
+      },
+      "candidate_stats": {
+        "runs": [
+          4975.21,
+          5011.38,
+          5015.75,
+          5016.95,
+          5008.71
+        ],
+        "mean": 5005.6,
+        "min": 4975.21,
+        "max": 5016.95,
+        "n": 5
+      },
+      "gate_mean_ge_max": true,
+      "gate_pp_ge_1": false,
+      "commit_eligible": false
+    },
+    {
+      "label": "P1c",
+      "M": 28672,
+      "N": 4096,
+      "K": 16384,
+      "comp": 5273.0,
+      "parent": "_ts_gm8",
+      "cand_tag": "regclassglob_lgk2",
+      "candidate": "_ts_gm8_r15a_regclassglob_lgk2",
+      "baseline": {
+        "runs": [
+          5001.0,
+          5004.98,
+          4992.9,
+          5001.99,
+          4979.65
+        ],
+        "mean": 4996.1,
+        "min": 4979.65,
+        "max": 5004.98,
+        "n": 5
+      },
+      "candidate_stats": {
+        "runs": [
+          5006.23,
+          4971.64,
+          4981.57,
+          4985.68,
+          4992.71
+        ],
+        "mean": 4987.57,
+        "min": 4971.64,
+        "max": 5006.23,
+        "n": 5
+      },
+      "gate_mean_ge_max": false,
+      "gate_pp_ge_1": false,
+      "commit_eligible": false
+    }
+  ]
+}

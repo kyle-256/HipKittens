@@ -1,0 +1,19 @@
+Round 15 OptC source-level builds: 15 jobs
+==============================================================================================================
+  M= 28672 N= 32768 K=  4096  _ts_pf6_6_v12_memc_r15c_p1_lgkm2                   OK       (4.7s)
+  M= 28672 N= 32768 K=  4096  _ts_pf6_6_v12_memc_r15c_p2_s4v12                   OK       (4.7s)
+  M= 28672 N= 32768 K=  4096  _ts_pf6_6_v12_memc_r15c_p2_s4v4                    OK       (4.8s)
+  M= 28672 N= 32768 K=  4096  _ts_pf6_6_v12_memc_r15c_p2_s4v8                    OK       (4.8s)
+  M= 28672 N= 32768 K=  4096  _ts_pf6_6_v12_memc_r15c_p1_lgkm4                   OK       (4.9s)
+  M= 28672 N= 32768 K=  4096  _ts_pf6_6_v12_memc_r15c_p2_s4v16                   OK       (4.8s)
+  M= 28672 N= 32768 K=  4096  _ts_pf6_6_v12_memc_r15c_p1_lgkm0                   OK       (4.9s)
+  M=  4096 N= 32768 K=128256  _ts_pf6_6_v12_memc_r15c_p2_s4v12                   OK       (5.1s)
+  M=  4096 N= 32768 K=128256  _ts_pf6_6_v12_memc_r15c_p2_s4v4                    OK       (5.1s)
+  M=  4096 N= 32768 K=128256  _ts_pf6_6_v12_memc_r15c_p2_s4v20                   OK       (5.2s)
+  M=  4096 N= 32768 K=128256  _ts_pf6_6_v12_memc_r15c_p2_s4v8                    OK       (5.2s)
+  M=  4096 N= 32768 K=128256  _ts_pf6_6_v12_memc_r15c_p2_s4v16                   OK       (5.3s)
+  M= 28672 N= 32768 K=  4096  _ts_pf6_6_v12_memc_r15c_p2_s4v20                   OK       (4.6s)
+  M=  4096 N= 32768 K=128256  _ts_pf6_6_v12_memc_r15c_p3_pfg_neg1                OK       (5.0s)
+  M=  4096 N= 32768 K=128256  _ts_pf6_6_v12_memc_r15c_p3_pfg_pos1                OK       (5.1s)
+
+Elapsed: 9.9s

@@ -1,0 +1,102 @@
+{
+  "phase_a": {
+    "DLA1": {
+      "M": 4096,
+      "N": 32768,
+      "K": 128256,
+      "parent_suffix": "_ts_pf6_6_v12_memc",
+      "parent_hash": "c2400812e33eec5c",
+      "cand_suffix": "_ts_pf6_6_v12_memc_r15a_regclassglob",
+      "cand_hash": "ea8116ac3a57d6d1",
+      "verdict": "DIFF"
+    },
+    "DLA2": {
+      "M": 128256,
+      "N": 32768,
+      "K": 4096,
+      "parent_suffix": "_ts_gm2_v12_memc_dc",
+      "parent_hash": "4bd4d79ff4b044c1",
+      "cand_suffix": "_ts_gm2_v12_memc_dc_r15a_regclassglob",
+      "cand_hash": "757f1bada390a57a",
+      "verdict": "DIFF"
+    },
+    "DLA7": {
+      "M": 28672,
+      "N": 32768,
+      "K": 4096,
+      "parent_suffix": "_ts_lgk2_v12_memc",
+      "parent_hash": "25110f2c98d70d4a",
+      "cand_suffix": "_ts_lgk2_v12_memc_r15a_regclassglob",
+      "cand_hash": "ca6bef434e541075",
+      "verdict": "DIFF"
+    },
+    "P1": {
+      "M": 28672,
+      "N": 4096,
+      "K": 16384,
+      "parent_suffix": "_ts_gm8",
+      "parent_hash": "186aeff97eb705a9",
+      "cand_suffix": "_ts_gm8_r15a_regclassglob",
+      "cand_hash": "e6ae56adfa140207",
+      "verdict": "DIFF"
+    }
+  },
+  "phase_b": {
+    "_ts_gm8_r15a_regclassglob_v20": {
+      "M": 28672,
+      "N": 4096,
+      "K": 16384,
+      "cand_hash": "f200fb6777fc3258",
+      "vs_parent": "DIFF",
+      "vs_regclassglob": "DIFF"
+    },
+    "_ts_gm8_r15a_regclassglob_v24": {
+      "M": 28672,
+      "N": 4096,
+      "K": 16384,
+      "cand_hash": "71862adca6ee8476",
+      "vs_parent": "DIFF",
+      "vs_regclassglob": "DIFF"
+    },
+    "_ts_gm8_r15a_regclassglob_lgk2": {
+      "M": 28672,
+      "N": 4096,
+      "K": 16384,
+      "cand_hash": "2c8bcc7fd29614ea",
+      "vs_parent": "DIFF",
+      "vs_regclassglob": "DIFF"
+    },
+    "_ts_gm8_r15a_regclassglob_extbr": {
+      "M": 28672,
+      "N": 4096,
+      "K": 16384,
+      "cand_hash": "777f28809c5d5c02",
+      "vs_parent": "DIFF",
+      "vs_regclassglob": "DIFF"
+    },
+    "_ts_gm8_r15a_regclassglob_noembed": {
+      "M": 28672,
+      "N": 4096,
+      "K": 16384,
+      "cand_hash": "e6ae56adfa140207",
+      "vs_parent": "DIFF",
+      "vs_regclassglob": "NOOP"
+    },
+    "_ts_gm8_r15a_regclassglob_tv0": {
+      "M": 28672,
+      "N": 4096,
+      "K": 16384,
+      "cand_hash": "8d951e539de50004",
+      "vs_parent": "DIFF",
+      "vs_regclassglob": "DIFF"
+    },
+    "_ts_gm8_r15a_regclassglob_tv16": {
+      "M": 28672,
+      "N": 4096,
+      "K": 16384,
+      "cand_hash": "dac7b21fd99d8e8e",
+      "vs_parent": "DIFF",
+      "vs_regclassglob": "DIFF"
+    }
+  }
+}
