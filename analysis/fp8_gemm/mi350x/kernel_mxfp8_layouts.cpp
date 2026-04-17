@@ -360,6 +360,12 @@ constexpr int TAIL_BLOCK_N = 16;
 #ifndef MXFP8_RCR_EXACT_PQ_PIPELINE_SCALE_ENABLE
 #define MXFP8_RCR_EXACT_PQ_PIPELINE_SCALE_ENABLE 0
 #endif
+#ifndef MXFP8_RCR_EXACT_PQ_HOIST_HI_ENABLE
+#define MXFP8_RCR_EXACT_PQ_HOIST_HI_ENABLE 0
+#endif
+#ifndef MXFP8_RCR_EXACT_PQ_OPSEL_PHASE_ENABLE
+#define MXFP8_RCR_EXACT_PQ_OPSEL_PHASE_ENABLE 0
+#endif
 #ifndef MXFP8_RRR_FAST_ENABLE
 #define MXFP8_RRR_FAST_ENABLE 0
 #endif
@@ -817,6 +823,32 @@ __device__ __forceinline__ void rcr_exact_mfma_scale_builtin_inplace(
     );
 }
 
+// opsel byte-select encoding: bit0 = sub-group (A/B), bit1 = K-phase (lo/hi 16-bit half
+// of the 4-byte scale pack). Lets MFMA read the 2 scale bytes for phase 1 directly from
+// the 32-bit scale register, avoiding the explicit v_lshrrev_b32 by 16.
+template<int OPSEL_A, int OPSEL_B, int K_PHASE>
+__device__ __forceinline__ void rcr_exact_mfma_scale_builtin_opsel_phase_inplace(
+    rcr_exact_floatx4_t& d,
+    const rcr_exact_intx8_t& a,
+    const rcr_exact_intx8_t& b,
+    fp8e8m0_4 scale_a,
+    fp8e8m0_4 scale_b)
+{
+    constexpr int OPSEL_A_FULL = (OPSEL_A & 1) | ((K_PHASE & 1) << 1);
+    constexpr int OPSEL_B_FULL = (OPSEL_B & 1) | ((K_PHASE & 1) << 1);
+    d = __builtin_amdgcn_mfma_scale_f32_16x16x128_f8f6f4(
+        a,
+        b,
+        d,
+        0,
+        0,
+        OPSEL_A_FULL,
+        scale_a,
+        OPSEL_B_FULL,
+        scale_b
+    );
+}
+
 template<typename RT_C>
 __device__ __forceinline__ void rcr_exact_acc_to_rt(
     RT_C& dst,
@@ -961,6 +993,53 @@ __device__ __forceinline__ void rcr_mma_scaled_from_packs_fixed_phase_impl(
         a_scale_packs,
         b_scale_packs
     );
+}
+
+// K_PHASE-templated row: uses HW opsel byte-select to read the correct 2 bytes from the
+// 32-bit scale pack for phase K_PHASE, so no runtime v_lshr is required.
+template<int K_PHASE, int ROW_BASE, int A_PACK_COUNT, int B_PACK_COUNT>
+__device__ __forceinline__ void rcr_mma_scaled_from_packs_opsel_phase_row(
+    rcr_exact_acc& acc,
+    const A_row_reg& a,
+    const RCR_B_reg& b,
+    const fp8e8m0_4 (&a_scale_packs)[A_PACK_COUNT],
+    const fp8e8m0_4 (&b_scale_packs)[B_PACK_COUNT])
+{
+    static_assert(RBM == 64 && RBN == 32, "RCR exact opsel-phase helper expects a 64x32 accumulator tile");
+    static_assert(ROW_BASE >= 0 && ROW_BASE < 4, "invalid row base");
+    static_assert(A_PACK_COUNT >= 2, "RCR exact opsel-phase helper expects two A scale packs");
+    static_assert(B_PACK_COUNT >= 1, "RCR exact opsel-phase helper expects one B scale pack");
+
+    auto& d0 = acc.regs[ROW_BASE * (RBN / 16) + 0];
+    auto& d1 = acc.regs[ROW_BASE * (RBN / 16) + 1];
+
+    const auto& a0 = *reinterpret_cast<const rcr_exact_intx8_t*>(&a.tiles[ROW_BASE][0].data[0]);
+    const auto& b0 = *reinterpret_cast<const rcr_exact_intx8_t*>(&b.tiles[0][0].data[0]);
+    const auto& b1 = *reinterpret_cast<const rcr_exact_intx8_t*>(&b.tiles[1][0].data[0]);
+    const fp8e8m0_4 a_scale0 = a_scale_packs[ROW_BASE / 2];
+    const fp8e8m0_4 b_scale0 = b_scale_packs[0];
+
+    if constexpr ((ROW_BASE & 1) == 0) {
+        rcr_exact_mfma_scale_builtin_opsel_phase_inplace<0, 0, K_PHASE>(d0, a0, b0, a_scale0, b_scale0);
+        rcr_exact_mfma_scale_builtin_opsel_phase_inplace<0, 1, K_PHASE>(d1, a0, b1, a_scale0, b_scale0);
+    } else {
+        rcr_exact_mfma_scale_builtin_opsel_phase_inplace<1, 0, K_PHASE>(d0, a0, b0, a_scale0, b_scale0);
+        rcr_exact_mfma_scale_builtin_opsel_phase_inplace<1, 1, K_PHASE>(d1, a0, b1, a_scale0, b_scale0);
+    }
+}
+
+template<int K_PHASE, int A_PACK_COUNT, int B_PACK_COUNT>
+__device__ __forceinline__ void rcr_mma_scaled_from_packs_opsel_phase_impl(
+    rcr_exact_acc& acc,
+    const A_row_reg& a,
+    const RCR_B_reg& b,
+    const fp8e8m0_4 (&a_scale_packs)[A_PACK_COUNT],
+    const fp8e8m0_4 (&b_scale_packs)[B_PACK_COUNT])
+{
+    rcr_mma_scaled_from_packs_opsel_phase_row<K_PHASE, 0>(acc, a, b, a_scale_packs, b_scale_packs);
+    rcr_mma_scaled_from_packs_opsel_phase_row<K_PHASE, 1>(acc, a, b, a_scale_packs, b_scale_packs);
+    rcr_mma_scaled_from_packs_opsel_phase_row<K_PHASE, 2>(acc, a, b, a_scale_packs, b_scale_packs);
+    rcr_mma_scaled_from_packs_opsel_phase_row<K_PHASE, 3>(acc, a, b, a_scale_packs, b_scale_packs);
 }
 
 template<bool USE_PHASE_DISPATCH, int A_PACK_COUNT, int B_PACK_COUNT>
@@ -2457,9 +2536,10 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
     __builtin_amdgcn_s_barrier();
 
 #if MXFP8_RCR_EXACT_PQ_KPAIR_LOOP_ENABLE
-    auto do_k_iter_body = [&](int k, int k_phase) __attribute__((always_inline)) {
+    auto do_k_iter_body = [&]<int K_PHASE>(int k) __attribute__((always_inline)) {
+        constexpr int k_phase = K_PHASE;
 #if MXFP8_RCR_EXACT_PQ_KPAIR_INLINE_SCALE_ENABLE
-        if (k_phase == 0) {
+        if constexpr (K_PHASE == 0) {
             load_scale_packs_for_pair(k >> 1);
         }
 #endif
@@ -2522,6 +2602,30 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
         } else {
             rcr_mma_scaled_from_packs_exact<PRESHUFFLED_QUANT>(cA, a, b0, a0_scale_packs, b0_scale_packs, k_phase);
         }
+#elif MXFP8_RCR_EXACT_PQ_HOIST_HI_ENABLE
+        if constexpr (PRESHUFFLED_QUANT) {
+#if MXFP8_RCR_EXACT_PQ_KPAIR_LOOP_ENABLE
+            rcr_mma_scaled_from_packs_opsel_phase_impl<K_PHASE>(cA, a, b0, a0_scale_packs, b0_scale_packs);
+#else
+            if (k_phase == 0) {
+                rcr_mma_scaled_from_packs_opsel_phase_impl<0>(cA, a, b0, a0_scale_packs, b0_scale_packs);
+            } else {
+                rcr_mma_scaled_from_packs_opsel_phase_impl<1>(cA, a, b0, a0_scale_packs, b0_scale_packs);
+            }
+#endif
+        } else {
+            rcr_mma_scaled_from_packs_exact<PRESHUFFLED_QUANT>(cA, a, b0, a0_scale_packs, b0_scale_packs, k_phase);
+        }
+#elif MXFP8_RCR_EXACT_PQ_OPSEL_PHASE_ENABLE
+        if constexpr (PRESHUFFLED_QUANT) {
+            if (k_phase == 0) {
+                rcr_mma_scaled_from_packs_opsel_phase_impl<0>(cA, a, b0, a0_scale_packs, b0_scale_packs);
+            } else {
+                rcr_mma_scaled_from_packs_opsel_phase_impl<1>(cA, a, b0, a0_scale_packs, b0_scale_packs);
+            }
+        } else {
+            rcr_mma_scaled_from_packs_exact<PRESHUFFLED_QUANT>(cA, a, b0, a0_scale_packs, b0_scale_packs, k_phase);
+        }
 #else
         rcr_mma_scaled_from_packs_exact<PRESHUFFLED_QUANT>(cA, a, b0, a0_scale_packs, b0_scale_packs, k_phase);
 #endif
@@ -2551,6 +2655,30 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
 #elif MXFP8_RCR_EXACT_PQ_REMAP_ONCE_ENABLE
         if constexpr (PRESHUFFLED_QUANT) {
             rcr_mma_scaled_from_packs_fixed_phase_impl(cB, a, b1, a0_phase_packs, b1_phase_packs);
+        } else {
+            rcr_mma_scaled_from_packs_exact<PRESHUFFLED_QUANT>(cB, a, b1, a0_scale_packs, b1_scale_packs, k_phase);
+        }
+#elif MXFP8_RCR_EXACT_PQ_HOIST_HI_ENABLE
+        if constexpr (PRESHUFFLED_QUANT) {
+#if MXFP8_RCR_EXACT_PQ_KPAIR_LOOP_ENABLE
+            rcr_mma_scaled_from_packs_opsel_phase_impl<K_PHASE>(cB, a, b1, a0_scale_packs, b1_scale_packs);
+#else
+            if (k_phase == 0) {
+                rcr_mma_scaled_from_packs_opsel_phase_impl<0>(cB, a, b1, a0_scale_packs, b1_scale_packs);
+            } else {
+                rcr_mma_scaled_from_packs_opsel_phase_impl<1>(cB, a, b1, a0_scale_packs, b1_scale_packs);
+            }
+#endif
+        } else {
+            rcr_mma_scaled_from_packs_exact<PRESHUFFLED_QUANT>(cB, a, b1, a0_scale_packs, b1_scale_packs, k_phase);
+        }
+#elif MXFP8_RCR_EXACT_PQ_OPSEL_PHASE_ENABLE
+        if constexpr (PRESHUFFLED_QUANT) {
+            if (k_phase == 0) {
+                rcr_mma_scaled_from_packs_opsel_phase_impl<0>(cB, a, b1, a0_scale_packs, b1_scale_packs);
+            } else {
+                rcr_mma_scaled_from_packs_opsel_phase_impl<1>(cB, a, b1, a0_scale_packs, b1_scale_packs);
+            }
         } else {
             rcr_mma_scaled_from_packs_exact<PRESHUFFLED_QUANT>(cB, a, b1, a0_scale_packs, b1_scale_packs, k_phase);
         }
@@ -2585,6 +2713,30 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
         } else {
             rcr_mma_scaled_from_packs_exact<PRESHUFFLED_QUANT>(cC, a, b0, a1_scale_packs, b0_scale_packs, k_phase);
         }
+#elif MXFP8_RCR_EXACT_PQ_HOIST_HI_ENABLE
+        if constexpr (PRESHUFFLED_QUANT) {
+#if MXFP8_RCR_EXACT_PQ_KPAIR_LOOP_ENABLE
+            rcr_mma_scaled_from_packs_opsel_phase_impl<K_PHASE>(cC, a, b0, a1_scale_packs, b0_scale_packs);
+#else
+            if (k_phase == 0) {
+                rcr_mma_scaled_from_packs_opsel_phase_impl<0>(cC, a, b0, a1_scale_packs, b0_scale_packs);
+            } else {
+                rcr_mma_scaled_from_packs_opsel_phase_impl<1>(cC, a, b0, a1_scale_packs, b0_scale_packs);
+            }
+#endif
+        } else {
+            rcr_mma_scaled_from_packs_exact<PRESHUFFLED_QUANT>(cC, a, b0, a1_scale_packs, b0_scale_packs, k_phase);
+        }
+#elif MXFP8_RCR_EXACT_PQ_OPSEL_PHASE_ENABLE
+        if constexpr (PRESHUFFLED_QUANT) {
+            if (k_phase == 0) {
+                rcr_mma_scaled_from_packs_opsel_phase_impl<0>(cC, a, b0, a1_scale_packs, b0_scale_packs);
+            } else {
+                rcr_mma_scaled_from_packs_opsel_phase_impl<1>(cC, a, b0, a1_scale_packs, b0_scale_packs);
+            }
+        } else {
+            rcr_mma_scaled_from_packs_exact<PRESHUFFLED_QUANT>(cC, a, b0, a1_scale_packs, b0_scale_packs, k_phase);
+        }
 #else
         rcr_mma_scaled_from_packs_exact<PRESHUFFLED_QUANT>(cC, a, b0, a1_scale_packs, b0_scale_packs, k_phase);
 #endif
@@ -2612,6 +2764,30 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
 #elif MXFP8_RCR_EXACT_PQ_REMAP_ONCE_ENABLE
         if constexpr (PRESHUFFLED_QUANT) {
             rcr_mma_scaled_from_packs_fixed_phase_impl(cD, a, b1, a1_phase_packs, b1_phase_packs);
+        } else {
+            rcr_mma_scaled_from_packs_exact<PRESHUFFLED_QUANT>(cD, a, b1, a1_scale_packs, b1_scale_packs, k_phase);
+        }
+#elif MXFP8_RCR_EXACT_PQ_HOIST_HI_ENABLE
+        if constexpr (PRESHUFFLED_QUANT) {
+#if MXFP8_RCR_EXACT_PQ_KPAIR_LOOP_ENABLE
+            rcr_mma_scaled_from_packs_opsel_phase_impl<K_PHASE>(cD, a, b1, a1_scale_packs, b1_scale_packs);
+#else
+            if (k_phase == 0) {
+                rcr_mma_scaled_from_packs_opsel_phase_impl<0>(cD, a, b1, a1_scale_packs, b1_scale_packs);
+            } else {
+                rcr_mma_scaled_from_packs_opsel_phase_impl<1>(cD, a, b1, a1_scale_packs, b1_scale_packs);
+            }
+#endif
+        } else {
+            rcr_mma_scaled_from_packs_exact<PRESHUFFLED_QUANT>(cD, a, b1, a1_scale_packs, b1_scale_packs, k_phase);
+        }
+#elif MXFP8_RCR_EXACT_PQ_OPSEL_PHASE_ENABLE
+        if constexpr (PRESHUFFLED_QUANT) {
+            if (k_phase == 0) {
+                rcr_mma_scaled_from_packs_opsel_phase_impl<0>(cD, a, b1, a1_scale_packs, b1_scale_packs);
+            } else {
+                rcr_mma_scaled_from_packs_opsel_phase_impl<1>(cD, a, b1, a1_scale_packs, b1_scale_packs);
+            }
         } else {
             rcr_mma_scaled_from_packs_exact<PRESHUFFLED_QUANT>(cD, a, b1, a1_scale_packs, b1_scale_packs, k_phase);
         }
@@ -2644,15 +2820,14 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
         };
         for (int k_pair = 0; k_pair < k_pairs; k_pair++) {
             load_scale_buffer(k_pair);
-            #pragma unroll
-            for (int phase = 0; phase < 2; phase++) {
-                do_k_iter_body(k_pair * 2 + phase, phase);
-                tic ^= 1; toc ^= 1;
-            }
+            do_k_iter_body.template operator()<0>(k_pair * 2);
+            tic ^= 1; toc ^= 1;
+            do_k_iter_body.template operator()<1>(k_pair * 2 + 1);
+            tic ^= 1; toc ^= 1;
         }
         if (k_remainder) {
             load_scale_buffer(k_pairs);
-            do_k_iter_body(k_pairs * 2, 0);
+            do_k_iter_body.template operator()<0>(k_pairs * 2);
             tic ^= 1; toc ^= 1;
         }
 #else
@@ -2660,17 +2835,16 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
 #if !MXFP8_RCR_EXACT_PQ_KPAIR_INLINE_SCALE_ENABLE
             load_scale_packs_for_pair(k_pair);
 #endif
-            #pragma unroll
-            for (int phase = 0; phase < 2; phase++) {
-                do_k_iter_body(k_pair * 2 + phase, phase);
-                tic ^= 1; toc ^= 1;
-            }
+            do_k_iter_body.template operator()<0>(k_pair * 2);
+            tic ^= 1; toc ^= 1;
+            do_k_iter_body.template operator()<1>(k_pair * 2 + 1);
+            tic ^= 1; toc ^= 1;
         }
         if (k_remainder) {
 #if !MXFP8_RCR_EXACT_PQ_KPAIR_INLINE_SCALE_ENABLE
             load_scale_packs_for_pair(k_pairs);
 #endif
-            do_k_iter_body(k_pairs * 2, 0);
+            do_k_iter_body.template operator()<0>(k_pairs * 2);
             tic ^= 1; toc ^= 1;
         }
 #endif

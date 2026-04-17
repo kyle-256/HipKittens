@@ -24,8 +24,9 @@
 | 版本 | TFLOPS | SNR | VGPR / AGPR / Spills / LDS |
 | --- | ---: | --- | --- |
 | **FP8 RCR (target)** | **3070.93** | 49.61 | 252 / 0 / 0 / 131 KB |
-| MXFP8 8-wave KPAIR+SRD+SCALE_PIPE | 2897.66 | 49.60 | 256 / 0 / 0 / 135 KB |
-| 差距 | −173.27 (−5.64%) | | |
+| **MXFP8 8-wave KPAIR+SRD+SCALE_PIPE+HOIST_HI(opsel)** | **2925.64** (GPU7 reviewer, SNR+det PASS) | 49.60 | 254 / 0 / 0 / 131 KB |
+| MXFP8 8-wave KPAIR+SRD+SCALE_PIPE (前 baseline) | 2897.66 | 49.60 | 256 / 0 / 0 / 135 KB |
+| 差距 (当前最佳 vs FP8) | −145.29 (−4.73%) | | |
 
 ## 角色定义
 
@@ -48,13 +49,14 @@
   - `MXFP8_RCR_EXACT_PQ_PHASE_U16_CACHE_ENABLE=1`
   - `MXFP8_RCR_EXACT_PQ_REMAP_ONCE_ENABLE=1`
   - `MXFP8_RCR_EXACT_PQ_SCALAR_PHASE_PACKS_ENABLE=1`
-- **stash 含有 Dev B 已经在试的 `MXFP8_RCR_EXACT_PQ_HOIST_HI_ENABLE` 路径**，pop 后可接续完成
-- **禁地**：skill 明确 `op_sel_hi` phase1 inline-ASM 变体「语义能对，长跑回归」，谨慎
+- **已完成**：HOIST_HI opsel 方案上线（reviewer GPU7 验收 2925.64，A/B +17.80；GPU1 head-to-head +25.67；main-loop v_lshr 0；spills 0；VGPR 256→254）。构建加 `-DMXFP8_RCR_EXACT_PQ_HOIST_HI_ENABLE=1` 即可。
+- **经验**：K_PHASE 必须是 **编译期常量**（C++20 templated lambda）；tail 区域走 `rcr_mma_scaled_from_packs_exact`（runtime k_phase）——route tail 到 opsel 会复制 MFMA code path 并制造 31 spills。
+- **禁地**：skill 明确 `op_sel_hi` phase1 **inline-ASM** 变体「语义能对，长跑回归」——当前 HOIST_HI 用的是 `__builtin_amdgcn_mfma_scale_*` + `op_sel`/`op_sel_hi`，不是 inline ASM，工作正常。
 
 ### Dev C — ASM Rewriter 路径
 - **目标**：改写 `rewrite_mxfp8.py`（当前只处理 AGPR，对 8-wave PQ=1 是 no-op）使其对 8-wave 生效
 - **思路**：把 6 个 `v_lshr` 前移到**上一 phase** 的 MFMA shadow（64-cycle 延迟里隐藏）
-- **stash 已有 Dev C 写到一半的 `rewrite_mxfp8_8wave.py`（414 行）+ `build_rewrite_8wave.sh`**，pop 后接续
+- ~~**stash 已有 Dev C 写到一半的 `rewrite_mxfp8_8wave.py` + `build_rewrite_8wave.sh`**~~ **已关闭**：第二轮实测 +0.18%，HOIST_HI 已从根源消除 `v_lshr`，ASM rewriter 无有效优化空间。该方向已废弃，rewriter 脚本未入库
 - **pipeline 陷阱**（来自 MXFP4 经验）：
   - `clang -x assembler` 必须带 `-c`，否则 ld.lld 视为预建 DYN ELF 会吞 kernel
   - cuid 必须从 `grep -oP '__hip_cuid_\K[0-9a-f]+' device.s` 动态获取
@@ -73,14 +75,17 @@ SNR: XX.XX dB, determinism: PASS (3 runs)
 VGPR: X, AGPR: Y, spills: Z, LDS: W KB
 ```
 
-## 半成品 stash 说明
+## 第二轮评审结果 (2026-04-17)
 
-`stash@{0}` 保存第一轮 3 个 dev agent 未测完的改动：
-- `kernel_mxfp8_layouts.cpp`：Dev B 的 `MXFP8_RCR_EXACT_PQ_HOIST_HI_ENABLE` 开关 + `rcr_mfma_scale_builtin_opsel_phase_inplace` helper（消除 `v_lshr`）
-- `rcr_mxfp8_4wave_fastpath.inc`：Dev A 的 `MXFP8_RCR_4WAVE_KPAIR_LOOP_ENABLE` + `MXFP8_RCR_4WAVE_SCALE_PIPE_ENABLE` 开关骨架
-- `rewrite_mxfp8_8wave.py`（414 行）+ `build_rewrite_8wave.sh`：Dev C 的 asm rewriter 草稿
+stash@{0} 已 pop 并逐条评审。三条路径：
 
-恢复方式：`git stash pop stash@{0}`（但是**必须**先确认当前工作区干净、不会冲突）。恢复后必须立即验证每条改动 smoke 通过再继续扩展。
+| 路径 | 结果 | 采纳？ |
+|---|---|---|
+| Dev B — HOIST_HI opsel 消除 v_lshr | reviewer GPU7 formal 2925.64 (SNR+det PASS)；A/B +17.80；Dev B GPU1 A/B +25.67；VGPR 256→254；spills 0；main-loop `v_lshr` 6→0 | **采纳，已 commit** |
+| Dev A — 4-wave KPAIR+SCALE_PIPE | GPU0 同 GPU A/B：4-wave bare 2878 → 4-wave KPAIR+PIPE 2900 (+22)；但仍显著低于同 GPU 上的 8-wave KPAIR+SRD+PIPE (2993)；且 4-wave 走 inline ASM 占 256 AGPR + 256 VGPR → occupancy=1，结构劣势根深 | **拒绝**（不能超越 8-wave） |
+| Dev C — ASM rewriter `rewrite_mxfp8_8wave.py` + `build_rewrite_8wave.sh` | GPU2 A/B 仅 +5.94 TFLOPS (+0.18%)；HOIST_HI 已从源头消除 `v_lshr`，rewriter 的重排空间被覆盖 | **拒绝**（边际收益 + 维护成本不划算，脚本未入库） |
+
+任何后续 agent 想重启 Dev C 的 ASM rewriter 方向之前，必须先证明 HOIST_HI 框架下还有可被 rewriter 独占抢到的非 `v_lshr` 结构性收益，否则视为重蹈覆辙。
 
 ## 工作流
 
