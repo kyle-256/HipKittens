@@ -99,6 +99,21 @@ using namespace kittens;
 #define PACKED_STORE 0
 #endif
 
+// PERSISTENT_XCD: launch a fixed-size grid (PERSISTENT_GRID workgroups), each WG
+// pulling tile_id atomically from a global counter. Maintains XCD-aware ordering
+// by constructing raw_bid = tile_id (so the existing % NUM_XCDS swizzle still works).
+#ifndef PERSISTENT_XCD
+#define PERSISTENT_XCD 0
+#endif
+#ifndef PERSISTENT_GRID
+// Default: 8 XCDs * 38 CUs * 2 WGs/CU = 608.  MI355X has 304 CUs total.
+#define PERSISTENT_GRID 608
+#endif
+#ifndef PERSISTENT_BATCH
+// Tiles claimed per atomicAdd (1 = one-at-a-time, 4 = grab 4 sequential tiles).
+#define PERSISTENT_BATCH 1
+#endif
+
 // OPTC flags (default-off, source-level scheduling/codegen hints)
 #ifndef WAVE_PRIO_HIGH
 #define WAVE_PRIO_HIGH 0
@@ -1659,6 +1674,11 @@ __device__ __forceinline__ void kpair_32mfma_with_lds_and_pf_swapped_sel(
 // Main kernel
 // ══════════════════════════════════════════════════════════════
 
+#if PERSISTENT_XCD
+// Global tile counter for persistent-kernel mode. Reset to 0 from host before each launch.
+__device__ unsigned int g_persistent_tile_counter = 0;
+#endif
+
 #if defined(WAVES_PER_EU_1)
 __attribute__((amdgpu_waves_per_eu(1, 1)))
 #elif defined(WAVES_PER_EU_2)
@@ -1690,14 +1710,45 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 #define GROUP_SIZE_M 4
 #endif
     constexpr int GROUP_M = GROUP_SIZE_M;
+#if PERSISTENT_XCD
+    // Persistent grid: total_blocks = real number of tiles in problem (M/BLK * N/BLK).
+    // gridDim.x = PERSISTENT_GRID (e.g. 608). Each WG loops, atomically claiming tile_id.
+    const int total_blocks = (M_DIM / BLK) * (N_DIM / BLK);
+#else
     const int total_blocks = gridDim.x;
+#endif
     const int bpr = total_blocks / bpc;
 
-    // XCD pid remapping: Gluon-style "tall XCDs" for correct remainder handling
-    const int raw_bid = blockIdx.x;
     const int pids_per_xcd = (total_blocks + NUM_XCDS - 1) / NUM_XCDS;
     int tall_xcds = total_blocks % NUM_XCDS;
     if (tall_xcds == 0) tall_xcds = NUM_XCDS;
+
+#if PERSISTENT_XCD
+    // ── Persistent loop entry ──
+    // Per-WG cache of the next tile (for batch>1 we reuse claims).
+    __shared__ unsigned int s_claim_base;
+    unsigned int local_offset = PERSISTENT_BATCH;  // forces first-iter claim
+
+    while (true) {
+        // ── Claim next tile_id via atomicAdd on the global counter ──
+        if (local_offset >= PERSISTENT_BATCH) {
+            if (threadIdx.x == 0) {
+                s_claim_base = atomicAdd(&g_persistent_tile_counter,
+                                         (unsigned int)PERSISTENT_BATCH);
+            }
+            __syncthreads();
+            local_offset = 0;
+        }
+        const int raw_bid = (int)(s_claim_base + local_offset);
+        local_offset += 1;
+        if (raw_bid >= total_blocks) break;
+#else
+    {
+        // Static dispatch: raw_bid = blockIdx.x
+        const int raw_bid = (int)blockIdx.x;
+#endif
+
+    // XCD pid remapping: Gluon-style "tall XCDs" for correct remainder handling
     const int xcd = raw_bid % NUM_XCDS;
     const int local_pid = raw_bid / NUM_XCDS;
     int bid;
@@ -1706,7 +1757,11 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     } else {
         bid = tall_xcds * pids_per_xcd + (xcd - tall_xcds) * (pids_per_xcd - 1) + local_pid;
     }
+#if PERSISTENT_XCD
+    if (bid >= total_blocks) continue;
+#else
     if (bid >= total_blocks) return;
+#endif
 
     // GROUP_SIZE_M swizzle within XCD's block range
     const int num_pig = GROUP_M * bpc;
@@ -2420,12 +2475,26 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     store_block(acc_A1Bl, 1, 0);
     store_block(acc_A1Br, 1, 1);
 #endif
+
+#if PERSISTENT_XCD
+    } // end while(true) persistent loop
+#else
+    } // end static-dispatch block
+#endif
 }
 
 void dispatch_gluon_cpp(gluon_globals g) {
     int m = static_cast<int>(g.c.rows());
     int n = static_cast<int>(g.c.cols());
+#if PERSISTENT_XCD
+    // Reset persistent tile counter to 0 before each launch
+    unsigned int* counter_dev = nullptr;
+    hipGetSymbolAddress((void**)&counter_dev, HIP_SYMBOL(g_persistent_tile_counter));
+    hipMemsetAsync(counter_dev, 0, sizeof(unsigned int), 0);
+    const dim3 grid(PERSISTENT_GRID);
+#else
     const dim3 grid((m / BLK) * (n / BLK));
+#endif
     mxfp4_gluon_cpp_kernel<<<grid, dim3(_NUM_THREADS), 0>>>(g);
 }
 

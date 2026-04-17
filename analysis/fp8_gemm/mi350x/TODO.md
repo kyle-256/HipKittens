@@ -243,6 +243,24 @@ memclause family (`-mllvm -amdgpu-sched-strategy=max-memory-clause`) is the domi
   - DIRECT_BL + EARLY_BL_PF:  4004.2 TFLOPS (76.3%)
   Latency-hiding 假设 VALIDATED (+4.1pp), 但 DIRECT_BL+EARLY 仍比 LDS 慢 10.3pp. 结论: B-direct 路径在当前内核上 **结构性 inadequate**, 即使 Step12-launched prefetch 完全隐藏 buffer_load 延迟. LDS broadcast bandwidth 是真正瓶颈, 不是 load latency. 代码保留在 `EARLY_BL_PF=1` flag 下 (default 0). 见 `test_early_bl_pf.py`. 这次实验 close 了 "B-direct 重写" 这条路 — 唯一能突破 24 WIN 的就是 aiter 架构 (A-only-LDS + deep-pipelined B-direct), 需 >256 VGPRs, 在 gfx950 不可行.
 
+## Round 4 (2026-04-17) — 3 parallel optimizers, all DEAD END
+Decider 提出 5 个 untested vectors, 3 个 in-session 可执行. 启动 3 个 optimizer agents 并行验证:
+- **SCALE_REG_CACHE** → DUPLICATE: scales 已经 VGPR-resident (`v70-v73`), 用 `buffer_load_dwordx2` 直接 VMEM→VGPR (无 LDS round-trip), `pf_a0/pf_a1/pf_bl/pf_br` 持久 VGPR 缓存 + `NONVOLATILE_SCALE_X2_POC=1` (default-on) 已实现该优化. Decider 误读了 kernel. 无代码改动.
+- **LDS_XOR_SWIZZLE_B** → DUPLICATE: `st_16x128_s::swizzle()` 已实现 (`include/types/shared/st_shape.cuh:236-237`), 写侧 `prefill_swizzled_offsets` 预 permute global offset, 读侧 `compute_lds_base_addrs` 同步 XOR. 模拟确认 perfect 8 acc/bank uniform = LDS 硬件下界. 之前 `kernel_mxfp4_xor_toggle.cpp` 测试无改善. 无代码改动.
+- **PERSISTENT_XCD_QUEUE** → DEAD END: 实现持久 kernel + atomic counter + `PERSISTENT_BATCH ∈ {1,4,8}` 调优, 在 IMPENETRABLE 128256×32768×4096 上测试 (warmup=200, iters=500):
+  - static (`ts_gm2_v12_memc_dc`): 4296 TFLOPS (94.7%)
+  - PERSISTENT b=1 g=608: 3791 TFLOPS (83.6%) −11.8%
+  - PERSISTENT b=4 g=608: 4129 TFLOPS (91.0%) −3.9% ← best
+  - PERSISTENT b=8 g=608: 3857 TFLOPS (85.0%) −10.2%
+  失败原因: (1) HWS overhead 不是瓶颈 — static 已 94.7%, 仅剩 5% headroom, atomic 立即吃掉 4%; (2) XCD-locality LOSS — static `raw_bid % 8` 保证每个 XCD 内连续 tile 的 L2 B-tile 复用, persistent 破坏该模式; (3) atomic latency 在已 ALU-bound (256V/256A, 1 wave/SIMD) 的 kernel 上叠加可见开销. **128256×32768×4096 的 92.9% 上限是 register-pressure / MFMA-pipeline bound, 不是 launch-bound**. 代码保留在 `PERSISTENT_XCD=1` flag 下 (default 0).
+
+**Round 4 净增 WIN: 0**. 24/42 第 4 次确认饱和.
+
+## 剩余 untested vectors (out of in-session scope)
+- **MFMA_32X32X64_TILING**: 切换 `v_mfma_scale_f32_16x16x128_f8f6f4` → `v_mfma_scale_f32_32x32x64_f8f6f4`. 巨大 kernel rewrite (>1 day, asm + layout 全改). AGPR 从 256 降到 64 释放 192 VGPRs/AGPRs 用于深度 B-buffering. 是唯一未测的"内核重构"级别尝试, 接近 aiter 架构.
+- **B_TRIPLE_BUFFER**: 3-stage pipeline 替代当前 2-stage. LDS budget 是杀手 (131KB → 163KB > 160KB max). 仅在 #1 (32x32 MFMA 释放 AGPR) 完成后才可行.
+- Optimizer A 副产建议: 早期 scale prefetch (移到 Step12 前), 4× dwordx2 → 1× dwordx8 burst 合并, drop redundant scale stream 当 a0_raw == a1_raw.
+
 ## Rocprof 分析结论 (2026-04-16)
 对生产 .s (N=32768, K=4096, TS=1, LGK2) 做了 PC sampling 和 assembly 分析:
 - 2048 MFMAs, 512 ds_reads, 165 s_nop, 313 asm block pairs

@@ -111,6 +111,34 @@
     Tried with CK BpreShuffle on B too: SNR -3.03 dB (worse). The "5084 TFLOPS" reference is
     measuring a kernel that doesn't compute correct GEMM. To use ASM, would need to load
     aiter's actual `.co` files via `hipModuleLoad` — different architectural change entirely.
+12. ~~**SCALE_REG_CACHE (hoist scale ds_reads into VGPR across iterations)**~~ — **DUPLICATE / NOT NEW (2026-04-17 Round 4)**:
+    Investigation found scales are ALREADY VGPR-resident: `load_pq_scale_x2_async` is direct
+    VMEM→VGPR via `buffer_load_dwordx2` (NOT VMEM→LDS). Persistent VGPRs `pf_a0/pf_a1/pf_bl/pf_br`
+    (line 1831) hold scales across iterations; asm operands `v70-v73` reused across all 32 MFMAs
+    in each kpair with zero reloads. `NONVOLATILE_SCALE_X2_POC=1` (default-on) already does the
+    optimization. The decider misread the kernel. No code changes made.
+13. ~~**LDS_XOR_SWIZZLE_B (XOR-swizzle B's LDS column to remove bank conflicts)**~~ — **DUPLICATE / NOT NEW (2026-04-17 Round 4)**:
+    Already implemented via `st_16x128_s::swizzle()` in `include/types/shared/st_shape.cuh:236-237`:
+    `swizzled_offset = offset ^ (((offset % 2048) >> 8) << 4)`. Symmetrically applied: writer side
+    pre-permutes global offset via `prefill_swizzled_offsets`, reader side applies same XOR via
+    `compute_lds_base_addrs` (line 376,379). Simulation confirms perfect 8 acc/bank uniform =
+    LDS hardware lower bound. Prior `kernel_mxfp4_xor_toggle.cpp` test showed no improvement
+    (4917T vs 4926T baseline). No code changes made.
+14. ~~**PERSISTENT_XCD_QUEUE (persistent kernel + atomic work queue for mega-M shape)**~~ — **DEAD END (2026-04-17 Round 4)**:
+    Targeted at "IMPENETRABLE" 128256×32768×4096 (currently 94.7% aiter). Implemented behind
+    `PERSISTENT_XCD=1` flag (default 0) with `PERSISTENT_GRID=608` (8 XCDs × 38 CUs × 2 WGs/CU)
+    and tunable `PERSISTENT_BATCH ∈ {1,4,8}`. Bench results (warmup=200, iters=500):
+        static (best variant `ts_gm2_v12_memc_dc`): 4296 TFLOPS (94.7%)
+        PERSISTENT b=1 g=608:  3791 TFLOPS (83.6%)  −11.8%
+        PERSISTENT b=4 g=608:  4129 TFLOPS (91.0%)  −3.9%  ← best persistent
+        PERSISTENT b=8 g=608:  3857 TFLOPS (85.0%)  −10.2%
+    Reasons it failed: (1) HWS overhead is NOT the bottleneck — only ~5% headroom total to aiter,
+    atomic-counter eats ~4% even at BATCH=4; (2) XCD-locality LOSS — static `raw_bid % 8`
+    preserves L2 B-tile reuse within each XCD; persistent destroys that L2 reuse pattern;
+    (3) atomic latency adds visible overhead on already-ALU-bound kernel (256V/256A, 1 wave/SIMD).
+    The 92.9% ceiling on this shape is **register-pressure / MFMA-pipeline bound**, NOT launch/dispatch bound.
+    Code preserved behind `PERSISTENT_XCD=1` flag.
+
 11. ~~**EARLY_BL_PF (Bl buffer_load issued at Step12 start, ~128-MFMA hiding)**~~ — **DEAD END (2026-04-17)**:
     Hypothesis: original DIRECT_BL placed Bl buffer_load inside Step4 with only ~32 cyc MFMA hiding for
     a ~400 cyc buffer_load — issuing it before Step12 gives ~512 cyc hiding.
@@ -144,6 +172,11 @@
   +4.1pp vs original DIRECT_BL on 14336×4096×32768 (latency-hiding hypothesis confirmed) but still
   -10.3pp vs LDS baseline. B-direct path structurally cannot match LDS broadcast bandwidth on this kernel.
   Code preserved behind `EARLY_BL_PF=1` flag (default 0). See `test_early_bl_pf.py`.
+- **Round 4 (2026-04-17)**: 3 untested vectors investigated by parallel optimizer team:
+  - SCALE_REG_CACHE → DUPLICATE (scales already VGPR-resident `v70-v73`, no LDS round-trip)
+  - LDS_XOR_SWIZZLE_B → DUPLICATE (already in `st_16x128_s::swizzle()`, perfect 8 acc/bank uniform)
+  - PERSISTENT_XCD_QUEUE → DEAD END (3.9% slower; XCD-locality loss + atomic overhead; mega-M shape is reg-pressure bound, not launch-bound)
+  Net: 0/3 WIN gain. **24/42 ceiling re-confirmed for 4th time.**
 
 ## Benchmark 规则
 - **warmup=200, iters=500**, trimmed mean 10%
