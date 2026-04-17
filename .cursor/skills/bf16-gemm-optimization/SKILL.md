@@ -12,17 +12,19 @@ All optimizations must live in a single `tk_bf16_layouts.so` built from
 folder, and do not add a Python-level driver that loads different `.so`
 files per shape.
 
-## Current Performance (GPU1, 2026-04-17)
+## Current Performance (GPU2, 2026-04-17, post-P8)
 
-Single `tk_bf16_layouts.so`, 48 LLM shapes, runtime group_m autotune.
+Single `tk_bf16_layouts.so`, 48 LLM shapes, runtime group_m + NUM_XCDS autotune.
 
 | Layout | Geo-mean vs torch.mm | Wins | Status |
 |---|---|---|---|
-| **RCR** | **~0.98x** | ~10/48 | Close, needs +2pp |
-| **RRR** | **~0.97x** | ~11/48 | Close, needs +3pp |
-| **CRR** | **~0.95x** | ~3/48  | Weakest, needs +5pp |
+| **RCR** | **0.984x** | 6/48 | Close, needs +1.6pp |
+| **RRR** | **0.980x** | 9/48 | Close, needs +2.0pp |
+| **CRR** | **0.953x** | 3/48 | Weakest, needs +4.7pp |
 
-Numbers fluctuate ±0.005 between runs depending on device thermals.
+Numbers fluctuate ±2pp between runs depending on device thermals — this is
+the dominant signal in CRR-class tuning sweeps. Pin clocks
+(`rocm-smi --setperflevel high`) before any future CRR exploration.
 
 `torch.mm` under the hood uses hipBLASLt for bf16 GEMM.
 
@@ -51,11 +53,13 @@ Numbers fluctuate ±0.005 between runs depending on device thermals.
 ## Compile Resource Usage
 
 - 3 layouts × 11 KI values = **33 kernel instantiations** in one .so
-- VGPRs ≤ 242 on all, occupancy 2 waves/SIMD
+- VGPRs 216-245 across instantiations, occupancy 2 waves/SIMD
 - 0 VGPR spills
-- CRR at KI ∈ {128, 172, 296} previously used `unroll 1` to dodge SGPR spill;
-  this is the **primary suspected cause of the 5pp CRR gap** vs the old JIT
-  path that hit 1.2x+ with `unroll 2` despite 7-26 SGPR spills.
+- CRR at KI ∈ {128, 296} runs at `unroll 2` with **26 SGPR spills**;
+  KI=172 at `unroll 2` with 7 SGPR spills. These spills are the
+  **primary suspected cause of the residual 4.7pp CRR gap**. Reducing
+  them requires hoisting per-iter SRD / coord arithmetic out of the
+  loop body.
 
 ## What Closed the JIT-vs-Dynamic Gap
 
@@ -65,6 +69,10 @@ Numbers fluctuate ±0.005 between runs depending on device thermals.
 3. **Block-level XCD swizzle** — already present in dynamic
 4. **Runtime group_m autotune** — per-shape best gm ∈ {1, 2, 4, 8, 16}, cached
    in `.autotune_bf16_cache.json`
+5. **Runtime NUM_XCDS autotune (P8)** — `g.num_xcds` is now a kernel arg.
+   `bench_bf16_vs_torch.py` sweeps xcd ∈ {4, 8, 16} per (gm, layout, shape)
+   and prints the winning xcd. Default 8 preserves existing behavior. Best
+   wins on tall-N shapes (xcd=16) and small-K + big-N (xcd=4).
 
 ## Build & Test
 
@@ -103,21 +111,29 @@ HIP_VISIBLE_DEVICES=1 PYTHONPATH=. python3 bench_bf16_vs_torch.py
 
 ## Remaining Gap — Why BF16 Still Below 1.0x
 
-Most shapes sit at 0.92–0.97x. hipBLASLt has ISA-level advantages
+Most shapes sit at 0.93–0.99x. hipBLASLt has ISA-level advantages
 (wave-level scheduling, tuned Split-K) that HLL frameworks cannot fully
 replicate without per-shape ISA tuning. BF16 is also more memory-bound than
 FP8, so schedule choices matter more.
 
 Areas that need more work:
-1. **CRR `#pragma unroll 2` on KI ∈ {128, 172, 296}** — currently falls back
-   to `unroll 1` due to SGPR spill fears. Force unroll 2 and measure; the
-   JIT reference showed spills are OK if throughput wins.
+1. **Reduce SGPR spill on CRR KI=128 (26) and KI=296 (26)**. Per-iter
+   constants (e.g. `tile+1/+2/+3` SRD offsets, `b_coord(col*2, ...)`
+   arithmetic) keep refilling SGPRs. Hoist these out. Confirmed: simple
+   knob sweeps over CRR_MAIN_VMCNT/LGKMCNT, CRR_UNROLL={1,4,8},
+   CRR_NUM_XCDS={4,16}, CRR_CHUNK={16,32,128,256} all stayed within
+   the 2pp DVFS noise band (P8 investigation 2026-04-17). Spill
+   reduction is the only avenue that hasn't been ruled out.
 2. **Per-shape waitcnt tuning** — the `s_waitcnt lgkmcnt(8)` and
    `s_waitcnt vmcnt(6)` positions in the main loop were hand-tuned for 8192³
    in the JIT era; they may not be optimal for small-K large-N shapes.
-3. **Swap M↔N decisively for large-N shapes** — the group-by-N swizzle
-   is a partial fix; a full kernel swap (compute C^T in registers, store
-   transposed) might be worth trying for N ≥ 22016.
+3. **Swap M↔N decisively for large-N shapes** — per-shape NUM_XCDS already
+   absorbs most of the large-N gain; a full kernel swap (compute C^T in
+   registers, store transposed) could still be worth trying for N ≥ 22016
+   where group-by-N swizzle doesn't fully cover.
+
+Before any new sweep: pin clocks with `rocm-smi --setperflevel high`. The
+2pp DVFS drift is larger than most single-knob effects.
 
 ## What NOT To Do
 

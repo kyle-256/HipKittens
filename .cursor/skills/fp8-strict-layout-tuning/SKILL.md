@@ -55,13 +55,16 @@ HIP_VISIBLE_DEVICES=0 PYTHONPATH=. python3 bench_vs_hipblaslt.py --mode full --w
 
 4. For Primus-Turbo benchmarking, compare the same shapes against `HIPBLASLT` and `TRITON` backends rather than looking at HipKittens in isolation.
 
-## Current Acceptance State (2026-04-17)
+## Current Acceptance State (2026-04-17, post-P8)
 
 Single `tk_fp8_layouts.so`:
-- **RCR geo-mean ≥ 1.00x vs hipBLASLt** — current 1.005x, 23/56 wins
-- **RRR ≥ 95% of RCR** — current 1.551x hipBLASLt, ~94% of RCR absolute TFLOPS
-- **CRR ≥ 95% of RCR** — current 1.974x hipBLASLt, ~92% of RCR absolute TFLOPS
-- SNR min 49.6 dB; determinism PASS across 168 configs.
+- **RCR geo-mean ≥ 1.00x vs hipBLASLt** — current 0.996x (within ±1pp
+  noise of 1.00x; 1.005x reported in P7), 21/56 wins
+- **RRR ≥ 95% of RCR** — current 1.530x hipBLASLt
+- **CRR ≥ 95% of RCR** — current 1.967x hipBLASLt
+- SNR min 49.6 dB; determinism PASS across all configs.
+- P8: `RCR_TWO_TILE_MID_VMCNT 4 → 6` landed (the P7 commit message
+  claimed this but the file shipped at 4).
 
 ## Debug Workflow
 1. Identify the actual blocker first: correctness/SNR, determinism, absolute `RCR`, or `RRR/CRR` ratio.

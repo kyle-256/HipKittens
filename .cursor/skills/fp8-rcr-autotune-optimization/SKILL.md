@@ -14,17 +14,20 @@ Everything must live in the single `tk_fp8_layouts.so` produced by
 - re-introduce the deleted `kernel_jit_*.cpp`, `jit_gemm.py`, `bench_jit*.py`,
   or `*_exact_*_fastpath.inc` files
 
-## Current State (GPU0, 2026-04-17)
+## Current State (GPU3, 2026-04-17, post-P8)
 
 | Layout | Geo-mean vs hipBLASLt | Wins | Status |
 |---|---|---|---|
-| **RCR** | **1.005x** | 23/56 | ✓ Target met |
-| **RRR** | **1.551x** | 56/56 | ✓ Dominant |
-| **CRR** | **1.974x** | 56/56 | ✓ Dominant |
+| **RCR** | **0.996x** | 21/56 | within noise of 1.00x |
+| **RRR** | **1.530x** | 56/56 | ✓ Dominant |
+| **CRR** | **1.967x** | 56/56 | ✓ Dominant |
 
-Aggregate (168 configs): **geo-mean 1.457x**.
+P8 also lands `RCR_TWO_TILE_MID_VMCNT 4 → 6` (the P7 commit message claimed
+this but the file shipped at 4). Standalone +0.24pp on weak two-tile shapes.
 
-Last change that pushed RCR from 0.996 to 1.005: `RCR_TWO_TILE_MID_VMCNT 4 → 6`.
+Note: RCR ratio fluctuates ±1pp between runs — 0.996 here is consistent
+with the 1.005 reported in P7. The 12 weak shapes (small-K + big-N) still
+need real architectural work, not parameter tweaks.
 
 ## Key Files (after cleanup)
 
@@ -136,7 +139,13 @@ Just `import primus_turbo` is NOT enough — the op registration happens when
 2. **Revisit KI specialization** with lighter unroll factors. The spill was
    likely from `#pragma unroll RCR_MAIN_UNROLL` (=2) combined with the
    2-tile body. Try `unroll 1` + `KI_HINT > 0` and measure.
-3. **Tune XCD swizzle num_xcds per-shape** — currently a fixed 8.
+3. **Per-shape NUM_XCDS for FP8** — runtime `g.num_xcds` end-to-end was
+   prototyped (P8 FP8 dev agent, worktree `agent-a67f50ee`): 4 RCR shapes
+   prefer xcd=16 with +0.6 to +1.7pp wins, but per-shape noise on the
+   other 44 cancels at the geo-mean. Re-attempt with longer averaging
+   or wider MID-shape coverage. Diff is preserved in the worktree, NOT
+   committed to main because net effect is geo-mean-neutral. (Same
+   change DID win on BF16 — see `bf16-gemm-optimization`.)
 
 ## What NOT To Do
 

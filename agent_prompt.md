@@ -135,3 +135,31 @@ Every Decider session should append a one-line dated entry to `TODO.md`
 
 Every skill update should reflect only what was verified in the current
 session, not aspirational targets.
+
+## Session Log
+
+### 2026-04-17 — P8 (3 Devs in worktrees, all model=opus)
+- **FP8 Dev (a67f50ee, GPU 0)** — implemented runtime `g.num_xcds` end-to-end
+  in `kernel_fp8_layouts.cpp` + autotune two-phase + bench passthrough.
+  4 RCR shapes prefer xcd=16 with measurable wins, but per-shape noise on
+  the other 44 cancels at the geo-mean. Mechanism is sound; **not landed**
+  pending more aggressive coverage. Diff preserved in worktree.
+- **BF16 CRR Dev (a7cbd1fb, GPU 4)** — exhaustive sweep of CRR-only knobs
+  (CRR_MAIN_VMCNT/LGKMCNT/UNROLL/NUM_XCDS/CHUNK). All within ±2pp DVFS
+  noise band. Reverted. Recommendation for next iteration: pin GPU clocks
+  before sweeping; root cause of CRR gap is SGPR spill on KI=128/296.
+- **BF16 RCR/RRR Dev (ac9f516a, GPU 5)** — applied same NUM_XCDS-as-runtime
+  strategy that FP8 dev tried; **on BF16 it works**: RCR +1.0pp, RRR +1.6pp,
+  CRR +1.7pp at the geo-mean, no regressions, SNR/det pass. Landed in P8.
+- **Decider** — verified on GPU2/3 in main worktree, committed P8 with both
+  the BF16 NUM_XCDS infra and the FP8 MID=6 correction.
+
+Lessons:
+- A strategy that's neutral on one kernel can win on another (NUM_XCDS
+  was geo-mean-neutral on FP8 because FP8 RCR autotune already pushes
+  the strong shapes hard; BF16 had more slack).
+- Always pin GPU clocks before doing CRR-class sweeps (the 2pp band
+  swallowed several real attempts).
+- Sub-agents must `git fetch && git reset --hard <branch>` first if their
+  worktree was created from a different branch — `main` doesn't have the
+  bf16/fp8 dirs.
