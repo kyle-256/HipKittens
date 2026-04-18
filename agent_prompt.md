@@ -183,6 +183,141 @@ BF16 work is paused unless a clean structural restructure is on the table
 
 ## Session Log
 
+### 2026-04-18 — P22 (4 Devs + 1 Reviewer; multi-GPU; CLOSE — Route 1 LDS write-side swizzle DESIGN APPROVED-WITH-AMENDMENTS; one CRITICAL framing correction overrides P21 Dev A; one autotuner lever DEFINITIVELY CLOSED)
+
+**Outcome: Design `st_64x32_padded_b128` for BF16 RCR Route 1 is
+approved by Reviewer (60-75% conf ≥+2pp on RCR worst shape over
+4-4.5 P23 sessions). One critical framing correction: BL's RCR
+kernel does NOT use `v_perm_b32` or `ds_read_b64_tr_b16` (P21 Dev A's
+finding was BL CRR-only). One DEFINITIVELY-CLOSED lever (P21 Dev I's
+autotuner NREPEAT bump). Full design captured in
+`project_bf16_rcr_padded_b128_design.md`; do NOT re-discover the
+b128-only pattern in P23.**
+
+**The 4 dispatched Devs + 1 Reviewer:**
+
+- **Dev A (TK current LDS write-pattern characterization, opus,
+  worktree `p22-dev-a-tk-write-pattern`, commit `0c6f2b5a`)** — built
+  TK LDS-write probe (`probe_lds_writes/probe_write.cpp`) and derived
+  the row-pair-interleaved swizzle (Q5) candidate. **Hit the gfx950
+  DTL `vmcnt`/`__syncthreads()` race on first attempt** (silently
+  dropped lanes ≥32); fixed with `s_waitcnt vmcnt(0)` ahead of the
+  dump barrier. This DTL probe lesson is now captured in
+  `feedback_dtl_probe_kernel.md` — **any future probe kernel mixing
+  DTL global→LDS stores with subsequent LDS reads MUST emit BOTH
+  `s_waitcnt vmcnt(0)` AND `s_waitcnt lgkmcnt(0)` before
+  `__builtin_amdgcn_s_barrier()`**. Q5 swizzle proposal applies to
+  the b64_tr_b16 read path (CRR), NOT to RCR — see Dev B.
+
+- **Dev B (BL RCR write-pattern reverse-engineering, opus, worktree
+  `p22-dev-b-bl-write-pattern`, commit `91e9cf76`)** — disassembled
+  BL's actual RCR kernel
+  (`Cijk_Alik_Bljk_..._MIWT8_8_..._LBSPPA1024_LBSPPB1024_LPA16_LPB16`,
+  25,444-line disasm at `/tmp/p22_dev_b/bl_kernel.s`). **CRITICAL
+  FRAMING CORRECTION:** BL RCR uses **0× `ds_read_b64_tr_b16`,
+  0× `v_perm_b32`, only 248× `ds_read_b128` (64 in main loop)**.
+  The s83/s84 v_perm pattern P21 Dev A attributed to RCR was
+  actually from BL's CRR (`Ailk_Bjlk`) kernel. **Closed-form BL
+  write swizzle:** `lds_byte_offset(M_row, K_col_octet) =
+  K_col_octet * 4224 + M_row * 16 = K_col_octet * 4 * (1024 + 32) +
+  M_row * 16`. Column-major over 8 K-octets per A-tile, +32 B
+  padding per 1024 B subtile breaks the LDS-bank alias (gfx950
+  has 32 LDS banks × 4 B = 128 B bank cycle; without pad, M_rows
+  differing by 8 land at 1024 B = perfect alias). Reviewer
+  independently re-verified via grep on `bl_main_loop.s` + all-pairs
+  bank-conflict counter in `/tmp/p22_reviewer/check_bank_conflict.py`.
+
+- **Dev C (design synthesis + probe, opus, worktree
+  `p22-dev-c-design-synth`, commit `5f01551b`)** — produced
+  `DESIGN.md` and probe-kernel validation
+  (`probe_st_padded_b128/probe.cpp`). Original proposal:
+  `st_64x8_padded_b128` (subtile_padding=32, 1024-B subtile, mirrors
+  BL exactly). Probe analytically validates 0 bank conflicts across
+  all 8 K-octets and 8 cycle groups. **Reviewer amendment**:
+  `st_64x8` fails BOTH template branches in
+  `shared_to_register.cuh:50/117` → escalated to
+  `st_64x32_padded_b128` (works template-wise but changes pad
+  granularity from +32/1024B to +32/4096B; needs probe re-proof in
+  P23 step 1). Existing precedent identified: `st_16x128_v2`
+  already uses `subtile_padding=128` (`st_shape.cuh:246-274`); the
+  `subtile_padding` field is already threaded through
+  `global_to_shared.cuh:60,98,212,236,305`, so adding the new shape
+  is purely additive.
+
+- **Dev D (P21 Dev I autotuner NREPEAT-bump validation, GPU 7, opus)** —
+  tested NREPEAT=3 vs NREPEAT=8 on alt_rcr (8192,22016,4096) over
+  3+3 runs each, then per-candidate low-noise (8 runs) means.
+  **Verdict: P21 Dev I premise was WRONG.** True optimum across full
+  GM × XCD = 7×5 = 35 grid is `(gm=8, xcd=8)` at 1501.5 TF/s, NOT
+  `(gm=2, xcd=32)` at 1499.0 TF/s. NREPEAT bump only +0.13pp lift
+  (sub-0.3pp DROP threshold) at 2.7× bench-runtime cost. Lever
+  CLOSED. Captured in `project_bf16_alt_rcr_autotuner.md`. **Memo
+  for future "autotuner is mispicking" claims**: enumerate ALL
+  `GM_SEARCH × XCD_SEARCH` candidates with low-noise repeats (≥8)
+  BEFORE recommending a bench-harness change. Don't propose a
+  candidate as "alternative" without proving it's the global
+  optimum across the full grid.
+
+- **Reviewer (`/tmp/p22_reviewer/REVIEW.md`)** — independently
+  re-verified BL disasm grep, rebuilt Dev C's probe on GPU 5, wrote
+  all-pairs bank-conflict counter; verdict **APPROVE-WITH-
+  AMENDMENTS**. Caught 3 substantive bugs: (a) `st_64x8` template
+  failure → switch to `st_64x32`; (b) Dev C's §4.2 col_l B-operand
+  claim wrong (RCR's col_l is on **A_reg** per
+  `kernel_bf16_dynamic.cpp:154`); (c) per-block LDS at occupancy=2
+  needs re-verification (math-budget check at 32 KB).
+
+**P22 close-out lever table:**
+
+| Lever                                     | Status | Notes                                              |
+|-------------------------------------------|:------:|----------------------------------------------------|
+| Route 1 LDS write swizzle (RCR)           | DESIGN APPROVED-WITH-AMENDMENTS | `st_64x32_padded_b128`; P23 4-4.5 sess; 60-75% conf ≥+2pp |
+| L_HBM_FETCH (alt_rcr autotuner NREPEAT)   | CLOSED | true optimum is (gm=8,xcd=8); +0.13pp sub-threshold — Dev D |
+| BL RCR uses v_perm/b64_tr_b16             | FRAMING CORRECTED | BL RCR uses ONLY ds_read_b128 + padded LDS (overrides P21 Dev A) — Dev B |
+| Q5 row-pair-interleave swizzle (CRR-only) | OPEN | applies to CRR b64_tr_b16 read path; needs separate BL CRR RE — Dev A |
+
+**P23 dispatch (next session) — 8-step plan, 4-4.5 agent-sessions:**
+
+See `project_bf16_rcr_padded_b128_design.md` §P23 plan. Highlights:
+1. (0.25 sess) Re-run probe with subtile_rows=64, subtile_cols=32,
+   subtile_padding=32 (4096-B subtile re-proof for amended shape).
+2. (0.25 sess) Add `st_64x32_padded_b128` to
+   `include/types/shared/st_shape.cuh` (additive); verify per-block
+   LDS ≤32 KB at occupancy=2.
+3. (0.5 sess) Verify `prefill_swizzled_offsets` threads
+   `subtile_padding` correctly.
+4. (1.5-2 sess) Add `ds_read_b128` dispatch branch to
+   `shared_to_register::load(col_l)` (`shared_to_register.cuh:195`)
+   for new shape; lane formula `row_offset = laneid, col_offset = 0`.
+   **Trickiest step.** Pre-commit hard-coded fallback per Reviewer.
+5. (0.25 sess) **NEW: end-to-end MFMA correctness gate vs torch.mm**
+   on a representative shape — catches silent operand-mapping errors
+   BEFORE any benchmark.
+6. (0.5 sess) Modify `kernel_bf16_dynamic.cpp` RCR branch (gate
+   `RCR_PADDED_B128_MODE`); paired bench on (4096, 28672, 4096);
+   flip default if win.
+7. (0.25 sess) `rocprofv3 --pmc-counter LDS_BANK_CONFLICT MFMA`
+   validation; expect drop from ~67.6M to <1M.
+8. (0.5 sess) Cross-GPU paired bench (GPUs 2-7), 3 runs each.
+
+**Out of scope for P23+ (deferred):** CRR + RRR Route 1 (need
+separate BL `Ailk_Bjlk` reverse-engineering — Dev A's row-pair
+swizzle is the right framing for CRR, not RCR); Stream-K
+re-evaluation (post-P23, new bandwidth headroom may make
+`bc4392bf` abandonment reversible).
+
+**Risks open for P23 (from Reviewer):**
+1. **Pad-granularity divergence**: amended `st_64x32` uses
+   +32/4096B vs BL's +32/1024B. If bank-conflict math changes at
+   probe re-proof (step 1), may need a different shape.
+2. **MFMA operand layout**: probe didn't run actual MFMA. End-to-end
+   correctness gate (step 5) catches this. Worst case: need v_perm
+   fixup after `ds_read_b128` to satisfy MFMA col_l A-operand
+   expectations — adds ≤1 sub-session.
+3. **`prefill_swizzled_offsets` HBM voffset assumption**: likely
+   benign because the swizzle is identity within a subtile; verify
+   in step 3.
+
 ### 2026-04-18 — P21 (9 Devs + 1 Reviewer; multi-GPU; CLOSE — ALL short-term BF16 RCR/RRR levers EXHAUSTED; only Route 1 LDS-write-side swizzle remains, multi-session)
 
 **Outcome: Zero commit-worthy perf wins; one architectural unblocker
