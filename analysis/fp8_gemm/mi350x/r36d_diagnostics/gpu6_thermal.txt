@@ -1,0 +1,23 @@
+===== GPU6 temp/power/voltage/clocks =====
+
+
+============================ ROCm System Management Interface ============================
+WARNING: AMD GPU device(s) is/are in a low-power state. Check power control/runtime_status
+
+====================================== Temperature =======================================
+GPU[6]		: Temperature (Sensor junction) (C): 44.0
+GPU[6]		: Temperature (Sensor memory) (C): 30.0
+==========================================================================================
+=============================== Current clock frequencies ================================
+GPU[6]		: fclk clock level: 0: (1250Mhz)
+GPU[6]		: mclk clock level: 0: (2000Mhz)
+GPU[6]		: sclk clock level: 1: (158Mhz)
+GPU[6]		: socclk clock level: S: (38Mhz)
+==========================================================================================
+=================================== Power Consumption ====================================
+GPU[6]		: Current Socket Graphics Package Power (W): 238.0
+==========================================================================================
+==================================== Current voltage =====================================
+GPU[6]		: get_volt_metric, Not supported on the given system
+==========================================================================================
+================================== End of ROCm SMI Log ===================================

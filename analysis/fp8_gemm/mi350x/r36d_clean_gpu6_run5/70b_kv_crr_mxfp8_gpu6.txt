@@ -1,0 +1,70 @@
+===== R36 cell=70b_kv_crr kind=mxfp8 layout=crr M=4096 N=1024 K=8192 phys_gpu=6 =====
+[orchestrate] phys_gpu=6 N_RUNS=5 WARMUP=50 ITERS=100 sclk_gate=2200MHz stdev_ratio_max=0.01 max_retries=3
+[orchestrate] R36 GATES active: (1) sclk-post-preheat>=2200MHz  AND  (2a) sclk-post-bench>=2200MHz  AND  (2b) stdev/mean<=0.01
+Sat Apr 18 13:42:37 UTC 2026
+[pre-orchestrate sclk check]
+GPU[6]		: sclk clock level: 1: (317Mhz)
+[orchestrate] SKIP_BUILD=1; reusing existing .so. md5=b41dce25f18830aa8ebf6610641b4845
+[bench attempt 1/3]
+CORRECTNESS snr_db=49.60 pass_rate_pct=100.00
+DETERMINISM ok=True
+RUN 0 avg_ms=0.0876 tflops=784.52
+RUN 1 avg_ms=0.0876 tflops=784.43
+RUN 2 avg_ms=0.0869 tflops=790.79
+RUN 3 avg_ms=0.0867 tflops=792.81
+RUN 4 avg_ms=0.0868 tflops=792.15
+SUMMARY median=790.79 mean=788.94 stdev=4.14 runs=5
+TFLOPS_LIST 784.5211,784.4318,790.7939,792.8122,792.1502
+W20260418 13:42:40.705778 139879810269184 agent.cpp:461] Attempt to enable hip visiblity for agent-2 which is not visible to HSA (ROCR)
+[sclk-pre-preheat] phys_gpu=6 GPU[6]		: sclk clock level: 1: (158Mhz)
+[preheat] sustained 8s 16k matmul...
+[preheat] done 5116 iters
+[sclk-post-preheat] phys_gpu=6 GPU[6]		: sclk clock level: 1: (2079Mhz)
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=1024, K=8192) is +10.24% to +10.83% faster on V2-RRR (R33 Dev C 70B KV SHIP, 4-GPU triangulated; min Δ% +10.24). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r33c_findings.md.
+[sclk-pre-bench] phys_gpu=6 GPU[6]		: sclk clock level: 1: (2360Mhz)
+[sclk-post-bench] phys_gpu=6 GPU[6]		: sclk clock level: 1: (2397Mhz)
+[orchestrate] attempt=1 rc=0 | G1 sclk-post-preheat=2079MHz pass=0 | G2a sclk-post-bench=2397MHz pass=1 | G2b stdev/mean=0.005248 pass=1
+[orchestrate] attempt=1 FAILED gate(s); retrying after 5s wait...
+[bench attempt 2/3]
+CORRECTNESS snr_db=49.60 pass_rate_pct=100.00
+DETERMINISM ok=True
+RUN 0 avg_ms=0.0905 tflops=759.42
+RUN 1 avg_ms=0.0900 tflops=763.31
+RUN 2 avg_ms=0.0903 tflops=761.42
+RUN 3 avg_ms=0.0900 tflops=763.46
+RUN 4 avg_ms=0.0899 tflops=764.13
+SUMMARY median=763.31 mean=762.35 stdev=1.92 runs=5
+TFLOPS_LIST 759.4235,763.3073,761.4161,763.4565,764.1290
+W20260418 13:43:34.485888 140282865819648 agent.cpp:461] Attempt to enable hip visiblity for agent-2 which is not visible to HSA (ROCR)
+[sclk-pre-preheat] phys_gpu=6 GPU[6]		: sclk clock level: 1: (171Mhz)
+[preheat] sustained 8s 16k matmul...
+[preheat] done 5116 iters
+[sclk-post-preheat] phys_gpu=6 GPU[6]		: sclk clock level: 1: (2089Mhz)
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=1024, K=8192) is +10.24% to +10.83% faster on V2-RRR (R33 Dev C 70B KV SHIP, 4-GPU triangulated; min Δ% +10.24). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r33c_findings.md.
+[sclk-pre-bench] phys_gpu=6 GPU[6]		: sclk clock level: 1: (2329Mhz)
+[sclk-post-bench] phys_gpu=6 GPU[6]		: sclk clock level: 1: (2387Mhz)
+[orchestrate] attempt=2 rc=0 | G1 sclk-post-preheat=2089MHz pass=0 | G2a sclk-post-bench=2387MHz pass=1 | G2b stdev/mean=0.002519 pass=1
+[orchestrate] attempt=2 FAILED gate(s); retrying after 5s wait...
+[bench attempt 3/3]
+CORRECTNESS snr_db=49.60 pass_rate_pct=100.00
+DETERMINISM ok=True
+RUN 0 avg_ms=0.3357 tflops=204.71
+RUN 1 avg_ms=0.1988 tflops=345.73
+RUN 2 avg_ms=0.4153 tflops=165.46
+RUN 3 avg_ms=0.2014 tflops=341.16
+RUN 4 avg_ms=0.1997 tflops=344.19
+SUMMARY median=341.16 mean=280.25 stdev=87.99 runs=5
+TFLOPS_LIST 204.7089,345.7310,165.4585,341.1625,344.1932
+W20260418 13:44:19.802543 140296030892032 agent.cpp:461] Attempt to enable hip visiblity for agent-2 which is not visible to HSA (ROCR)
+[sclk-pre-preheat] phys_gpu=6 GPU[6]		: sclk clock level: 1: (221Mhz)
+[preheat] sustained 8s 16k matmul...
+[preheat] done 5116 iters
+[sclk-post-preheat] phys_gpu=6 GPU[6]		: sclk clock level: 1: (1743Mhz)
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=1024, K=8192) is +10.24% to +10.83% faster on V2-RRR (R33 Dev C 70B KV SHIP, 4-GPU triangulated; min Δ% +10.24). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r33c_findings.md.
+[sclk-pre-bench] phys_gpu=6 GPU[6]		: sclk clock level: 1: (1738Mhz)
+[sclk-post-bench] phys_gpu=6 GPU[6]		: sclk clock level: 1: (1746Mhz)
+[orchestrate] attempt=3 rc=0 | G1 sclk-post-preheat=1743MHz pass=0 | G2a sclk-post-bench=1746MHz pass=0 | G2b stdev/mean=0.313970 pass=0
+[orchestrate] attempt=3 FAILED gate(s); retrying after 5s wait...
+[orchestrate] EXHAUSTED 3 retries; using last attempt (gates not all met).
+DONE gpu=6 attempts=3
+Sat Apr 18 13:45:17 UTC 2026
