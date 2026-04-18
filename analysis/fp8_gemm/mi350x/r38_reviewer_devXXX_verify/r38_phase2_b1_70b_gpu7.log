@@ -1,0 +1,37 @@
+===== R38 Reviewer SHIP RECONFIRM cell=c_b1_70b label=70b_kv_b1 M=4096 N=1024 K=8192 phys_gpu=7 mode=two_so =====
+Sat Apr 18 15:19:26 UTC 2026
+[build c_b1_70b default md5=79e0334026943f4a1d9e9ecb5b573908 (cached)]
+[build c_b1_70b b1 md5=6fb2b48229543e2828b3eb12b8c2f2d8 (cached)]
+[nm-gate] checking hbshrink symbol presence (R37 Dev C dead-code gate)
+[nm-gate] default .so A: hbshrink_symbols=0 (expect 0)
+[nm-gate] b1      .so B: hbshrink_symbols=4 (expect >0)
+[nm-gate-all] default .so A: hbshrink_symbols=0 (expect 0)
+[nm-gate-all] b1      .so B: hbshrink_symbols=4 (expect >0)
+[bench rc=0]
+[sclk-pre-preheat] GPU[7]		: sclk clock level: S: (99Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[7]		: sclk clock level: 1: (2254Mhz)
+CORRECTNESS_A_default snr_db=49.60 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_B_b1 snr_db=49.60 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[7]		: sclk clock level: 1: (2386Mhz)
+WARMUP 0 B_b1=940.11 A_default=765.00
+WARMUP 1 B_b1=980.04 A_default=767.45
+PAIR 0 B_b1_1=982.12 A_default_1=768.08 B_b1_2=979.17 A_default_2=767.18
+PAIR 1 B_b1_1=989.58 A_default_1=768.56 B_b1_2=982.72 A_default_2=766.12
+PAIR 2 B_b1_1=985.26 A_default_1=766.61 B_b1_2=985.46 A_default_2=764.52
+PAIR 3 B_b1_1=978.73 A_default_1=767.01 B_b1_2=980.33 A_default_2=767.96
+PAIR 4 B_b1_1=978.24 A_default_1=770.06 B_b1_2=982.73 A_default_2=766.51
+[sclk-post-bench] GPU[7]		: sclk clock level: 1: (2406Mhz)
+CRR_DEFAULT  median=767.09 mean=767.26 stdev=1.51 n=10
+CRR_HBSHRINK median=982.42 mean=982.43 stdev=3.57 n=10
+Welch t (DEFAULT vs HBSHRINK) = 175.417  (positive = HBSHRINK faster)
+DELTA_MEDIAN_PCT HBSHRINK_vs_DEFAULT = +28.071%
+CRR_DEFAULT_TFLOPS_LIST 768.0821,767.1766,768.5637,766.1162,766.6082,764.5200,767.0057,767.9592,770.0590,766.5057
+CRR_HBSHRINK_TFLOPS_LIST 982.1227,979.1682,989.5816,982.7218,985.2571,985.4594,978.7345,980.3290,978.2413,982.7314
+--- stderr ---
+W20260418 15:19:29.762089 139968673533952 agent.cpp:461] Attempt to enable hip visiblity for agent-2 which is not visible to HSA (ROCR)
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=1024, K=8192) is +10.24% to +10.83% faster on V2-RRR (R33 Dev C 70B KV SHIP, 4-GPU triangulated; min Δ% +10.24). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r33c_findings.md.
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=1024, K=8192) is +10.24% to +10.83% faster on V2-RRR (R33 Dev C 70B KV SHIP, 4-GPU triangulated; min Δ% +10.24). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r33c_findings.md.
+[tk_mxfp8_layouts] gemm_crr_pq_v2: HB shrink Stage B1 (BLK_M=128, PIPE=1) ACTIVE for 70B-KV (M=4096, N=1024, K=8192) — R36 Dev A SHIP +28.02% / R37 Dev A production wire-in. See analysis/fp8_gemm/mi350x/r37a_findings.md.
+Sat Apr 18 15:20:41 UTC 2026
+DONE cell=c_b1_70b gpu=7

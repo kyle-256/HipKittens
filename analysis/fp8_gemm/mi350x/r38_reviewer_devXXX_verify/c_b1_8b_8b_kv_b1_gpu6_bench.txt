@@ -1,0 +1,20 @@
+[sclk-pre-preheat] GPU[6]		: sclk clock level: 1: (158Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[6]		: sclk clock level: 1: (2188Mhz)
+CORRECTNESS_A_default snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_B_b1 snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[6]		: sclk clock level: 1: (2378Mhz)
+WARMUP 0 B_b1=652.38 A_default=661.26
+WARMUP 1 B_b1=662.98 A_default=662.40
+PAIR 0 B_b1_1=660.90 A_default_1=657.97 B_b1_2=662.73 A_default_2=661.44
+PAIR 1 B_b1_1=663.02 A_default_1=659.40 B_b1_2=661.17 A_default_2=660.37
+PAIR 2 B_b1_1=664.38 A_default_1=663.35 B_b1_2=658.88 A_default_2=660.45
+PAIR 3 B_b1_1=654.31 A_default_1=660.21 B_b1_2=659.07 A_default_2=661.96
+PAIR 4 B_b1_1=660.36 A_default_1=661.06 B_b1_2=663.17 A_default_2=660.16
+[sclk-post-bench] GPU[6]		: sclk clock level: 1: (2400Mhz)
+CRR_DEFAULT  median=660.41 mean=660.64 stdev=1.46 n=10
+CRR_HBSHRINK median=661.04 mean=660.80 stdev=2.91 n=10
+Welch t (DEFAULT vs HBSHRINK) = 0.159  (positive = HBSHRINK faster)
+DELTA_MEDIAN_PCT HBSHRINK_vs_DEFAULT = +0.095%
+CRR_DEFAULT_TFLOPS_LIST 657.9736,661.4389,659.3977,660.3715,663.3492,660.4523,660.2094,661.9598,661.0627,660.1579
+CRR_HBSHRINK_TFLOPS_LIST 660.8997,662.7348,663.0215,661.1744,664.3756,658.8826,654.3149,659.0737,660.3614,663.1654
