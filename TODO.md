@@ -54,6 +54,35 @@
 
 **baseline 建立**：首次需在每个 LLaMA shape 上跑 FP8 per-tensor + MXFP8 V2 baseline 各 5x，记录 median TFLOPS 作为后续对照。
 
+## R27 cycle 完结 (2026-04-18, 4 dev + 1 reviewer，1 partial production ship + 3 paradigm corrections)
+
+R27 派 5 agent (Dev A GPU0, Dev B GPU1, Dev C GPU2, Dev D GPU3, Reviewer GPU4) 攻 R26 后剩下的 V2 levers。**1 个 macro infrastructure SHIP** (cherry-pick `12785d98`)，**3 paradigm correction**。
+
+### R27 SHIP: `MXFP8_*_V2_SCALE_CACHEPOLICY` macro infrastructure (Dev A)
+- 4 处 `+ MXFP8_{CRR,RRR}_V2_SCALE_CACHEPOLICY` macro hook on V2 `buffer_load_b128/b64` scale loads
+- Default 0 = binary identical to current behavior (zero risk)
+- Per-shape opt-in: `make CXXFLAGS="-DMXFP8_CRR_V2_SCALE_CACHEPOLICY=2"` for **70B Gate V2-CRR** (M=4096 N=28672 K=8192) gives **+63 TFLOPS / +2.7% Welch t≈+13** (5x preheat, GPU0, SNR 49.60 dB, det 3/3 PASS)
+- **shape-dependent**: cp=2 catastrophic on 4096³ V2-RCR (-25×) and regression on 70B KV (-6.9%) / 8B Gate (-4.2%) / 8192³ V2-RCR (-2.3% breaks 3180 floor)
+- Auto-select disabled — opt-in only. R28+ candidate: `#if N_DIM≥28672 && K_DIM≥8192 && IS_CRR` auto-select gate
+
+### R27 paradigm corrections
+1. **V2 has NO scale LDS** (Dev C): R23 Dev B's `SCALE_LDS REPLACE` kill misled subsequent rounds. V2 actually loads scale VMEM→VGPR direct (`crr_mxfp8_exact_8wave_fastpath.inc:304-333`, SCALE_VERSION==2 branch). LDS budget V2-CRR = **128 KB** (As/Bs double-buffer only), 32 KB headroom. R26 "131-139 KB" figure was different kernel variant. Adding scale LDS = re-litigate killed lever. **NEVER prototype "scale LDS double-buffer"** again.
+2. **Split-K-along-K DEAD-END universally** (Dev B): -12% on 70B KV. Each K-chunk sub-grid still launches same 64 blocks → no CU exposure gain, but pay 2× launch + 2× epilogue + lose K=8192 single-pass B-tile cache reuse. Reduction overhead fine (7.7%, well under 30% gate). Real fix needs split-along-M/N (= R26 Dev A's static_assert path) or streamk (multi-day).
+3. **BLK rewrite path: rectangular BLK_M=256/N=128 not square** (Dev D): 22 BLK=256 dependency sites audited, complexity 1=8 / 2=4 / 3=4 / 4=5 / 5=1. Square BLK=128 forces RBM/RBN below MFMA sweet spot. **Rectangular BLK_M=256/BLK_N=128 keeps RBM=64 (no A-side helper rewrite)**, only needs new B-side helper variant + B-only preshuffle. Est 2-3 days. Hardest blocker = `load_col_from_v2_st_half` family at `kernel_mxfp8_layouts.cpp:414-491` (`ds_read_b64_tr_b8 offset:1024` hardcodes K-stride for HB=128). Dev D shipped 25-line `MXFP8_BLK128` macro proof-of-concept (default unchanged, BLK128 V1-fallback PASS at 2.71 TFLOPS).
+
+### R28+ priority list (rebuilt from R27 root-causes)
+
+1. **【high / 1-2 day】Auto-select cachepolicy=2 by N_DIM/K_DIM compile-time gate**: extend Dev A macro infrastructure with `#if N_DIM>=28672 && K_DIM>=8192 && IS_CRR` auto-select. Direct +2.7% on 70B Gate without manual flag. Need to find boundary precisely (8B Gate K=4096 lost; 70B Gate K=8192 won — K threshold likely between).
+2. **【critical / 2-3 day】Rectangular BLK_M=256/BLK_N=128 V2 path**: per Dev D, smaller scope than original BLK=128 plan. Add new B-side `load_col_from_v2_st_quarter` helper + B-only preshuffle helper. Targets 70B KV V2-CRR 0.84 (4 N-tile → 8 N-tile → ~2× CU utilization). Validate with `MXFP8_BLK128` infrastructure already shipped at `c019bec8` (r27-d, not yet cherry-picked).
+3. **【medium】s_setprio on MFMA-side waves stacked on cp=3 for 70B Gate** (Dev A H2 not reached): could push +2.7% to +4-5% if scheduler fairness improves.
+4. **【medium】Streamk scheduling for small-N**: alternative to BLK rewrite. One kernel, internal K-reduction across CUs. More complex than rectangular BLK but reuses existing tile structure.
+5. **【low】8192³ V2-CRR -8.9%**: still no production-impacting fix path. Skip until other items addressed.
+
+### Reviewer & cherry-pick status
+- Cherry-picked Dev A SHIP: `12785d98` on feat/mxfp8-only
+- Reviewer (GPU4) ran in parallel with devs to build 10-cell baseline matrix; verdict pending
+- Side-branch commits NOT cherry-picked (dead-end docs only): r27-b `59d32212`, r27-c `9b2e1384`, r27-d `c019bec8`
+
 ## R26 cycle 完结 (2026-04-18, 5 dev/reviewer all DEAD-END/NULL on production change，但 3 个关键 paradigm correction)
 
 R26 派 5 agent (Reviewer GPU1, Dev A GPU3, Dev B GPU5, Dev C GPU6, Dev D GPU7) 攻 R25 LLaMA baseline 4 个最差 cell + 1 winning cell mechanism。**0 production commit**, 5 个 side-branch commit (954ba8b4 + ee5f985a 已 cherry-pick to main 作 infrastructure + corrected baseline)。

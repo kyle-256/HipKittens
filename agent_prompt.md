@@ -54,6 +54,33 @@ python3 test_mxfp8_python.py 4096 14336 4096
 5. 禁止提交 `*.so`、`*.s`、`*_layout_results_*.json`、`.bak*`、`gpucore.*`、`__pycache__` 等（`.gitignore` 已覆盖）
 6. 每个子 agent 使用不同 `HIP_VISIBLE_DEVICES` 以免 GPU 冲突：Dev A → 0，Dev B → 1，Dev C → 2，Reviewer/formal → 7
 
+## R27 cycle 完结 (2026-04-18) ★ 1 partial production ship (cachepolicy macro infra) + 3 paradigm correction
+
+5 agent (Dev A GPU0, Dev B GPU1, Dev C GPU2, Dev D GPU3, Reviewer GPU4) 攻 R26 后剩下的 V2 levers。
+
+### R27 SHIP cherry-pick: `12785d98` `MXFP8_*_V2_SCALE_CACHEPOLICY` macro infrastructure (Dev A)
+- 4 处 `+ MXFP8_{CRR,RRR}_V2_SCALE_CACHEPOLICY` macro hook on V2 `buffer_load_b128/b64` scale loads in `analysis/fp8_gemm/mi350x/crr_mxfp8_exact_8wave_fastpath.inc:320,332` (+ rcr/rrr counterparts)
+- Default 0 = binary identical to current behavior (zero risk to production baseline)
+- Per-shape opt-in build flag: `make CXXFLAGS="-DMXFP8_CRR_V2_SCALE_CACHEPOLICY=2"` for **70B Gate V2-CRR** (M=4096 N=28672 K=8192) gives **+63 TFLOPS / +2.7% Welch t≈+13** (5x preheat, GPU0, SNR 49.60 dB, det 3/3 PASS)
+- **Shape-dependent — DO NOT enable globally**: cp=2 catastrophic on 4096³ V2-RCR (-25×) and regression on 70B KV (-6.9%) / 8B Gate (-4.2%) / 8192³ V2-RCR (-2.3% breaks 3180 floor)
+- Auto-select gate is R28 candidate, NOT yet shipped
+
+### R27 paradigm corrections (write-down for future cycles)
+1. **V2 has NO scale LDS** (Dev C verified): R23 Dev B's "SCALE_LDS REPLACE" kill misled subsequent rounds. V2 actually loads scales VMEM→VGPR direct (`crr_mxfp8_exact_8wave_fastpath.inc:304-333`, SCALE_VERSION==2 branch). LDS budget V2-CRR = **128 KB** (As/Bs double-buffer only), 32 KB headroom. R26 "131-139 KB" figure was a different kernel variant. **NEVER prototype "scale LDS double-buffer"** — it is a re-litigation of an already-killed lever.
+2. **Split-K-along-K is universally DEAD-END** (Dev B verified): -12% on 70B KV. Each K-chunk sub-grid still launches the same 64 blocks → no CU exposure gain, but pay 2× launch + 2× epilogue + lose K=8192 single-pass B-tile cache reuse. Reduction overhead fine (7.7%, well under 30% gate). Real fix needs split-along-M/N (= R26 Dev A's static_assert path) or streamk (multi-day).
+3. **BLK rewrite path: rectangular BLK_M=256/N=128, NOT square BLK=128** (Dev D audit): 22 BLK=256 dependency sites, complexity 1=8 / 2=4 / 3=4 / 4=5 / 5=1. Square BLK=128 forces RBM/RBN below MFMA sweet spot. **Rectangular BLK_M=256/BLK_N=128 keeps RBM=64 (no A-side helper rewrite)**, only needs new B-side helper variant + B-only preshuffle. Est 2-3 days. Hardest blocker = `load_col_from_v2_st_half` family at `kernel_mxfp8_layouts.cpp:414-491` (`ds_read_b64_tr_b8 offset:1024` hardcodes K-stride for HB=128). Dev D shipped 25-line `MXFP8_BLK128` macro proof-of-concept on r27-d branch (default unchanged, BLK128 V1-fallback PASS at 2.71 TFLOPS) — useful infrastructure for R28 rectangular path.
+
+### R28+ priority list (rebuilt from R27 root-causes)
+1. **【high / 1-2 day】Auto-select cachepolicy=2 by N_DIM/K_DIM compile-time gate**: extend Dev A macro infra with `#if N_DIM>=28672 && K_DIM>=8192 && IS_CRR` auto-select. Direct +2.7% on 70B Gate without manual flag. Need to find K-threshold precisely (8B Gate K=4096 lost; 70B Gate K=8192 won).
+2. **【critical / 2-3 day】Rectangular BLK_M=256/BLK_N=128 V2 path**: per Dev D audit, smaller scope than original square BLK=128 plan. Add new B-side `load_col_from_v2_st_quarter` helper + B-only preshuffle. Targets 70B KV V2-CRR 0.84 (4 N-tile → 8 N-tile → ~2× CU utilization). Validate with `MXFP8_BLK128` infrastructure already shipped on r27-d branch (`c019bec8`).
+3. **【medium】s_setprio on MFMA-side waves stacked on cp=3 for 70B Gate** (Dev A H2 not reached): could push +2.7% to +4-5%.
+4. **【medium】Streamk scheduling for small-N**: alternative to BLK rewrite. One kernel, internal K-reduction across CUs.
+5. **【low】8192³ V2-CRR -8.9%**: still no production-impacting fix path. Skip until others addressed.
+
+### R27 worktree status
+- `r27-a`: cherry-picked SHIP `12785d98` to main feat/mxfp8-only
+- `r27-b`/`r27-c`/`r27-d`: side-branch only, dead-end docs (`59d32212` / `9b2e1384` / `c019bec8`); r27-d's `MXFP8_BLK128` macro is reference for R28 rectangular path
+
 ## R26 cycle 完结 (2026-04-18) ★ 3 关键 paradigm correction，0 production fix
 
 5 agent (Reviewer GPU1, Dev A GPU3, Dev B GPU5, Dev C GPU6, Dev D GPU7) 攻 R25 LLaMA worst cells. 0 production commit, 2 infra cherry-pick to main:
