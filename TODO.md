@@ -6,6 +6,54 @@
 
 协议：`test_mxfp8_python.py` / `test_python.py` 内的 per-iteration sync + `output.zero_()`，warmup=100 iters=200。
 
+## 测试 shape 矩阵（R25 起新增）
+
+除 8192³ 正方形外，必须覆盖 LLaMA 推理实际 GEMM shape：
+
+### LLaMA 8B (hidden=4096, intermediate=14336, GQA kv_heads=8)
+
+| 层 | Layout | M | N | K | 说明 |
+|---|---|---:|---:|---:|---|
+| Q proj | RCR | 4096 | 4096 | 4096 | prefill bs=1 seq=4096 |
+| K proj | RCR | 4096 | 1024 | 4096 | GQA 8 heads × 128 |
+| V proj | RCR | 4096 | 1024 | 4096 | 同 K |
+| O proj | RCR | 4096 | 4096 | 4096 | 同 Q |
+| Gate (MLP) | RCR | 4096 | 14336 | 4096 | SwiGLU gate |
+| Up (MLP) | RCR | 4096 | 14336 | 4096 | SwiGLU up |
+| Down (MLP) | RCR | 4096 | 4096 | 14336 | SwiGLU down |
+
+### LLaMA 70B (hidden=8192, intermediate=28672, GQA kv_heads=8)
+
+| 层 | Layout | M | N | K | 说明 |
+|---|---|---:|---:|---:|---|
+| Q proj | RCR | 4096 | 8192 | 8192 | prefill bs=1 seq=4096 |
+| K proj | RCR | 4096 | 1024 | 8192 | GQA 8 heads × 128 |
+| V proj | RCR | 4096 | 1024 | 8192 | 同 K |
+| O proj | RCR | 4096 | 8192 | 8192 | 同 Q |
+| Gate (MLP) | RCR | 4096 | 28672 | 8192 | SwiGLU gate |
+| Up (MLP) | RCR | 4096 | 28672 | 8192 | SwiGLU up |
+| Down (MLP) | RCR | 4096 | 8192 | 28672 | SwiGLU down |
+
+### 典型 batch decode shapes
+
+| 场景 | M | N | K |
+|---|---:|---:|---:|
+| 单 token decode (8B) | 1 | 4096 | 4096 |
+| batch=32 decode (8B) | 32 | 4096 | 4096 |
+| batch=128 decode (8B) | 128 | 4096 | 4096 |
+| 单 token decode (70B) | 1 | 8192 | 8192 |
+| batch=32 decode (70B) | 32 | 8192 | 8192 |
+| batch=128 decode (70B) | 128 | 8192 | 8192 |
+
+**注**：当前 dispatcher gates on compile-time `M_DIM`/`N_DIM`/`K_DIM`（`kernel_mxfp8_layouts.cpp:5-12`，默认 8192），非正方形需 rebuild：`make CXXFLAGS_EXTRA="-DM_DIM=4096 -DN_DIM=14336 -DK_DIM=4096"` 然后 `python3 test_mxfp8_python.py 4096 14336 4096`。**每 shape 需单独 rebuild .so**。
+
+**R25+ 要求**：任何 SHIP candidate 除 8192³ formal 外，还须在 ≥2 个 LLaMA shape（建议 Gate 4096×14336×4096 + Down 4096×4096×14336）上跑：
+1. **Correctness gate**: SNR ≥ 48 dB + det 3/3 PASS
+2. **性能 gate**: MXFP8 V2 TFLOPS ≥ 同 shape FP8 per-tensor × 95%（即 MXFP8 不能比 FP8 慢超 5%）
+3. **无回归**: 同 shape 对比 MXFP8 V2 优化前后，Δ ≥ 0（不能因优化 8192³ 而在 LLaMA shape 上退化）
+
+**baseline 建立**：首次需在每个 LLaMA shape 上跑 FP8 per-tensor + MXFP8 V2 baseline 各 5x，记录 median TFLOPS 作为后续对照。
+
 ## 当前 baseline（GPU0，per-iter sync，8192^3）— **R24 reverify (2026-04-18) ★ paradigm 大修正：V2 ≈ FP8 (RCR -0.5%, RRR -2.4%)，R23 SQC/TCC 大幅"瓶颈"全为 PMC-mode 测量伪影**
 
 | 版本 | TFLOPS | SNR | 相对 FP8 RCR |

@@ -20,11 +20,36 @@
   - `.cursor/skills/fp8-per-tensor-layout-tuning/SKILL.md`
 - 测试协议：`test_mxfp8_python.py` / `test_python.py` 内的 **per-iteration `torch.cuda.synchronize()` + `output.zero_()`**，`warmup=100, iters=200`
 
+## 测试 shape 矩阵（R25 起新增）
+
+**正方形 8192³ 仍为 primary formal**，但 SHIP candidate 还须在 LLaMA 实际 shape 上确认 correctness + 无 regression：
+
+| 名称 | M | N | K | 用途 |
+|---|---:|---:|---:|---|
+| **8192³** (primary) | 8192 | 8192 | 8192 | 所有 formal A/B + SNR + det gate |
+| **LLaMA-8B Gate** | 4096 | 14336 | 4096 | 非正方形 MLP shape |
+| **LLaMA-8B Down** | 4096 | 4096 | 14336 | K > N 非正方形 |
+| **LLaMA-70B Gate** | 4096 | 28672 | 8192 | 大 N shape |
+| **LLaMA-70B Q** | 4096 | 8192 | 8192 | attention shape |
+| **batch decode** | 128 | 8192 | 8192 | 小 M decode |
+
+**编译**：dispatcher gates on compile-time `M_DIM`/`N_DIM`/`K_DIM`（`kernel_mxfp8_layouts.cpp:5-12`，默认 8192）。非正方形需 rebuild：
+```bash
+make CXXFLAGS_EXTRA="-DM_DIM=4096 -DN_DIM=14336 -DK_DIM=4096"
+python3 test_mxfp8_python.py 4096 14336 4096
+```
+每 shape 需**单独 rebuild .so**。
+
+**SHIP gate 扩展（R25 起）**：8192³ formal PASS **且** ≥2 个 LLaMA shape 全 gate PASS 才算 SHIP-ready：
+1. **Correctness**: SNR ≥ 48 dB + det 3/3 PASS
+2. **性能**: MXFP8 V2 TFLOPS ≥ 同 shape FP8 per-tensor × 95%（MXFP8 不能比 FP8 慢超 5%）
+3. **无回归**: 同 shape MXFP8 V2 优化前后 Δ ≥ 0（不能因优化 8192³ 而在 LLaMA shape 上退化）
+
 ## 核心约束
 
 1. 不破坏 FP8 per-tensor baseline（每次 formal 必须附 FP8 回归确认）
 2. 只改 MXFP8 相关文件（`kernel_mxfp8_layouts.cpp`，`*_mxfp8_*.inc`，`kernel_mxfp8_4wave_rewrite.cpp`，`rewrite_mxfp8*.py`，`build_rewrite*.sh`）
-3. 每次改动必须过门禁：smoke OK → formal 8192^3 OK → SNR > 48 dB → 3 次 determinism 一致
+3. 每次改动必须过门禁：smoke OK → formal 8192^3 OK → SNR > 48 dB → 3 次 determinism 一致 → **≥2 LLaMA shapes: correctness PASS + perf ≥ FP8×95% + 无回归**
 4. 有提升才 commit，Commit 时**必须同步更新** `TODO.md` + `agent_prompt.md` +（如有 durable finding）SKILL
 5. 禁止提交 `*.so`、`*.s`、`*_layout_results_*.json`、`.bak*`、`gpucore.*`、`__pycache__` 等（`.gitignore` 已覆盖）
 6. 每个子 agent 使用不同 `HIP_VISIBLE_DEVICES` 以免 GPU 冲突：Dev A → 0，Dev B → 1，Dev C → 2，Reviewer/formal → 7
