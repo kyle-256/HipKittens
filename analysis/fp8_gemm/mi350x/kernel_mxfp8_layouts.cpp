@@ -3523,6 +3523,10 @@ __host__ inline void dispatch_rcr_exact_8wave_scaled_v2(const layout_globals& g)
 #include "rrr_mxfp8_4wave_fastpath.inc"
 #include "rrr_mxfp8_exact_8wave_fastpath.inc"
 #include "crr_mxfp8_exact_8wave_fastpath.inc"
+// R31 Dev A — Stage A1: rect-V2 CRR fastpath kernel. Only defines symbols
+// when MXFP8_RECT_BLK_N=64. Default build (square) sees an empty
+// translation unit (guarded internally) so no behavioral change.
+#include "crr_mxfp8_exact_8wave_rect_fastpath.inc"
 
 template<Layout L, bool PRESHUFFLED_QUANT=false>
 __global__ __launch_bounds__(_NUM_THREADS, GEMM_MIN_BLOCKS_PER_CU)
@@ -5381,20 +5385,26 @@ void dispatch_pq_v2(layout_globals g) {
         }
     }
 #endif
-    // R29 Dev A: when MXFP8_RECT_BLK_N=64 (rect mode) and L==CRR, the V2-CRR
-    // exact-8wave fastpath has been gated off (see crr_mxfp8_exact_8wave_fastpath.inc)
-    // and there is no rect-V2 fastpath kernel yet. Falling through to
-    // dispatch<L,true> would crash with a GPU memory access fault because the
-    // V1 path expects V1-preshuffled scales but the caller has provided
-    // V2-preshuffled scales. Hard-guard the fall-through to fail loudly on
-    // host instead of producing a memory fault on device. Callers should use
-    // gemm_crr_pq with V1-preshuffled scales when MXFP8_RECT_BLK_N=64.
+    // R31 Dev A — Stage A1: rect-V2 CRR fastpath dispatch. Replaces the R29
+    // Dev A hard-guard (which printed a host error and returned) with a real
+    // dispatch to the rect kernel. Stage A1a guarantees clean compile + no
+    // GPU fault when the host has provided correctly-sized buffers; Stage A2
+    // will fix the host preshuffle layout to match the new rect slab geometry.
 #if defined(MXFP8_RECT_BLK_N) && (MXFP8_RECT_BLK_N == 64)
     if constexpr (L == Layout::CRR) {
+        g.m = static_cast<int>(g.c.rows());
+        g.n = static_cast<int>(g.c.cols());
+        g.k = static_cast<int>(g.b.rows());
+        if (crr_can_use_exact_8wave_scaled_rect(g)) {
+            dispatch_crr_exact_8wave_scaled_v2_rect<true>(g);
+            return;
+        }
+        // Fall-through to host-side error (no rect kernel applies for this shape).
         std::fprintf(stderr,
-            "[tk_mxfp8_layouts] gemm_crr_pq_v2 called with MXFP8_RECT_BLK_N=64; "
-            "no rect-V2 fastpath exists. Use gemm_crr_pq with V1 preshuffle. "
-            "(R29 Dev A guard — see r29a_findings.md.)\n");
+            "[tk_mxfp8_layouts] gemm_crr_pq_v2 called with MXFP8_RECT_BLK_N=64 "
+            "but shape m=%d n=%d k=%d does not match rect predicate. "
+            "(R31 Dev A Stage A1 — see r31a_findings.md.)\n",
+            g.m, g.n, g.k);
         return;
     }
 #endif

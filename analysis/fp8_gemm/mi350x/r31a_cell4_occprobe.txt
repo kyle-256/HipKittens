@@ -1,0 +1,14 @@
+===== R31 cell=4 rect MIN_BLOCKS_PER_CU=3 probe (bonus) =====
+occ=3 build rc=0
+./crr_mxfp8_exact_8wave_rect_fastpath.inc:287:1: remark: Function Name: _Z34crr_exact_8wave_scaled_rect_kernelILb1EEv14layout_globals [-Rpass-analysis=kernel-resource-usage]
+  287 | {
+      | ^
+./crr_mxfp8_exact_8wave_rect_fastpath.inc:287:1: remark:     TotalSGPRs: 53 [-Rpass-analysis=kernel-resource-usage]
+./crr_mxfp8_exact_8wave_rect_fastpath.inc:287:1: remark:     VGPRs: 148 [-Rpass-analysis=kernel-resource-usage]
+./crr_mxfp8_exact_8wave_rect_fastpath.inc:287:1: remark:     AGPRs: 0 [-Rpass-analysis=kernel-resource-usage]
+./crr_mxfp8_exact_8wave_rect_fastpath.inc:287:1: remark:     ScratchSize [bytes/lane]: 0 [-Rpass-analysis=kernel-resource-usage]
+./crr_mxfp8_exact_8wave_rect_fastpath.inc:287:1: remark:     Dynamic Stack: False [-Rpass-analysis=kernel-resource-usage]
+./crr_mxfp8_exact_8wave_rect_fastpath.inc:287:1: remark:     Occupancy [waves/SIMD]: 2 [-Rpass-analysis=kernel-resource-usage]
+./crr_mxfp8_exact_8wave_rect_fastpath.inc:287:1: remark:     SGPRs Spill: 0 [-Rpass-analysis=kernel-resource-usage]
+./crr_mxfp8_exact_8wave_rect_fastpath.inc:287:1: remark:     VGPRs Spill: 0 [-Rpass-analysis=kernel-resource-usage]
+./crr_mxfp8_exact_8wave_rect_fastpath.inc:287:1: remark:     LDS Size [bytes/block]: 104448 [-Rpass-analysis=kernel-resource-usage]

@@ -1,0 +1,10 @@
+===== R31 cell=3 rect build GPU-fault test (Stage A1b) =====
+[r31a-A1b] starting GPU-fault test M=4096 N=1024 K=8192
+[r31a-A1b] As.shape=torch.Size([32, 32768]) Bs.shape=torch.Size([32, 8192])
+[r31a-A1b] As.numel=1048576 Bs.numel=262144
+[r31a-A1b] calling gemm_crr_pq_v2 (rect kernel via R31A dispatcher)...
+[r31a-A1b] PASS — kernel completed in 0.002s, no GPU fault.
+[r31a-A1b] C[0, :8] = [0.0, -2.204051907791789e-39, 1.1020259538958945e-39, -3.03057137321371e-39, 4.1325973271096045e-39, -1.744874427001833e-39, 1.6530389308438418e-39, -7.346839692639297e-39]
+[r31a-A1b] C abs sum = nan
+[r31a-A1b] STAGE_A1b_RESULT: NO_FAULT
+stage_a1b rc=0
