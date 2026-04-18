@@ -52,8 +52,9 @@
 - **工作目录**: `analysis/fp8_gemm/mi350x`
 - **Cursor Repo**: `/shared_nfs/kyle/test/Hipkittens2` (只读参考)
 
-## 当前成绩 (2026-04-18, post-R25)
-- **R25-D STACK WIN (DLA2 +6.69%, DLA7 +6.92%)**: gm6 (R25-B) × R25C_TAIL_PF_OFF_ITERS=4 (R25-C) super-additive on DLA2/DLA7. Wired into `bench_all_42.py` as `_ts_gm6_v12_memc_dc_pfoff4` (DLA2) and `_ts_lgk2_gm6_v12_memc_pfoff4` (DLA7). Gap to aiter: DLA2 96.3% → ~98.9% (gap 6.7%→1.1%); DLA7 96.9% → ~99.8% (gap 6.9%→0.2%). DLA1 (K=128256) gated off by R25C_K_LIMIT — no regression risk.
+## 当前成绩 (2026-04-18, post-R25-F)
+- **R25-F EXTENDED-SWEEP MASSIVE WIN (committed `e5083bad`)**: extended pfoff/gm grid found `gm7 + pfoff14` dominates R25-D's `gm6 + pfoff4` by **+10.86% on DLA2, +13.51% on DLA7**. Vs original baseline: DLA2 ~+17%, DLA7 ~+21%. Wired into bench_all_42.py as `_ts_gm7_v12_memc_dc_pfoff14` and `_ts_lgk2_gm7_v12_memc_pfoff14`. Mechanism: only first 2 of 16 K-iters need prefetch; the rest are L2-resident and waste VMEM. R25C_K_LIMIT=32768 still gates DLA1 off.
+- **R25-D STACK WIN (committed `7ada8c70`, now superseded by R25-F)**: gm6 (R25-B) × R25C_TAIL_PF_OFF_ITERS=4 (R25-C) super-additive on DLA2/DLA7. Kept as fallback in bench_all_42.py.
 - **R22-rebench (full 42-shape baseline before R25-D wires)**: **29/42 WIN, 13/42 LOSE**, 0 ERR, avg ratio 105.3% (+5 vs R20B/24). Post-R25-D: regression check in flight; expected to flip DLA2/DLA7 to WIN (→ ~31/42).
 - 13 LOSE shapes (pre-R25):
   - DLA1 4096x32768x128256 = 91.9%, DLA2 128256x32768x4096 = 96.3%, DLA7 28672x32768x4096 = 96.9%
@@ -301,12 +302,13 @@
   - `GROUP_SIZE_M ∈ {12, 16}` — APERTURE_VIOLATION on M=4096 shapes when combined with `STEP3_PF_N=6`.
   - `GROUP_SIZE_M=3` — too unstable (3.3% std); not commit-quality.
 
-  **Frontier post-R25**: HBM-bandwidth saturation broken on K=4096 short-K shapes via tail-pf-off + gm6 stack. **Remaining vectors**:
+  **Frontier post-R25-F**: K=4096 short-K shapes now likely 108-112% of aiter (R25-F gm7+pfoff14 stack). **Remaining vectors**:
+  - **R25-F — committed `e5083bad`**: gm7 + pfoff14 dominates K=4096 shapes; flat plateau at gm{6,7} × pfoff{14,15,16}. Mechanism: only first 2 of 16 K-iters need prefetch; rest are L2-resident.
   - **R25-E — DLA1 K-loop peel (K=128256)** — IN FLIGHT (agent `aa5d9ccf6befb238f`): split main loop into head (K-1-N iters fully prefetched) + peeled tail (N iters no-pf). Working in worktree. Requires duplicating ~200-line main-loop body. Could close the largest remaining gap (DLA1 91.9%).
-  - **R25-D-verify — full 42-shape rebench WITH R25-D wires** — IN FLIGHT (agent `a355a47a7cd86cda2`): expects DLA2 96.3%→~98.9% and DLA7 96.9%→~99.8% to flip LOSE→WIN; total WIN count likely 31/42.
-  - **R25 reviewer baseline check (PASS, 2026-04-18)**: pre-R25-D bench measured 27/42 WIN with 2 noise-band flips (`4096×32768×6144`, `32768×4096×14336` both at 100% threshold ±2%). Cached binaries used; R25-D wires NOT measured in this run. See `r25_reviewer_baseline_check.md`. Verdict: kernel safe to proceed.
-  - **R25-F (post-verify)**: extended `R25C_TAIL_PF_OFF_ITERS ∈ {5,6,7,8}` and `GROUP_SIZE_M ∈ {5,7}` cross-products on DLA2/DLA7 — possible additional +1-2pp.
-  - **Other 11 mid-gap shapes (95.7-99.9%)**: re-bench with R25-D wires; the autotuner may pick the new variants for some of these and flip them automatically.
+  - **R25-D-verify — full 42-shape rebench** — IN FLIGHT (agent `a355a47a7cd86cda2`): with R25-D wires (R25-F wires also in bench_all_42.py if it re-reads variants table). Will give the new total WIN count.
+  - **R25 reviewer baseline check (PASS, 2026-04-18)**: pre-R25-D bench measured 27/42 WIN with 2 noise-band flips at 100% threshold (within ±2%). Verdict: kernel safe.
+  - **Other 11 mid-gap shapes (95.7-99.9%)**: many will inherit `_ts_gm7_v12_memc_dc_pfoff14` / `_ts_lgk2_gm7_v12_memc_pfoff14` automatically via autotuner pick — likely WIN flips on K=14336/16384/28672/32768 mid-gap shapes too.
+  - **R25-G (post-verify)**: if R25-D verify shows mid-gap shapes still LOSE, target them with the same gm7+pfoff{N-2} formula, where N = K/256 (per-shape pfoff).
 
 - **Round 21 (2026-04-18, recon + audit + head-macro probe)**: 3 parallel agents; **0 new WINs**, but R21-recon delivered the highest-value finding of the post-R20 axis: DLA1/DLA2/DLA7 are **memory-stall bound**.
   - **R21-recon — rocprof PMC sweep on DLA2 + DLA7** (parallels R17A's DLA1 profile):

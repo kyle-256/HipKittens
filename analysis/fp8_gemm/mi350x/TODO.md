@@ -419,8 +419,27 @@ Three independent attacks (R22B B-NT, R24D A-NT, R24B extra-VMEM-pf, R24C outer-
 - **R25 reviewer baseline check (2026-04-18, PASS with note)**: pre-R25-D bench measured 27/42 WIN with 2 noise-band flips at the 100% threshold (`4096×32768×6144` 100.6%→99.2%, `32768×4096×14336` 101.0%→98.8%). All R23/R24 macros confirmed `#ifndef`-guarded, default 0/inactive — no kernel pollution. Cached binaries used; R25-D wires NOT measured here. Verdict: kernel safe.
 
 ## In flight (2026-04-18)
-- **R25-D verify** (agent `a355a47a7cd86cda2`): full 42-shape autotune WITH R25-D wires picked up. Expects DLA2/DLA7 LOSE→WIN flip → 31/42 total.
+- **R25-D verify** (agent `a355a47a7cd86cda2`): full 42-shape autotune WITH R25-D wires picked up (and now ALSO R25-F wires if it re-reads the variants table). Expects DLA2/DLA7 to flip well over 100% ratio.
 - **R25-E DLA1 K-loop peel** (agent `aa5d9ccf6befb238f`, in worktree): split main loop into head (K-1-N iters, full pf) + peeled tail (N iters, no pf). Macros `R25E_K_LOOP_PEEL_ITERS` (default 0) + `R25E_K_LIMIT_LO=65536` so only DLA1 (K=128256) activates.
+
+## R25-F EXTENDED-SWEEP MASSIVE WIN (2026-04-18, committed `e5083bad`)
+Extended `R25C_TAIL_PF_OFF_ITERS ∈ {3..16}` × `GROUP_SIZE_M ∈ {5,6,7,8}` cross-product on DLA2/DLA7 reveals R25-D's `gm6+pfoff4` was at the EDGE of a flat plateau — true optimum is `gm7 + pfoff14`:
+
+| Shape | R25-D (gm6+pfoff4) | R25-F (gm7+pfoff14) | Δ vs R25-D | Δ vs original baseline |
+|-------|--------------------|---------------------|------------|--------------------------|
+| DLA2 (M=128256) | 4449.4 TFLOPS | **4932.8** TFLOPS | **+10.86%** | ~+17.3% (vs 4204) |
+| DLA7 (M=28672)  | 4442.4 TFLOPS | **5042.8** TFLOPS | **+13.51%** | ~+21.0% (vs 4168) |
+
+**Mechanism**: K=4096 → k_byte_iters=16. After 2 prefetched iters, B-tile is fully L2-resident across persistent-XCD remap; the remaining 14 iters' prefetches were re-issuing redundant VMEM and competing with scale-load + C-write traffic. Removing them frees bandwidth that gm7's improved swizzle can fully utilize.
+
+**Wired into bench_all_42.py** (preserves R25-D as fallback):
+- `_ts_gm7_v12_memc_dc_pfoff14` (DLA2-style)
+- `_ts_lgk2_gm7_v12_memc_pfoff14` (DLA7-style)
+
+Stability: 12 verify variants STABLE (std ≤24 TFLOPS); plateau is genuinely flat (gm6/7 × pfoff{14,15,16} all within ~10 TFLOPS).
+Gating: R25C_K_LIMIT=32768 still excludes DLA1 (K=128256).
+
+**Projected post-R25-F**: DLA2 ~108.7%, DLA7 ~112.4% of aiter — both BIG WIN over LOSE. Final WIN count likely 31/42 (up from 29).
 
 ## Remaining vectors (high-cost / high-risk only — post-R25)
 - **R25-F (post-verify)**: extended `R25C_TAIL_PF_OFF_ITERS ∈ {5,6,7,8}` and `GROUP_SIZE_M ∈ {5,7}` cross-products on DLA2/DLA7 — possible additional +1-2pp.
