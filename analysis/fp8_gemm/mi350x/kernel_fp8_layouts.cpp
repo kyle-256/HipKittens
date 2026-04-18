@@ -180,6 +180,20 @@ using namespace kittens;
 #ifndef RCR_USE_V2A_SHARED
 #define RCR_USE_V2A_SHARED 0
 #endif
+
+// P19 Dev A — port the 4-wave m0-broadcast hoist (P18 Dev A) to 8-wave RCR.
+// Default ON in production: Reviewer cross-GPU validated +0.27pp (GPU 6) /
+// +0.47pp (GPU 0) on the 4 gate_up weak shapes, asm-verify clean
+// (-60% v_readfirstlane, -67% s_nop, -16 VGPRs, occupancy unchanged at 2).
+// Replaces G::load(...) inside the 8-wave RCR branch with a local helper that
+// pre-computes scalar per-pass LDS offsets and issues
+// `s_mov m0; buffer_load_dwordx4 ... offen lds` via inline asm so LLVM cannot
+// CSE the readfirstlane back into vector regs. Set to 0 to recover the
+// pre-P19 baseline (kept reachable for asm-bisecting future LLVM updates).
+#ifndef RCR_8W_HOIST_M0
+#define RCR_8W_HOIST_M0 1
+#endif
+
 #ifndef RRR_MAIN_UNROLL
 #define RRR_MAIN_UNROLL 4
 #endif
@@ -798,6 +812,128 @@ __device__ __forceinline__ void load_transpose(
     }
 }
 
+#if RCR_8W_HOIST_M0
+// P19 Dev A — m0-broadcast hoist for the 8-wave RCR DTL loads.
+//
+// Drop-in replacement for the kittens 4-arg G::load(dst, src, idx, swizzled_offsets)
+// used inside the 8-wave RCR main loop. Behaviour:
+//   * Pre-computes the per-iter LDS byte offset as an SGPR (readfirstlane
+//     forces wave-uniform residency in SGPR class), bypassing LLVM's
+//     tendency to recompute the address through a VGPR + v_readfirstlane
+//     immediately before each DTL store.
+//   * Issues `s_mov m0, <sgpr>` + `buffer_load_dwordx4 ... offen lds` via
+//     inline asm. The LLVM intrinsic
+//     `__builtin_amdgcn_raw_buffer_load_lds` lets the scheduler CSE the
+//     m0 plumbing back into vector ops; inline asm forecloses that.
+//   * Vector destination operand is a phantom — `buffer_load_dwordx4 ... lds`
+//     does NOT write a VGPR, the operand merely satisfies LLVM's asm-binding
+//     contract and gets dead-code-eliminated downstream.
+//   * Preserves the leftover-warps tail handling from the kittens helper so
+//     odd memcpy_per_tile counts still drain.
+//
+// Mirrors `kittens::load<2, false, ST, GL, COORD, N_THREADS>` from
+// include/ops/warp/memory/tile/global_to_shared.cuh:187-249 (the 4-arg
+// variant taking pre-computed swizzled_offsets).
+template<int N_THREADS,
+         ducks::st::all ST,
+         ducks::gl::all GL,
+         ducks::coord::tile COORD = coord<ST>>
+__device__ __forceinline__ void rcr_8w_load_hoist(
+    ST& dst, const GL& src, const COORD& idx,
+    const uint32_t* __restrict__ swizzled_offsets)
+{
+    using T = typename ST::dtype;
+
+    constexpr int bytes_per_thread = ST::underlying_subtile_bytes_per_thread;
+    constexpr int bytes_per_warp   = bytes_per_thread * kittens::WARP_THREADS;
+    constexpr int memcpy_per_tile  =
+        ST::rows * ST::cols * sizeof(T) / (bytes_per_thread * N_THREADS);
+    static_assert(
+        ST::rows * ST::cols * sizeof(T) >= bytes_per_warp,
+        "shared tile must be at least 1024 bytes"
+    );
+
+    constexpr int num_warps = N_THREADS / kittens::WARP_THREADS;
+    const int warpid = kittens::warpid() % num_warps;
+
+    const int row_stride = src.template stride<2>();
+    coord<> unit_coord = idx.template unit_coord<2, 3>();
+    T* global_ptr = (T*)&src[unit_coord];
+    i32x4 srsrc = make_srsrc(global_ptr, row_stride * ST::rows * sizeof(T));
+
+    const uintptr_t lds_tile_base =
+        reinterpret_cast<uintptr_t>(&dst.data[0]);
+
+    // A1: hoist scalar per-pass LDS-byte ramp into SGPRs in the prologue.
+    // Each lds_addr below is wave-uniform (warpid + i are uniform), so we
+    // make that explicit via readfirstlane and keep the value in SGPR.
+    uint32_t lds_addrs[memcpy_per_tile + 1];  // +1 leftover slot (may be unused)
+    #pragma unroll
+    for (int i = 0; i < memcpy_per_tile; ++i) {
+        const int warp_linear_offset =
+            (warpid * bytes_per_warp) + (i * num_warps * bytes_per_warp);
+        const int lds_subtile_id = warp_linear_offset / ST::underlying_subtile_bytes;
+        const uint32_t off32 = static_cast<uint32_t>(
+            lds_tile_base + warp_linear_offset +
+            lds_subtile_id * ST::subtile_padding);
+        lds_addrs[i] = __builtin_amdgcn_readfirstlane(off32);
+    }
+
+    // A2: full inline-asm DTL — set m0 from the SGPR-hoisted per-pass offset
+    // and issue buffer_load_dwordx4 ... offen lds. Operand binding mirrors
+    // P18 Dev A's working 4-wave pattern (see rcr_4wave_dynamic.inc).
+    // %0 = s "lds_off" (SGPR), %1 = v "goff" (per-lane VGPR offset),
+    // %2 = s "srsrc" (4-SGPR buffer resource), with v0 as the phantom
+    // destination operand the asm constraint requires.
+    #pragma unroll
+    for (int i = 0; i < memcpy_per_tile; ++i) {
+        const uint32_t lds_off = lds_addrs[i];
+        const uint32_t goff    = swizzled_offsets[i];
+        asm volatile(
+            "s_mov_b32 m0, %0\n\t"
+            "buffer_load_dwordx4 %1, %2, 0 offen lds\n\t"
+            :
+            : "s"(lds_off), "v"(goff), "s"(srsrc)
+            : "memory");
+    }
+
+    if constexpr (memcpy_per_tile * (bytes_per_thread * N_THREADS) !=
+                  ST::rows * ST::cols * sizeof(T)) {
+        constexpr int leftover_bytes =
+            ST::rows * ST::cols * sizeof(T) -
+            memcpy_per_tile * (bytes_per_thread * N_THREADS);
+        constexpr int leftover_threads = leftover_bytes / bytes_per_thread;
+        constexpr int leftover_warps   = leftover_threads / kittens::WARP_THREADS;
+        if (warpid < leftover_warps) {
+            const int warp_linear_offset =
+                (warpid * bytes_per_warp) +
+                (memcpy_per_tile * num_warps * bytes_per_warp);
+            const int lds_subtile_id =
+                warp_linear_offset / ST::underlying_subtile_bytes;
+            const uint32_t off32 = static_cast<uint32_t>(
+                lds_tile_base + warp_linear_offset +
+                lds_subtile_id * ST::subtile_padding);
+            const uint32_t lds_off = __builtin_amdgcn_readfirstlane(off32);
+            const uint32_t goff    = swizzled_offsets[memcpy_per_tile];
+            asm volatile(
+                "s_mov_b32 m0, %0\n\t"
+                "buffer_load_dwordx4 %1, %2, 0 offen lds\n\t"
+                :
+                : "s"(lds_off), "v"(goff), "s"(srsrc)
+                : "memory");
+        }
+    }
+}
+
+// Convenience macro used inside the 8-wave RCR branch to switch between the
+// stock G::load(...) path and the hoist helper at compile time.
+#define RCR_LOAD_8W(DST, SRC, IDX, SO) \
+    rcr_8w_load_hoist<_NUM_THREADS>((DST), (SRC), (IDX), (SO))
+#else
+#define RCR_LOAD_8W(DST, SRC, IDX, SO) \
+    G::load((DST), (SRC), (IDX), (SO))
+#endif
+
 struct layout_globals {
     _gl_fp8 a, b;
     _gl_bf16 c;
@@ -902,10 +1038,10 @@ void gemm_kernel(const layout_globals g) {
             load(dst, sub);
         };
 
-        G::load(Bs[0], g.b, b_co(bc*2,   0), soB);
-        G::load(As[0], g.a, a_co(br*2,   0), soA);
-        G::load(Bs[1], g.b, b_co(bc*2+1, 0), soB);
-        G::load(As[1], g.a, a_co(br*2+1, 0), soA);
+        RCR_LOAD_8W(Bs[0], g.b, b_co(bc*2,   0), soB);
+        RCR_LOAD_8W(As[0], g.a, a_co(br*2,   0), soA);
+        RCR_LOAD_8W(Bs[1], g.b, b_co(bc*2+1, 0), soB);
+        RCR_LOAD_8W(As[1], g.a, a_co(br*2+1, 0), soA);
 
         if (wm == 1) __builtin_amdgcn_s_barrier();
         TK_WAIT_VMCNT(RCR_SINGLE_STAGE_INIT_VMCNT);
@@ -925,8 +1061,8 @@ void gemm_kernel(const layout_globals g) {
 
             load_a(a, As[1], wm);
             if (k + 1 < ki_dyn) {
-                G::load(Bs[0], g.b, b_co(bc*2,   k+1), soB);
-                G::load(As[0], g.a, a_co(br*2,   k+1), soA);
+                RCR_LOAD_8W(Bs[0], g.b, b_co(bc*2,   k+1), soB);
+                RCR_LOAD_8W(As[0], g.a, a_co(br*2,   k+1), soA);
             }
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
@@ -934,8 +1070,8 @@ void gemm_kernel(const layout_globals g) {
             __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
 
             if (k + 1 < ki_dyn) {
-                G::load(Bs[1], g.b, b_co(bc*2+1, k+1), soB);
-                G::load(As[1], g.a, a_co(br*2+1, k+1), soA);
+                RCR_LOAD_8W(Bs[1], g.b, b_co(bc*2+1, k+1), soB);
+                RCR_LOAD_8W(As[1], g.a, a_co(br*2+1, k+1), soA);
                 TK_WAIT_VMCNT(RCR_SINGLE_STAGE_STEADY_VMCNT);
             }
             __builtin_amdgcn_s_barrier();
@@ -988,18 +1124,18 @@ void gemm_kernel(const layout_globals g) {
         };
 
         int tic = 0, toc = 1;
-        G::load(b_tile(tic, 0), g.b, b_co(bc*2,   0), soB);
-        G::load(As[tic][0], g.a, a_co(br*2,   0), soA);
-        G::load(b_tile(tic, 1), g.b, b_co(bc*2+1, 0), soB);
-        G::load(As[tic][1], g.a, a_co(br*2+1, 0), soA);
+        RCR_LOAD_8W(b_tile(tic, 0), g.b, b_co(bc*2,   0), soB);
+        RCR_LOAD_8W(As[tic][0], g.a, a_co(br*2,   0), soA);
+        RCR_LOAD_8W(b_tile(tic, 1), g.b, b_co(bc*2+1, 0), soB);
+        RCR_LOAD_8W(As[tic][1], g.a, a_co(br*2+1, 0), soA);
 
         if (wm == 1) __builtin_amdgcn_s_barrier();
         TK_WAIT_VMCNT(RCR_INIT0_VMCNT);
         __builtin_amdgcn_s_barrier();
 
-        G::load(b_tile(toc, 0), g.b, b_co(bc*2,   1), soB);
-        G::load(As[toc][0], g.a, a_co(br*2,   1), soA);
-        G::load(b_tile(toc, 1), g.b, b_co(bc*2+1, 1), soB);
+        RCR_LOAD_8W(b_tile(toc, 0), g.b, b_co(bc*2,   1), soB);
+        RCR_LOAD_8W(As[toc][0], g.a, a_co(br*2,   1), soA);
+        RCR_LOAD_8W(b_tile(toc, 1), g.b, b_co(bc*2+1, 1), soB);
 
         TK_WAIT_VMCNT(RCR_INIT1_VMCNT);
         __builtin_amdgcn_s_barrier();
@@ -1009,7 +1145,7 @@ void gemm_kernel(const layout_globals g) {
             auto main_loop_iter = [&](int tile) {
                 load_b(b0, Bs[0][0], wn);
                 load_a(a, As[0][0], wm);
-                G::load(As[1][1], g.a, a_co(br*2+1, tile+1), soA);
+                RCR_LOAD_8W(As[1][1], g.a, a_co(br*2+1, tile+1), soA);
                 TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
 
                 asm volatile("s_waitcnt lgkmcnt(0)");
@@ -1017,7 +1153,7 @@ void gemm_kernel(const layout_globals g) {
                 __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
 
                 load_b(b1, Bs[0][1], wn);
-                G::load(Bs[0][0], g.b, b_co(bc*2, tile+2), soB);
+                RCR_LOAD_8W(Bs[0][0], g.b, b_co(bc*2, tile+2), soB);
                 __builtin_amdgcn_s_barrier();
 
                 asm volatile("s_waitcnt lgkmcnt(0)");
@@ -1025,7 +1161,7 @@ void gemm_kernel(const layout_globals g) {
                 __builtin_amdgcn_s_barrier();
 
                 load_a(a, As[0][1], wm);
-                G::load(As[0][0], g.a, a_co(br*2, tile+2), soA);
+                RCR_LOAD_8W(As[0][0], g.a, a_co(br*2, tile+2), soA);
                 __builtin_amdgcn_s_barrier();
 
                 asm volatile("s_waitcnt lgkmcnt(0)");
@@ -1033,14 +1169,14 @@ void gemm_kernel(const layout_globals g) {
                 __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
 
                 load_b(b0, Bs[1][0], wn);
-                G::load(Bs[0][1], g.b, b_co(bc*2+1, tile+2), soB);
+                RCR_LOAD_8W(Bs[0][1], g.b, b_co(bc*2+1, tile+2), soB);
                 TK_WAIT_VMCNT(RCR_TWO_TILE_MID_VMCNT); __builtin_amdgcn_s_barrier();
 
                 __builtin_amdgcn_s_setprio(1); mma_ABt(cD, a, b1, cD); __builtin_amdgcn_s_setprio(0);
                 __builtin_amdgcn_s_barrier();
 
                 load_a(a, As[1][0], wm);
-                G::load(As[0][1], g.a, a_co(br*2+1, tile+2), soA);
+                RCR_LOAD_8W(As[0][1], g.a, a_co(br*2+1, tile+2), soA);
                 TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
 
                 asm volatile("s_waitcnt lgkmcnt(0)");
@@ -1048,7 +1184,7 @@ void gemm_kernel(const layout_globals g) {
                 __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
 
                 load_b(b1, Bs[1][1], wn);
-                G::load(Bs[1][0], g.b, b_co(bc*2, tile+3), soB);
+                RCR_LOAD_8W(Bs[1][0], g.b, b_co(bc*2, tile+3), soB);
                 __builtin_amdgcn_s_barrier();
 
                 asm volatile("s_waitcnt lgkmcnt(0)");
@@ -1056,14 +1192,14 @@ void gemm_kernel(const layout_globals g) {
                 __builtin_amdgcn_s_barrier();
 
                 load_a(a, As[1][1], wm);
-                G::load(As[1][0], g.a, a_co(br*2, tile+3), soA);
+                RCR_LOAD_8W(As[1][0], g.a, a_co(br*2, tile+3), soA);
                 __builtin_amdgcn_s_barrier();
 
                 asm volatile("s_waitcnt lgkmcnt(0)");
                 __builtin_amdgcn_s_setprio(1); mma_ABt(cC, a, b0, cC); __builtin_amdgcn_s_setprio(0);
                 __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
 
-                G::load(Bs[1][1], g.b, b_co(bc*2+1, tile+3), soB);
+                RCR_LOAD_8W(Bs[1][1], g.b, b_co(bc*2+1, tile+3), soB);
                 TK_WAIT_VMCNT(RCR_TWO_TILE_MID_VMCNT); __builtin_amdgcn_s_barrier();
 
                 __builtin_amdgcn_s_setprio(1); mma_ABt(cD, a, b1, cD); __builtin_amdgcn_s_setprio(0);
@@ -1113,7 +1249,7 @@ void gemm_kernel(const layout_globals g) {
             const auto b1_pair_cB = b1;
             const auto b1_pair_cD = b1;
 #endif
-            G::load(As[toc][1], g.a, a_co(br*2+1, k+1), soA);
+            RCR_LOAD_8W(As[toc][1], g.a, a_co(br*2+1, k+1), soA);
             TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
 #if RCR_PAIR_CB_RELOAD_LAST_WN
@@ -1135,7 +1271,7 @@ void gemm_kernel(const layout_globals g) {
             __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
 
             load_b(b1, b_tile(tic, 1), wn);
-            G::load(b_tile(tic, 0), g.b, b_co(bc*2, k+2), soB);
+            RCR_LOAD_8W(b_tile(tic, 0), g.b, b_co(bc*2, k+2), soB);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1);
@@ -1211,24 +1347,24 @@ void gemm_kernel(const layout_globals g) {
 
 #if RCR_PAIR_SPLIT_CB
 #if !RCR_PAIR_LATE_B1_PREFETCH
-            G::load(b_tile(tic, 1), g.b, b_co(bc*2+1, k+2), soB);
+            RCR_LOAD_8W(b_tile(tic, 1), g.b, b_co(bc*2+1, k+2), soB);
 #endif
 #else
         #if RCR_PAIR_SWAP_FUTURE_B_ORDER
         #if !RCR_PAIR_LATE_B1_PREFETCH && !RCR_PAIR_SPLIT_CD
-            G::load(b_tile(tic, 1), g.b, b_co(bc*2+1, k+2), soB);
+            RCR_LOAD_8W(b_tile(tic, 1), g.b, b_co(bc*2+1, k+2), soB);
         #endif
         #if RCR_PAIR_SERIALIZE_FUTURE_B_LOADS
             TK_WAIT_VMCNT(RCR_PAIR_FUTURE_B_GAP_VMCNT); __builtin_amdgcn_s_barrier();
         #endif
-            G::load(b_tile(tic, 0), g.b, b_co(bc*2, k+2), soB);
+            RCR_LOAD_8W(b_tile(tic, 0), g.b, b_co(bc*2, k+2), soB);
         #else
-            G::load(b_tile(tic, 0), g.b, b_co(bc*2, k+2), soB);
+            RCR_LOAD_8W(b_tile(tic, 0), g.b, b_co(bc*2, k+2), soB);
         #if RCR_PAIR_SERIALIZE_FUTURE_B_LOADS
             TK_WAIT_VMCNT(RCR_PAIR_FUTURE_B_GAP_VMCNT); __builtin_amdgcn_s_barrier();
         #endif
         #if !RCR_PAIR_LATE_B1_PREFETCH && !RCR_PAIR_SPLIT_CD
-            G::load(b_tile(tic, 1), g.b, b_co(bc*2+1, k+2), soB);
+            RCR_LOAD_8W(b_tile(tic, 1), g.b, b_co(bc*2+1, k+2), soB);
         #endif
         #endif
 #endif
@@ -1236,7 +1372,7 @@ void gemm_kernel(const layout_globals g) {
             TK_WAIT_VMCNT(RCR_PAIR_PRE_A1_VMCNT); __builtin_amdgcn_s_barrier();
 #endif
             load_a(a, As[tic][1], wm);
-            G::load(As[tic][0], g.a, a_co(br*2, k+2), soA);
+            RCR_LOAD_8W(As[tic][0], g.a, a_co(br*2, k+2), soA);
             TK_WAIT_VMCNT(RCR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1);
@@ -1248,7 +1384,7 @@ void gemm_kernel(const layout_globals g) {
 #endif
             __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
-            G::load(b_tile(tic, 1), g.b, b_co(bc*2+1, k+2), soB);
+            RCR_LOAD_8W(b_tile(tic, 1), g.b, b_co(bc*2+1, k+2), soB);
             TK_WAIT_VMCNT(RCR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1);
@@ -1293,7 +1429,7 @@ void gemm_kernel(const layout_globals g) {
             __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
 #if RCR_PAIR_LATE_B1_PREFETCH
-            G::load(b_tile(tic, 1), g.b, b_co(bc*2+1, k+2), soB);
+            RCR_LOAD_8W(b_tile(tic, 1), g.b, b_co(bc*2+1, k+2), soB);
 #endif
 #elif RCR_BATCHED_READS
             A_row_reg a1;
@@ -1301,14 +1437,14 @@ void gemm_kernel(const layout_globals g) {
             load_b(b1, b_tile(tic, 1), wn);
             load_a(a, As[tic][0], wm);
             load_a(a1, As[tic][1], wm);
-            G::load(As[toc][1], g.a, a_co(br*2+1, k+1), soA);
+            RCR_LOAD_8W(As[toc][1], g.a, a_co(br*2+1, k+1), soA);
             TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_barrier();
 
-            G::load(b_tile(tic, 0), g.b, b_co(bc*2, k+2), soB);
-            G::load(As[tic][0], g.a, a_co(br*2, k+2), soA);
-            G::load(b_tile(tic, 1), g.b, b_co(bc*2+1, k+2), soB);
+            RCR_LOAD_8W(b_tile(tic, 0), g.b, b_co(bc*2, k+2), soB);
+            RCR_LOAD_8W(As[tic][0], g.a, a_co(br*2, k+2), soA);
+            RCR_LOAD_8W(b_tile(tic, 1), g.b, b_co(bc*2+1, k+2), soB);
 
             __builtin_amdgcn_s_setprio(1);
             rcr_mma(cA, a, b0);
@@ -1323,27 +1459,27 @@ void gemm_kernel(const layout_globals g) {
 #else
             load_b(b0, b_tile(tic, 0), wn);
             load_a(a, As[tic][0], wm);
-            G::load(As[toc][1], g.a, a_co(br*2+1, k+1), soA);
+            RCR_LOAD_8W(As[toc][1], g.a, a_co(br*2+1, k+1), soA);
             TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); rcr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
 
             load_b(b1, b_tile(tic, 1), wn);
-            G::load(b_tile(tic, 0), g.b, b_co(bc*2, k+2), soB);
+            RCR_LOAD_8W(b_tile(tic, 0), g.b, b_co(bc*2, k+2), soB);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); RCR_RHS_MMA(cB, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
-            G::load(As[tic][0], g.a, a_co(br*2, k+2), soA);
+            RCR_LOAD_8W(As[tic][0], g.a, a_co(br*2, k+2), soA);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); rcr_mma(cC, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
 
-            G::load(b_tile(tic, 1), g.b, b_co(bc*2+1, k+2), soB);
+            RCR_LOAD_8W(b_tile(tic, 1), g.b, b_co(bc*2+1, k+2), soB);
             TK_WAIT_VMCNT(RCR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
             __builtin_amdgcn_s_setprio(1); RCR_RHS_MMA(cD, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
@@ -1358,7 +1494,7 @@ void gemm_kernel(const layout_globals g) {
             load_b(b1, b_tile(tic, 1), wn);
             load_a(a, As[tic][0], wm);
             load_a(a1_epi, As[tic][1], wm);
-            G::load(As[toc][1], g.a, a_co(br*2+1, ki_dyn-1), soA);
+            RCR_LOAD_8W(As[toc][1], g.a, a_co(br*2+1, ki_dyn-1), soA);
             TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
 
@@ -1377,7 +1513,7 @@ void gemm_kernel(const layout_globals g) {
             load_b(b0, b_tile(tic, 0), wn);
             load_b(b1, b_tile(tic, 1), wn);
             load_a(a, As[tic][0], wm);
-            G::load(As[toc][1], g.a, a_co(br*2+1, ki_dyn-1), soA);
+            RCR_LOAD_8W(As[toc][1], g.a, a_co(br*2+1, ki_dyn-1), soA);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1);
@@ -1400,7 +1536,7 @@ void gemm_kernel(const layout_globals g) {
 #else
             load_b(b0, b_tile(tic, 0), wn);
             load_a(a, As[tic][0], wm);
-            G::load(As[toc][1], g.a, a_co(br*2+1, ki_dyn-1), soA);
+            RCR_LOAD_8W(As[toc][1], g.a, a_co(br*2+1, ki_dyn-1), soA);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); rcr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
