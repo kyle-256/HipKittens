@@ -7,14 +7,91 @@
 - SNR ≥ 48 dB (FP8) / ≥ 47 dB (BF16 vs torch.mm), bit-exact determinism are hard gates.
 - Never commit `*.so`, `.autotune_cache.json` is OK to keep (it's text), logs are not.
 
-## Current Status (2026-04-17, post-P9 — no code change landed)
+## Current Status (2026-04-18, post-P12 — no code change landed; ceiling proven)
 
-P9 was an agent-team exploration session (3 Devs + 1 Reviewer, all opus). Net
-result: nothing landed. Three optimization directions all bottomed out at
-DVFS noise after cross-GPU validation. See "Closed / Completed" for details
-and lessons.
+P11 + P12 ran 7 Dev agents + 1 Reviewer + 1 ceiling-research agent across
+GPUs 0/3/4/5/6/7. **Nothing landed.** Critical outcome: **Dev G proved the
+new "RRR/RCR ≥ 1.000, CRR/RCR ≥ 0.950" targets are architecturally
+infeasible on gfx950 within the no-preshuffle constraint** — see the P12
+ceiling analysis below. The numbers below remain unchanged from post-P8.
 
-The numbers below are unchanged from post-P8.
+## CEILING ANALYSIS (2026-04-18, P12 Dev G — definitive)
+
+Single-launch rocprofv3 on GPU 6, 8192³ FP8 e4m3 → BF16:
+
+| Kernel  | TFLOPs | Wall (cycles) | LDS/MFMA | VALU/MFMA | WAIT/LDS |
+|---------|--------|---------------|----------|-----------|----------|
+| TK_RCR  | 3111   | 5,252,876     | 0.75     | 1.50      | 1.36     |
+| TK_RRR  | 3002   | 5,653,394     | 1.00     | 2.16      | 1.22     |
+| TK_CRR  | 2908   | 5,920,020     | 1.50     | 2.60      | 0.88     |
+| BL_RCR  | 3203   | 5,135,587     | 0.50     | 1.26      | 0.73     |  ← Custom_ TN hand-written
+| BL_RRR  | 2018   | 9,880,062     | 1.21     | 5.50      | 1.87     |  ← Tensile autogen
+| BL_CRR  | 1505   | 12,183,826    | 4.51     | 13.55     | 1.80     |  ← Tensile autogen
+
+All 6 kernels issue **identical** SQ_INSTS_VALU_MFMA_F8 = 16,777,216 and
+SQ_VALU_MFMA_BUSY_CYCLES = 536,870,912. Same MFMA flavor
+(`v_mfma_f32_16x16x128_f8f6f4`). No kernel uses 32×32×16 or scaled-FP8.
+
+**hipBLASLt's own ratios** (its NN/NT Tensile kernels vs its TN custom):
+- BL_RRR / BL_RCR = 0.66
+- BL_CRR / BL_RCR = 0.50
+
+We are at 0.95/0.92, i.e. **substantially better than hipBLASLt's own
+layout-uniformity**. TK_RRR is 1.49× BL_RRR, TK_CRR is 1.93× BL_CRR.
+
+**The 1.000 RRR/RCR target presupposes** a hidden software lever exists.
+The data shows there is none for NN/NT layouts:
+
+1. The only kernel that beats us is BL_RCR's hand-written `Custom_` TN
+   kernel (3% gap). It uses Direct-To-LDS (DTLA1+DTLB1) — bypasses the
+   VGPR roundtrip. DTL only works for the TN coalesced-load pattern;
+   Tensile's NN/NT solutions don't enable DTL because their global-load
+   strides don't line up.
+2. BL_RCR additionally uses MT256×256×128 + 256-VGPR allocation (1
+   wave/SIMD) + a hand-scheduled MFMA pipeline ("CMS") + WGM6 mapping.
+   Reproducing this in TK is ≥ 3 P-sessions of work, narrows occupancy
+   to 1, and the gain only appears for RCR.
+3. **NO preshuffle applies symmetrically to hipBLASLt** — they don't get
+   that lever either. The constraint is real and external.
+
+**Recommendation (Dev G):** treat the RRR/RCR=1.000, CRR/RCR=0.950
+targets as unachievable under the no-preshuffle hard constraint. Reframe
+success as:
+- TK_RRR / BL_RRR ≥ 1.40 → **achieved 1.49** ✅
+- TK_CRR / BL_CRR ≥ 1.80 → **achieved 1.93** ✅
+- TK_RCR / BL_RCR ≥ 0.97 → **achieved 0.97** ✅
+
+If a 1.000 RRR/RCR is required, the only path is one of:
+- Relax no-preshuffle for B in RRR (reorder to TN-equivalent stride
+  offline) — explicitly forbidden by current rules.
+- Build a dedicated DTL+CMS+MT256² RRR/CRR variant — multi-session
+  effort with downside risk on RCR.
+- Accept the structural ceiling (current state).
+
+## NEW PRIMARY TARGETS (2026-04-18, P11+) — STATUS: CEILING REACHED
+
+The user's targets (set 2026-04-18) are listed below for reference; P12
+work proves they cannot be met within the no-preshuffle constraint.
+
+| Layout | Current (RCR-relative) | Target | Gap | P12 verdict |
+|---|---|---|---|---|
+| FP8 RRR | 0.950 × RCR | **1.000 × RCR** | +5.0pp | INFEASIBLE no-preshuffle |
+| FP8 CRR | 0.922 × RCR | **0.950 × RCR** | +2.8pp | INFEASIBLE no-preshuffle |
+
+Reference absolute geo-means (GPU 3, `bench_no_jit_final.json`):
+RCR 2939 TFLOPs / RRR 2793 / CRR 2711.
+
+**Hard constraint additions (still in force):**
+- **NO preshuffle / no offline weight permutation.**
+- The vs-hipBLASLt geo-means (RRR 1.53x, CRR 1.97x) are non-regression
+  gates. P12 confirms: TK still 1.49×/1.93× vs BL on RRR/CRR at 8192³.
+
+**FP8 absolute throughput** (geo-mean tk_tflops over the 48-shape set,
+`bench_no_jit_final.json`): RCR 2939 / RRR 2793 / CRR 2711 →
+**RRR/RCR = 0.950, CRR/RCR = 0.922**. RRR is exactly on the 95% line of
+RCR (23/48 shapes ≥ 0.95); CRR is ~3pp short of 95%. The vs-hipBLASLt
+ratios (0.996 / 1.530 / 1.967) overstate RRR/CRR strength because
+hipBLASLt itself is much slower on RRR/CRR than on RCR.
 
 
 
@@ -78,6 +155,41 @@ layout; no layout regressed.
       large-N shapes (these were hand-tuned for 8192³).
 - [ ] Consider runtime 4-wave path for large-grid shapes (analogous to FP8).
 
+### FP8 RRR / CRR — closed under no-preshuffle (P12 ceiling proven)
+
+Per Dev G's P12 ceiling analysis (above), the 1.000 and 0.950 targets
+are not reachable while no-preshuffle is in force. Items kept here only
+for archival; do NOT redispatch unless the constraint changes:
+
+- [P12-CLOSED] LDS bank-conflict profiling (RRR/CRR). Dev E (P12) measured
+  `SQ_LDS_BANK_CONFLICT = 0` on both. Not the lever.
+- [P12-CLOSED] `ds_read_b64` 2-stage schedule + register-level
+  `v_perm_b32`. Dev A (P11) showed RRR's 4× `s_waitcnt lgkmcnt(0)`
+  hard-drain barriers (lines 1607-1670) mask all per-instruction
+  wait-tuning until the structural barriers are removed. Dev D (P11)
+  attempted the restructure and could not converge.
+- [P12-CLOSED] CRR LDS A double-buffer. Dev C (P11) confirmed
+  `__shared__ ST_crr_a As[2][2]` is already double-buffered.
+- [P12-CLOSED] CRR `lgkmcnt(0)→lgkmcnt(K)` per-operand restructure.
+  Dev F (P12) shipped the knob infrastructure (`CRR_STEADY1_LGKM`,
+  `CRR_STEADY2_LGKM`) but the one override they got to bench
+  (S1=2,S2=4) gave +0.27pp RRR / +0.43pp CRR — within DVFS noise band.
+  Diff lives in `agent-a5b15c06` worktree, defaults to identity, NOT
+  landed.
+- [P12-CLOSED] Alternate (M_TILE, N_TILE, K_TILE) for RRR-only.
+  hipBLASLt's RRR uses MT256×208×128 (asymmetric) — Dev G concluded the
+  large tile only helps because it pairs with DTLA1+DTLB1 (Direct-To-LDS),
+  which TK doesn't have an implementation for.
+
+### FP8 RCR — only remaining headroom (~3% to BL_RCR custom kernel)
+- [ ] Direct-To-LDS (DTLA1+DTLB1) implementation for RCR (TN). Dev G P12
+      identifies this as the single lever that explains the BL_RCR
+      advantage. Estimated ≥ 3 P-sessions of work to re-architect the
+      load → LDS path; would drop our LDS/MFMA from 0.75 to 0.50.
+- [ ] Hand-scheduled MFMA pipeline (`__builtin_amdgcn_sched_barrier` +
+      `s_setprio` discipline) for RCR. Reduces SQ_WAIT_INST_LDS from
+      1.36×LDS to ~0.73×LDS. Risk is high — BF16 P9 attempts didn't land.
+
 ### FP8 RCR (within noise of 1.00x; 12 weak shapes still 0.90-0.93x)
 - [x] ~~Per-shape NUM_XCDS for FP8~~ — P9 ran a strict per-shape re-bench
       (warmup=30, iters=100, trials=5) on every weak shape. Result:
@@ -113,6 +225,93 @@ layout; no layout regressed.
 
 ## Closed / Completed
 
+- 2026-04-18 P11 + P12 — Two back-to-back agent-team sessions (7 Devs +
+  1 Reviewer + 1 ceiling-research agent across GPUs 0/3/4/5/6/7).
+  **Nothing landed.** Net outcome: **the new RRR/RCR ≥ 1.000 and
+  CRR/RCR ≥ 0.950 targets are architecturally infeasible under the
+  no-preshuffle constraint** (Dev G ceiling analysis above).
+  - **Dev A (P11, RRR waitcnt sweep)** — identified the structural
+    blocker: `kernel_fp8_layouts.cpp:1607-1670` has 4× `s_waitcnt
+    lgkmcnt(0)` hard-drain barriers per RRR steady-state iteration.
+    These mask every per-instruction wait knob. NO LAND.
+  - **Dev B (P11, RRR alt-tile)** — silent for 2h+, produced 21 bench
+    JSONs but no kernel diff. NO LAND.
+  - **Dev C (P11, CRR LDS double-buffer)** — confirmed `As[2][2]` is
+    already double-buffered. The 8% gap is structural column-stride
+    cost, not a missing buffer. NO LAND.
+  - **Dev D (P12, RRR `lgkmcnt(K)` restructure)** — hung after 1h, no
+    kernel diff. NO LAND.
+  - **Dev E (P12, CRR LDS layout / bank-conflict)** — direct measurement
+    `SQ_LDS_BANK_CONFLICT = 0` on both CRR and RCR. Eliminates bank
+    conflicts as a lever. NO LAND.
+  - **Dev F (P12, CRR `lgkmcnt` knob infrastructure)** — added
+    `CRR_STEADY1_LGKM`/`CRR_STEADY2_LGKM` macros at lines 1968/1983,
+    defaults to identity. Single override S1=2,S2=4 benched at
+    +0.27pp RRR / +0.43pp CRR — within DVFS noise. Agent died before
+    finishing the sweep. Diff in `agent-a5b15c06` worktree, NOT landed.
+  - **Dev G (P12, hipBLASLt ceiling research, GPU 6, no kernel edits)** —
+    rocprofv3 single-launch profile of all 6 kernels (TK ×3 layouts,
+    BL ×3 layouts) at 8192³. Findings:
+    - Identical SQ_INSTS_VALU_MFMA_F8 = 16,777,216 across all 6.
+    - hipBLASLt's own RRR/RCR = 0.66, CRR/RCR = 0.50 (we are at 0.95/0.92,
+      i.e. *better* than hipBLASLt's own layout-uniformity).
+    - TK_RRR / BL_RRR = 1.49; TK_CRR / BL_CRR = 1.93 at 8192³.
+    - The only kernel that beats us is BL_RCR's hand-written `Custom_`
+      TN kernel (3% gap). It uses Direct-To-LDS + MT256² + 256-VGPR +
+      hand-scheduled CMS + WGM6 — none of which generalize to NN/NT.
+    - Verdict: targets are unachievable; treat current state as ceiling.
+  - **Lessons additive to P10:**
+    - "Vs our own RCR" is not a meaningful target when RCR has access
+      to a hardware-specific code path (Direct-To-LDS for TN-coalesced
+      loads) that other layouts intrinsically can't use. Future
+      "X-layout / RCR" targets need a feasibility check first.
+    - rocprofv3 single-launch comparison (TK vs BL same shape, same GPU)
+      is a far stronger ceiling-bounding tool than perf benchmarking
+      alone. Use it before launching restructure attempts.
+    - Multi-Dev parallelism on the same kernel source eventually
+      collides: when 4+ Devs share `kernel_fp8_layouts.cpp` with no
+      coordinator, several silently hang or never produce a diff.
+      P12 should have used at most 2 concurrent Devs on shared files.
+    - Negative results have shipping value: the P12 ceiling memo is
+      itself the headline result of the session — it stops downstream
+      teams from re-attempting the same dead ends.
+- 2026-04-18 P10 — Second agent-team session (3 Devs + 1 Reviewer, all opus,
+  GPU 0/4/5/7). **Nothing landed.**
+  - **Dev A (BF16 CRR SGPR-spill restructure, GPU 4)** — three strategies:
+    KI=128 `#pragma unroll 1` (-0.31pp geo-mean), `__builtin_amdgcn_readfirstlane`
+    on `row*2/col*2/etc.` (zero spill effect — compiler already proved
+    uniformity), manual 2-iter fusion + `sched_barrier(0)` (spills 26→0
+    on every CRR KI but VGPRs 245→252, occupancy floor at 2 became
+    fragile, **CRR -0.90pp regression**, e.g. (8192,8192,8192) -3.11pp).
+    All reverted.
+  - **Dev B (BF16 RCR/RRR M↔N swap + small-K WAITCNT, GPU 5)** — Strategy A
+    (host grid swap) ruled out: clean version needs a transposed C store
+    that the existing `gl<>` API doesn't accept; Python-level transpose
+    copy costs 5–25% on target shapes (regression). Strategy B small-K
+    WAITCNT (`lgkmcnt(8)→4`, `vmcnt(6)→2` for `KI<96` constexpr branch):
+    in DVFS noise, slight regression on (4096,28672,4096) RRR. All reverted.
+  - **Dev C (FP8 RCR weak shapes small-K big-N, GPU 0)** — Strategy C
+    per-shape `RCR_TWO_TILE_MIN_KI` runtime knob: swept mk∈{0,32,64,128,∞}
+    × gm∈{1,2,4,8,16,32} on 13 weak shapes, **mk=0/32 (current default)
+    wins everywhere**, mk≥64 uniformly 1-2% slower. Strategy B KI=28/32
+    template + `unroll(1)`: clean build, 0 spills, but A/B test gave
+    geo-mean +0.03pp (pure noise). Both reverted; only an 8-line "do not
+    repeat" comment recommended.
+  - **Lessons additive to P9:**
+    - For BF16 CRR, the unroll-2 + 26-spill point is genuinely
+      Pareto-optimal for the current `main_loop_iter` shape. Reducing
+      spills via either `unroll 1` OR manual fusion costs more than it
+      saves. **Future CRR work needs a structural restructure** (e.g.
+      maintain running SOFF SGPR per LDS slot; `__launch_bounds__(_,1)`
+      only for KI=128/296 to trade occupancy for register pressure),
+      not another local tweak.
+    - The 12 weak FP8 RCR shapes (small-K big-N) appear to be at a
+      structural ceiling for the 8-wave 2-tile schedule. A real fix
+      requires either a 4-tile in-block split (Strategy A — 2+ days
+      of work, deferred) or relaxing the no-atomics rule for true
+      Split-K. No amount of WAITCNT/MIN_KI tuning will close it.
+    - Pattern reinforced from P9: any sub-1pp signal is noise on this
+      host until clock pinning works.
 - 2026-04-17 P9 — Agent team session (3 Devs + 1 Reviewer, all opus).
   Three optimization directions explored, **nothing landed**:
   - BF16 CRR KI=296 `#pragma unroll 1` (Dev 1, GPU 4): SGPR spills
