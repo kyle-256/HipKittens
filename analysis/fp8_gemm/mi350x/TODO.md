@@ -1,10 +1,14 @@
 # MXFP4 GEMM Optimization TODO
 
-## Current State (2026-04-18, post-R29)
+## Current State (2026-04-18, post-R30)
 
-**Bench**: `bench_all42_results_R25_FINAL_v2.{json,log}` (warmup=200 iters=500 trim=10%, 5-GPU parallel) + R29 single-shape verifies
-**Result**: **41/42 WIN, 1/42 LOSE, 0 ERR, projected win rate 97.6%** — L4 flipped LOSE→WIN by R29 (+1 from v2 40/42).
-**Status**: Effectively saturated. Only L6/DLA1 remains (structural mega-K, V5 + V8 both DEAD).
+**Bench**: `bench_all42_results_R25_FINAL_v2.{json,log}` + R29 single-shape verifies
+**Result**: **41/42 WIN, 1/42 LOSE, 0 ERR, projected win rate 97.6%** — unchanged since R29.
+**Status**: **STRUCTURALLY SATURATED.** R30 produced 0 new wins via two parallel attacks:
+- Opt A (cross-shape transplant scout, 5 candidates on DLA2 + 32768×14336×2048): all 5 faulted with HSA aperture violation. `BARRIER_TO_WAITCNT_*` flagged correctness-risky on these shapes (`bench_all_42.py:462-467`). Parallel bench harness silently drops crashes (`bench_all42_parallel_R25_FINAL.py:263-267` returns None on rc≠0) — hidden bug-feature that explains why "missing" per_variant entries stay missing.
+- Opt B (K_EXACT parent-stack audit, R29 L4-style): AUDIT-CLEAN — every K_EXACT entry dominates by 3-22% over alternates; only L7 had alternate parents to test, both lost vs incumbent.
+
+Only L6/DLA1 remains (4096×32768×128256, 92.6%). All sub-2hr levers exhausted. Path forward = V5 MFMA32×32×64 rewrite (≥1 week), V6 split-K (≥3 days), or V7 stream-K (≥2 weeks). See `R30_DECIDER_VERDICT.md`, `R30_OPT_A_VERDICT.md`, `R30_OPT_B_VERDICT.md`.
 
 ### 1 residual LOSE shape (post-R29)
 | #  | Shape (M×N×K)         | Ours    | Comp    | Ratio  | Best Tag                              | Class                                |
@@ -65,6 +69,11 @@ The original "don't chase WIN, only gap-reduce" pivot from 2026-04-17 is **fully
 - **WAVES_PER_EU=3** — `__launch_bounds__(_NUM_THREADS, 1)` already clamps to 1 wave/SIMD on K-bound shapes; wpeu axis is theoretically inert
 - **Cache hints / NT stores / persistent-XCD / EARLY_SCALE_PF / EARLY_BL_PF / DIRECT_BL** — all confirmed DEAD pre-R26
 - **outer-K pull-forward / extra L2 pf** — R24B/C: VMEM-issue-bound, not VMEM-latency-bound
+
+### R30 axes confirmed DEAD (DO NOT REVISIT)
+- **Cross-shape transplant scout** (`R30_OPT_A_VERDICT.md`) — 5 missing per_variant entries on DLA2 + 32768×14336×2048 all faulted with HSA aperture violation rc=-6. Root cause: `BARRIER_TO_WAITCNT_*` macros are correctness-risky on shapes where parent SNR is marginal. The "missing" entries in v2 per_variant tables are MISSING BECAUSE THEY CRASH. Parallel bench harness silently drops crashes (`bench_all42_parallel_R25_FINAL.py:263-267`).
+- **K_EXACT parent-stack audit (R29 L4-style sweep)** (`R30_OPT_B_VERDICT.md`) — AUDIT-CLEAN. K∈{6144,7168,8192,16384,28672,32768}: K_EXACT dominates by 3-22%. K=2048: K_EXACT wins on 2/9; gaps 0.17-0.55% (sub-1%). K=14336: L4/L8 already individually fixed; L7's `_dc_gm7` is genuinely the right parent (u16/tv0 transplants -4.17% / -0.93%).
+- **R30 V8 R25E peel revival** — N/A; R29 already declared DEAD via state-hazard. Decider mistakenly recommended V8 not knowing R29 had tried it.
 
 ### R29+ vector candidates (post-v2 — only L6/DLA1 has real headroom)
 - **V5 — MFMA_32X32X64 tiling rewrite** — only remaining structural lever for L6/DLA1. ≥1 week of work; 0-5pp on K-bound deep-LOSE; high uncertainty. Per R27 V5 scout (`f0780765`): BACKBURNER unless dedicated 1-week sprint.

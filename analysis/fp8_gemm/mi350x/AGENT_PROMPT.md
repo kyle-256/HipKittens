@@ -2,10 +2,11 @@
 
 你在继续推进 `HipKittens` 的 MXFP4 GEMM 优化工作，跟 Cursor (Hipkittens2) 竞赛。
 
-## ⚠️ 当前优化目标 (2026-04-18, post-R29)
-> 24/42 ceiling 早已被打破: 现在 **41/42 WIN (97.6%)** = effectively saturated.
-> 唯一剩余目标: **L6 / DLA1 (4096×32768×128256, 92.6%)** — V5 MFMA_32X32X64 重写 (BACKBURNER, 1周). V8 R25E peel 也 DEAD (state-hazard).
-> L4 已 R29 修复 (LOSE→WIN +17.45% via parent-stack 修正).
+## ⚠️ 当前优化目标 (2026-04-18, post-R30)
+> 41/42 WIN (97.6%) = **structurally saturated**. R30 双 optimizer 攻击全 DEAD:
+> - Opt A 跨 shape transplant 5/5 HSA aperture viol (BARRIER_TO_WAITCNT_* 在 DLA2/32768×14336×2048 不安全)
+> - Opt B K_EXACT parent-stack audit AUDIT-CLEAN (table 已最优)
+> 唯一剩余目标: **L6 / DLA1 (4096×32768×128256, 92.6%)** — 仅剩 V5 MFMA32 (≥1周) / V6 split-K (≥3天) / V7 stream-K (≥2周) 多日重写. V8 R25E peel 也 DEAD (R29).
 
 **历史指令** (2026-04-17, 已过时):
 > "24win 已经卡了好久了，现在把优化目标改成优化剩下那几个差的比较多的。"
@@ -67,10 +68,12 @@ R25-G 之前各类已知 dead (history): `iterative-ilp` 编译器 bug, BK=256 L
 |------|------|------|------|
 | **V5 — MFMA_32X32X64_TILING 重构** (R29+) | 高 | 0-5pp on L6/DLA1 | **唯一剩余结构性 axis**. ≥1 周 asm 重写. 32×32 MFMAs 允许 4× concurrent in-flight @ same acc footprint, 可能松开 R24B/C 确认的 VMEM-issue saturation. 高不确定性. 见 `R27_V5_MFMA32_SCOUT.md` |
 
-DEAD post-R29 (不要再尝试 — 已 reproduce 过):
+DEAD post-R30 (不要再尝试 — 已 reproduce 过):
 - ~~R26-A V1 DLA1 K-loop peel (R25-E pf495)~~ — 5-rep verify std=1729 TFLOPS, mean swing 1672→5546, 不稳定 false alarm
-- ~~R27-C DLA1 K_EXACT bypass~~ — HSA aperture violation rc=-6 全 5/5 reps; kernel HARD-GATE K≤32768 (`kernel_mxfp4_gluon_cpp.cpp:85-91`)
+- ~~R27-C DLA1 K_EXACT bypass~~ — HSA aperture violation rc=-6 全 5/5 reps; kernel HARD-GATE K≤32768 (`kernel_mxfp4_gluon_cpp.cpp:85-91`). 注意: 这是 R25C 优化 gate, 不是 kernel K capability gate; 拉宽 macro 一行 <30 min 但 underlying R25C optimization 在 K_iters=501 不能 fold under unroll 8.
 - ~~V8 R25E static-loop-split peel on L6/DLA1~~ — `R29_L6_V8_VERDICT.md`. PEEL=2/4 runtime HSA memory access fault; PEEL=8 catastrophic -71% regression (1529 TFLOPS). State-hazard between unroll-8 main loop & peel TAIL via pf_a0/a1/bl/br scale registers. Kernel 已 revert.
+- ~~Cross-shape variant transplant (R30 Opt A)~~ — `R30_OPT_A_VERDICT.md`. 5/5 候选 (`ts_lgk2_memc_btw_all`, `ts_lgk2_v12_memc_btw_all`, `v20_memc_btw_step3` × DLA2/32768×14336×2048) 全 HSA aperture viol rc=-6. Root cause: `BARRIER_TO_WAITCNT_*` correctness-risky on shapes where parent SNR is marginal (`bench_all_42.py:462-467`). v2 per_variant "missing" entries 之所以 missing 是因为 crash, 不是因为 untested.
+- ~~K_EXACT parent-stack audit (R30 Opt B, R29 L4-style sweep)~~ — `R30_OPT_B_VERDICT.md`. AUDIT-CLEAN. K∈{6144,7168,8192,16384,28672,32768}: K_EXACT dominates 3-22% over 所有 alternates. K=2048 K_EXACT 只 win 2/9 shapes 但 gap <1%. K=14336: L7 是唯一可测候选, u16/tv0 transplants -4.17%/-0.93%, `_dc_gm7` 真的是 L7 最优 parent.
 
 DEAD (不要再尝试 — 已 reproduce 过):
 - ~~per-shape compiler flag (LLVM sched-strategy per-K-bucket)~~ — `iterative-ilp` LLVM bug (aperture violation), 其它 strategy ±0.4% noise
