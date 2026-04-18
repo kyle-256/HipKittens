@@ -1,0 +1,109 @@
+R25-G SMOKE: 6 shapes × ~6 variants × 1 reps
+warmup=200 iters=500 trim=0.1
+GPU layout: [('SA', 3), ('SB', 3), ('SC', 4), ('SD', 4), ('SE', 7), ('SF', 7)]
+==============================================================================================================
+  GPU groups: [(3, ['SA', 'SB']), (4, ['SC', 'SD']), (7, ['SE', 'SF'])]
+
+[SA] starting on GPU 3 (M=4096,N=28672,K=32768)
+
+[SC] starting on GPU 4 (M=14336,N=4096,K=32768)
+
+[SE] starting on GPU 7 (M=28672,N=4096,K=16384)
+  SE PARENT_REF rep0 gpu7                                   5143.88 TFLOPS (ms=0.7481)
+  SA PARENT_REF rep0 gpu3                                   5416.23 TFLOPS (ms=1.421)
+  SE gm7_pfoff0_DIAG rep0 gpu7                              5161.21 TFLOPS (ms=0.7456)
+  SA gm7_pfoff0_DIAG rep0 gpu3                              5199.09 TFLOPS (ms=1.4804)
+  SC PARENT_REF rep0 gpu4                                  ERR rc=-6
+  SE gm7_pfoff56 rep0 gpu7                                  6060.64 TFLOPS (ms=0.635)
+  SA gm7_pfoff120 rep0 gpu3                                 6484.72 TFLOPS (ms=1.1869)
+  SC gm7_pfoff0_DIAG rep0 gpu4                              4955.25 TFLOPS (ms=0.7766)
+  SE gm7_pfoff60 rep0 gpu7                                  5856.10 TFLOPS (ms=0.6571)
+  SC gm7_pfoff120 rep0 gpu4                                 5953.35 TFLOPS (ms=0.6464)
+  SC gm7_pfoff124 rep0 gpu4                                 5833.51 TFLOPS (ms=0.6597)
+  SA gm7_pfoff124 rep0 gpu3                                 6387.19 TFLOPS (ms=1.205)
+  SC gm7_pfoff126 rep0 gpu4                                 5797.32 TFLOPS (ms=0.6638)
+  SE gm7_pfoff62 rep0 gpu7                                  6024.41 TFLOPS (ms=0.6388)
+  SA gm7_pfoff126 rep0 gpu3                                 6423.10 TFLOPS (ms=1.1983)
+  SC gm7_pfoff127 rep0 gpu4                                 3488.05 TFLOPS (ms=1.1033)
+
+[SD] starting on GPU 4 (M=16384,N=4096,K=28672)
+  SE gm7_pfoff63 rep0 gpu7                                  4566.22 TFLOPS (ms=0.8428)
+
+[SF] starting on GPU 7 (M=4096,N=14336,K=16384)
+  SD PARENT_REF rep0 gpu4                                   3631.15 TFLOPS (ms=1.0598)
+  SA gm7_pfoff127 rep0 gpu3                                 6308.33 TFLOPS (ms=1.2201)
+
+[SB] starting on GPU 3 (M=4096,N=32768,K=14336)
+  SF PARENT_REF rep0 gpu7                                   4945.44 TFLOPS (ms=0.3891)
+  SB PARENT_REF rep0 gpu3                                   5172.79 TFLOPS (ms=0.7439)
+  SD gm7_pfoff0_DIAG rep0 gpu4                              5009.68 TFLOPS (ms=0.7682)
+  SF gm7_pfoff0_DIAG rep0 gpu7                              4944.79 TFLOPS (ms=0.3891)
+  SD gm7_pfoff104 rep0 gpu4                                 6287.68 TFLOPS (ms=0.612)
+  SB gm7_pfoff0_DIAG rep0 gpu3                              5010.33 TFLOPS (ms=0.7681)
+  SF gm7_pfoff56 rep0 gpu7                                  5628.72 TFLOPS (ms=0.3418)
+  SB gm7_pfoff48 rep0 gpu3                                  6074.56 TFLOPS (ms=0.6335)
+  SD gm7_pfoff108 rep0 gpu4                                 4844.25 TFLOPS (ms=0.7944)
+  SF gm7_pfoff60 rep0 gpu7                                  5285.71 TFLOPS (ms=0.364)
+  SB gm7_pfoff52 rep0 gpu3                                  5869.85 TFLOPS (ms=0.6556)
+  SD gm7_pfoff110 rep0 gpu4                                 6211.01 TFLOPS (ms=0.6196)
+  SF gm7_pfoff62 rep0 gpu7                                  4000.12 TFLOPS (ms=0.481)
+  SB gm7_pfoff54 rep0 gpu3                                  6068.63 TFLOPS (ms=0.6341)
+  SF gm7_pfoff63 rep0 gpu7                                  3017.42 TFLOPS (ms=0.6377)
+  SB gm7_pfoff55 rep0 gpu3                                  5478.38 TFLOPS (ms=0.7025)
+  SD gm7_pfoff111 rep0 gpu4                                ERR rc=-6
+
+Elapsed: 151.5s
+
+==============================================================================================================
+[SA] 4096x28672x32768 parent=ts_v12_tv0_memc_btw_all
+==============================================================================================================
+  PARENT_REF: 5416.23 TFLOPS
+  gm7_pfoff0 (gm7 only, no R25C): 5199.09 TFLOPS  (-4.01%)
+  gm7_pfoff120: 6484.7 TFLOPS  (+19.73%) *
+  gm7_pfoff126: 6423.1 TFLOPS  (+18.59%) *
+  gm7_pfoff124: 6387.2 TFLOPS  (+17.93%) *
+  gm7_pfoff127: 6308.3 TFLOPS  (+16.47%) *
+
+==============================================================================================================
+[SB] 4096x32768x14336 parent=ts_v12_tv0_memc_btw_all
+==============================================================================================================
+  PARENT_REF: 5172.79 TFLOPS
+  gm7_pfoff0 (gm7 only, no R25C): 5010.33 TFLOPS  (-3.14%)
+  gm7_pfoff48: 6074.6 TFLOPS  (+17.43%) *
+  gm7_pfoff54: 6068.6 TFLOPS  (+17.32%) *
+  gm7_pfoff52: 5869.9 TFLOPS  (+13.48%) *
+  gm7_pfoff55: 5478.4 TFLOPS  (+5.91%) *
+
+==============================================================================================================
+[SC] 14336x4096x32768 parent=ts_lgk2_memc_btw_all
+==============================================================================================================
+  PARENT_REF: None TFLOPS
+
+==============================================================================================================
+[SD] 16384x4096x28672 parent=ts_lgk2_memc_btw_all
+==============================================================================================================
+  PARENT_REF: 3631.15 TFLOPS
+  gm7_pfoff0 (gm7 only, no R25C): 5009.68 TFLOPS  (+37.96%)
+  gm7_pfoff104: 6287.7 TFLOPS  (+73.16%) *
+  gm7_pfoff110: 6211.0 TFLOPS  (+71.05%) *
+  gm7_pfoff108: 4844.2 TFLOPS  (+33.41%) *
+
+==============================================================================================================
+[SE] 28672x4096x16384 parent=ts_lgk2_memc_btw_all
+==============================================================================================================
+  PARENT_REF: 5143.88 TFLOPS
+  gm7_pfoff0 (gm7 only, no R25C): 5161.21 TFLOPS  (+0.34%)
+  gm7_pfoff56: 6060.6 TFLOPS  (+17.82%) *
+  gm7_pfoff62: 6024.4 TFLOPS  (+17.12%) *
+  gm7_pfoff60: 5856.1 TFLOPS  (+13.85%) *
+  gm7_pfoff63: 4566.2 TFLOPS  (-11.23%)
+
+==============================================================================================================
+[SF] 4096x14336x16384 parent=ts_lgk2_memc_btw_all
+==============================================================================================================
+  PARENT_REF: 4945.44 TFLOPS
+  gm7_pfoff0 (gm7 only, no R25C): 4944.79 TFLOPS  (-0.01%)
+  gm7_pfoff56: 5628.7 TFLOPS  (+13.82%) *
+  gm7_pfoff60: 5285.7 TFLOPS  (+6.88%) *
+  gm7_pfoff62: 4000.1 TFLOPS  (-19.11%)
+  gm7_pfoff63: 3017.4 TFLOPS  (-38.99%)

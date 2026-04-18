@@ -95,7 +95,16 @@ using namespace kittens;
 #ifndef R25C_K_LIMIT
 #define R25C_K_LIMIT 32768
 #endif
-#define R25C_ACTIVE ((R25C_TAIL_PF_OFF_ITERS > 0) && (K_DIM <= R25C_K_LIMIT))
+// R25-G: optional EXACT-K gate. When R25C_K_EXACT > 0, R25C only fires for the
+// exact specified K_DIM. Used to ship per-K-iter-count tuned pfoff values
+// (e.g. K=14336→pfoff54, K=32768→pfoff124) without their flag set bleeding
+// into other shapes (where the wrong pfoff would zero out all prefetches).
+// Default 0 → behavior unchanged (only the K_LIMIT gate applies).
+#ifndef R25C_K_EXACT
+#define R25C_K_EXACT 0
+#endif
+#define R25C_ACTIVE ((R25C_TAIL_PF_OFF_ITERS > 0) && (K_DIM <= R25C_K_LIMIT) \
+                     && (R25C_K_EXACT == 0 || K_DIM == R25C_K_EXACT))
 
 #ifndef DIRECT_BL
 #define DIRECT_BL 0

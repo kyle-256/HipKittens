@@ -510,6 +510,40 @@ def main():
          "-DTAIL_SPLIT=1 -DSTEP12_BR_LGKMCNT=2 -DGROUP_SIZE_M=7 -DSTEP3_BARRIER_VMCNT=12 "
          "-DR25C_TAIL_PF_OFF_ITERS=14 -DR25C_K_LIMIT=32768 "
          "-mllvm -amdgpu-sched-strategy=max-memory-clause"),  # R25F WIN: DLA7 +13.51% vs R25D
+        # R25-G PER-K WINS: extend R25-F gm7+(K_iters-N) prefetch-only-first-few mechanism
+        # to mid-gap LARGER-K shapes that R25-F's pfoff≤16 sweep could not reach.
+        # Each entry is gated by R25C_K_EXACT so the wrong-K pfoff never bleeds into
+        # other shapes (where R25C_TAIL_PF_OFF_ITERS > k_byte_iters would zero out
+        # ALL prefetches and regress).
+        # Parent stack: tv0 family (SA, SB) — best fits ts_v12_tv0_memc_btw_all parent.
+        ("_ts_v12_tv0_memc_dc_gm7_pfoff120_kx32768_btw_all",
+         "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=7 -DSTEP3_BARRIER_VMCNT=12 -DTAIL_BARRIER_VMCNT=0 "
+         "-DR25C_TAIL_PF_OFF_ITERS=120 -DR25C_K_LIMIT=32768 -DR25C_K_EXACT=32768 "
+         "-mllvm -amdgpu-sched-strategy=max-memory-clause "
+         "-mllvm -amdgpu-disable-clustered-low-occupancy-reschedule "
+         "-DBARRIER_TO_WAITCNT_ALL=1"),  # R25G WIN: SA 4096x28672x32768 +19.60% vs parent
+        ("_ts_v12_tv0_memc_dc_gm7_pfoff54_kx14336_btw_all",
+         "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=7 -DSTEP3_BARRIER_VMCNT=12 -DTAIL_BARRIER_VMCNT=0 "
+         "-DR25C_TAIL_PF_OFF_ITERS=54 -DR25C_K_LIMIT=32768 -DR25C_K_EXACT=14336 "
+         "-mllvm -amdgpu-sched-strategy=max-memory-clause "
+         "-mllvm -amdgpu-disable-clustered-low-occupancy-reschedule "
+         "-DBARRIER_TO_WAITCNT_ALL=1"),  # R25G WIN: SB 4096x32768x14336 +17.55% vs parent
+        # Parent stack: lgk2 family (SC, SD, SE, SF) — best fits ts_lgk2_memc_btw_all.
+        ("_ts_lgk2_gm7_memc_pfoff124_kx32768_btw_all",
+         "-DTAIL_SPLIT=1 -DSTEP12_BR_LGKMCNT=2 -DGROUP_SIZE_M=7 "
+         "-DR25C_TAIL_PF_OFF_ITERS=124 -DR25C_K_LIMIT=32768 -DR25C_K_EXACT=32768 "
+         "-mllvm -amdgpu-sched-strategy=max-memory-clause "
+         "-DBARRIER_TO_WAITCNT_ALL=1"),  # R25G WIN: SC 14336x4096x32768 +17.55% vs parent
+        ("_ts_lgk2_gm7_memc_pfoff104_kx28672_btw_all",
+         "-DTAIL_SPLIT=1 -DSTEP12_BR_LGKMCNT=2 -DGROUP_SIZE_M=7 "
+         "-DR25C_TAIL_PF_OFF_ITERS=104 -DR25C_K_LIMIT=32768 -DR25C_K_EXACT=28672 "
+         "-mllvm -amdgpu-sched-strategy=max-memory-clause "
+         "-DBARRIER_TO_WAITCNT_ALL=1"),  # R25G WIN: SD 16384x4096x28672 +20.84% vs parent
+        ("_ts_lgk2_gm7_memc_pfoff56_kx16384_btw_all",
+         "-DTAIL_SPLIT=1 -DSTEP12_BR_LGKMCNT=2 -DGROUP_SIZE_M=7 "
+         "-DR25C_TAIL_PF_OFF_ITERS=56 -DR25C_K_LIMIT=32768 -DR25C_K_EXACT=16384 "
+         "-mllvm -amdgpu-sched-strategy=max-memory-clause "
+         "-DBARRIER_TO_WAITCNT_ALL=1"),  # R25G WIN: SE 28672x4096x16384 +16.89%, SF 4096x14336x16384 +13.68%
     ]
     for n_val, k_val in nk_pairs:
         for suffix, cppflags in variants:

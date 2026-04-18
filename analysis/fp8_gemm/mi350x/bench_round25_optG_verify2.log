@@ -1,0 +1,28 @@
+R25-G VERIFY2: SC, SD only, isolated GPUs, serial
+================================================================================
+
+[SC] 14336x4096x32768 GPU 3
+  SC PARENT_REF rep0   5026.99 TFLOPS
+  SC PARENT_REF rep1   5036.59 TFLOPS
+  SC PARENT_REF rep2   5020.90 TFLOPS
+  SC gm7_pfoff124 rep0   5896.73 TFLOPS
+  SC gm7_pfoff124 rep1   5920.57 TFLOPS
+  SC gm7_pfoff124 rep2   5914.98 TFLOPS
+
+[SD] 16384x4096x28672 GPU 6
+  SD PARENT_REF rep0   1921.58 TFLOPS
+  SD PARENT_REF rep1   5185.70 TFLOPS
+  SD PARENT_REF rep2   2620.16 TFLOPS
+  SD gm7_pfoff110 rep0   6221.19 TFLOPS
+  SD gm7_pfoff110 rep1   2175.92 TFLOPS
+  SD gm7_pfoff110 rep2   6258.95 TFLOPS
+
+Elapsed: 127.6s
+
+================================================================================
+Shape Variant                      Mean      Std         Δ%
+================================================================================
+SC    PARENT_REF                5028.16     6.46          —
+SC    gm7_pfoff124              5910.76    10.18     17.55%  [OK]
+SD    PARENT_REF                3242.48  1403.35          —
+SD    gm7_pfoff110              4885.35  1915.92     50.67%  [FAIL_STD]

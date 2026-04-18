@@ -1,0 +1,15 @@
+R25-G VERIFY3 SD: 16384x4096x28672 on GPU 1, 5 reps each
+  PARENT_REF rep0   5281.82 TFLOPS
+  PARENT_REF rep1   5275.39 TFLOPS
+  PARENT_REF rep2   5265.09 TFLOPS
+  PARENT_REF rep3   5264.06 TFLOPS
+  PARENT_REF rep4   5267.54 TFLOPS
+  gm7_pfoff104 rep0   6369.39 TFLOPS
+  gm7_pfoff104 rep1   6371.77 TFLOPS
+  gm7_pfoff104 rep2   6383.18 TFLOPS
+  gm7_pfoff104 rep3   6378.77 TFLOPS
+  gm7_pfoff104 rep4   6343.20 TFLOPS
+
+Summary:
+  PARENT_REF           mean=5270.78 std=  6.80  runs=[5281.82, 5275.39, 5265.09, 5264.06, 5267.54]
+  gm7_pfoff104         mean=6369.26 std= 13.93  runs=[6369.39, 6371.77, 6383.18, 6378.77, 6343.2]
