@@ -8,8 +8,17 @@
 #endif
 // R27 Dev A H1: cachepolicy bits for V2 scale buffer loads (b128/b64).
 // Default 0 = previous behavior. 1=GLC, 2=SLC, 3=GLC|SLC.
+// R28 Dev A: auto-default to 2 (SLC) when the compile-time shape gate
+// matches the WIN region observed in R27 (large-N, large-K CRR shapes
+// such as LLaMA 70B Gate 4096x28672x8192). User-provided -D wins.
+// Gate: N_DIM >= 28672 AND K_DIM >= 8192. Outside this region cp=0
+// preserves baseline (KV K=8192 N=1024, 8B Gate K=4096, 8192^3, etc.).
 #ifndef MXFP8_CRR_V2_SCALE_CACHEPOLICY
-#define MXFP8_CRR_V2_SCALE_CACHEPOLICY 0
+#  if defined(N_DIM) && defined(K_DIM) && ((N_DIM) >= 28672) && ((K_DIM) >= 8192)
+#    define MXFP8_CRR_V2_SCALE_CACHEPOLICY 2
+#  else
+#    define MXFP8_CRR_V2_SCALE_CACHEPOLICY 0
+#  endif
 #endif
 
 #ifndef CRR_USE_EXACT_8WAVE_FASTPATH
