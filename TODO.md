@@ -7,6 +7,63 @@
 - SNR ≥ 48 dB (FP8) / ≥ 47 dB (BF16 vs torch.mm), bit-exact determinism are hard gates.
 - Never commit `*.so`, `.autotune_cache.json` is OK to keep (it's text), logs are not.
 
+## Current Status (2026-04-18, post-P18 close — Lever A m0 hoist works on 4-wave but autotuner routes to 8-wave; P19 = port hoist to 8-wave)
+
+P18 dispatched 2 Devs in parallel against the P17 dispatch.
+**Both returned NO-LAND with definitive findings.** No code committed;
+critical reframing of the P17 production-path assumption.
+
+- **Dev A (Lever A1+A2+A3 m0-broadcast hoist on `rcr_4wave_dynamic.inc`,
+  GPU 3, opus, worktree `agent-a4ccdb26`)** — implemented all three
+  knobs behind macro gates, default-OFF byte-identical to baseline.
+  **Technical win**: forced-4-wave geo-mean 0.8737 → 0.9021 (+2.84pp,
+  ~13% non-MFMA inst reduction, `v_readfirstlane` 50→38). Inline-asm
+  `buffer_load_dwordx4 offen lds` was the only reliable way to keep
+  m0 in scalars (intrinsic let LLVM CSE-fold readfirstlane back to
+  vector). **Production verdict**: NO-LAND. The autotuner already
+  routes all 4 gate_up shapes to 8-wave (8-wave forced 0.9122 > 4-wave
+  forced 0.8737). End-to-end production gain = +0.06pp (within trial
+  noise). **The P17 Dev A premise — that 4-wave is the production
+  path — was wrong**: static dispatch in `kernel_fp8_layouts.cpp:2334-
+  2356` selects 4-wave by `grid_size>=3200 AND k<=8192`, but the
+  runtime autotuner overrides and picks 8-wave. Diff backed up at
+  `/tmp/p18_dev_a_4wave_hoist.diff`, NOT in tree.
+
+- **Dev B (A3 sched_barrier strip safety net, GPU 5, opus, worktree
+  `agent-a83cd07c`)** — stripped the 6 DTL-bracketing `sched_barrier(0)`
+  calls in `do_cluster` (lines 169/175/182/188/195/201) behind macro
+  gate. **Asm-verify killed the hypothesis**: `s_nop` count identical
+  (345 each, same N-distribution). The LLVM scheduler emits the same
+  total filler-cycle budget regardless of barriers; it just rearranges
+  MFMA/DTL ordering. **The 32 `s_nop` filler insts/iter are NOT from
+  `sched_barrier(0)` brackets** — they come from another scheduler
+  pass (likely m0-write hazard / MFMA pipeline gap / DTL latency
+  budgeting). Bench Δ within ±0.64pp on 4 gate_up shapes (within
+  per-config noise floor 0.17pp).
+
+**Tree cleanup**: P17 Dev B's 136-line orphan persistent-grid Stream-K
+diff was contaminating the main repo working tree (Dev B reported
+NO-LAND but left the changes uncommitted). Backed up to
+`/tmp/p17_dev_b_streamk_orphan.diff` and discarded via `git checkout`.
+P18 Dev A also leaked Lever A edits into the main repo (worktree-
+isolation violation); backed up + discarded.
+
+**P19 dispatch — m0 hoist on 8-wave RCR (the production path):**
+
+The same DTL m0-broadcast pattern almost certainly exists in
+`gemm_kernel<RCR,KI>` in `analysis/fp8_gemm/mi350x/kernel_fp8_layouts.cpp`.
+Per P15 Dev A's per-iter slice, 8-wave RCR also issues 16
+`buffer_load_dwordx4 ... offen lds` per iter — same DTL pattern. If
+8-wave gets the same +2-3pp lift that 4-wave got, gate_up shapes
+ratio rises 0.9122 → ~0.94 (real production gain). The inline-asm
+recipe from P18 Dev A is portable to 8-wave. This is the **only
+remaining lever** for these shapes (operand-reuse, waitcnt micro-tuning,
+Stream-K all closed).
+
+Risks for 8-wave: VGPR usage 238 (headroom for SGPR additions like
+4-wave); 8-wave already uses sched_barrier brackets — only A1+A2 expected
+to matter. Build flag must use `HIPFLAGS=-D` per P16 Makefile lesson.
+
 ## Current Status (2026-04-18, post-P17 close — 4-wave RCR bottleneck = m0-broadcast, Stream-K conclusively dead for RCR 8-wave)
 
 P17 dispatched 2 research-only Devs to bound the post-P16 reframed
@@ -516,16 +573,27 @@ for archival; do NOT redispatch unless the constraint changes:
       model in budget). Combined with `bc4392bf` precedent, Stream-K
       now closed for RCR 8-wave. The 2 mlp_down shapes have no
       remaining lever — accept current state.
-- [P18] **Lever A m0-broadcast hoist on `rcr_4wave_dynamic.inc`** —
-      hoist DTL m0 sequences out of inner loop in `g2s_pass`
-      (lines 78-85) and `prefill_s2r_offsets`/swizzle XOR (lines
-      96-99). Three sub-knobs: A1 (precomputed scalar m0 ramp), A2
-      (s_or_b32 / s_add_u32 instead of v_or + v_readfirstlane), A3
-      (drop sched_barrier(0) brackets around DTL micro-ops). Target
-      6-9pp geo-mean gain on 4 gate_up shapes (current 0.908 →
-      expected 0.95-0.98). Risk MEDIUM — LLVM scheduler historically
-      liked sched_barrier brackets. Build flag must use `HIPFLAGS=-D`.
-      Optional Dev B: A3-only strip as parallel safety net.
+- [P18-NO-LAND] ~~Lever A m0-broadcast hoist on `rcr_4wave_dynamic.inc`~~ —
+      P18 Dev A landed all 3 sub-knobs (A1+A2+A3, inline-asm form);
+      forced-4-wave geo-mean +2.84pp (0.8737 → 0.9021). But autotuner
+      routes all 4 gate_up shapes to 8-wave; production gain +0.06pp
+      (noise). Diff backed up `/tmp/p18_dev_a_4wave_hoist.diff`. Do
+      NOT redispatch on 4-wave.
+- [P18-NO-LAND] ~~A3-only sched_barrier(0) strip~~ — P18 Dev B
+      asm-refuted: `s_nop` count invariant (345 each) under bracket
+      removal. LLVM scheduler emits same filler budget regardless.
+      Hypothesis dead.
+- [P19] **m0 hoist on 8-wave RCR `gemm_kernel<RCR,KI>`** — port the
+      P18 Dev A inline-asm recipe (A1+A2 only; A3 is dead) to the
+      production-path 8-wave kernel in `kernel_fp8_layouts.cpp`. The
+      DTL pattern is identical (16× `buffer_load_dwordx4 ... offen lds`
+      per iter, per P15 Dev A). Target +2-3pp on 4 gate_up shapes
+      (autotuner-default 0.9122 → ~0.94). The ONLY remaining lever
+      after P15-P18 closed operand-reuse, waitcnt, Stream-K, and
+      4-wave m0. Risk MEDIUM — 8-wave VGPR=238 has headroom; m0
+      hoist adds SGPRs not VGPRs (per P18 Dev A). Build flag
+      `HIPFLAGS=-D`. Asm-verify v_readfirstlane drop in 8-wave kernel
+      disasm BEFORE benching.
 - [P13-CLOSED] ~~Direct-To-LDS (DTLA1+DTLB1) implementation for RCR (TN).~~
       P13 Dev C disassembly grep proved TK ALREADY uses gfx950 wide-DTL
       for 100% of hot-path loads. P14 Decider re-verified after Dev F
@@ -581,6 +649,46 @@ for archival; do NOT redispatch unless the constraint changes:
 
 ## Closed / Completed
 
+- 2026-04-18 P18 — Sixth agent-team session (2 implementation Devs, both
+  opus, GPUs 3/5). Both NO-LAND with definitive findings; no code
+  committed; critical reframing of the production-path assumption.
+  - **Dev A (Lever A1+A2+A3 m0 hoist on `rcr_4wave_dynamic.inc`,
+    GPU 3, worktree `agent-a4ccdb26`)** — technical win (forced-4-wave
+    +2.84pp via inline-asm `buffer_load_dwordx4 offen lds` + scalar
+    m0 ramp). Production NO-LAND: autotuner already routes all 4
+    gate_up shapes to 8-wave (8-wave 0.9122 > 4-wave + Lever A 0.9021).
+    End-to-end gain +0.06pp (noise).
+  - **Dev B (A3 sched_barrier(0) strip, GPU 5, worktree
+    `agent-a83cd07c`)** — asm-refuted: `s_nop` count identical
+    (345 each, same N-distribution) under bracket removal. LLVM
+    emits same filler budget; 32 `s_nop`/iter NOT from sched_barriers.
+  - **Tree cleanup**: P17 Dev B's 136-line orphan persistent-grid
+    Stream-K diff was contaminating main repo; backed up + discarded.
+    P18 Dev A also leaked 4-wave hoist edits into main repo
+    (worktree-isolation violation); same treatment.
+  - **Lessons additive to P17:**
+    - **Autotuner trumps static dispatch.** Before claiming a
+      bottleneck is "the production path", verify the autotuner
+      hasn't already routed around it. Run forced-4-wave AND
+      forced-8-wave AND autotuner-default benches; production
+      bottleneck = whichever the autotuner picks.
+    - **Knob-infrastructure-only diffs are not landable** (P12/P13/
+      P18 lesson). Default-OFF macros with no production path that
+      activates them have zero shipping value. Discard cleanly.
+    - **Worktree-isolation violations contaminate main repo.**
+      EnterWorktree creates an isolated working tree, but Devs can
+      and do edit the main repo by mistake. Decider must `git status`
+      after each Dev and either commit explicitly or discard. Backed-
+      up patches at `/tmp/p<N>_dev_<X>_*.diff` for recovery.
+    - **Inline-asm is required for m0 control on gfx950.** The
+      public `__builtin_amdgcn_raw_buffer_load_lds` intrinsic lets
+      LLVM CSE-fold the readfirstlane back to vector. Use inline asm
+      (`asm volatile("buffer_load_dwordx4 %0, %1, %2, 0 offen lds")`)
+      for any kernel that needs to control the m0 register.
+    - **NEGATIVE asm-verify is signal.** Dev B's `s_nop` count =
+      345 in both builds is a CLEAN RESULT — it conclusively kills
+      the sched_barrier hypothesis without touching wall-clock.
+      Always asm-verify before declaring a knob "wins" via timing.
 - 2026-04-18 P17 — Fifth agent-team session (2 research Devs, both opus,
   GPUs 2/4). Both returned definitive verdicts; no code committed.
   - **Dev A (4-wave RCR rocprofv3 + disasm, GPU 2)** — definitive

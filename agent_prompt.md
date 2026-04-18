@@ -183,6 +183,118 @@ BF16 work is paused unless a clean structural restructure is on the table
 
 ## Session Log
 
+### 2026-04-18 — P18 (2 implementation Devs, all opus; GPUs 3/5; CLOSE — both NO-LAND)
+
+**Outcome: Both Devs returned NO-LAND with definitive findings.
+Critical reframing — P17 Dev A's premise "4-wave is the production
+path for gate_up shapes" was wrong. The autotuner already routes
+those shapes to 8-wave. P19 dispatch: port the m0 hoist to 8-wave
+RCR (the ONLY remaining lever after P15-P18 closed everything else).**
+
+- **Dev A (Lever A1+A2+A3 m0 hoist on `rcr_4wave_dynamic.inc`,
+  GPU 3, opus, worktree `agent-a4ccdb26`)** — implemented all three
+  knobs behind macro gates, default-OFF byte-identical to baseline.
+  Built `baseline.so`/`a1.so`/`a2.so`/`a1_a3.so`/`all.so` plus 7
+  per-config bench JSONs in `/tmp/p18_dev_a/`.
+
+  **Forced-4-wave bench (technical win, all numbers from Dev A):**
+  | Build              | Geo-mean TK/BL on 4 gate_up |
+  |--------------------|---------------------------:|
+  | baseline           |                     0.8737 |
+  | A2 alone           |                     0.9014 |
+  | A1 alone           |                     0.8983 |
+  | A1+A3              |                     0.9012 |
+  | A1+A2+A3 (all)     |                     0.9021 |
+
+  ~13% non-MFMA inst reduction (793 → 691 per main-loop slice),
+  `v_readfirstlane` 50→38, `s_nop` 301→278. VGPRs/SGPRs/spills/occupancy
+  unchanged. **Inline-asm form of `buffer_load_dwordx4 offen lds` was
+  the only reliable way to keep m0 in scalars** — the public
+  `__builtin_amdgcn_raw_buffer_load_lds` intrinsic let LLVM CSE-fold
+  the readfirstlane back to vector.
+
+  **Production NO-LAND**: autotuner (`AutotunedGEMM._get_entry`) routes
+  all 4 gate_up shapes to 8-wave because 8-wave wins (8-wave forced
+  0.9122 > 4-wave + Lever A 0.9021). End-to-end production gain
+  +0.06pp = noise.
+
+- **Dev B (A3-only sched_barrier(0) strip safety net, GPU 5, opus,
+  worktree `agent-a83cd07c`)** — stripped 6 DTL-bracketing
+  `sched_barrier(0)` calls in `do_cluster` (lines 169/175/182/188/195/
+  201) behind macro gate. **Asm-verify killed the hypothesis**:
+  `s_nop` count identical (345 each, same N-distribution: 301× `s_nop 0`,
+  15× `s_nop 7`, etc.) in both builds. The LLVM scheduler emits the
+  same total filler-cycle budget regardless; it just rearranges MFMA
+  vs DTL ordering. **The 32 `s_nop` filler insts/iter are NOT from
+  `sched_barrier(0)` brackets** — likely m0-write hazard or DTL
+  latency budgeting from another scheduler pass. Bench Δ within
+  ±0.64pp on 4 gate_up shapes (within per-config noise floor 0.17pp).
+
+**Tree cleanup performed (Decider):**
+- P17 Dev B's 136-line orphan persistent-grid Stream-K diff was
+  contaminating the main repo working tree (Dev B reported NO-LAND
+  but left changes uncommitted). Backed up to
+  `/tmp/p17_dev_b_streamk_orphan.diff` and discarded via
+  `git checkout -- analysis/fp8_gemm/mi350x/kernel_fp8_layouts.cpp`.
+- P18 Dev A leaked the 4-wave Lever A edits into the main repo's
+  `rcr_4wave_dynamic.inc` (worktree-isolation violation; the worktree
+  at `agent-a4ccdb26` was supposed to be isolated). Backed up to
+  `/tmp/p18_dev_a_4wave_hoist.diff` and discarded.
+
+**P19 dispatch — m0 hoist on 8-wave RCR (production path):**
+
+Port the P18 Dev A inline-asm recipe (A1+A2 only; A3 is dead) to
+`gemm_kernel<RCR,KI>` in `analysis/fp8_gemm/mi350x/kernel_fp8_layouts.cpp`.
+The DTL pattern is identical (16× `buffer_load_dwordx4 ... offen lds`
+per iter, per P15 Dev A). Target +2-3pp on the 4 gate_up shapes
+(autotuner-default 0.9122 → ~0.94). **The ONLY remaining lever** for
+RCR weak shapes after operand-reuse, waitcnt, Stream-K, and 4-wave
+m0 are all closed.
+
+Risks: 8-wave VGPRs=238 has headroom; m0 hoist adds SGPRs not VGPRs.
+Build flag `HIPFLAGS=-D`. Asm-verify v_readfirstlane drop in 8-wave
+disasm BEFORE benching.
+
+**Lessons additive to P17:**
+1. **Autotuner trumps static dispatch.** Before claiming a bottleneck
+   is "the production path", verify the autotuner hasn't already
+   routed around it. Run forced-4-wave AND forced-8-wave AND
+   autotuner-default benches; production = autotuner's pick. P17
+   Dev A's static-dispatch reading was wrong because it ignored the
+   runtime autotuner.
+2. **Inline-asm is required for m0 control on gfx950.** The public
+   `__builtin_amdgcn_raw_buffer_load_lds` intrinsic lets LLVM
+   CSE-fold the readfirstlane back to vector even after readfirstlane
+   hoist. Use inline asm
+   (`asm volatile("buffer_load_dwordx4 v_phantom, srsrc, soffset, 0 offen lds")`)
+   for any kernel needing m0 control. Cite this pattern in P19+ Dev
+   prompts.
+3. **NEGATIVE asm-verify is signal.** Dev B's invariant `s_nop` count
+   conclusively kills the sched_barrier hypothesis without touching
+   wall-clock. Always asm-verify before declaring a knob wins via
+   timing — and equally important, an asm-invariant build is a
+   conclusive close on a hypothesis.
+4. **Knob-infrastructure-only diffs are not landable** (P12/P13/P18
+   reinforced). Default-OFF macros with no activating production
+   path have zero shipping value. Discard cleanly via
+   `git checkout -- <file>` and back up the patch under
+   `/tmp/p<N>_dev_<X>_*.diff`.
+5. **Worktree-isolation violations contaminate main repo.**
+   EnterWorktree creates an isolated working tree, but Devs DO edit
+   the main repo by mistake (P17 Dev B + P18 Dev A this session).
+   Decider MUST `git status analysis/...` after each Dev finishes
+   and either explicitly commit or discard with backup. The
+   worktree path is in the agent task notification's
+   `<worktreePath>` field — contamination is when files outside
+   that path show as modified.
+6. **The s_nop budget on gfx950 is set by hazards, not source-level
+   barriers.** P18 Dev B asm-refuted that `sched_barrier(0)` brackets
+   produce `s_nop` filler. The filler is emitted by a separate LLVM
+   amdgpu pass that budgets cycles for MFMA pipeline gaps, m0-write
+   hazards, and DTL latency. Don't try to remove `s_nop` via barrier
+   stripping — fix the underlying hazard (e.g. eliminate the m0
+   write entirely by using a uniform scalar stream).
+
 ### 2026-04-18 — P17 (2 research-only Devs, all opus; GPUs 2/4; CLOSE)
 
 **Outcome: Both Devs returned definitive findings. Dev A characterized
