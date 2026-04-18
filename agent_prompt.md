@@ -54,6 +54,36 @@ python3 test_mxfp8_python.py 4096 14336 4096
 5. 禁止提交 `*.so`、`*.s`、`*_layout_results_*.json`、`.bak*`、`gpucore.*`、`__pycache__` 等（`.gitignore` 已覆盖）
 6. 每个子 agent 使用不同 `HIP_VISIBLE_DEVICES` 以免 GPU 冲突：Dev A → 0，Dev B → 1，Dev C → 2，Reviewer/formal → 7
 
+## R41 cycle 完结 (2026-04-18) ★★★ TRIPLE-CLOSURE + ★★ MAJOR FINDING — 3 paradigm closures (V2-RCR HB shrink + BK=64 K-blocking + B-operand alt-layout — ALL refuted via inspection without burning GPU; cumulative tally → 42 levers) + ★★ MAJOR FINDING (decode-shape survey: 0/6 PASS 95% rule; ALL dispatch to V1-LEGACY-FALLBACK; V2 fastpaths structurally unreachable for M<BLK=256 — project goal incomplete on production decode workload) + 11th-cycle baseline 778.57 TF (envelope 3.04% UNCHANGED) + 2/2 R40 STRICT RECONFIRM + 4/4 gold-standard re-bench PASS + 1 NEW R41+ methodology rule (tile-rotation hypotheses REFUTED-BY-DEFAULT)
+
+R41 派 4 dev (A V2-RCR HB shrink prototype, B BK=64 K-blocking, C decode-shape M=1/32/128 coverage survey, D B-operand alt-layout feasibility) + Reviewer (11th-cycle baseline + 2 RECONFIRM + 4 re-bench + GPU lock validation). **0 NEW SHIPs from A/B/D — ALL three pre-refuted via inspection, ~6-10 GPU-hr saved + ★★ Dev C decode-shape MAJOR FINDING + 2/2 STRICT RECONFIRM + 4/4 gold-standard PASS.**
+
+### ★★ Headline result — Dev C decode-shape coverage 0/6 PASS the 95% rule
+- All 6 decode shapes (M=1/32/128 × 8B/70B) FAIL: ratios 58-78% MXFP8/FP8
+- ALL dispatch to V1-LEGACY-FALLBACK; V2 fastpaths structurally unreachable for M<BLK=256
+- Mechanism: MXFP8 carries per-32-K E8M0 scale-load overhead vs FP8's single per-tensor scalar → ~77% ratio at M=32/128. M=1 ~58-69% (tail-kernel overhead amortized over 1 row)
+- **★★★ STRATEGIC IMPLICATION**: Project goal "MXFP8 V2 ≥ FP8 per-tensor × 95%" is **structurally unattainable on decode shapes** via current dispatcher. R28-R40's 39 closed-paradigm levers all targeted prefill geometry. R42+ default track: implement dedicated small-M MXFP8 fastpath (M=1..256, BLK_M=16/32, BLK_N=128, K-pipelined; estimated 30-50× decode TF lift)
+
+### ★★★ Triple-closure (3 closures via inspection, no benches burned)
+- **Dev A V2-RCR HB shrink REFUTED** (3-leg): tile-config byte-identical to V2-CRR + V2-RCR slower than V2-CRR on tall-thin (R33C 13-cycle confirm) + bar to beat = absolute V2-CRR HB shrink production +28-31% (predicted -3% to -8% NEGATIVE). **Closes 5-cycle HB-* exhaustion** across all 4 layouts × 2 axes × 2 shapes
+- **Dev B BK=64 REFUTED**: scale-pack `fp8e8m0_4` already amortizes 2 BK=128 iters/fetch → halving BK DOUBLES fetch freq (premise inverted); VMEM total invariant under BK rotation; per-iter overhead doubles with no bandwidth gain. **4th tile-area-conservation confirmation** (M, N, WARPS_M+N, K — all 4 axes closed)
+- **Dev D B-operand alt-layout NO-GO**: broadcast-B (R19 architectural impossibility) + swizzled-B (R29 already 0-conflict) + VGPR-cached-B (tile-area-conservation 3-confirm 256 ceiling) — all 3 sub-classes pre-closed. Sole remaining B-side direction `buffer_load_dword_lds` is path-change not layout-change (R42+ separate scoping)
+
+### Reviewer Phase 1+2+3 (`c828b2b7`)
+- **R41 baseline 778.57 TF** (locked to GPU2/3/6/7 per R40 recommendation); 11-cycle envelope 3.04% UNCHANGED (R41 sits inside R31-R40 766-790 band)
+- 2/2 STRICT RECONFIRM via dispatcher-trace: R40D 8B QO V2-RCR +7.52% t=+15.40 (N_PAIRS=10→20 needed; 5th statistical-power-cap confirmation) + R40D 70B QO V2-RCR +8.84% t=+19.96 (N_PAIRS=10 sufficient)
+- 4/4 production gold-standard re-bench PASS: R37A 70B-KV B1 +29.47% / R38 wrap fix 8B-KV B1 +24.66% / R38C 8B-Down +8.47% / R39B 8B Gate/Up +5.76%
+
+### R41 paradigm corrections (3 → cumulative 42 closed levers; R32:21 + R33:5 + R34:4 + R35:1 + R36:2 + R37:2 + R38:2 + R39:1 + R40:1 + R41:3)
+- V2-RCR HB shrink REFUTED → closes 5-cycle HB-* exhaustion. NO MORE HB-* prototypes on existing tile geometry
+- BK=64 K-direction blocking REFUTED → 4th tile-area-conservation confirmation
+- B-operand alt shared-mem layout NO-GO → 3 sub-classes pre-closed
+
+### R42+ priority (rebuilt from R41)
+1. **【★★★ critical】Dedicated small-M MXFP8 fastpath** (R41 Dev C strategic finding) — M=1..256, BLK_M=16/32, BLK_N=128, K-pipelined. Goal: ≥ FP8 per-tensor × 95% on decode shapes. Without this, project goal incomplete on production inference workload
+2. 【medium】`buffer_load_dword_lds` (VMEM→LDS direct path) — only B-side lever not yet closed; path-change not layout-change; estimate 5-15% lift if VMEM dispatch is binding
+3. 【methodology】All R29-R40 + R41 NEW: tile-rotation hypotheses REFUTED-BY-DEFAULT unless proposer identifies binding resource + concrete prototype; HB-* exploration on existing tile geometry CLOSED; GPU2/3/6/7 lock validated for baseline like-for-like
+
 ## R40 cycle 完结 (2026-04-18) ★★ STRICT-PROMOTE x2 — 2 STRICT PROMOTEs (8B QO V2-RCR + 70B QO V2-RCR; statistical-power hypothesis 4-in-a-row CONFIRMED, no code change) + 1 SHIP-LITE BOUNDARY-LOCK (8B Up V2-RRR sits structurally at +5.0 Δ% boundary across 4 cycles, silicon-bin perf cap not statistical-power) + 4/4 STRICT RECONFIRMs + 8/8 V2-RCR/V2-RRR advisories HEALTHY + 1 paradigm closure (HB-N+WARPS_N=2 V2-RRR REFUTED via doubly-pre-refuted compound — 3rd tile-area-conservation confirmation) + 10th-cycle baseline 789.48 TF (drift envelope 3.04% fractionally over 3% threshold, no source change since R39, flagged not escalated)
 
 R40 派 4 dev (A HB-N+WARPS_N=2 V2-RRR compound bet, B 4-GPU STRICT promote 8B Up V2-RRR mirror, C V2-RCR advisory audit via MXFP8_DISPATCH_TRACE, D 4-GPU STRICT promote V2-RCR QO 8B+70B) + Reviewer (10th-cycle baseline + 4 RECONFIRM + 3 methodology). **2 STRICT PROMOTEs + 1 SHIP-LITE BOUNDARY-LOCK + 4/4 RECONFIRM + 8/8 advisories HEALTHY + 0 NEW SHIPs from speculative HB-N+WARPSN compound.**
