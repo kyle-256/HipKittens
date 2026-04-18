@@ -1,0 +1,18 @@
+[md5-base] 7faa93a673ac1b02759c6e0c872dde2a  tk_mxfp8_layouts_base.cpython-310-x86_64-linux-gnu.so
+[md5-pipe2] 6ca57d39c38dcc7f497ac0b141c07d75  tk_mxfp8_layouts_pipe2.cpython-310-x86_64-linux-gnu.so
+[sclk-pre-preheat] GPU[1]		: sclk clock level: 1: (195Mhz)
+[preheat 30s] done 6140 iters
+[sclk-post-preheat] GPU[1]		: sclk clock level: 1: (2154Mhz)
+CORRECTNESS_base snr_db=49.59 pass_rate_pct=100.00
+CORRECTNESS_pipe2 snr_db=49.59 pass_rate_pct=100.00
+DETERMINISM_pipe2 ok=True
+[sclk-pre-bench] GPU[1]		: sclk clock level: 1: (2312Mhz)
+PAIR 0 base=497.33,338.27 cand=235.59,240.21 delta=-179.90
+PAIR 1 base=343.90,341.37 cand=237.00,237.43 delta=-105.42
+PAIR 2 base=342.83,719.74 cand=236.91,1153.62 delta=+163.98
+[sclk-post-bench] GPU[1]		: sclk clock level: 1: (2361Mhz)
+BASE  median=343.36 mean=430.57 stdev=154.77 n=6
+CAND  median=237.21 mean=390.13 stdev=374.04 n=6
+Welch t (base vs cand) = -0.245
+BASE_TFLOPS_LIST 497.3277,338.2713,343.8981,341.3680,342.8254,719.7413
+CAND_TFLOPS_LIST 235.5931,240.2101,236.9976,237.4312,236.9127,1153.6203

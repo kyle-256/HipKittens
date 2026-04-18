@@ -1,0 +1,15 @@
+[sclk-pre-preheat] GPU[0]		: sclk clock level: 1: (361Mhz)
+[preheat] sustained 8s 16k matmul...
+[preheat] done 5116 iters
+[sclk-post-preheat] GPU[0]		: sclk clock level: S: (94Mhz)
+CORRECTNESS stage=v2 layout=crr M=4096 N=28672 K=8192 snr_db=49.59 pass_rate_pct=100.00
+DETERMINISM ok=True
+[sclk-pre-bench] GPU[0]		: sclk clock level: S: (94Mhz)
+RUN 0 avg_ms=0.8061 tflops=2386.99
+RUN 1 avg_ms=0.8135 tflops=2365.22
+RUN 2 avg_ms=0.8120 tflops=2369.69
+RUN 3 avg_ms=0.8122 tflops=2369.13
+RUN 4 avg_ms=0.8125 tflops=2368.26
+[sclk-post-bench] GPU[0]		: sclk clock level: S: (94Mhz)
+SUMMARY median=2369.13 mean=2371.86 stdev=8.64 runs=5
+TFLOPS_LIST 2386.9940,2365.2153,2369.6861,2369.1292,2368.2556
