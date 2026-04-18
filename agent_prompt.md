@@ -183,6 +183,144 @@ BF16 work is paused unless a clean structural restructure is on the table
 
 ## Session Log
 
+### 2026-04-18 — P20 (2 Devs; GPUs 3/4; CLOSE — Dev A H1 DEFER (architectural walls + probe-kernel-required), Dev B H4 CLOSED (zero cycle cost + SNR-broken))
+
+**Outcome: No commit-worthy effect, but Dev A delivered critical
+architectural blockers that make P21 dispatch concrete.** P19 Dev
+B's "1-2 sessions for H1" estimate was optimistic — realistic is 3
+sub-sessions (probe kernel → in-kernel impl → autotune). P20 Dev B
+permanently retired H4.
+
+- **Dev A (H1 b64_tr_b16 → b128 + v_perm refactor, GPU 3, opus,
+  worktree `p20-dev-a-lds-b128`)** — verdict **DEFER**. NO source
+  edits committed. Baseline asm-confirmed Dev B's GPU-7 measurement
+  exactly: 2112 `ds_read_b64_tr_b16` / 2816 MFMA = 0.750 LDS/MFMA in
+  the CRR KI=128 hot path; 0 `ds_read_b128`, 0 `v_perm_b32`. Both
+  routes hit hard walls within one Dev session:
+
+  - **Route 1 (storage shape swap to `st_16x32_s` row_l, hijack
+    existing template branch in `shared_to_register.cuh:76-84`):**
+    breaks HBM coalescing. CRR's HBM A is `(K,M)`-leading; current
+    `prefill_swizzled_offsets` uses axis=2 stride `M*sizeof(bf16)`
+    (coalesced). After shape swap, axis=2 stride is wrong direction
+    → axis=3 stride `2 B` = 16-way scalar gather. Trades 3pp of LDS-
+    bandwidth gain for ~5pp of HBM-bandwidth loss. hipBLASLt avoids
+    this only because its DTL writes A into LDS in pre-transposed
+    row-major form via custom address swizzle — porting that swizzle
+    into TK g2s is a separate multi-session effort. Half-measure
+    (just flipping the rt layout) keeps tr_b16 because the kittens
+    template at line 254 still selects the b64_tr_b16 branch for
+    `(st_*, rt_col_l)`.
+
+  - **Route 2 (inline-asm `ds_read_b128 + v_perm_b32` into existing
+    col_l layout):** blocked by hardware semantics. `v_perm_b32` is
+    **intra-lane only** (selects bytes from `{vs0, vs1}` within the
+    same lane). But `ds_read_b64_tr_b16` performs a **cross-lane 4×4
+    byte transpose** during the read. The cross-lane shuffle needed
+    requires `v_permlane16_b32` or `ds_swizzle_b32`. **BL's disasm
+    (`bl_main_loop.s`) shows ONLY `v_perm_b32`, NOT
+    `v_permlane16_b32`** — because BL's DTL pre-shuffles the LDS
+    write side. Route 2 in strict "swap loads only" form is NOT
+    equivalent to BL.
+
+  - **Critical discovery:** BL's win comes from the *combination* of
+    LDS-write-side pre-shuffle + b128 read + v_perm. Both routes need
+    the same fundamental work, just split across the LDS-write/read
+    boundary differently.
+
+  - **Recommended P21 sub-project:**
+    - Sub-session 1 (probe kernel, 1-2 hours): 32-lane kernel that
+      initialises 256-byte LDS with a known pattern (e.g.
+      `sm[i] = (row<<8)|col`), then dumps lane registers after both
+      `ds_read_b64_tr_b16` and `ds_read_b128`. Derive the lane→byte
+      mapping table needed for either v_perm selectors (Route 2) or
+      LDS pre-shuffle (Route 1).
+    - Sub-session 2 (in-kernel impl): standalone
+      `load_a_subtile_b128` in `kernel_bf16_dynamic.cpp` (NOT in
+      kittens templates — narrower blast radius), gated by
+      `CRR_LDS_B128`.
+    - Sub-session 3 (autotune): if Δpp ≥ +1.5pp on worst CRR.
+
+  - **Worktree preserved:** `/shared_nfs/kyle/HipKittens2/.claude/worktrees/p20-dev-a-lds-b128`,
+    no commits, baseline `.so` md5 `fca3634b289e61c7642312e7f1f70a6d`.
+    P21 should reuse.
+
+- **Dev B (H4 `s_setprio` rebalance, GPU 4, opus, worktree
+  `p20-dev-b-setprio`)** — verdict **CLOSED**.
+
+  - **Source attribution:** All 348 `s_setprio` instructions in CRR
+    KI=128 come from explicit `__builtin_amdgcn_s_setprio(N)` calls
+    in `kernel_bf16_dynamic.cpp` (28 source call sites: 14 prio-1 +
+    14 prio-0). NO LLVM auto-insertion. NO inline-asm. Source-level
+    removal works clean.
+  - **Histogram:** 174 × prio-1 + 174 × prio-0, only values used.
+    Pattern: `s_waitcnt → s_setprio 1 → 16-32 MFMA → s_setprio 0 →
+    s_barrier`. 100% MFMA-adjacent, never LDS-adjacent.
+  - **Variants:** V0 baseline / V1 strip-all / V2 keep-hi-only / V3
+    all-prio-3, gated by `CRR_SETPRIO_MODE`, CRR-isolated. Asm
+    counts: 348/0/174/348. RCR/RRR codegen identical across all 4.
+
+  - **Bench (5 worst CRR × 3 layouts × 3 paired runs, GPU 4):**
+    | variant | CRR mean Δpp | best single shape           |
+    |---------|-------------:|-----------------------------|
+    | V1      |       −0.09  | -                           |
+    | V2      |       −0.12  | -                           |
+    | V3      |       +0.01  | +0.28pp on (4096,10240,8192)|
+    All within ±0.4pp on CRR — noise floor.
+  - **SNR on V3 (best variant) vs V0:** **−13.2 dB** (spec required
+    ≥ 47 dB). Determinism 5/10 (chance). Per-rep deltas flip sign 6×.
+    No real signal AND functionally broken at the SNR level — some
+    priorities are correctness-required, not just perf hints.
+
+  - **Mechanism:** `s_setprio` is a 1-cycle SALU op that overlaps
+    with MFMA-bound pipe. TK has slack VALU/SALU bandwidth (1.05 vs
+    BL 2.11 VALU/MFMA), so 174 prio-toggles per launch fit in scalar
+    slack at zero cycle cost. The instruction-count delta is real
+    but the cycle delta is zero.
+
+**Updated hypothesis ranking (post-P20):**
+| H  | Lever                                | Upside  | Status                                                |
+|----|--------------------------------------|--------:|-------------------------------------------------------|
+| H1 | b64_tr_b16 → b128 + v_perm           | 3-5pp   | DEFER — needs probe kernel; 3-session sub-project     |
+| H2 | persistent grid + Stream-K           | 1-2pp   | CLOSED (`bc4392bf`)                                   |
+| H3 | port FP8 P18 m0-hoist to BF16 CRR    | <0.5pp  | DEFER — small upside                                  |
+| H4 | `s_setprio` rebalance                | 0.5-1pp | **CLOSED (P20 Dev B)** — zero cycle + SNR-broken      |
+| H5 | spill fix via unroll/launch_bounds   | 0pp     | CLOSED (P19 Dev B)                                    |
+| H6 | reduce `s_barrier` 0.125→0.031/MFMA  | 0.5-1.5pp | OPEN — TK 4× more barriers/MFMA than BL             |
+
+**P21 dispatch — 2 parallel Devs:**
+- Dev A: probe kernel + lane-mapping derivation for H1 Route 2
+  (reuse worktree `p20-dev-a-lds-b128`)
+- Dev B: H6 barrier-reduction research (independent code path)
+
+**Lessons (P20):**
+1. **Architecturally validate before implementing.** Dev A's whole
+   session was reading template stack + reference asm; no source
+   edits. This produced more value than a session of speculative
+   edits would have — pinning down WHY the obvious routes don't
+   work makes the next dispatch concrete and bounded. Mirrors the
+   `feedback_feasibility_check.md` pattern.
+2. **Architectural blockers are often packed into one mismatch.**
+   H1 looked like a "swap two type aliases" until Dev A traced
+   through `prefill_swizzled_offsets` (HBM coalescing) and the
+   kittens template specialization tree (which routes
+   `(st_32x16_s, rt_col_l)` to b64_tr_b16). The lever is real but
+   the paint-by-numbers fix isn't.
+3. **`s_setprio` is correctness, not just performance, in
+   overlapping-MFMA kernels** — Dev B's V1 strip-all gave −13.2 dB
+   SNR. The priorities are part of the issue-ordering contract that
+   keeps MFMA waves from issuing into the wrong cluster.
+4. **Per-MFMA inst counts can mislead.** TK's 0.124 setprio/MFMA
+   delta vs BL looked exploitable in P19 Dev B's table, but
+   `s_setprio` overlaps with the MFMA-bound critical path → zero
+   cycle delta. **Always verify whether an inst-count delta lands
+   on the critical path.**
+5. **Insurance levers must clear the same gates as primary
+   levers.** Dev B's H4 was dispatched as a small parallel lever
+   "in case H1 underperforms"; the SNR check still mattered and
+   killed it cleanly. Without that gate the −0.12pp regression
+   might have looked tolerable.
+
 ### 2026-04-18 — P19 (1 implementation Dev + 1 cross-GPU Reviewer + 1 research Dev; GPUs 0/6/7; CLOSE — Dev A LANDED, Dev B characterization → P20 dispatch)
 
 **Outcome: Dev A's 8-wave m0 hoist LANDED as commit `49647b11`

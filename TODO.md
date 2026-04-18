@@ -7,7 +7,65 @@
 - SNR ≥ 48 dB (FP8) / ≥ 47 dB (BF16 vs torch.mm), bit-exact determinism are hard gates.
 - Never commit `*.so`, `.autotune_cache.json` is OK to keep (it's text), logs are not.
 
-## Current Status (2026-04-18, post-P19 close — m0 hoist landed on 8-wave (commit 49647b11, +0.27/+0.47pp cross-GPU); BF16 CRR bottleneck characterized as LDS pressure; P20 = b64_tr_b16 → b128 + v_perm refactor)
+## Current Status (2026-04-18, post-P20 close — H1 (b128+v_perm) DEFER pending probe kernel; H4 (setprio) CLOSED; H6 (barrier reduction) is new candidate; P21 = probe kernel + H6 research)
+
+P20 dispatched 2 Devs in parallel against the P19 Dev B-identified
+bottleneck. **Both returned without commit-worthy effect, but Dev A
+delivered critical architectural blockers.**
+
+- **Dev A (H1 b64_tr_b16 → b128 + v_perm refactor, GPU 3, opus,
+  worktree `p20-dev-a-lds-b128`)** — verdict **DEFER**, no source
+  edits. Baseline asm-confirmed Dev B's measurement exactly (2112
+  `ds_read_b64_tr_b16` / 2816 MFMA = 0.750 LDS/MFMA). Both
+  implementation routes hit walls in one session:
+  - **Route 1** (storage shape swap) breaks HBM coalescing because
+    CRR's HBM is `(K, M)`-leading; needs DTL address-swizzle port
+    (separate multi-session effort).
+  - **Route 2** (inline-asm b128+v_perm into existing col_l) blocked
+    by hardware semantics: `v_perm_b32` is intra-lane only, but
+    `ds_read_b64_tr_b16` performs cross-lane 4×4 byte transpose. BL
+    avoids this because its DTL pre-shuffles the LDS write side
+    (BL disasm shows ONLY `v_perm_b32`, no `v_permlane16_b32`).
+  - **Realistic effort:** 3 sub-sessions: probe kernel → in-kernel
+    Route 2 → autotune. P19 Dev B's "1-2 sessions" estimate was
+    optimistic. Worktree preserved (no commits, baseline `.so` md5
+    `fca3634b289e61c7642312e7f1f70a6d`) for P21 to reuse.
+
+- **Dev B (H4 `s_setprio` rebalance, GPU 4, opus, worktree
+  `p20-dev-b-setprio`)** — verdict **CLOSED**. Source-attributed all
+  348 setprios to 28 explicit `__builtin_amdgcn_s_setprio(N)` call
+  sites (174 prio-1 + 174 prio-0, all bracketing MFMA bundles). Built
+  4 variants gated by `CRR_SETPRIO_MODE` (V0/V1 strip/V2 keep-hi/V3
+  all-prio-3), CRR-isolated. Bench: CRR Δpp ±0.4 on 5 worst CRR
+  shapes (noise floor). **SNR on best variant V3: −13.2 dB
+  (catastrophic).** Strip-all is functionally broken; the priorities
+  are required for correct issue ordering. Mechanism: `s_setprio` is
+  a 1-cycle SALU op overlapping with MFMA-bound pipe; TK has slack
+  VALU bandwidth so toggles fit at zero cycle cost. **Do not
+  re-attempt.**
+
+**P21 dispatch — 2 parallel Devs:**
+
+- **Dev A (probe kernel + Route 2 prep)**: build a 32-lane probe
+  kernel that initialises 256-byte LDS with a known pattern, dumps
+  lane registers after `ds_read_b64_tr_b16` and `ds_read_b128`,
+  derives the lane→byte mapping table needed for an in-kernel
+  `load_a_subtile_b128` Route 2 implementation. If time permits,
+  draft the helper. Reuse worktree `p20-dev-a-lds-b128`.
+
+- **Dev B (H6 — `s_barrier` reduction research)**: TK barriers
+  0.125/MFMA vs BL 0.031/MFMA (4× more). Investigate whether the
+  per-K-step barriers in the CRR main loop can be relaxed to
+  per-macro-K-tile cadence (matching BL's `_PGR2_PLR1` Tensile
+  config). Risk: barriers exist for correctness across waves sharing
+  LDS; each removal needs pipeline analysis + SNR validation.
+  Expected upside: 0.5-1.5pp on CRR mean.
+
+These two are independent levers (Route 2 lane-mapping vs barrier
+cadence). H1 still has the larger projected upside (3-5pp on worst
+CRR), but H6 may land first as a smaller-blast-radius lever.
+
+## [P20 archive] Earlier Status (2026-04-18, post-P19 close — m0 hoist landed on 8-wave)
 
 P19 dispatched 2 Devs in parallel + 1 Reviewer (cross-GPU validation).
 Dev A landed; Dev B characterization complete.
