@@ -76,8 +76,11 @@ cp=3 (GLC|SLC) vs cp=2 (SLC) on 70B Gate V2-CRR: Δ=-0.088%, Welch t=-0.77 — f
 
 Diagnostic confirms gate region is doing real work — forcing cp=3 outside gate regresses 70B KV -7.5% and 8B Gate -5%. No production change.
 
-### R28 Dev D in flight (GPU1)
-- Rectangular BLK_M=256/N=128 scaffolding (R28 #2 critical, 90 min compile/correctness goal NOT perf SHIP this cycle)
+### R28 Dev D = SCAFFOLDING ONLY (Stage 1+2 PASS, Stage 3 FAIL — known fall-through)
+
+Built compile-ready rectangular BLK_M=256/BLK_N=128 scaffolding on r28-d (`ddfd2f80`): `MXFP8_RECT_BLK_N` macro + `load_col_from_v2_st_half_rect` template helper + rect gate in `crr_mxfp8_exact_8wave_fastpath.inc:3-15`. Default build binary identical. Rect mode currently faults at runtime (V2 layout/V1 fallback mismatch — same root cause R27 Dev D found).
+
+**Paradigm correction #2 (audit fix)**: `offset:1024` in `ds_read_b64_tr_b8` is **BK-derived (=8*BK)**, NOT HB-derived as R27 Dev D's audit said. HB dependency localizes to `k_row = row_off + K_HALF*64` math + subtile count only. Rectangular BLK_M=256/BLK_N=128 needs **less rewrite than originally estimated** — primarily B-side N-stride parametrization + V2 half-N scale preshuffle. NOT cherry-picked (no positive perf value yet).
 
 ## R27 cycle 完结 (2026-04-18) ★ 1 partial production ship (cachepolicy macro infra) + 3 paradigm correction
 

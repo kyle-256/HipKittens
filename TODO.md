@@ -93,8 +93,16 @@ Diagnostic no-regress (cp=3 forced on out-of-gate shapes, confirms gate region i
 - 8B Gate 4096×14336×4096 cp=3: -4.95% vs cp=0 baseline
 - 8192³ cp=3: -0.91% (within noise)
 
-### R28 Dev D in flight (GPU1)
-- Rectangular BLK_M=256/BLK_N=128 scaffolding (R28 #2 critical). Goal = compile-ready + V1 fallback PASS, NOT perf SHIP this cycle.
+### R28 Dev D = SCAFFOLDING ONLY (`ddfd2f80` r28-d only)
+
+Stage 1 PASS (default build clean, rect build clean — fastpath drops 2700→2483 TFLOPS confirming gate works). Stage 2 PASS (rect+V1 fallback correctness on 4096×1024×8192: SNR 49.59 dB, det 3/3, 2.67 TFLOPS). Stage 3 FAIL (V2 dispatch falls through to V1 layout with V2-preshuffled scales → GPU memory access fault, same mode R27 Dev D documented).
+
+**R28 paradigm correction #2 — `offset:1024` is BK-derived, NOT HB-derived (audit fix)**:
+- R27 Dev D's audit said `offset:1024` in `ds_read_b64_tr_b8` was hardcoded for HB=128. Dev D investigation found the actual dependency: **`offset = 8*BK`**, NOT `8*HB`. HB dependency localizes to `k_row = row_off + K_HALF*64` math + subtile count.
+- Implication: rectangular BLK_M=256/BLK_N=128 (HB unchanged at 128, BK unchanged) requires LESS rewrite than R27 Dev D estimated. The B-side helper variant primarily needs N-stride changes, not the inline asm offset.
+- Updated R29 starting point: focus on (1) B-side N-stride parametrization, (2) V2 scale preshuffle layout for half-N tile, (3) dispatcher gate for rectangular shapes. Scaffolding `MXFP8_RECT_BLK_N` macro + `load_col_from_v2_st_half_rect` template lives on r28-d for R29 to build on.
+
+NOT cherry-picked to main (Stage 3 FAIL means -DMXFP8_RECT_BLK_N=64 currently faults; default is binary identical but no positive value to ship).
 
 ## R27 cycle 完结 (2026-04-18, 4 dev + 1 reviewer，1 partial production ship + 3 paradigm corrections)
 
