@@ -6,16 +6,22 @@
 
 协议：`test_mxfp8_python.py` / `test_python.py` 内的 per-iteration sync + `output.zero_()`，warmup=100 iters=200。
 
-## 当前 baseline（GPU0，per-iter sync，8192^3）— **R21 confirmed (2026-04-17) ★ V2 SHIPPED**
+## 当前 baseline（GPU0/1/2，per-iter sync，8192^3）— **R22 confirmed (2026-04-18) ★ V2 推广至 RRR + CRR SHIPPED**
 
-| 版本 | TFLOPS | SNR | 相对 MXFP8 RCR V2 |
+| 版本 | TFLOPS | SNR | 相对 FP8 RCR |
 | --- | ---: | --- | ---: |
-| **FP8 per-tensor RCR (长期目标)** | **3243.67** | 49.61 dB PASS | 105.4% |
-| **MXFP8 RCR PRESHUFFLE V2 + KPAIR+PIPELINE+HOIST_HI+8WAVE_FAST (R21 5x median, ★ default-on)** | **3078.09** | 49.60 dB PASS | **100.0%** |
-| MXFP8 RCR V1 (R21 reproduced 5x median, retained as RUNTIME=0 fallback) | 3022.43 | 49.60 dB PASS | 98.19% |
-| **MXFP8 RRR EXACT_8WAVE_FAST** | **2862.99** | 49.59 dB PASS | 93.01% ✅ static gate |
-| **MXFP8 CRR PIPELINE_SCALE+8WAVE_FAST (R17 5x median)** | **2822.30** | 49.60 dB PASS | 91.69% ✅ static gate +42.02 |
-| **gap MXFP8 RCR V2 vs FP8 RCR** | **−165.58** (−5.10%) | | **R21 closes 27% of R20 gap (−225.23 → −165.58)** |
+| **FP8 per-tensor RCR (长期目标)** | **3243.67** | 49.61 dB PASS | 100.0% |
+| **MXFP8 RCR PRESHUFFLE V2 (R21 5x median, ★ default-on)** | **3078.09** | 49.60 dB PASS | 94.90% (gap -165.58 / -5.10%) |
+| **MXFP8 RRR PRESHUFFLE V2 (R22-A 5x median, ★ default-on)** | **~3038** (Reviewer indep verify +159.61 / +5.54%) | 49.59 dB PASS | ~93.7% (gap -212 / -6.3%) |
+| **MXFP8 CRR PRESHUFFLE V2 (R22-B 5x median, ★ default-on)** | **2732.33** (GPU1 sanity verify) | 49.60 dB PASS | ~84.2% (gap -517 / -15.9%) |
+| MXFP8 RCR V1 (R21 reproduced 5x median, RUNTIME=0 fallback) | 3022.43 | 49.60 dB PASS | 98.19% of V2 |
+| MXFP8 RRR V1 (R22 fallback) | ~2878 | 49.59 dB PASS | — |
+| MXFP8 CRR V1 (R22 fallback) | 2711.78 | 49.60 dB PASS | — |
+| **gap MXFP8 RCR V2 vs FP8 RCR** | **−165.58** (−5.10%) | | (R21 closed 27% of R20 gap) |
+| **gap MXFP8 RRR V2 vs FP8 RCR** | **~−212** (~−6.3%) | | **R22 RRR closed 43% of R21 gap (−371 → −212)** |
+| **gap MXFP8 CRR V2 vs FP8 RCR** | **~−517** (~−15.9%) | | **R22 CRR closed +20.55 TFLOPS (small uplift, baseline more MFMA-bound)** |
+
+**R22 综合**：V2 preshuffle paradigm 推广到三 layout（RCR + RRR + CRR）全 SHIPPED default-on。RRR 大额收益 (+5.54%) 因 V1 RRR 有 19 spills/80B scratch 这次 V2 collapsed to 0 spills；CRR 小额 (+0.76%) 因 baseline 已 MFMA-bound + 已用 PIPELINE_SCALE 单 shot 4×b32。所有 V1 路径保留为 RUNTIME=0 fallback。
 
 **R21 Reviewer 5x V2 + 5x V1 reproduction (GPU0, indep verify)**：V2 median 3078.09 (std 4.63), V1 median 3022.43 (std 3.19), Δ +55.66 TFLOPS / +1.84%, Welch t=23.33 (p<<0.001). 全 SNR ≥49.5 + det 3/3 PASS at 256³/1024³/8192³。FP8 RCR median 3243.67 (std 6.86)。SQ_INSTS_VMEM V1=6,815,744 / V2=5,767,168 = -15.38% byte-exact match Dev A。
 
@@ -274,6 +280,63 @@ CRR PQ：**2737.94 TFLOPS** (93.55% of RCR) → 差 **42.34 TFLOPS (1.55%)** 才
     - Dev T（LDS 分配缩减 136→131 KB）：worktree 在 42f5407b base，活跃到 18:26（最后 .so build），**timeout 无 commit**
     - Diagnostic-S：完成（paradigm-shift 发现，见上）
   - **R12 行动结论**：4 个 dev 全 timeout 无 commit；唯一产出是 Diagnostic-S 的瓶颈定性更正。要 commit 代码必须重派 dev，**强烈建议下轮按 Diagnostic-S 的 SPI 启动器假说派活**：(1) 缩减 CRR LDS/block（单缓冲 A 或 B，packing 重叠）、(2) `__launch_bounds__(512, 3)` 提示 SPI 预留更多 slots、(3) 减少 SQC_DCACHE 压力（per-CTA 常量改 s_load_b256 单次加载）。**不要** 再投资 LDS bank conflict / LDS pipe / re-stripe stride 方向（已证 0 conflict，无收益）
+
+- **第二十二轮评审 (2026-04-18) — ★ V2 推广至 RRR + CRR 双 SHIPPED ★ R22-A RRR V2 +159.61 TFLOPS / +5.54% / Welch t (Reviewer indep verify)；R22-B CRR V2 +20.55 TFLOPS / +0.76% / Welch t=4.92；R22-C sched hints 永久 KILLED (baseline VMEM-wait 已比 FP8 LESS)；2 production commit cherry-picked to main**
+  - **R22 派 1 Reviewer + 3 Dev (A/B/C) 并行（GPU0/1/2/3 隔离），按 R21 path priority list 第一项: V2 推广到 RRR/CRR**
+  - **Reviewer (GPU0)** Task 1 — 5x baseline 全 PASS, 系统 stable
+    - MXFP8 RCR V2 median 3071 / V1 3022 / RRR 2878 / CRR 2706 / FP8 RCR 3242
+    - 跨会话 drift < 0.5%；可作为 R22 Dev A/B/C 比较基准
+  - **Dev A (GPU1) — V2-RRR milestone-1+2: ★ PASS BIG, COMMITTED ★**
+    - **5x A/B (Dev A GPU1)**: V1 mean ~2878, V2 mean ~3046, **Δ +168.64 TFLOPS / +5.94%, Welch t=4.76**
+    - **关键 finding**: V1 RRR 此前 256 VGPR / **19 spills / 80B scratch** (compiler 在 V1 SRD chains + opsel templating 下边界刚好溢出)；V2 collapse 到 256/0/0/0 — 这是 RRR 比 RCR 收益更大的根因
+    - **dual-patch rule 简化**: RRR 单一 `load_scale_packs` lambda（无独立 warmup helper），所有 callers (main loop + pre-tail) 统一消费 V2 packs
+    - 复用 `preshuffle_scale_matrix_mfma16_v2_rcr_a/b`：RRR A/B scale base address formulas byte-identical to RCR (M-major / N-major, k_blocks columns)
+    - 新增 `dispatch_rrr_exact_8wave_scaled_v2` + `dispatch_pq_v2<RRR>` + `gemm_rrr_pq_v2` pybind；runtime gate `MXFP8_RRR_PRESHUFFLE_V2_RUNTIME` default 1
+    - **b128/b64 emission verified** via `--offload-device-only -S`
+    - **Correctness gates** (HIP_VISIBLE_DEVICES=1, det 3/3): 256/1024/8192³ 全 SNR ≥49.5 PASS, 100% pass-rate
+    - cherry-picked to main as commit `dabeffa0`
+  - **Reviewer (GPU0) Task 2-RRR — independent verify: VERIFIED PASS**
+    - 干净 worktree 重建，全 correctness gates 重现
+    - **5x A/B (Reviewer GPU0)**: **Δ +159.61 TFLOPS / +5.54%**, byte-exact rocprofv3 counter match
+    - GPU0 vs GPU1 cross-drift < 9 TFLOPS, Δ same-session 一致
+    - **Gap closure**: V2 RRR vs FP8 RCR ~-212 / -6.3% (vs R21 RRR estimate -371) → **43% gap close in 1 round**
+  - **Dev B (GPU2) — V2-CRR milestone-1+2: ★ PASS, COMMITTED ★**
+    - **8192³ 5x A/B (Dev B GPU2)**: V1 median 2711.78 (std 10.61), V2 median 2732.33 (std 2.99), **Δ +20.55 TFLOPS / +0.76%, Welch t=4.92**
+    - 复用 V2-RCR Python preshuffle (scale shapes 在 RCR/CRR 之间相同)
+    - CRR 单一 `load_raw_scales` 加载器从 main loop / pre-tail / tail 全调用，dual-patch 简化为 single patch
+    - **rocprofv3 SQ_INSTS_VMEM**: V1 212,992 → V2 180,224 = **-15.38%** (byte-exact match R21 V2-RCR)
+    - **Resource**: VGPR 234 (V1: 232, +2), 0 spills, occupancy 2, LDS 139 KB
+    - **Correctness gates** (HIP_VISIBLE_DEVICES=2, det 3/3): 256/1024/**8192³ 49.60 dB**, 67108864/67108864 PASS
+    - cherry-picked to main as commit `9a0d0624`
+    - **CRR 收益小于 RRR/RCR 的原因**: CRR baseline 已 MFMA-bound (not VMEM-issue-bound) + 已用 PIPELINE_SCALE 单 shot 4 b32 加载；marginal cost 4 b32 vs 1 b128 + 1 b64 在 MFMA 吞吐相对小
+  - **Reviewer (GPU0) Task 2-CRR — environmental noise，sanity re-verify on GPU1**
+    - 第一次在 GPU0 verify FAIL：GPU0 sclk 卡在 260MHz / mclk 2000MHz (severely throttled)
+    - Reviewer 同时实施 dispatcher M_DIM rebuild 错误（dispatcher gates on `g.m == M_DIM`，必须 per-size rebuild）
+    - Reviewer 不可能地 claim R21 RCR V2（早 ship 工作）也 FAIL
+    - **Sanity Reviewer on GPU1** (sclk 2090MHz healthy)：byte-for-byte match Dev B's numbers，**VERIFIED PASS**
+  - **Dev C (GPU3) — sched hints diagnostic: ABORT-DIAGNOSTIC 永久 close**
+    - 在 V2-RCR 上重新 measure VMCNT-wait cycles：**V2 vmcnt wait 已 LOWER 比 FP8 (-8.8%)**
+    - sched hints 没有任何可发挥空间；剩余 gap 100% 来自 structural VMEM-issue rate 而非 idle stall
+    - **永久关闭 sched-hints / sched_barrier / sched_group_barrier 调优方向**（R18 sched-hint REJECT + R22 V2 baseline reaffirm）
+    - 要继续 close gap 必须做 structural VMEM-issue cuts（preshuffle V3 进一步合并？或 cache-line layout 重设计）
+  - **R22 综合产出 = 2 production commits (dabeffa0 + 9a0d0624 V2 RRR/CRR) + 1 永久 dead-end + V2 paradigm 三 layout 全覆盖**：
+    1. **★ V2-RRR SHIPPED ★ +159.61 TFLOPS / +5.54%**（Reviewer indep verify）→ gap close 43% in 1 round
+    2. **★ V2-CRR SHIPPED ★ +20.55 TFLOPS / +0.76%**（GPU1 sanity re-verify byte-exact）
+    3. **sched hints 路径永久 KILLED**（V2 已 hide 所有 vmcnt waits, 不可能再 hide more）
+    4. **三 layout V2 paradigm 完整覆盖**：RCR/RRR/CRR 全 wired through `dispatch_pq_v2<L>` + `gemm_*_pq_v2` pybind + `MXFP8_*_PRESHUFFLE_V2_RUNTIME=1` default
+  - **R22 confirms**：
+    - V2 layout paradigm 在 3 个 layout 均成功 (R21 RCR + R22 RRR + R22 CRR)
+    - V1→V2 收益排序 RRR (5.54%) > RCR (1.84%) > CRR (0.76%)，与 V1 baseline spills + VMEM-issue rate 排序一致
+    - dual-patch rule (R21 silent FAIL learning): 必须 patch BOTH main loop AND `load_scale_packs_for_pair` helper；R22-A RRR / R22-B CRR 都验证正确
+    - GPU benchmark sanity: 测试前必须 verify GPU sclk (`rocm-smi`) — GPU0 throttled 是 R22 CRR 第一次 verify FAIL 的根因，per-size rebuild 也是必要
+  - **R23+ 路径**（按优先级）：
+    1. **V2 milestone-3 进一步 VMEM-cut**：V2 已 -15.4%；可能还能用 64B-aligned coalesce 或 V3 preshuffle 让 b128+b128 (32B) 替换 b128+b64 (24B)
+    2. **CRR 长期 gap (-15.9%)** 是新焦点（RCR/RRR 已 < 6.3%）：根因仍是 LDS-pipe / col-major A 布局 (R10 census)；A LDS row-major transpose 仍 unattempted as multi-day rewrite
+    3. **不要再** revisit sched hints / SCALE_LDS REPLACE / V1 layout 下 b64 — 全 dead-end
+  - **新经验 (R22 起)**：
+    - **复用 R21 V2 paradigm 跨 layout 极快**: RRR/CRR scale shapes 与 RCR 相同（M-major/N-major × k_blocks），所以 Python `preshuffle_scale_matrix_mfma16_v2_rcr_a/b` 直接复用，仅需 layout-specific kernel template specialization
+    - **GPU sclk verify 必须前置**: rocm-smi 检查 sclk ≥ 2GHz；throttled GPU 给出 misleading FAIL
+    - **dispatcher per-size rebuild**: dispatcher gates on compile-time `M_DIM`，必须按 size rebuild .so
 
 - **第二十一轮评审 (2026-04-17) — ★ V2 SHIPPED ★ Preshuffle V2 milestone-2 PASS (+55.66 TFLOPS / +1.84% / Welch t=23.33) cherry-picked to main 作为 default-on；SCALE_LDS REPLACE 路径永久 KILLED；首次 21 轮 sub-200 gap 关闭**
   - **R21 派 1 Reviewer + 2 Dev (A/B) 并行（GPU0/1/2 隔离）**
