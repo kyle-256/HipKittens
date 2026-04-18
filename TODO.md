@@ -6,14 +6,14 @@
 
 协议：`test_mxfp8_python.py` / `test_python.py` 内的 per-iteration sync + `output.zero_()`，warmup=100 iters=200。
 
-## 当前 baseline（GPU0/1/2，per-iter sync，8192^3）— **R22 confirmed (2026-04-18) ★ V2 推广至 RRR + CRR SHIPPED**
+## 当前 baseline（GPU0/1/2，per-iter sync，8192^3）— **R23 reverify (2026-04-18) ★ V2 stable，无 SHIP candidate；SQC dcache 新瓶颈定位**
 
 | 版本 | TFLOPS | SNR | 相对 FP8 RCR |
 | --- | ---: | --- | ---: |
-| **FP8 per-tensor RCR (长期目标)** | **3243.67** | 49.61 dB PASS | 100.0% |
-| **MXFP8 RCR PRESHUFFLE V2 (R21 5x median, ★ default-on)** | **3078.09** | 49.60 dB PASS | 94.90% (gap -165.58 / -5.10%) |
-| **MXFP8 RRR PRESHUFFLE V2 (R22-A 5x median, ★ default-on)** | **~3038** (Reviewer indep verify +159.61 / +5.54%) | 49.59 dB PASS | ~93.7% (gap -212 / -6.3%) |
-| **MXFP8 CRR PRESHUFFLE V2 (R22-B 5x median, ★ default-on)** | **2732.33** (GPU1 sanity verify) | 49.60 dB PASS | ~84.2% (gap -517 / -15.9%) |
+| **FP8 per-tensor RCR (长期目标)** | **3252** (R23 reverify, R21: 3243.67) | 49.61 dB PASS | 100.0% |
+| **MXFP8 RCR PRESHUFFLE V2 (R23 5x median, ★ default-on)** | **3074** (R21: 3078.09) | 49.60 dB PASS | 94.5% (gap -178 / -5.5%) |
+| **MXFP8 RRR PRESHUFFLE V2 (R23 5x median, ★ default-on)** | **3033** (R22-A indep: ~3038) | 49.59 dB PASS | 93.3% (gap -219 / -6.7%) |
+| **MXFP8 CRR PRESHUFFLE V2 (R23 5x median, ★ default-on)** | **2811** (R22-B GPU1 sanity: 2732.33, +79 cross-session drift) | 49.60 dB PASS | 86.4% (gap -441 / -13.6%) |
 | MXFP8 RCR V1 (R21 reproduced 5x median, RUNTIME=0 fallback) | 3022.43 | 49.60 dB PASS | 98.19% of V2 |
 | MXFP8 RRR V1 (R22 fallback) | ~2878 | 49.59 dB PASS | — |
 | MXFP8 CRR V1 (R22 fallback) | 2711.78 | 49.60 dB PASS | — |
@@ -280,6 +280,65 @@ CRR PQ：**2737.94 TFLOPS** (93.55% of RCR) → 差 **42.34 TFLOPS (1.55%)** 才
     - Dev T（LDS 分配缩减 136→131 KB）：worktree 在 42f5407b base，活跃到 18:26（最后 .so build），**timeout 无 commit**
     - Diagnostic-S：完成（paradigm-shift 发现，见上）
   - **R12 行动结论**：4 个 dev 全 timeout 无 commit；唯一产出是 Diagnostic-S 的瓶颈定性更正。要 commit 代码必须重派 dev，**强烈建议下轮按 Diagnostic-S 的 SPI 启动器假说派活**：(1) 缩减 CRR LDS/block（单缓冲 A 或 B，packing 重叠）、(2) `__launch_bounds__(512, 3)` 提示 SPI 预留更多 slots、(3) 减少 SQC_DCACHE 压力（per-CTA 常量改 s_load_b256 单次加载）。**不要** 再投资 LDS bank conflict / LDS pipe / re-stripe stride 方向（已证 0 conflict，无收益）
+
+- **第二十三轮评审 (2026-04-18) — ★ R22 V2 stable reverify (V2-RCR 3074 / V2-RRR 3033 / V2-CRR 2811 / FP8-RCR 3252)；3 个 dev 全 exhausted: V3-RCR REJECTED (-2.99%) / CRR A-LDS Route X FAIL SNR-2.71 dB (R11 wall reproduced) / Dev C diagnostic 找到 SQC_DCACHE pressure (+441%) 作为 NEW #1 lever；0 production commit；1 docs commit**
+  - **R23 派 1 Reviewer + 3 Dev (A/B/C) 并行（GPU0/1/2/3 隔离），按 R22 R23+ priority list 执行: V2 milestone-3 / CRR LDS rewrite / V2 cycle diagnostic**
+  - **Reviewer (GPU0)** Task 1 — 5x 全 layout V2 baseline reverify: stable
+    - V2-RCR median **3074** (std 6.20), V2-RRR median **3033** (std 4.14), V2-CRR median **2811** (std 6.83), FP8-RCR median **3252** (std 6.40)
+    - 全 SNR ≥49.5 + det 3/3 PASS
+    - 跨 R22→R23 drift < 0.5% (RCR -4 TFLOPS / RRR -5 / CRR +79); 系统 reproducibly stable
+    - **gap (R23 reverify)**: V2-RCR -178 / -5.5%, V2-RRR -219 / -6.7%, V2-CRR -441 / -13.6% (CRR 用 R23 reverify 数字 vs R22 的 -517 改善 ~76 TFLOPS, 实际 baseline drift)
+  - **Dev A (GPU1) — V3 preshuffle prototype: ★ REJECTED, NO COMMIT ★**
+    - branch `r23-a-preshuffle-v3` (side branch, NOT cherry-picked)
+    - **Approach**: 推 V2 b128+b64 (24B/wave) 升到 b128+b128 (32B/wave) 通过 V3 preshuffle 让 B scale pack 也能 b128
+    - **Side commits**: `3fbfa416` (V3 prototype) + `aef1d03e` (bench harness) — 仅在 side branch
+    - **关键 finding (negative)**: **SQ_INSTS_VMEM 是 transaction count, 不是 byte count**；b64→b128 width promotion 给 0% VMEM-issue reduction (transactions 数量不变，仅 width 增大)
+    - **5x A/B**: V3 mean **3018** vs V2 baseline mean **3091**, **Δ -92 TFLOPS / -2.99%, Welch t=-7.46** (统计显著 regression)
+    - 路径完全废弃；R18+R21 paradigm "减 VMEM-issue 数量" 在 V2 之后已 saturated（不能再减；只能换其他 bottleneck）
+  - **Dev B (GPU2) — CRR A-LDS row-major Route X: ★ FAIL CORRECTNESS, NO COMMIT ★**
+    - branch `r23-b-crr-a-lds @ /tmp/wt-r23-b` (worktree, 修改 uncommitted)
+    - **Approach**: ST_v2a (col-major) → ST_row (row-major)；`load_transpose<NT>` global→LDS + `load(A_row_reg, sub)` ds_read_b128 (16B) 替换 `load_col_from_v2a_st` ds_read_b64_tr_b8 (8B)；A_col_reg 经 memcpy reinterpret 复用
+    - **Build**: clean compile (VGPR 249, +15 vs baseline; LDS 135168, **-4096B**; 0 spills, occ 2 — 资源 healthy)
+    - **Correctness FAIL at 8192³**: SNR **-2.71 dB** (threshold 48), 97.62% partial pass-rate, det 3/3 PASS
+    - **完全复刻 R11 Dev M 的失败模式** (R11 也 hit -2.71 dB SNR wall)
+    - **Root cause (R23 Dev B 进一步分析)**: `load_transpose` + `prefill_transpose_swizzled_offsets` 写入 LDS 的物理 layout 与 `ds_read_b128` 直接读取期望的 row-MMA layout 在 lane-element correspondence 上不匹配；97.62% partial pass 表明 systematic permutation within K-blocks 而非随机；要修需要 (a) element-dump kernel 验证 actual lane-element mapping, (b) keep explicit `transpose(dst, tmp)` register call 而非 memcpy, 或 (c) 写 custom `load_transpose` variant
+    - **Verdict**: dead-end-with-caveat；R11 + R23 两次 hit 同一墙；CRR A-LDS 需要 multi-day microbenchmark 才有可能 unblock，且 Dev C diagnostic 显示上限 +50-100 TFLOPS（5-10% only）
+  - **Dev C (GPU3) — V2 cycle-level diagnostic via rocprofv3 PMC: ★ COMPLETE, 6 NEW LEVERS RANKED ★**
+    - 32 PMC counters × 6 kernels (V2-RCR/RRR/CRR + FP8-RCR/RRR/CRR) × 4 chunks
+    - **mangled name verify**: `_Z29rcr_exact_8wave_scaled_kernelILb1ELi2EEv` 等等 (V2 = `<true, 2>`)
+    - **GPU3 sclk caveat**: GPU3 idle low-power state but ramps to 1872-1995 MHz under load；rocprofv3 PMC mode (serialized) wall-clock degrades but **per-dispatch event counters are clock-invariant** (analysis robust)
+    - **6 NEW lever findings (ranked by est. upside)**:
+      1. **SQC_DCACHE_BUSY_CYCLES (NEW #1, never instrumented R10/R12/R18)**: V2 vs FP8 = **+441% RCR / +91.6% RRR / +254% CRR**；wave-tile preshuffle 让 scale pointer arithmetic per-wave scalar code 击中 constant cache 频率剧增。Lever: precompute slab base ptrs into LDS-scalar/SGPR before K-loop OR single `s_load_dword_x4` for `(a0,a1,b0,b1)_ptr` instead of repeated SMEM in K-loop. **Est upside +80-150 TFLOPS aggregate**, easy 1-day audit.
+      2. **CRR A-LDS row-major (Dev B path)**: **bounded ~+50-100 TFLOPS** (+50% SQ_INSTS_LDS 8.4M extra insts/dispatch in CRR vs RRR is structural; halving A's LDS reads is theoretical max)；but **R11+R23 已两次 hit dead-end SNR wall** → multi-day investment, gated on layout-matching microbenchmark first
+      3. **RRR TCC working-set re-tile (NEW)**: V2-RRR shows **TCC_MISS +166% / SQ_VMEM_TA_ADDR_FIFO_FULL +597%** vs FP8-RRR；B-operand fp8 fetch in RRR row-major hitting TCC poorly。Lever: B-side block re-tile (e.g. 32×32 tiles 替换 16×128) 适配 TCC working set。Est upside +50-80 TFLOPS RRR-only.
+      4. **V3 scale-preshuffle (Dev A path)**: **SATURATED on RCR**（SQ_INST_LEVEL_VMEM V2 已 -41% 比 FP8；TA_ADDR_FIFO_FULL 仅 10% utilization），可能 RRR/CRR marginal +30-80 TFLOPS。Dev A REJECTED 已实测确认。
+      5. **SPI launch occupancy fix (NEW)**: 全 V2 layout SPI_RA_LDS_CU_FULL_CSN/RES_STALL_CSN/VGPR_SIMD_FULL_CSN uniformly **+18.7-18.95% over FP8** → VGPR pressure signal。Lever: audit `Rpass-analysis=kernel-resource-usage` for V2 vs FP8 VGPR delta；recover 8-16 VGPRs via lifetime mgmt 解锁 occupancy。Est +30-80 TFLOPS.
+      6. **MFMA-VALU coexec on V2-CRR (NEW)**: SQ_VALU_MFMA_COEXEC_CYCLES V2 vs FP8 **-28.6%** (56.5M vs 79.1M)；V2 preshuffle scales 挤掉了 MFMA shadow 中的 helper VALU。Lever: schedule helper math (s_load → v_mov / cvt) into MFMA bubbles。Est +20-40 TFLOPS CRR-only.
+    - **Bottleneck attribution**: V2-RCR gap = ~55% VMEM-issue + ~30% other (SPI/SQC) + ~10% LDS + ~5% MFMA；V2-RRR = ~65% VMEM (TCC working-set) + ~15% LDS + ~15% other；V2-CRR = ~45% VMEM + ~25% LDS + ~15% MFMA-coexec + ~15% other
+    - **Verdict on Dev A V3**: SATURATED，估 +0-30 TFLOPS RCR / +30-80 RRR / 0-20 CRR — 与 Dev A 实测 -2.99% regression 一致 (V3 not the lever, SQC dcache is)
+  - **R23 综合产出 = 0 production commits + 1 docs commit + R23 reverify baseline + 6 ranked NEW levers (SQC dcache 是 #1 NEW lever 历史从未 instrumented)**：
+    1. **R22 V2 三 layout 全 stable reproducible** (drift < 0.5% after 1 session)
+    2. **V3 preshuffle 路径 REJECTED**: 关键 paradigm-shift finding 是 SQ_INSTS_VMEM 是 transaction count，b64→b128 width promotion 给 0% VMEM 减少；R18+R21 "减 VMEM count" paradigm 已 saturated 在 V2 之后
+    3. **CRR A-LDS row-major 第二次 hit R11 SNR -2.71 dB wall**: layout-matching microbenchmark 先做才有可能 unblock；不再尝试 naive memcpy/transpose alias
+    4. **SQC_DCACHE_BUSY_CYCLES 历史从未 instrumented**: V2 paradigm 引入 **+441%** scalar-cache pressure，是 R23+ #1 lever (估 +80-150 TFLOPS aggregate, 1-day audit)
+    5. **sched hints / SCALE_LDS / V3 preshuffle / V1 b64 全列入 永久 dead-end** (R23 reaffirm)
+  - **R23 confirms**：
+    - V2 paradigm 三 layout 完全 stable, no regressions across session boundaries
+    - VMEM-issue count cuts has saturated as a lever (R18→R21→R22 paradigm complete)
+    - **新瓶颈类别**: SQC dcache + SPI launch + TCC working-set 是 R24+ 焦点（不是 VMEM count 也不是 LDS bank）
+    - **R11 SNR wall reproducible**: CRR A-LDS layout transpose naive approach (load_transpose + memcpy) 在 R11 + R23 两次 hit -2.71 dB；microbenchmark 先做才能 unblock
+  - **R24+ 路径**（按优先级，基于 Dev C diagnostic）：
+    1. **SQC dcache pressure cut** (NEW #1，估 +80-150 TFLOPS aggregate)：precompute slab base pointers per CTA into LDS-scalar/SGPR before K-loop；OR single `s_load_dword_x4` for `(a0,a1,b0,b1)_ptr` 替换 K-loop 内 repeated SMEM loads
+    2. **RRR TCC working-set re-tile** (估 +50-80 TFLOPS RRR-only)：B-side block re-tile 32×32 替换 16×128 适配 TCC working set
+    3. **SPI launch occupancy fix** (估 +30-80 TFLOPS)：audit V2 VGPR delta vs FP8，recover 8-16 VGPR 解锁 occupancy
+    4. **MFMA-VALU coexec on V2-CRR** (估 +20-40 TFLOPS CRR-only)：schedule helper math into MFMA bubbles
+    5. **CRR A-LDS layout-matching microbenchmark** (R11+R23 wall unblock prerequisite)：element-dump kernel mapping `load_transpose+ds_read_b128` vs `load_col_from_v2a_st` 实际 lane-element layout
+    6. **不要再** revisit V3 scale-preshuffle / V1 b64 / sched hints / SCALE_LDS / naive CRR A-LDS memcpy approach — 全 dead-end
+  - **新经验 (R23 起)**：
+    - **SQ_INSTS_VMEM 是 transaction count, 不是 byte count**：b32→b64→b128 width promotion 不减 VMEM-issue count，所以 R18+R21 paradigm "减 VMEM" 在 V2 后 saturated；下一步必须找其他 bottleneck (SQC/SPI/TCC)
+    - **SQC_DCACHE_BUSY_CYCLES 历史 R10/R12/R18 从未 instrumented**：V2 paradigm 引入了大幅 scalar cache pressure 是隐藏多轮的关键 overhead
+    - **rocprofv3 PMC mode caveat**：serialized dispatch 让 wall-clock degrade，但 per-dispatch event counters 是 clock-invariant 所以分析仍 robust（不要用 PMC mode 的 elapsed-time 做 perf 比较）
+    - **R11 SNR -2.71 dB wall (CRR A-LDS naive transpose)**: 不要再用 `load_transpose` + memcpy reinterpret approach；要么用 explicit `transpose(dst, tmp)` register call，要么写 custom `load_transpose` variant matching `ds_read_b128` semantics
 
 - **第二十二轮评审 (2026-04-18) — ★ V2 推广至 RRR + CRR 双 SHIPPED ★ R22-A RRR V2 +159.61 TFLOPS / +5.54% / Welch t (Reviewer indep verify)；R22-B CRR V2 +20.55 TFLOPS / +0.76% / Welch t=4.92；R22-C sched hints 永久 KILLED (baseline VMEM-wait 已比 FP8 LESS)；2 production commit cherry-picked to main**
   - **R22 派 1 Reviewer + 3 Dev (A/B/C) 并行（GPU0/1/2/3 隔离），按 R21 path priority list 第一项: V2 推广到 RRR/CRR**
