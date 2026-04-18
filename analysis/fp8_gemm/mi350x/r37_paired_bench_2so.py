@@ -47,6 +47,13 @@ def read_sclk():
 
 mod_A = load(mod_a, so_a)
 mod_B = load(mod_b, so_b)
+# R39 Dev D defensive guard — duplicate PY_MODULE_NAME causes Python to alias both
+# module objects to the SAME .so, collapsing measured Δ% to noise (~0% / t<1).
+# Build the two .so with distinct -DPY_MODULE_NAME (e.g. *_default and *_b1).
+assert mod_A is not mod_B, (
+    f'PY_MODULE_NAME collision: MOD_A={mod_a!r} MOD_B={mod_b!r} resolved to the same '
+    f'in-memory module — both .so must be built with distinct -DPY_MODULE_NAME')
+assert so_a != so_b, f'SO_A == SO_B == {so_a!r} (paired bench needs two distinct .so)'
 
 print(f'[sclk-pre-preheat] {read_sclk()}', flush=True)
 A_h = torch.randn(16384, 16384, device='cuda', dtype=torch.float16)

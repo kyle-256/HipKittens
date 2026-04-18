@@ -54,6 +54,60 @@ python3 test_mxfp8_python.py 4096 14336 4096
 5. 禁止提交 `*.so`、`*.s`、`*_layout_results_*.json`、`.bak*`、`gpucore.*`、`__pycache__` 等（`.gitignore` 已覆盖）
 6. 每个子 agent 使用不同 `HIP_VISIBLE_DEVICES` 以免 GPU 冲突：Dev A → 0，Dev B → 1，Dev C → 2，Reviewer/formal → 7
 
+## R39 cycle 完结 (2026-04-18) ★★ STRICT-PROMOTE + CRITICAL VALIDATION — 1 STRICT PROMOTE (8B Gate/Up V2-RRR R36→R39 cleared after 3 cycles SHIP-LITE) + ★★ R38 wrap fix `66ef02d8` STRICT-VALIDATED in production (8B-KV +24.57% min Welch t +72.6 through dispatcher path) + MXFP8_DISPATCH_TRACE=1 runtime infra deployed (R39+ mandatory) + ALL 9 production predicates AUDITED (0 new wire-in bugs) + 1 paradigm closure (HB-N shrink REFUTED on V2-RRR via tile-config inspection — early abort, ~1 GPU-hr saved) + 1 NEW methodology gap CLOSED (PY_MODULE_NAME collision in r37_paired_bench_2so.py — defensive assert added)
+
+R39 派 4 dev (A HB-N shrink V2-RRR wide-N, B 4-GPU STRICT promote 8B Gate/Up V2-RRR N_PAIRS=15, C MXFP8_DISPATCH_TRACE=1 runtime tracepoint, D audit ALL 9 production predicates + R38 wrap fix independent revalidate) + Reviewer (9th-cycle baseline + ★★ CRITICAL revalidate R38 wrap fix dispatcher-path + 2 STRICT RECONFIRMs). **1 STRICT PROMOTE + ★★ R38 fix DOUBLE-CONFIRMED + 2 STRICT RECONFIRM + 0 new wire-in bugs + 0 NEW SHIPs (HB-N V2-RRR REFUTED).**
+
+### ★★ Headline result — Reviewer + Dev D R38 wrap fix `66ef02d8` STRICT-VALIDATED in production
+- Reviewer dispatcher-path 8B-KV: GPU3 +26.00% t=+76.2; GPU6 +25.46% t=+72.6; GPU7 +24.57% t=+84.3 (min STRICT PASS by +19.57 / +62.6)
+- Dispatcher trace fires `[HB shrink Stage B1 ACTIVE for N=1024 tall-thin (M=4096, N=1024, K=4096) — R38 wire-in fix]` (predicate `(g.k == 8192 || g.k == 4096)` routes correctly)
+- Dev D independent CONFIRM: GPU5 +27.15% t=+68.0 / GPU0 +27.71% t=+84.3
+- R37 Dev B's +24.96% SHIP claim NOW REPRODUCIBLE through production .so
+
+### ★★ Dev B STRICT PROMOTE `85fd9418` (8B Gate/Up V2-RRR cleared after 3 cycles SHIP-LITE)
+- 4-GPU @ N_PAIRS=20 + PREHEAT=120: GPU2 +5.17% t=+21.45; GPU3 +5.13% t=+12.07; GPU6 +5.66% t=+17.62; GPU7 +5.46% t=+12.89
+- min Δ% +5.131% / min Welch t +12.066 (STRICT PASS by +0.131 / +2.066)
+- Cross-cycle Δ% rock-solid: +5.025 (R36) / +6.55 (R37) / +5.05 (R38) / +5.13 (R39)
+- R38 Dev D statistical-power hypothesis CONFIRMED on 2nd V2-RRR predicate. Welch t scaled cleanly: R36 t=6.28 (n=10) → R39 t=12.07 (n=40)
+- N_PAIRS=15 was insufficient; N_PAIRS=20 + PREHEAT=120 is new R40+ default for boundary-band V2-RRR (+5-6% Δ)
+
+### ★ Dev C `021d5a13` MXFP8_DISPATCH_TRACE=1 runtime infrastructure (R39+ mandatory)
+- 17 distinct tracepoints catalogued (8 V2-RCR/V2-RRR advisories + 2 hbshrink B1 routes + hbnshrink + default exact_8wave + rect-fast + V1 fallbacks)
+- R38 wrap fix smoke-test PASS at deploy: production .so on 8B-KV emits `CRR-V2-HBSHRINK-B1-8B-KV (R38 wrap fix 66ef02d8)`
+- Zero default-build overhead: stderr is 0 bytes when env unset; nm-gate OVERALL: PASS unchanged
+- **R40+ MANDATORY**: all Phase 2 verification runs with `MXFP8_DISPATCH_TRACE=1 ... 2> trace.err` and greps for expected predicate; empty match = CRITICAL bug abort
+
+### ★ Dev D `010d64e0` predicate audit (0 new wire-in bugs)
+- All 9 production predicates AUDITED: 8 V2-RRR/V2-RCR advisories + 2 HB shrink B1 kernel-swaps. ALL 9 fire correctly through dispatcher
+- R38 Reviewer's 8B-KV catch was the only wire-in bug in R28-R38
+- NEW methodology bug found (NOT wire-in): `r37_paired_bench_2so.py` with same `PY_MODULE_NAME` for both .so → Python aliases both module objects to SAME .so → measured Δ% collapses to noise (+0.10% t<1)
+- **Defensive guard added in R39 wrap**: `assert mod_A is not mod_B` + `assert so_a != so_b` in `r37_paired_bench_2so.py`. Future paired-bench with module-name collision aborts with clear error
+
+### Dev A `7724ab6f` (NO SHIP / NEGATIVE — REFUTED via tile-config inspection, ~1 GPU-hr saved)
+- V2-RRR `rrr_mxfp8_exact_8wave_fastpath.inc:18-19`: BLK=256, BK=128, WARPS_M=2, WARPS_N=4 — N-partition geometry byte-identical to V2-CRR
+- Per-warp accumulator (RBM=64 × RBN=32) byte-identical to V2-CRR
+- Only difference is A-fetch layout (row-shared B + transpose vs col-shared B); N-partition geometry identical → R38 Dev A's V2-CRR refute mechanism (bandwidth-bound, WG-grid-doubling, non-load-bearing accumulator drop) transfers directly
+- R34 Dev B's V2-RRR > V2-CRR +5-6% makes RRR *more* bandwidth-bound, not less — even worse outlook
+- Per R39 task spec time-box rule: abort early before scaffold/build. R40+ followup: speculative WARPS_N=2 compound bet (only path that could relieve bandwidth pressure)
+
+### Reviewer Phase 1 `fd484ce8` (9th-cycle baseline)
+- R39 baseline 768.68 TF (median-of-4 GPU2/3/6/7); 9-cycle drift envelope 766-787 TF, 2.67% spread (under 3% threshold)
+- GPU2 high outlier +2.87% above other-3; conservative ship-claim baseline = min-of-4 = 763.74 TF
+- 3-gate orchestrate clean PASS on all 4 GPUs (no G2a retries needed)
+
+### Reviewer Phase 3 STRICT RECONFIRMs
+- R37 Dev A HB shrink B1 70B-KV: GPU3 +29.74% / GPU6 +28.38% — **6/6 cross-cycle measurements at +28-30%** ★★
+- R38 Dev C 8B-Down V2-RRR: GPU0 +7.65% / GPU4 +7.65% — Δ% rock-solid R36 +6.66 / R37 +7.25 / R38 +7.42 / R39 +7.65 (Welch t below 10 is expected 2-GPU N=5 statistical-power limit, not signal weakness)
+
+### R39 paradigm corrections (1 → cumulative 38 closed levers; R32:21 + R33:5 + R34:4 + R35:1 + R36:2 + R37:2 + R38:2 + R39:1)
+- HB-N shrink REFUTED on V2-RRR wide-N via tile-config inspection (no benches needed, V2-CRR refute transfers byte-for-byte). Only remaining HB-N path is WARPS_N=2 compound bet (deferred to R40+)
+
+### R40+ priority (rebuilt from R39)
+1. 【high】4-GPU STRICT-promote remaining R28-R38 SHIP-LITE cells (8B Up V2-RRR mirror; V2-RCR predicates) using N_PAIRS=20+PREHEAT=120 + R38 orchestrate
+2. 【medium】HB-N shrink V2-RRR with WARPS_N=2 compound — only structural lever that could relieve bandwidth pressure for HB-N geometry
+3. 【medium】V2-RCR advisory audit through MXFP8_DISPATCH_TRACE — verify each of 8 advisories fires for target shape under autotune-default invocation
+4. 【methodology】All R29-R38 + R39 NEW: MXFP8_DISPATCH_TRACE=1 mandatory in Phase 2; paired-bench .so MUST have distinct -DPY_MODULE_NAME (defensive assert enforced); STRICT-promote V2-RRR boundary-band defaults to N_PAIRS=20 + PREHEAT=120
+
 ## R38 cycle 完结 (2026-04-18) ★★ STRICT-PROMOTE + CRITICAL BUGFIX — 1 STRICT PROMOTE (8B-Down V2-RRR R36→R38) + 1 CRITICAL FIX (R37 Dev B 8B-KV production wire-in was dead) + 2 paradigm closures (HB-N shrink REFUTED on V2-CRR wide-N) + R38 NEW G1' fallback orchestrate + R38 NEW nm-based dead-code gate + 1 NEW methodology gap (predicate-fanout requires dispatcher-path verification)
 
 R38 派 4 dev (A HB-N shrink prototype 8B GU + 70B GU, B HB-N shrink fan-out 70B GU + 8B-Down, C 4-GPU STRICT promote 8B-Down V2-RRR N_PAIRS=15, D R37 NEW orchestrate G1' + nm-gate scripts) + Reviewer (8th-cycle baseline + Phase 2 RECONFIRM R37 SHIPs). **1 STRICT PROMOTE + 1 STRICT RECONFIRM + 0 NEW SHIPs (HB-N REFUTED) + 1 CRITICAL FAIL caught + FIXED in cycle wrap.**
