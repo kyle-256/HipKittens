@@ -46,6 +46,26 @@
 #define CRR_EXACT_INTERLEAVE_B1_LDS 1
 #endif
 
+// R31 Dev B: LDS single-buffer experiment.
+// Default 0 = baseline (As[2][2] + Bs[2][2], 139264 B/block, occ 1 block/CU).
+// 1 = collapse outer dim to [1][2], cutting LDS to ~69632 B/block (fits 2
+//     blocks/CU on gfx950 163840 B/CU). Loses K-pipelining (no more
+//     cross-iter prefetch into the toc slot); this experiment measures
+//     whether the occupancy gain pays for the latency-hiding loss.
+#ifndef MXFP8_CRR_LDS_SINGLE_BUFFER
+#define MXFP8_CRR_LDS_SINGLE_BUFFER 0
+#endif
+
+#if MXFP8_CRR_LDS_SINGLE_BUFFER
+#  define CRR_LDS_OUTER 1
+#  define CRR_LDS_TIC   0
+#  define CRR_LDS_TOC   0
+#else
+#  define CRR_LDS_OUTER 2
+#  define CRR_LDS_TIC   tic
+#  define CRR_LDS_TOC   toc
+#endif
+
 #ifndef CRR_EXACT_B1_LDS_INSERT_AFTER
 #define CRR_EXACT_B1_LDS_INSERT_AFTER 4
 #endif
@@ -205,8 +225,8 @@ void crr_exact_8wave_scaled_kernel(const layout_globals g)
     const int k_iters = g.k / BK;
     const int blocks_per_col = g.n / BLK;
 
-    __shared__ ST_crr_a As[2][2];
-    __shared__ ST_crr_b Bs[2][2];
+    __shared__ ST_crr_a As[CRR_LDS_OUTER][2];
+    __shared__ ST_crr_b Bs[CRR_LDS_OUTER][2];
 
     A_col_reg a;
     B_col_reg b0, b1;
@@ -493,6 +513,94 @@ void crr_exact_8wave_scaled_kernel(const layout_globals g)
     };
 #endif
 
+#if MXFP8_CRR_LDS_SINGLE_BUFFER
+    // R31 Dev B: single-buffered LDS path. No tic/toc, no cross-iter prefetch.
+    // Each K iteration: synchronously load all 4 tiles → barrier → MMA chain.
+    // Targets occupancy=2 blocks/CU (LDS ~69632 B vs 81920 B threshold).
+    int tic = 0; (void)tic;
+    int toc = 0; (void)toc;
+    // Initial load of k=0 only.
+    global_load_b(Bs[0][0], bc * 2, 0);
+    global_load_a(As[0][0], br * 2, 0);
+    global_load_b(Bs[0][1], bc * 2 + 1, 0);
+    global_load_a(As[0][1], br * 2 + 1, 0);
+    asm volatile("s_waitcnt vmcnt(0)");
+    __builtin_amdgcn_s_barrier();
+
+    TK_PRAGMA_UNROLL(CRR_MAIN_UNROLL)
+    for (int k = 0; k < k_iters - 1; k++) {
+        if ((k & 1) == 0) {
+            load_raw_scales(k >> 1);
+        } else {
+            #pragma unroll
+            for (int g = 0; g < crr_a_pack_count; g++) {
+                a0_scale_packs[g] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(a0_scale_packs[g]) >> 16);
+                a1_scale_packs[g] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(a1_scale_packs[g]) >> 16);
+            }
+            #pragma unroll
+            for (int g = 0; g < crr_b_pack_count; g++) {
+                b0_scale_packs[g] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(b0_scale_packs[g]) >> 16);
+                b1_scale_packs[g] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(b1_scale_packs[g]) >> 16);
+            }
+        }
+        // Read all four LDS tiles into the MMA register operands.
+        load_b(b0, Bs[0][0], wn);
+        load_b(b1, Bs[0][1], wn);
+        load_a(a, As[0][0], wm);
+        asm volatile("s_waitcnt lgkmcnt(0)");
+        CRR_MMA_BEGIN();
+        crr_mma_scaled_from_packs_fixed_phase(cA, a, b0, a0_scale_packs, b0_scale_packs);
+        crr_mma_scaled_from_packs_fixed_phase(cB, a, b1, a0_scale_packs, b1_scale_packs);
+        CRR_MMA_END();
+        load_a(a, As[0][1], wm);
+        asm volatile("s_waitcnt lgkmcnt(0)");
+        CRR_MMA_BEGIN();
+        crr_mma_scaled_from_packs_fixed_phase(cC, a, b0, a1_scale_packs, b0_scale_packs);
+        crr_mma_scaled_from_packs_fixed_phase(cD, a, b1, a1_scale_packs, b1_scale_packs);
+        CRR_MMA_END();
+        // Barrier so all waves are done reading LDS, then issue next-iter loads.
+        __builtin_amdgcn_s_barrier();
+        global_load_b(Bs[0][0], bc * 2, k + 1);
+        global_load_a(As[0][0], br * 2, k + 1);
+        global_load_b(Bs[0][1], bc * 2 + 1, k + 1);
+        global_load_a(As[0][1], br * 2 + 1, k + 1);
+        asm volatile("s_waitcnt vmcnt(0)");
+        __builtin_amdgcn_s_barrier();
+    }
+    // Final iter: data from last prefetch of k=k_iters-1 is in [0].
+    {
+        const int k = k_iters - 1;
+        if ((k & 1) == 0) {
+            load_raw_scales(k >> 1);
+        } else {
+            #pragma unroll
+            for (int g = 0; g < crr_a_pack_count; g++) {
+                a0_scale_packs[g] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(a0_scale_packs[g]) >> 16);
+                a1_scale_packs[g] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(a1_scale_packs[g]) >> 16);
+            }
+            #pragma unroll
+            for (int g = 0; g < crr_b_pack_count; g++) {
+                b0_scale_packs[g] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(b0_scale_packs[g]) >> 16);
+                b1_scale_packs[g] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(b1_scale_packs[g]) >> 16);
+            }
+        }
+        load_b(b0, Bs[0][0], wn);
+        load_b(b1, Bs[0][1], wn);
+        load_a(a, As[0][0], wm);
+        asm volatile("s_waitcnt lgkmcnt(0)");
+        CRR_MMA_BEGIN();
+        crr_mma_scaled_from_packs_fixed_phase(cA, a, b0, a0_scale_packs, b0_scale_packs);
+        crr_mma_scaled_from_packs_fixed_phase(cB, a, b1, a0_scale_packs, b1_scale_packs);
+        CRR_MMA_END();
+        load_a(a, As[0][1], wm);
+        asm volatile("s_waitcnt lgkmcnt(0)");
+        CRR_MMA_BEGIN();
+        crr_mma_scaled_from_packs_fixed_phase(cC, a, b0, a1_scale_packs, b0_scale_packs);
+        crr_mma_scaled_from_packs_fixed_phase(cD, a, b1, a1_scale_packs, b1_scale_packs);
+        CRR_MMA_END();
+        __builtin_amdgcn_s_barrier();
+    }
+#else
     int tic = 0, toc = 1;
     global_load_b(Bs[tic][0], bc * 2, 0);
     global_load_a(As[tic][0], br * 2, 0);
@@ -643,6 +751,7 @@ void crr_exact_8wave_scaled_kernel(const layout_globals g)
         CRR_MMA_END();
         __builtin_amdgcn_s_barrier();
     }
+#endif // MXFP8_CRR_LDS_SINGLE_BUFFER
 
     if (wm == 0) {
         __builtin_amdgcn_s_barrier();
