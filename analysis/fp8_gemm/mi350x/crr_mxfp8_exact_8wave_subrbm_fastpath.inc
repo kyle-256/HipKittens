@@ -86,6 +86,29 @@ static_assert(CRR_SUBRBM_M_STRIDES == 4,
 using A_col_reg_subrbm = rt_fp8e4m3<BK, RBM_SUB, col_l, rt_128x16_s>;  // 128x32
 using B_col_reg_subrbm = rt_fp8e4m3<BK, RBN_SUB, col_l, rt_128x16_s>;  // 128x32
 
+// R34 Dev D Stage 2a: row-layout aliases for sub-RBM operand tiles.
+// These are the bridge that lets us reinterpret_cast a col-layout
+// register tile to the row-layout shape the MFMA scaled intrinsic
+// expects (mirrors A_row_reg/B_row_reg + the reinterpret bridge in
+// crr_mma_scaled_base at kernel_mxfp8_layouts.cpp:1378-1388).
+//
+// With RBM_SUB=32:
+//   A_row_reg_subrbm: tiles[rows/16=2][cols/128=1] = tiles[2][1]
+//   A_col_reg_subrbm: tiles[rows/128=1][cols/16=2] = tiles[1][2]
+//   B_row_reg_subrbm: tiles[2][1]
+//   B_col_reg_subrbm: tiles[1][2]
+// Sizes/alignment must match for the alias to be safe. Asserted below.
+using A_row_reg_subrbm = rt_fp8e4m3<RBM_SUB, BK, row_l, rt_16x128_s>;  // 32x128
+using B_row_reg_subrbm = rt_fp8e4m3<RBN_SUB, BK, row_l, rt_16x128_s>;  // 32x128
+static_assert(sizeof(A_row_reg_subrbm) == sizeof(A_col_reg_subrbm),
+              "Sub-RBM A row/col aliases must have identical size");
+static_assert(alignof(A_row_reg_subrbm) == alignof(A_col_reg_subrbm),
+              "Sub-RBM A row/col aliases must have identical alignment");
+static_assert(sizeof(B_row_reg_subrbm) == sizeof(B_col_reg_subrbm),
+              "Sub-RBM B row/col aliases must have identical size");
+static_assert(alignof(B_row_reg_subrbm) == alignof(B_col_reg_subrbm),
+              "Sub-RBM B row/col aliases must have identical alignment");
+
 // Pack counts for sub-RBM. crr_a_pack_count_subrbm = RBM_SUB / 32 = 1
 // (was 2 at RBM=64). This is the load-loop count delta that breaks the
 // existing scale slab math without a host-side preshuffle update.
@@ -100,22 +123,17 @@ static_assert(crr_a_pack_count_subrbm == 1,
 // No new helper needed for Stage 1b (the existing template-on-RT helpers
 // dispatch on the destination tile size).
 
-// Sub-RBM mma_scaled_base: forwards to the existing column-major MMA
-// dispatcher used by crr_mma_scaled_base. The 16x16x128 MFMA intrinsic
-// shape is INDEPENDENT of the surrounding accumulator tile size, so the
-// per-quadrant call is identical — only the tile-index range differs
-// (acc_h = RBM_SUB/16 = 2 instead of 4, acc_w = RBN_SUB/16 = 2 unchanged).
+// Sub-RBM mma_scaled_base: same per-quadrant 16x16x128 scaled MFMA
+// intrinsic as crr_mma_scaled_base, only the surrounding tile container
+// shape changes. The intrinsic is invoked on individual sub-tiles
+// (acc.tiles[n][m], a_row.tiles[n][0], b_row.tiles[m][0] — all 16x16
+// or 16x128 base tiles), so the call signature is identical to the
+// RBM=64 version; we just use the sub-RBM row aliases.
 //
-// Stage 1b: marked TODO(R34) — the existing crr_mma_scaled_base relies
-// on `reinterpret_cast<const A_row_reg&>(a)` to bridge the col-major
-// register-tile layout to the MMA's row-major operand expectation, and
-// A_row_reg is hardcoded to RBM=64. A sub-RBM version requires a parallel
-// A_row_reg_subrbm = rt_fp8e4m3<RBM_SUB, BK, row_l, rt_16x128_s>` and
-// associated mma_ABt_base_scaled overload that accepts the smaller tile.
-// For Stage 1b we only declare the helper signature so future authors
-// see the call site; the body is left as a deliberate compile failure
-// when MXFP8_CRR_SUBRBM_PROBE=1, demonstrating the static_assert chain
-// that fires (see r33d_findings.md Stage 1a row "crr_mma_scaled_base").
+// R34 Dev D Stage 2a: type bridge wired in. The reinterpret_cast pair
+// mirrors crr_mma_scaled_base (kernel_mxfp8_layouts.cpp:1378-1388).
+// The `n` argument now ranges over [0, RBM_SUB/16) = [0, 2), and `m`
+// ranges over [0, RBN_SUB/16) = [0, 2) — both halved from RBM=64.
 template<int opsel_a, int opsel_b>
 __device__ __forceinline__ void crr_mma_scaled_base_subrbm(
     rt_fl<RBM_SUB, RBN_SUB, col_l, rt_16x16_s>& acc,
@@ -126,27 +144,19 @@ __device__ __forceinline__ void crr_mma_scaled_base_subrbm(
     const fp8e8m0_4 a_scale_pack,
     const fp8e8m0_4 b_scale_pack)
 {
-#if MXFP8_CRR_SUBRBM_PROBE
-    // PROBE=1 mode: try to wire to the existing intrinsic. Will fail to
-    // resolve mma_AB_base_scaled because A_col_reg_subrbm doesn't match
-    // any registered operand-tile shape. Documenting the failure mode is
-    // the intent of Stage 1b probe.
-    mma_AB_base_scaled<opsel_a, opsel_b>(
+    // Bridge col-layout → row-layout so the row-row mma_ABt_base_scaled
+    // intrinsic resolves. Sub-RBM row aliases have identical size /
+    // alignment to their col counterparts (asserted at type definition).
+    const auto& a_row = reinterpret_cast<const A_row_reg_subrbm&>(a);
+    const auto& b_row = reinterpret_cast<const B_row_reg_subrbm&>(b);
+    mma_ABt_base_scaled<opsel_a, opsel_b>(
         acc.tiles[n][m],
-        a.tiles[0][n],
-        b.tiles[0][m],
+        a_row.tiles[n][0],
+        b_row.tiles[m][0],
         acc.tiles[n][m],
         a_scale_pack,
         b_scale_pack
     );
-#else
-    // Stage 1b non-probe build: helper is dead (kernel stub does an
-    // early return, never calls this). The body uses the parameters to
-    // suppress unused-warnings while keeping the helper signature stable
-    // for future Stage 2 implementation.
-    (void)acc; (void)a; (void)b; (void)n; (void)m;
-    (void)a_scale_pack; (void)b_scale_pack;
-#endif
 }
 
 // Sub-RBM mma_scaled fixed-phase wrapper. RBM_SUB=32 → acc_h = RBM_SUB/16 = 2
@@ -192,22 +202,51 @@ __device__ __forceinline__ void crr_mma_scaled_phase_subrbm(
     crr_mma_scaled_base_subrbm<hi, hi>(acc, a, b, 1, 1, a_scale_packs[0], b_scale_packs[0]);
 }
 
-// Sub-RBM CRR exact 8-wave scaled kernel STUB.
-// Stage 1b: emits the symbol with all sub-RBM types instantiated so the
-// compiler validates them, but the K-loop body is left as a TODO(R34).
-// The stub returns immediately after declaring the new register tile
-// types and accumulators; this is sufficient to confirm:
-//   (a) sub-RBM types compile cleanly
-//   (b) sub-RBM mma helper chain instantiates
-//   (c) symbol appears in the .so
-//   (d) NO call site is wired in the dispatcher (so it's dead code in
-//       the default and sub-RBM builds)
+// Sub-RBM CRR exact 8-wave scaled kernel — Stage 2b skeleton (R34 Dev D).
 //
-// Stage 2 (R34+) will:
-//   1. Implement the 4-stride M-loop per warp (HB / RBM_SUB = 4).
-//   2. Update host-side scale preshuffle to match the new slab geometry
-//      (slab_bytes_a = 32 * padded_k_blocks instead of 128).
-//   3. Re-run R31/R32 SB pipelining matrix on this kernel.
+// This is a full kernel body translated from crr_exact_8wave_scaled_kernel
+// with the following changes:
+//   * RBM_SUB=32 throughout (was 64) — accumulator + operand register
+//     tile types use the _subrbm aliases.
+//   * Per-warp M coverage is now 4 strides × RBM_SUB=32 = 128 rows = HB
+//     (was 2 strides × 64 = 128). We therefore need 4 sets of sub-RBM
+//     accumulators per (cB-or-cD, wn-quadrant) pair instead of 2. The
+//     accumulator vector layout is:
+//         cA[0..3] : top-half (half=0) × N-tile-left  (b0)
+//         cB[0..3] : top-half (half=0) × N-tile-right (b1)
+//         cC[0..3] : bot-half (half=1) × N-tile-left
+//         cD[0..3] : bot-half (half=1) × N-tile-right
+//     Each cA[s] is 16 VGPR/wave (was 32 for the RBM=64 cA), so total
+//     accumulator footprint is 4 × 4 × 16 = 256 VGPR/wave — actually
+//     IDENTICAL to the RBM=64 footprint of 4 × 32 = 128 VGPR/wave per
+//     warp **wait no**: with double-buffered LDS the original kernel
+//     uses 4 accumulators × 32 VGPR = 128 VGPR for accumulators total
+//     per warp. Sub-RBM uses 16 accumulators × 16 VGPR = 256 VGPR — that
+//     is DOUBLE. The naive sub-RBM kernel therefore SPILLS more, not
+//     less. The R32 Dev B "64 VGPR savings" claim only holds if we keep
+//     the per-warp accumulator count at 4 (i.e., keep WARPS_M=2 covering
+//     HB=64 instead of HB=128). That requires a DIFFERENT structural
+//     change: WARPS_M=4 with a tighter block, OR fewer accumulators per
+//     warp with epilogue store-redo. NOT a simple operand-tile shrink.
+//
+// **Stage 2b finding (R34 Dev D, day 1):** the operand-tile shrink alone
+// does not save accumulator VGPR — it merely shifts where the budget is
+// spent (operand registers down 16, accumulator registers up 128 per
+// warp net). This is a structural correction to the R32 Dev B / R33 Dev D
+// scaffolding hypothesis. The real path past the structural ceiling is
+// either (a) reduce WARPS_M coverage (smaller block in M), or (b) reuse
+// fewer accumulators with intermediate stores. Neither is a "type bridge"
+// change.
+//
+// Despite the corrected hypothesis, the Stage 2 SCAFFOLDING is still
+// useful: it gives the next R-cycle author a working sub-RBM kernel
+// body skeleton + verified type bridge, so they can pivot to the real
+// lever (smaller block geometry) without re-doing the type plumbing.
+//
+// Below is the full skeleton kernel: 4-stride M-loop + 8 accumulators
+// per warp, demonstrating end-to-end type validation. Dispatch is NOT
+// wired (the host-side preshuffle audit in §4.3 of r33d_findings.md is
+// still required for SCALE_VERSION=2).
 template<bool PRESHUFFLED_QUANT, int SCALE_VERSION = 2>
 __global__ __launch_bounds__(_NUM_THREADS, GEMM_MIN_BLOCKS_PER_CU)
 void crr_exact_8wave_scaled_subrbm_kernel(const layout_globals g)
@@ -218,53 +257,202 @@ void crr_exact_8wave_scaled_subrbm_kernel(const layout_globals g)
     constexpr int crr_a_pack_count_local = crr_a_pack_count_subrbm;  // 1
     constexpr int crr_b_pack_count_local = crr_b_pack_count_subrbm;  // 1
 
-    // Suppress unused-warning for stub body (Stage 1b only).
-    (void)g;
+    const int k_iters = g.k / BK;
+    const int blocks_per_col = g.n / BLK;
 
-    // Instantiate the new register tile types so the compiler validates
-    // them and emits the relevant MFMA intrinsic shapes. These are the
-    // load-bearing types whose VGPR cost is the entire reason for this
-    // kernel:
-    //   A_col_reg_subrbm: 128x32 fp8e4m3 = 4KB tile / 64 lanes = 64 B/lane
-    //                                    = 16 VGPR/wave (was 32 at RBM=64)
-    //   cA/cB/cC/cD:      32x32 fp32     = 4KB tile / 64 lanes = 64 B/lane
-    //                                    = 16 VGPR/wave (was 32 at RBM=64)
-    //   Total cA+cB+cC+cD = 64 VGPR/wave (was 128 — saving 64 VGPR exactly
-    //   matches R32 Dev B's spill threshold).
-    A_col_reg_subrbm a_subrbm;
-    B_col_reg_subrbm b0_subrbm, b1_subrbm;
-    rt_fl<RBM_SUB, RBN_SUB, col_l, rt_16x16_s> cA_sub, cB_sub, cC_sub, cD_sub;
-    zero(cA_sub);
-    zero(cB_sub);
-    zero(cC_sub);
-    zero(cD_sub);
-    (void)a_subrbm; (void)b0_subrbm; (void)b1_subrbm;
+    // LDS tiles unchanged from RBM=64 path (As/Bs are block-wide tiles,
+    // independent of operand-register tile geometry).
+    __shared__ ST_crr_a As[2][2];
+    __shared__ ST_crr_b Bs[2][2];
 
-    // PROBE=1 only: touch one mma helper to force instantiation. Default
-    // PROBE=0 leaves the kernel as a pure type-validation stub (kernel
-    // body is empty after the zero(cA/cB/cC/cD) sequence above, so the
-    // resource report will not show any MFMA usage but the type
-    // instantiations are validated by the compiler).
-#if MXFP8_CRR_SUBRBM_PROBE
-    {
-        fp8e8m0_4 a_scale_packs_dummy[crr_a_pack_count_local] = {};
-        fp8e8m0_4 b_scale_packs_dummy[crr_b_pack_count_local] = {};
-        crr_mma_scaled_from_packs_fixed_phase_subrbm(
-            cA_sub, a_subrbm, b0_subrbm, a_scale_packs_dummy, b_scale_packs_dummy);
-        crr_mma_scaled_phase_subrbm<0>(
-            cB_sub, a_subrbm, b0_subrbm, a_scale_packs_dummy, b_scale_packs_dummy);
-        crr_mma_scaled_phase_subrbm<1>(
-            cC_sub, a_subrbm, b0_subrbm, a_scale_packs_dummy, b_scale_packs_dummy);
+    // Sub-RBM operand tiles: 16 VGPR/wave each (was 32 at RBM=64).
+    A_col_reg_subrbm a_sub;
+    B_col_reg_subrbm b0_sub, b1_sub;
+
+    // Sub-RBM accumulators: 4 strides per warp × 2 N-tiles × 2 halves =
+    // 16 accumulators of size 32x32 = 16 VGPR/wave each.
+    rt_fl<RBM_SUB, RBN_SUB, col_l, rt_16x16_s>
+        cA[CRR_SUBRBM_M_STRIDES],   // half=0 × b0
+        cB[CRR_SUBRBM_M_STRIDES],   // half=0 × b1
+        cC[CRR_SUBRBM_M_STRIDES],   // half=1 × b0
+        cD[CRR_SUBRBM_M_STRIDES];   // half=1 × b1
+    #pragma unroll
+    for (int s = 0; s < CRR_SUBRBM_M_STRIDES; ++s) {
+        zero(cA[s]); zero(cB[s]); zero(cC[s]); zero(cD[s]);
     }
-#endif
 
-    // Stage 1b stub: early return. Stage 2 (R34+) replaces this with the
-    // K-loop body translated from crr_exact_8wave_scaled_kernel with:
-    //   - the 4-stride M-loop per warp
-    //   - sub-RBM types throughout
-    //   - V2 scale slab geometry updated for slab_bytes_a = 32 *
-    //     padded_k_blocks (from PC_A=1 instead of PC_A=4)
-    return;
+    const int bid = blockIdx.x;
+    const int br = bid / blocks_per_col;
+    const int bc = bid % blocks_per_col;
+    const int wm = warpid() / WARPS_N;
+    const int wn = warpid() % WARPS_N;
+
+    const int lane_nonk = kittens::laneid() % 16;
+    const int lane_kblk = kittens::laneid() / 16;
+    const uint32_t lane_scale_byte_offset =
+        (static_cast<uint32_t>(lane_kblk) << 6) |
+        (static_cast<uint32_t>(lane_nonk) << 2);
+
+    // Per-stride scale base offset (M-coord). With sub-RBM each warp
+    // covers 4 contiguous 32-row strides starting at wm * HB. The half
+    // index (0 or 1) selects which 128-row half of the BLK=256 block the
+    // warp's coverage falls within (warp wm=0 → half=0 base, wm=1 → half=1).
+    auto crr_scale_a_base_sub = [&](int half, int stride) {
+        return br * BLK + half * (BLK / 2) + wm * HB + stride * RBM_SUB;
+    };
+    auto crr_scale_b_base = [&](int half) {
+        return bc * BLK + half * (BLK / 2) + wn * RBN;
+    };
+
+    // Stage 2b NOTE: V1 / V2 scale fetch path translation deferred.
+    // The V1 row-base path needs 4 sets of bases (one per stride) per
+    // half — straightforward but tedious. The V2 slab-SRD path requires
+    // the host-side preshuffle update documented in r33d_findings.md
+    // §4.3 (slab_bytes_a re-tiled for PC_A=1 × 4 strides per warp).
+    // Both are wire-up work, not type-system work; deferred to R35+.
+    //
+    // For the Stage 2b skeleton we instantiate a representative scale
+    // pack vector (per-stride) to validate the type chain through to
+    // mma_ABt_base_scaled — this exercises the type bridge end-to-end
+    // and produces a kernel symbol with realistic VGPR/LDS resource
+    // numbers we can compare against the RBM=64 baseline.
+    fp8e8m0_4 a_scale_packs_per_stride[CRR_SUBRBM_M_STRIDES][crr_a_pack_count_local];
+    fp8e8m0_4 b0_scale_packs[crr_b_pack_count_local];
+    fp8e8m0_4 b1_scale_packs[crr_b_pack_count_local];
+    #pragma unroll
+    for (int s = 0; s < CRR_SUBRBM_M_STRIDES; ++s) {
+        for (int p = 0; p < crr_a_pack_count_local; ++p) {
+            a_scale_packs_per_stride[s][p] = std::bit_cast<fp8e8m0_4>(uint32_t{0x7F7F7F7F});
+        }
+    }
+    #pragma unroll
+    for (int p = 0; p < crr_b_pack_count_local; ++p) {
+        b0_scale_packs[p] = std::bit_cast<fp8e8m0_4>(uint32_t{0x7F7F7F7F});
+        b1_scale_packs[p] = std::bit_cast<fp8e8m0_4>(uint32_t{0x7F7F7F7F});
+    }
+
+    // Prefill swizzled offsets for global -> shared loads (unchanged
+    // from RBM=64 path — these are block-wide tile loaders).
+    constexpr int bptA = ST_crr_a::underlying_subtile_bytes_per_thread;
+    constexpr int bpmA = bptA * _NUM_THREADS;
+    constexpr int mptA = ST_crr_a::rows * ST_crr_a::cols * sizeof(fp8e4m3) / bpmA;
+    uint32_t soA[mptA];
+    G::prefill_swizzled_offsets(As[0][0], g.a, soA);
+    constexpr int bptB = ST_crr_b::underlying_subtile_bytes_per_thread;
+    constexpr int bpmB = bptB * _NUM_THREADS;
+    constexpr int mptB = ST_crr_b::rows * ST_crr_b::cols * sizeof(fp8e4m3) / bpmB;
+    uint32_t soB[mptB];
+    G::prefill_swizzled_offsets(Bs[0][0], g.b, soB);
+
+    auto a_co = [&](int s, int k) -> coord<ST_crr_a> { return {0, 0, k, s}; };
+    auto b_co = [&](int s, int k) -> coord<ST_crr_b> { return {0, 0, k, s}; };
+    auto global_load_a = [&](ST_crr_a& tile, int s, int k) {
+        G::load(tile, g.a, a_co(s, k), soA);
+    };
+    auto global_load_b = [&](ST_crr_b& tile, int s, int k) {
+        G::load(tile, g.b, b_co(s, k), soB);
+    };
+    // Per-stride sub-RBM A loader: col_start = wm * HB + stride * RBM_SUB.
+    // This loads RBM_SUB=32 rows of A starting at the warp's M-base + the
+    // intra-warp stride. Each warp's HB=128 coverage decomposes into 4
+    // such 32-row strides.
+    auto load_a_sub = [&](A_col_reg_subrbm& dst, ST_crr_a& tile, int stride) {
+        load_col_from_v2a_st(dst, tile, wm * HB + stride * RBM_SUB);
+    };
+    auto load_b_sub = [&](B_col_reg_subrbm& dst, ST_crr_b& tile) {
+        load_col_from_v2_st(dst, tile, wn * RBN);
+    };
+
+    // Single-buffered LDS path (mirrors MXFP8_CRR_LDS_SINGLE_BUFFER=1
+    // mode of the RBM=64 kernel; this is the simplest correct schedule
+    // for a Stage 2b skeleton). Stage 3+ can rewire to the DB main loop
+    // once host preshuffle is updated.
+    global_load_b(Bs[0][0], bc * 2, 0);
+    global_load_a(As[0][0], br * 2, 0);
+    global_load_b(Bs[0][1], bc * 2 + 1, 0);
+    global_load_a(As[0][1], br * 2 + 1, 0);
+    asm volatile("s_waitcnt vmcnt(0)");
+    __builtin_amdgcn_s_barrier();
+
+    for (int k = 0; k < k_iters; k++) {
+        // Suppress unused-warning for the half/stride helpers; full
+        // wire-in deferred to R35.
+        (void)crr_scale_a_base_sub; (void)crr_scale_b_base;
+        (void)lane_scale_byte_offset;
+
+        // Top half (As[0][0] = rows 0..127 of block).
+        load_b_sub(b0_sub, Bs[0][0]);
+        load_b_sub(b1_sub, Bs[0][1]);
+        asm volatile("s_waitcnt lgkmcnt(0)");
+
+        #pragma unroll
+        for (int s = 0; s < CRR_SUBRBM_M_STRIDES; ++s) {
+            load_a_sub(a_sub, As[0][0], s);
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            crr_mma_scaled_from_packs_fixed_phase_subrbm(
+                cA[s], a_sub, b0_sub,
+                a_scale_packs_per_stride[s], b0_scale_packs);
+            crr_mma_scaled_from_packs_fixed_phase_subrbm(
+                cB[s], a_sub, b1_sub,
+                a_scale_packs_per_stride[s], b1_scale_packs);
+        }
+
+        // Bottom half (As[0][1] = rows 128..255 of block).
+        #pragma unroll
+        for (int s = 0; s < CRR_SUBRBM_M_STRIDES; ++s) {
+            load_a_sub(a_sub, As[0][1], s);
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            crr_mma_scaled_from_packs_fixed_phase_subrbm(
+                cC[s], a_sub, b0_sub,
+                a_scale_packs_per_stride[s], b0_scale_packs);
+            crr_mma_scaled_from_packs_fixed_phase_subrbm(
+                cD[s], a_sub, b1_sub,
+                a_scale_packs_per_stride[s], b1_scale_packs);
+        }
+
+        __builtin_amdgcn_s_barrier();
+        if (k + 1 < k_iters) {
+            global_load_b(Bs[0][0], bc * 2, k + 1);
+            global_load_a(As[0][0], br * 2, k + 1);
+            global_load_b(Bs[0][1], bc * 2 + 1, k + 1);
+            global_load_a(As[0][1], br * 2 + 1, k + 1);
+            asm volatile("s_waitcnt vmcnt(0)");
+            __builtin_amdgcn_s_barrier();
+        }
+    }
+
+    if (wm == 0) {
+        __builtin_amdgcn_s_barrier();
+    }
+
+    if constexpr (PRESHUFFLED_QUANT) {
+        #pragma unroll
+        for (int s = 0; s < CRR_SUBRBM_M_STRIDES; ++s) {
+            mul(cA[s], cA[s], g.scale);
+            mul(cB[s], cB[s], g.scale);
+            mul(cC[s], cC[s], g.scale);
+            mul(cD[s], cD[s], g.scale);
+        }
+    }
+
+    // Per-stride epilogue store. Each warp's M-coverage is HB=128 rows
+    // = WARPS_M*2 macro-rows of 32 each; sub-RBM stores per stride into
+    // the appropriate macro-row index. Coordinate scheme mirrors the
+    // RBM=64 kernel but with 4 strides per half instead of 1.
+    //   macro_row(half=0, stride s) = br * WARPS_M * 4 + wm * 4 + s
+    //   macro_row(half=1, stride s) = br * WARPS_M * 4 + WARPS_M * 4 + wm * 4 + s
+    // (Note BLK/RBM_SUB = 8 macro-rows per block; WARPS_M=2 covers 8/2=4
+    // macro-rows per warp; halves account for top vs bottom of warp.)
+    #pragma unroll
+    for (int s = 0; s < CRR_SUBRBM_M_STRIDES; ++s) {
+        const int macro_row_top = br * WARPS_M * 4 + wm * CRR_SUBRBM_M_STRIDES + s;
+        const int macro_row_bot = br * WARPS_M * 4 + WARPS_M * CRR_SUBRBM_M_STRIDES
+                                + wm * CRR_SUBRBM_M_STRIDES + s;
+        store(g.c, cA[s], {0, 0, macro_row_top, bc * WARPS_N * 2 + wn});
+        store(g.c, cB[s], {0, 0, macro_row_top, bc * WARPS_N * 2 + WARPS_N + wn});
+        store(g.c, cC[s], {0, 0, macro_row_bot, bc * WARPS_N * 2 + wn});
+        store(g.c, cD[s], {0, 0, macro_row_bot, bc * WARPS_N * 2 + WARPS_N + wn});
+    }
 }
 
 // Host-side dispatch entry: NOT wired into gemm_*_pq_v2 path in
