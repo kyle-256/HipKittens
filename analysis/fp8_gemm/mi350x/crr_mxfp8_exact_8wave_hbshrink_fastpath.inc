@@ -17,7 +17,7 @@
 //   per-warp M-coverage (HB) — this actually reduces accumulator vector
 //   count.
 //
-// HB SHRINK (this file) APPROACH:
+// HB SHRINK APPROACH:
 //   * BLK_M = 128 (was 256). Block now covers HB_M = BLK_M / 2 = 64 rows
 //     per M-half. Each warp's M-coverage = HB_M = 64 rows.
 //   * WARPS_M = 2 (unchanged). Each warp covers 1 M-half-tile via RBM=64
@@ -26,32 +26,25 @@
 //   * Drop cC/cD: only cA/cB remain (top-half only). Accumulator footprint
 //     drops from 4 × 32 = 128 VGPR to 2 × 32 = 64 VGPR per warp.
 //
-// EXPECTED RESOURCE DELTA (Stage A3 prediction):
-//   * Accumulator VGPR/wave:  128 → 64    (-64)
-//   * Operand A VGPR/wave:    32  → 32    (0; A_col_reg unchanged at RBM=64)
-//   * Operand B VGPR/wave:    16+16 → 16+16 (0; b0/b1 unchanged)
-//   * Net VGPR/wave:          ~234 → ~170 (predicted; saves ~64 VGPR)
-//   * LDS bytes/block:        139264 → ~69632 (cuts in half — A side drops
-//     from As[2][2] to As[2][1] since each block is only one M-half-tile)
+// R36 Dev A — Stage B re-pipelining variants (this revision):
+//   The R35 Stage A skeleton had VGPR 168 (-66 vs default 234), 0 spill,
+//   occ=2 — but raw perf was -12.16% because it used a single-buffered LDS
+//   schedule with no cycle-2 prefetch and no B1 LDS interleave. R36 Dev A
+//   adds three pipelining variants selected by MXFP8_CRR_HBSHRINK_PIPELINE:
 //
-// SCOPE / CAVEATS (Stage A1+A2 scaffolding only):
-//   * Only the V2 SCALE_VERSION=2 path is provided (PRESHUFFLED_QUANT=true).
-//     V1 path can be added as straightforward extension.
-//   * Host-side preshuffle is UNCHANGED (we mirror rect-V2 Path 1's trick of
-//     keeping square LDS tile geometry and re-deriving the slab indexing
-//     from the doubled-grid kernel coordinates).
-//   * Single-buffered LDS schedule (mirror SUBRBM Stage 2b skeleton). The
-//     full DB main loop + SB pipelining variants can be added in R36+.
-//   * Dispatch is NOT wired into kernel_mxfp8_layouts.cpp's gemm_*_pq_v2 path
-//     this cycle. Wiring up is a single edit when the next cycle picks this
-//     up — see r35b_findings.md §X.
-//
-// Reference (R34 Dev D r34d_findings.md §3.2):
-// > Real path past the structural ceiling: smaller M-extent per warp.
-// > Option 1: Halve HB → new BLK=128 (M-direction smaller block) — halves
-// > both stride count AND accumulator count. This is a different scaffolding
-// > (touches block-tile geometry, scale slab math, dispatch grid).
-// This file IS that "smaller M-extent" lever as a parallel template.
+//     0 = Stage A skeleton (single-buffered, R35 baseline; -12.16% perf).
+//     1 = Stage B1: DB main loop with cycle-2 B-tile prefetch + cycle-2
+//                   A-tile prefetch + B1 LDS interleave inside the cA MMA
+//                   chain. Mirrors the default kernel's DB structure with
+//                   the second-half halved (single MMA pair instead of two).
+//     2 = Stage B2: PIPE=3 LDS pipelining (single-buffer LDS + early-issue
+//                   VMEM→LDS, all 3 LDS reads up front + late wait). Uses
+//                   the freed VGPR headroom to keep 2 a_col vectors in
+//                   flight (not needed here — only 1 a-load per iter — so
+//                   the variant degenerates to the single-A early-issue
+//                   form, matching R32 PIPE=1 with halved compute).
+//     3 = Stage B3: B1 LDS interleave inside Stage B2 (sub-tile interleave
+//                   of A-read + B1-read across MMA chain).
 
 // HB shrink macro: when defined to 128, the parallel HB shrink kernel
 // activates. Default 256 = no change (default fastpath remains source of
@@ -69,6 +62,23 @@
 
 #ifndef MXFP8_CRR_HBSHRINK_8WAVE_FAST_ENABLE
 #define MXFP8_CRR_HBSHRINK_8WAVE_FAST_ENABLE 1
+#endif
+
+// R36 Dev A pipelining selector. 0 = R35 Stage A skeleton (single-buffered,
+// no prefetch). 1 = Stage B1 DB main loop + B1 LDS interleave + cycle-2
+// prefetch. 2 = Stage B2 SB-PIPE=3 (early-issue + late-wait). 3 = Stage B3
+// SB-PIPE=3 + B1 LDS interleave.
+#ifndef MXFP8_CRR_HBSHRINK_PIPELINE
+#define MXFP8_CRR_HBSHRINK_PIPELINE 0
+#endif
+#if (MXFP8_CRR_HBSHRINK_PIPELINE < 0) || (MXFP8_CRR_HBSHRINK_PIPELINE > 3)
+#error "MXFP8_CRR_HBSHRINK_PIPELINE must be 0..3 (R36 Dev A)"
+#endif
+
+// Stage B1/B3 selector: insert-after position for the B1 LDS-interleave inside
+// the cA MMA chain. Default 4 mirrors the production default kernel.
+#ifndef MXFP8_CRR_HBSHRINK_B1_INSERT_AFTER
+#define MXFP8_CRR_HBSHRINK_B1_INSERT_AFTER 4
 #endif
 
 #if MXFP8_CRR_HBSHRINK_8WAVE_FAST_ENABLE
@@ -96,7 +106,50 @@ constexpr int HBSHRINK_HB_M  = HBSHRINK_BLK_M / 2;  // 64 = per-warp M coverage
 // via the mhalf selector below.
 
 // ---------------------------------------------------------------------------
-// Stage A2: HB shrink V2-CRR exact 8-wave scaled kernel skeleton.
+// R36 Dev A Stage B1/B3: B1 LDS-interleave helper. Parallel to the default
+// kernel's crr_exact_cA_with_b1_interleave_fixed_phase, but operates on the
+// runtime mhalf-selected A scale-pack array (a_sel_packs) instead of the
+// default a0_scale_packs. Same shape/contract: 8 MMA emit slots, the b1 LDS
+// load is inserted at slot INSERT_AFTER.
+// ---------------------------------------------------------------------------
+template<int INSERT_AFTER, int A_PACK_COUNT, int B_PACK_COUNT>
+__device__ __forceinline__ void crr_hbshrink_cA_with_b1_interleave_fixed_phase(
+    rt_fl<RBM, RBN, col_l, rt_16x16_s>& cA,
+    const A_col_reg& a,
+    const B_col_reg& b0,
+    B_col_reg& b1,
+    const ST_v2& b1_tile,
+    int wn,
+    const fp8e8m0_4 (&a_phase)[A_PACK_COUNT],
+    const fp8e8m0_4 (&b0_phase)[B_PACK_COUNT])
+{
+    static_assert(INSERT_AFTER >= 0 && INSERT_AFTER <= 8);
+    static_assert(RBM == 64 && RBN == 32);
+
+    __builtin_amdgcn_s_setprio(1);
+    if constexpr (INSERT_AFTER == 0) { CRR_SCHED_BARRIER(); load_col_from_v2_st(b1, b1_tile, wn * RBN); }
+    crr_mma_scaled_base<0, 0>(cA, a, b0, 0, 0, a_phase[0], b0_phase[0]);
+    if constexpr (INSERT_AFTER == 1) { CRR_SCHED_BARRIER(); load_col_from_v2_st(b1, b1_tile, wn * RBN); }
+    crr_mma_scaled_base<0, 1>(cA, a, b0, 0, 1, a_phase[0], b0_phase[0]);
+    if constexpr (INSERT_AFTER == 2) { CRR_SCHED_BARRIER(); load_col_from_v2_st(b1, b1_tile, wn * RBN); }
+    crr_mma_scaled_base<1, 0>(cA, a, b0, 1, 0, a_phase[0], b0_phase[0]);
+    if constexpr (INSERT_AFTER == 3) { CRR_SCHED_BARRIER(); load_col_from_v2_st(b1, b1_tile, wn * RBN); }
+    crr_mma_scaled_base<1, 1>(cA, a, b0, 1, 1, a_phase[0], b0_phase[0]);
+    if constexpr (INSERT_AFTER == 4) { CRR_SCHED_BARRIER(); load_col_from_v2_st(b1, b1_tile, wn * RBN); }
+    crr_mma_scaled_base<0, 0>(cA, a, b0, 2, 0, a_phase[1], b0_phase[0]);
+    if constexpr (INSERT_AFTER == 5) { CRR_SCHED_BARRIER(); load_col_from_v2_st(b1, b1_tile, wn * RBN); }
+    crr_mma_scaled_base<0, 1>(cA, a, b0, 2, 1, a_phase[1], b0_phase[0]);
+    if constexpr (INSERT_AFTER == 6) { CRR_SCHED_BARRIER(); load_col_from_v2_st(b1, b1_tile, wn * RBN); }
+    crr_mma_scaled_base<1, 0>(cA, a, b0, 3, 0, a_phase[1], b0_phase[0]);
+    if constexpr (INSERT_AFTER == 7) { CRR_SCHED_BARRIER(); load_col_from_v2_st(b1, b1_tile, wn * RBN); }
+    crr_mma_scaled_base<1, 1>(cA, a, b0, 3, 1, a_phase[1], b0_phase[0]);
+    if constexpr (INSERT_AFTER == 8) { CRR_SCHED_BARRIER(); load_col_from_v2_st(b1, b1_tile, wn * RBN); }
+    __builtin_amdgcn_s_setprio(0);
+    CRR_SCHED_BARRIER();
+}
+
+// ---------------------------------------------------------------------------
+// HB shrink V2-CRR exact 8-wave scaled kernel.
 //
 // Each block processes HB_M=64 (M) × BLK_N=256 (N) of C. Compared to the
 // default kernel (BLK_M=256 × BLK_N=256):
@@ -106,8 +159,11 @@ constexpr int HBSHRINK_HB_M  = HBSHRINK_BLK_M / 2;  // 64 = per-warp M coverage
 //     drops 64 VGPR/wave from the accumulator footprint.
 //   * Grid:  blocks_per_row = M / HBSHRINK_BLK_M = 2 × default.
 //
-// Uses single-buffered LDS schedule for skeleton simplicity. R36+ can
-// rewire to DB main loop + SB pipelining variants.
+// MXFP8_CRR_HBSHRINK_PIPELINE selects the pipelining strategy:
+//   0 = Stage A skeleton (single-buffered, R35 baseline).
+//   1 = Stage B1: DB main loop + cycle-2 prefetch + B1 LDS interleave.
+//   2 = Stage B2: SB PIPE=3 (early-issue + late-wait, single-A).
+//   3 = Stage B3: SB PIPE=3 + B1 LDS interleave.
 // ---------------------------------------------------------------------------
 template<bool PRESHUFFLED_QUANT, int SCALE_VERSION = 2>
 __global__ __launch_bounds__(_NUM_THREADS, GEMM_MIN_BLOCKS_PER_CU)
@@ -120,12 +176,11 @@ void crr_exact_8wave_scaled_hbshrink_kernel(const layout_globals g)
     constexpr int crr_b_pack_count = (RBN + 31) / 32; // 1 for RBN=32
 
     const int k_iters = g.k / BK;
-    // Grid uses HBSHRINK_BLK_M (= 128) for M-direction. blocks_per_col is
-    // unchanged since N geometry is unchanged.
     const int blocks_per_col = g.n / BLK;
 
-    // LDS: one A tile per slot (we only need ONE M-half-tile per block);
-    // B unchanged (two N-halves per block).
+    // LDS: single-tile A per slot (we only need ONE M-half-tile per block);
+    // B unchanged (two N-halves per block). Two slots for double-buffering
+    // in Stage B1; only slot [0] used in Stages 0/2/3.
     __shared__ ST_crr_a As[2];
     __shared__ ST_crr_b Bs[2][2];
 
@@ -154,10 +209,6 @@ void crr_exact_8wave_scaled_hbshrink_kernel(const layout_globals g)
     // to address the original square BLK-block scale slab — we still load
     // the same scale layout since host preshuffle is unchanged.
     auto crr_scale_a_base = [&](int local_half) {
-        // local_half is always 0 in the HB shrink kernel (each block covers
-        // ONE M-half = HB_M=64 rows = a single RBM=64 stride per warp).
-        // The "global" half of the original square BLK-block is mhalf,
-        // which selects which scale-pack of the square slab we use.
         (void)local_half;
         return br_orig * BLK + mhalf * (BLK / 2) + wm * RBM;
     };
@@ -197,10 +248,6 @@ void crr_exact_8wave_scaled_hbshrink_kernel(const layout_globals g)
             b1_scale_row_bases[p] = preshuffled_scale_row_base_ptr(
                 g.b_scale, (crr_scale_b_base(1) + p * 32) >> 5);
         }
-        // V2-CRR slab geometry — identical to square (host preshuffle
-        // unchanged).
-        //   slab_idx_a = br_orig * WARPS_M + wm  (br_orig, not br)
-        //   slab_idx_b = bc      * WARPS_N + wn
         const int padded_k_blocks =
             (g.k / 32 + 7) & ~7;
         const size_t slab_bytes_a = 128u * padded_k_blocks;
@@ -237,9 +284,6 @@ void crr_exact_8wave_scaled_hbshrink_kernel(const layout_globals g)
 
     auto load_raw_scales = [&](int k_pair) __attribute__((always_inline)) {
         if constexpr (PRESHUFFLED_QUANT) {
-            // V2-CRR: 1 b128 fetches 4 A packs (a0p0, a1p0, a0p1, a1p1),
-            // 1 b64 fetches 2 B packs (b0p0, b1p0). Layout unchanged from
-            // square — host preshuffle unchanged.
             const uint32_t a_voff =
                 (static_cast<uint32_t>(lane_kblk) << 8) |
                 (static_cast<uint32_t>(lane_nonk) << 4);
@@ -296,21 +340,21 @@ void crr_exact_8wave_scaled_hbshrink_kernel(const layout_globals g)
         load_col_from_v2_st(dst, tile, wi * RBN);
     };
 
-    // Single-buffered LDS schedule (mirrors SUBRBM Stage 2b skeleton).
-    // The simplest correct form: load → barrier → compute → barrier → load.
-    // Per-iter we issue the next-iter VMEM->LDS at end and waitcnt at top.
-    // The A-side global coord uses (br_orig * 2 + mhalf) — mhalf-aware.
+    // The A-side global K-tile coord. With BLK_M=128 we want the top half
+    // OR bot half of the original BLK=256 row-block. (br_orig * 2 + mhalf)
+    // gives the row-tile id at HB=128 granularity.
+    auto a_tile_row = [&]() { return br_orig * 2 + mhalf; };
+
+#if (MXFP8_CRR_HBSHRINK_PIPELINE == 0)
+    // -----------------------------------------------------------------------
+    // Stage A skeleton (R35 Dev B baseline; -12.16% vs default).
+    // Single-buffered LDS schedule: load → barrier → compute → barrier → load.
+    // -----------------------------------------------------------------------
     global_load_b(Bs[0][0], bc * 2,     0);
-    global_load_a(As[0],    br_orig * 2 + mhalf, 0);
+    global_load_a(As[0],    a_tile_row(), 0);
     global_load_b(Bs[0][1], bc * 2 + 1, 0);
     asm volatile("s_waitcnt vmcnt(0)");
     __builtin_amdgcn_s_barrier();
-
-    // Pick the right A scale-pack pair for this mhalf.
-    auto a_packs_for_mhalf = [&]() -> fp8e8m0_4* {
-        return (mhalf == 0) ? a0_scale_packs : a1_scale_packs;
-    };
-    (void)a_packs_for_mhalf;
 
     for (int k = 0; k < k_iters; k++) {
         if ((k & 1) == 0) {
@@ -327,9 +371,6 @@ void crr_exact_8wave_scaled_hbshrink_kernel(const layout_globals g)
                 b1_scale_packs[gp] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(b1_scale_packs[gp]) >> 16);
             }
         }
-        // Build a local mhalf-selected A-pack array (compiler can't const-
-        // fold mhalf, so this is a runtime select per K-iter — same pattern
-        // as rect-V2 Path 1's b_sel_packs for nhalf).
         fp8e8m0_4 a_sel_packs[crr_a_pack_count];
         #pragma unroll
         for (int p = 0; p < crr_a_pack_count; p++) {
@@ -346,12 +387,282 @@ void crr_exact_8wave_scaled_hbshrink_kernel(const layout_globals g)
         __builtin_amdgcn_s_barrier();
         if (k + 1 < k_iters) {
             global_load_b(Bs[0][0], bc * 2,     k + 1);
-            global_load_a(As[0],    br_orig * 2 + mhalf, k + 1);
+            global_load_a(As[0],    a_tile_row(), k + 1);
             global_load_b(Bs[0][1], bc * 2 + 1, k + 1);
             asm volatile("s_waitcnt vmcnt(0)");
             __builtin_amdgcn_s_barrier();
         }
     }
+
+#elif (MXFP8_CRR_HBSHRINK_PIPELINE == 1)
+    // -----------------------------------------------------------------------
+    // Stage B1: double-buffered LDS main loop with classic cross-buffer
+    // prefetch (read tic, prefetch into toc for k+1) + optional B1 LDS
+    // interleave inside the cA MMA chain. Two LDS outer slots eliminate
+    // the in-place-prefetch race that cripples a single-slot DB.
+    //
+    // Schedule per iter k (0 .. k_iters-2):
+    //   read tic for k     →  cA(b1 interleave) → cB
+    //   prefetch toc for k+1 (issued before the wait so VMEM overlaps MMA)
+    //   wait vmcnt + lgkm; barrier; tic ^= 1, toc ^= 1
+    // Final iter k = k_iters-1 reads tic only (no prefetch).
+    // -----------------------------------------------------------------------
+    int tic = 0, toc = 1;
+    // Initial loads: prime k=0 in As[tic]/Bs[tic][0..1].
+    global_load_b(Bs[tic][0], bc * 2,     0);
+    global_load_a(As[tic],    a_tile_row(), 0);
+    global_load_b(Bs[tic][1], bc * 2 + 1, 0);
+    asm volatile("s_waitcnt vmcnt(0)");
+    __builtin_amdgcn_s_barrier();
+
+    TK_PRAGMA_UNROLL(CRR_MAIN_UNROLL)
+    for (int k = 0; k < k_iters - 1; k++, tic ^= 1, toc ^= 1) {
+        if ((k & 1) == 0) {
+            load_raw_scales(k >> 1);
+        } else {
+            #pragma unroll
+            for (int gp = 0; gp < crr_a_pack_count; gp++) {
+                a0_scale_packs[gp] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(a0_scale_packs[gp]) >> 16);
+                a1_scale_packs[gp] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(a1_scale_packs[gp]) >> 16);
+            }
+            #pragma unroll
+            for (int gp = 0; gp < crr_b_pack_count; gp++) {
+                b0_scale_packs[gp] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(b0_scale_packs[gp]) >> 16);
+                b1_scale_packs[gp] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(b1_scale_packs[gp]) >> 16);
+            }
+        }
+        fp8e8m0_4 a_sel_packs[crr_a_pack_count];
+        #pragma unroll
+        for (int p = 0; p < crr_a_pack_count; p++) {
+            a_sel_packs[p] = (mhalf == 0) ? a0_scale_packs[p] : a1_scale_packs[p];
+        }
+
+        // Issue prefetch for k+1 into toc (different slot than tic). VMEM
+        // overlaps with subsequent LDS reads + MMAs.
+        global_load_b(Bs[toc][0], bc * 2,     k + 1);
+        global_load_a(As[toc],    a_tile_row(), k + 1);
+        global_load_b(Bs[toc][1], bc * 2 + 1, k + 1);
+
+        // LDS reads: b0, a; defer b1 into MMA chain interleave.
+        load_b(b0, Bs[tic][0], wn);
+        load_a(a, As[tic], wm);
+        asm volatile("s_waitcnt lgkmcnt(0)");
+
+        // cA MMA chain with b1 LDS-interleave at INSERT_AFTER position.
+        crr_hbshrink_cA_with_b1_interleave_fixed_phase<MXFP8_CRR_HBSHRINK_B1_INSERT_AFTER, crr_a_pack_count, crr_b_pack_count>(
+            cA, a, b0, b1, Bs[tic][1], wn, a_sel_packs, b0_scale_packs);
+        asm volatile("s_waitcnt lgkmcnt(0)");
+
+        // cB MMA (uses b1 just loaded by interleave).
+        __builtin_amdgcn_s_setprio(1);
+        crr_mma_scaled_from_packs_fixed_phase(cB, a, b1, a_sel_packs, b1_scale_packs);
+        __builtin_amdgcn_s_setprio(0);
+        CRR_SCHED_BARRIER();
+
+        asm volatile("s_waitcnt vmcnt(0)");
+        __builtin_amdgcn_s_barrier();
+    }
+
+    // Final iter k = k_iters - 1: read tic (toc was just primed by last
+    // prefetch). No more VMEM.
+    {
+        const int k = k_iters - 1;
+        if ((k & 1) == 0) {
+            load_raw_scales(k >> 1);
+        } else {
+            #pragma unroll
+            for (int gp = 0; gp < crr_a_pack_count; gp++) {
+                a0_scale_packs[gp] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(a0_scale_packs[gp]) >> 16);
+                a1_scale_packs[gp] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(a1_scale_packs[gp]) >> 16);
+            }
+            #pragma unroll
+            for (int gp = 0; gp < crr_b_pack_count; gp++) {
+                b0_scale_packs[gp] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(b0_scale_packs[gp]) >> 16);
+                b1_scale_packs[gp] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(b1_scale_packs[gp]) >> 16);
+            }
+        }
+        fp8e8m0_4 a_sel_packs[crr_a_pack_count];
+        #pragma unroll
+        for (int p = 0; p < crr_a_pack_count; p++) {
+            a_sel_packs[p] = (mhalf == 0) ? a0_scale_packs[p] : a1_scale_packs[p];
+        }
+        load_b(b0, Bs[tic][0], wn);
+        load_b(b1, Bs[tic][1], wn);
+        load_a(a, As[tic], wm);
+        asm volatile("s_waitcnt lgkmcnt(0)");
+        crr_mma_scaled_from_packs_fixed_phase(cA, a, b0, a_sel_packs, b0_scale_packs);
+        crr_mma_scaled_from_packs_fixed_phase(cB, a, b1, a_sel_packs, b1_scale_packs);
+        __builtin_amdgcn_s_barrier();
+    }
+
+#elif (MXFP8_CRR_HBSHRINK_PIPELINE == 2)
+    // -----------------------------------------------------------------------
+    // Stage B2: SB PIPE=3 form (single-buffered LDS, early-issue VMEM,
+    // late-wait). Mirrors R32 Dev B Approach 3 with single MMA pair.
+    // -----------------------------------------------------------------------
+    global_load_b(Bs[0][0], bc * 2,     0);
+    global_load_a(As[0],    a_tile_row(), 0);
+    global_load_b(Bs[0][1], bc * 2 + 1, 0);
+    asm volatile("s_waitcnt vmcnt(0)");
+    __builtin_amdgcn_s_barrier();
+
+    for (int k = 0; k < k_iters - 1; k++) {
+        if ((k & 1) == 0) {
+            load_raw_scales(k >> 1);
+        } else {
+            #pragma unroll
+            for (int gp = 0; gp < crr_a_pack_count; gp++) {
+                a0_scale_packs[gp] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(a0_scale_packs[gp]) >> 16);
+                a1_scale_packs[gp] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(a1_scale_packs[gp]) >> 16);
+            }
+            #pragma unroll
+            for (int gp = 0; gp < crr_b_pack_count; gp++) {
+                b0_scale_packs[gp] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(b0_scale_packs[gp]) >> 16);
+                b1_scale_packs[gp] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(b1_scale_packs[gp]) >> 16);
+            }
+        }
+        fp8e8m0_4 a_sel_packs[crr_a_pack_count];
+        #pragma unroll
+        for (int p = 0; p < crr_a_pack_count; p++) {
+            a_sel_packs[p] = (mhalf == 0) ? a0_scale_packs[p] : a1_scale_packs[p];
+        }
+        // Issue all 3 LDS reads up front.
+        load_b(b0, Bs[0][0], wn);
+        load_b(b1, Bs[0][1], wn);
+        load_a(a, As[0], wm);
+        asm volatile("s_waitcnt lgkmcnt(0)");
+        __builtin_amdgcn_s_barrier();
+        // Issue all next-iter VMEM→LDS writes (asynchronous).
+        global_load_b(Bs[0][0], bc * 2,     k + 1);
+        global_load_a(As[0],    a_tile_row(), k + 1);
+        global_load_b(Bs[0][1], bc * 2 + 1, k + 1);
+        // MMAs overlap with VMEM in flight.
+        CRR_MMA_BEGIN();
+        crr_mma_scaled_from_packs_fixed_phase(cA, a, b0, a_sel_packs, b0_scale_packs);
+        crr_mma_scaled_from_packs_fixed_phase(cB, a, b1, a_sel_packs, b1_scale_packs);
+        CRR_MMA_END();
+        // Drain VMEM at end-of-iter.
+        asm volatile("s_waitcnt vmcnt(0)");
+        __builtin_amdgcn_s_barrier();
+    }
+    // Final iter (k = k_iters - 1): no more VMEM to issue.
+    {
+        const int k = k_iters - 1;
+        if ((k & 1) == 0) {
+            load_raw_scales(k >> 1);
+        } else {
+            #pragma unroll
+            for (int gp = 0; gp < crr_a_pack_count; gp++) {
+                a0_scale_packs[gp] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(a0_scale_packs[gp]) >> 16);
+                a1_scale_packs[gp] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(a1_scale_packs[gp]) >> 16);
+            }
+            #pragma unroll
+            for (int gp = 0; gp < crr_b_pack_count; gp++) {
+                b0_scale_packs[gp] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(b0_scale_packs[gp]) >> 16);
+                b1_scale_packs[gp] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(b1_scale_packs[gp]) >> 16);
+            }
+        }
+        fp8e8m0_4 a_sel_packs[crr_a_pack_count];
+        #pragma unroll
+        for (int p = 0; p < crr_a_pack_count; p++) {
+            a_sel_packs[p] = (mhalf == 0) ? a0_scale_packs[p] : a1_scale_packs[p];
+        }
+        load_b(b0, Bs[0][0], wn);
+        load_b(b1, Bs[0][1], wn);
+        load_a(a, As[0], wm);
+        asm volatile("s_waitcnt lgkmcnt(0)");
+        crr_mma_scaled_from_packs_fixed_phase(cA, a, b0, a_sel_packs, b0_scale_packs);
+        crr_mma_scaled_from_packs_fixed_phase(cB, a, b1, a_sel_packs, b1_scale_packs);
+        __builtin_amdgcn_s_barrier();
+    }
+
+#elif (MXFP8_CRR_HBSHRINK_PIPELINE == 3)
+    // -----------------------------------------------------------------------
+    // Stage B3: SB PIPE=3 + B1 LDS interleave inside the cA MMA chain.
+    // Combines benefits of B1 interleave (b0/a issue + drain asynchronously
+    // of b1) with PIPE=3 VMEM-overlap.
+    // -----------------------------------------------------------------------
+    global_load_b(Bs[0][0], bc * 2,     0);
+    global_load_a(As[0],    a_tile_row(), 0);
+    global_load_b(Bs[0][1], bc * 2 + 1, 0);
+    asm volatile("s_waitcnt vmcnt(0)");
+    __builtin_amdgcn_s_barrier();
+
+    for (int k = 0; k < k_iters - 1; k++) {
+        if ((k & 1) == 0) {
+            load_raw_scales(k >> 1);
+        } else {
+            #pragma unroll
+            for (int gp = 0; gp < crr_a_pack_count; gp++) {
+                a0_scale_packs[gp] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(a0_scale_packs[gp]) >> 16);
+                a1_scale_packs[gp] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(a1_scale_packs[gp]) >> 16);
+            }
+            #pragma unroll
+            for (int gp = 0; gp < crr_b_pack_count; gp++) {
+                b0_scale_packs[gp] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(b0_scale_packs[gp]) >> 16);
+                b1_scale_packs[gp] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(b1_scale_packs[gp]) >> 16);
+            }
+        }
+        fp8e8m0_4 a_sel_packs[crr_a_pack_count];
+        #pragma unroll
+        for (int p = 0; p < crr_a_pack_count; p++) {
+            a_sel_packs[p] = (mhalf == 0) ? a0_scale_packs[p] : a1_scale_packs[p];
+        }
+        // Issue b0, a LDS reads (defer b1 into cA chain).
+        load_b(b0, Bs[0][0], wn);
+        load_a(a, As[0], wm);
+        asm volatile("s_waitcnt lgkmcnt(0)");
+        __builtin_amdgcn_s_barrier();
+        // cA MMA chain with b1 LDS interleave.
+        crr_hbshrink_cA_with_b1_interleave_fixed_phase<MXFP8_CRR_HBSHRINK_B1_INSERT_AFTER, crr_a_pack_count, crr_b_pack_count>(
+            cA, a, b0, b1, Bs[0][1], wn, a_sel_packs, b0_scale_packs);
+        asm volatile("s_waitcnt lgkmcnt(0)");
+        __builtin_amdgcn_s_barrier();
+        // Issue all next-iter VMEM→LDS writes BEFORE cB MMA so they overlap.
+        global_load_b(Bs[0][0], bc * 2,     k + 1);
+        global_load_a(As[0],    a_tile_row(), k + 1);
+        global_load_b(Bs[0][1], bc * 2 + 1, k + 1);
+        // cB MMA — overlaps with VMEM in flight.
+        __builtin_amdgcn_s_setprio(1);
+        crr_mma_scaled_from_packs_fixed_phase(cB, a, b1, a_sel_packs, b1_scale_packs);
+        __builtin_amdgcn_s_setprio(0);
+        CRR_SCHED_BARRIER();
+        // Drain VMEM at end-of-iter.
+        asm volatile("s_waitcnt vmcnt(0)");
+        __builtin_amdgcn_s_barrier();
+    }
+    // Final iter (k = k_iters - 1): no more VMEM to issue.
+    {
+        const int k = k_iters - 1;
+        if ((k & 1) == 0) {
+            load_raw_scales(k >> 1);
+        } else {
+            #pragma unroll
+            for (int gp = 0; gp < crr_a_pack_count; gp++) {
+                a0_scale_packs[gp] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(a0_scale_packs[gp]) >> 16);
+                a1_scale_packs[gp] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(a1_scale_packs[gp]) >> 16);
+            }
+            #pragma unroll
+            for (int gp = 0; gp < crr_b_pack_count; gp++) {
+                b0_scale_packs[gp] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(b0_scale_packs[gp]) >> 16);
+                b1_scale_packs[gp] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(b1_scale_packs[gp]) >> 16);
+            }
+        }
+        fp8e8m0_4 a_sel_packs[crr_a_pack_count];
+        #pragma unroll
+        for (int p = 0; p < crr_a_pack_count; p++) {
+            a_sel_packs[p] = (mhalf == 0) ? a0_scale_packs[p] : a1_scale_packs[p];
+        }
+        load_b(b0, Bs[0][0], wn);
+        load_b(b1, Bs[0][1], wn);
+        load_a(a, As[0], wm);
+        asm volatile("s_waitcnt lgkmcnt(0)");
+        crr_mma_scaled_from_packs_fixed_phase(cA, a, b0, a_sel_packs, b0_scale_packs);
+        crr_mma_scaled_from_packs_fixed_phase(cB, a, b1, a_sel_packs, b1_scale_packs);
+        __builtin_amdgcn_s_barrier();
+    }
+
+#endif  // MXFP8_CRR_HBSHRINK_PIPELINE
 
     if (wm == 0) {
         __builtin_amdgcn_s_barrier();
@@ -362,31 +673,17 @@ void crr_exact_8wave_scaled_hbshrink_kernel(const layout_globals g)
         mul(cB, cB, g.scale);
     }
 
-    // Store coords. Each block stores HBSHRINK_BLK_M=128 rows × BLK_N=256
-    // cols. Row index uses (br_orig * 2 + mhalf) * WARPS_M + wm — the
-    // doubled-grid M-index hits the right RBM=64 macro-row of the output.
-    //   cA: rows = (br_orig*2 + mhalf)*WARPS_M + wm,
-    //       cols = bc*WARPS_N*2 + wn
-    //   cB: rows same as cA,
-    //       cols = bc*WARPS_N*2 + WARPS_N + wn
-    // Note: original kernel used "br * WARPS_M * 2 + wm" for cA (top-half)
-    // and "br * WARPS_M * 2 + WARPS_M + wm" for cC (bot-half). With HB
-    // shrink, br_orig replaces br, and (mhalf * WARPS_M) replaces the
-    // top/bot offset.
+    // Store coords: each block stores HBSHRINK_BLK_M=128 rows × BLK_N=256 cols.
     const int macro_row =
         br_orig * WARPS_M * 2 + mhalf * WARPS_M + wm;
     store(g.c, cA, {0, 0, macro_row, bc * WARPS_N * 2 + wn});
     store(g.c, cB, {0, 0, macro_row, bc * WARPS_N * 2 + WARPS_N + wn});
 }
 
-// Host-side dispatch entry: NOT wired into gemm_*_pq_v2 path in
-// kernel_mxfp8_layouts.cpp. Kept here so future authors can switch the
-// dispatcher over with a single edit.
+// Host-side dispatch entry — wired into gemm_*_pq_v2 path in
+// kernel_mxfp8_layouts.cpp behind MXFP8_CRR_BLK_M=128.
 __host__ inline bool crr_can_use_exact_8wave_scaled_hbshrink(const layout_globals& g)
 {
-    // Shape gate: M divisible by HBSHRINK_BLK_M=128 (i.e., even number of
-    // BLK=256-blocks in M). N divisible by BLK=256 (unchanged). K
-    // divisible by BK=128 (unchanged).
     return g.m == M_DIM && g.n == N_DIM && g.k == K_DIM
         && (g.m % HBSHRINK_BLK_M == 0)
         && (g.n % BLK == 0)
@@ -396,17 +693,11 @@ __host__ inline bool crr_can_use_exact_8wave_scaled_hbshrink(const layout_global
 template<bool PRESHUFFLED_QUANT>
 __host__ inline void dispatch_crr_exact_8wave_scaled_v2_hbshrink(const layout_globals& g)
 {
-    // Grid: (M/HBSHRINK_BLK_M) * (N/BLK) — 2x more blocks vs square in M.
     const dim3 grid((g.m / HBSHRINK_BLK_M) * (g.n / BLK));
     crr_exact_8wave_scaled_hbshrink_kernel<PRESHUFFLED_QUANT, 2>
         <<<grid, dim3(_NUM_THREADS), 0, g.stream>>>(g);
 }
 
-// Force-instantiation probe: when MXFP8_CRR_HBSHRINK_PROBE=1 we emit a
-// host stub that takes the address of the dispatcher to force template
-// instantiation and produce a kernel symbol in the resource-usage report.
-// Default 0 (no probe — Stage A1 builds just need the file to parse).
-// Set to 1 to confirm the kernel emits with realistic VGPR/LDS numbers.
 #ifndef MXFP8_CRR_HBSHRINK_PROBE
 #define MXFP8_CRR_HBSHRINK_PROBE 0
 #endif
