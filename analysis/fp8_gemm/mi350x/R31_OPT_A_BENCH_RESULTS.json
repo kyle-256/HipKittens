@@ -1,0 +1,26 @@
+{
+  "M": 4096,
+  "N": 32768,
+  "K": 128256,
+  "incumbent_tflops": 5353.9,
+  "comp_tflops": 5781.1,
+  "warmup": 200,
+  "iters": 500,
+  "trim_frac": 0.1,
+  "gpu_id": 0,
+  "results": [
+    {
+      "tag": "u32",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k128256_R31A_ts_lgk2_v12_memc_btw_all_u32",
+      "gpu_id": 0,
+      "wall_sec": 8.7,
+      "M": 4096,
+      "N": 32768,
+      "K": 128256,
+      "avg_ms": 6.3802,
+      "tflops": 5396.1,
+      "comp": 5781.1,
+      "status": "OK"
+    }
+  ]
+}

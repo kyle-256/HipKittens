@@ -2,11 +2,11 @@
 
 你在继续推进 `HipKittens` 的 MXFP4 GEMM 优化工作，跟 Cursor (Hipkittens2) 竞赛。
 
-## ⚠️ 当前优化目标 (2026-04-18, post-R30)
-> 41/42 WIN (97.6%) = **structurally saturated**. R30 双 optimizer 攻击全 DEAD:
-> - Opt A 跨 shape transplant 5/5 HSA aperture viol (BARRIER_TO_WAITCNT_* 在 DLA2/32768×14336×2048 不安全)
-> - Opt B K_EXACT parent-stack audit AUDIT-CLEAN (table 已最优)
-> 唯一剩余目标: **L6 / DLA1 (4096×32768×128256, 92.6%)** — 仅剩 V5 MFMA32 (≥1周) / V6 split-K (≥3天) / V7 stream-K (≥2周) 多日重写. V8 R25E peel 也 DEAD (R29).
+## ⚠️ 当前优化目标 (2026-04-18, post-R31)
+> 41/42 WIN (97.6%) = **structurally saturated, RE-CONFIRMED 3 rounds**.
+> R29 (V8 peel DEAD), R30 (transplant + K_EXACT audit DEAD), R31 (UNROLL_K + Persistent-XCD + STEP3_BARRIER_VMCNT 全 DEAD).
+> R31 新发现: **v12 (STEP3_BARRIER_VMCNT=12) 在 K=128256 是唯一稳定值** — high VMCNT (≥20) 让 prefetch 越过 SRD bounds; low VMCNT (≤4) race. K_iters=501 放大了 prefetch-vs-SRD timing window.
+> 唯一剩余目标: **L6 / DLA1 (4096×32768×128256, 92.6%)** — 仅剩 V5 MFMA32 (≥1周) / V6 split-K (≥3天) / V7 stream-K (≥2周) 多日重写. 所有 sub-2hr levers 已在 R29+R30+R31 全部耗尽.
 
 **历史指令** (2026-04-17, 已过时):
 > "24win 已经卡了好久了，现在把优化目标改成优化剩下那几个差的比较多的。"
@@ -67,6 +67,11 @@ R25-G 之前各类已知 dead (history): `iterative-ilp` 编译器 bug, BK=256 L
 | 方向 | 风险 | 预期 | 备注 |
 |------|------|------|------|
 | **V5 — MFMA_32X32X64_TILING 重构** (R29+) | 高 | 0-5pp on L6/DLA1 | **唯一剩余结构性 axis**. ≥1 周 asm 重写. 32×32 MFMAs 允许 4× concurrent in-flight @ same acc footprint, 可能松开 R24B/C 确认的 VMEM-issue saturation. 高不确定性. 见 `R27_V5_MFMA32_SCOUT.md` |
+
+DEAD post-R31 (不要再尝试 — 已 reproduce 过):
+- ~~UNROLL_K sweep on L6~~ — `R31_OPT_A_VERDICT.md`. UNROLL_K∈{1,2,4,16,32} on L6 best parent. 5/5 lose. u16/u32 5-rep -0.55%/-0.58%, smaller worse. 默认 unroll 8 (kernel:2448) 在 K=128256 已最优.
+- ~~Persistent-XCD / STATIC_XCD_REMAP scout on L6~~ — `R31_OPT_B_VERDICT.md`. PERSISTENT_XCD=1 GPU-faults (kernel-side bug, R24A 三重 fix 没盖住). STATIC_XCD_REMAP=1 干净 -1.80% lose. 现有 tall-XCDs + GROUP_M=4 swizzle 已经是 L6 4096×32768 grid 的最优 reuse-window.
+- ~~STEP3_BARRIER_VMCNT sweep on L6~~ — `R31_OPT_C_VERDICT.md`. v∈{4,8,10,16,20,24}. v8/v10/v16 lose 0.81-1.12%. v20/v24 CRASH (HSA aperture viol — prefetch outrun SRD bounds). v4 lose 0.82% with intermittent crash. **v12 是 K=128256 唯一稳定值** (新发现).
 
 DEAD post-R30 (不要再尝试 — 已 reproduce 过):
 - ~~R26-A V1 DLA1 K-loop peel (R25-E pf495)~~ — 5-rep verify std=1729 TFLOPS, mean swing 1672→5546, 不稳定 false alarm
