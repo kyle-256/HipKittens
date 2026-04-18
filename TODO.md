@@ -54,7 +54,52 @@
 
 **baseline 建立**：首次需在每个 LLaMA shape 上跑 FP8 per-tensor + MXFP8 V2 baseline 各 5x，记录 median TFLOPS 作为后续对照。
 
-## R25 LLaMA baseline 结果 (2026-04-18, GPU5, sclk 2320 MHz, commit `6be73744`/`05bf4fef`) ★ paradigm 再修正：8192³ near-parity 不能推广到 production shape
+## R26 cycle 完结 (2026-04-18, 5 dev/reviewer all DEAD-END/NULL on production change，但 3 个关键 paradigm correction)
+
+R26 派 5 agent (Reviewer GPU1, Dev A GPU3, Dev B GPU5, Dev C GPU6, Dev D GPU7) 攻 R25 LLaMA baseline 4 个最差 cell + 1 winning cell mechanism。**0 production commit**, 5 个 side-branch commit (954ba8b4 + ee5f985a 已 cherry-pick to main 作 infrastructure + corrected baseline)。
+
+### R26 paradigm corrections (3 critical)
+
+1. **70B KV-attn V2-CRR 0.69 ratio was COLD-DPM THROTTLE ARTIFACT**: Reviewer (10x reps, iters=300, sclk-verified, GPU7 clean rerun) + Dev A (per-shape preheat, GPU3 throttle 1700 MHz) **independently** measure 0.84, +21% recovery vs R25. R25 multi-shape sweep had cold-DPM that hit V2 (heavier scale traffic) harder than FP8. **R25 baseline 70B KV CRR cell INVALIDATED, corrected value 0.84**. 其他 4 个 cell (70B Gate CRR, 70B Down CRR, 8B KV RRR, 70B Down RRR) Reviewer 10x 全 CONFIRM 在 ≤0.7% drift。
+
+2. **Down-RRR 1.05 V2-WIN is FP8-RRR REGISTER-SPILL BUG, not V2 mechanism**: Dev C ASM diff 显示 FP8-RRR `RRR_MAIN_UNROLL=4` 在 K≥14336 spill **39 VGPR + 160 B/lane scratch** (FP8 K=4096 时 0/0)；V2-RRR 同 K spill 仅 1 VGPR (V2 SGPR-broadcast scale SRD 比 FP8 `RRR_B_REG_ROW_LOAD` register 压力低)。Spill 量与 k_iters (32→112→224 for K=4096/14336/28672) 线性相关，正好匹配 FP8 RRR/RCR 比 1.00→0.87→0.84 collapse。**V2 没有"赢"，只是 FP8 在大 K RRR 路径上有 bug**。无法 port 到 V2-CRR/RCR (后者已 0 spill)。Dev C 试 `RRR_MAIN_UNROLL=2` 修 spill 但 TFLOPS 跌 41% (latency hiding 不足)，`UNROLL=8` 同样 spill 39。FP8-RRR 修复需深度重构，留 R27+。
+
+3. **V1 vs V2 dispatch dead universally**: Dev D 7 个 size 全 sweep (1024-8192) + Dev A 在 small-N (4096×1024×8192) **独立** A/B 验证。V1 vs V2 全部 ±2.5% 内 (Dev A: V1 791.64 vs V2 796.09, Welch t=-5.87 V2 微胜；Dev D: V2 8192 +60 TFLOPS, 其他 size 全 tied)。**V1/V2 runtime size-gating 永久 KILLED**。所有"V1 fallback at small problem"假说全部 dead-end。
+
+### R26 root-cause (no fix)
+
+- **70B Gate/Up V2-CRR 0.84 (large N=28672)**: Dev B PMC mode (5x normal + 5x PMC) 找到 dominant cap：**TA backpressure + per-wave SQ_INST_LEVEL_VMEM 4.895x scaling vs work-ratio 4.0x → +22% per-wave VMEM-stall queueing**. TCC_MISS 4.41x 但 FP8 4.91x 更差不是 V2-specific. 4 知 knob 全 NULL 或 correctness FAIL：CRR_STEADY_VMCNT=2 (-14.6%), VMCNT=6 (-0.7%), MID_BARRIER=0 (SNR 19 dB FAIL), PREFETCH_LGKM=2 (Welch t=-0.68 NULL)。8wave fastpath template 内现有 knob 已用尽。R27+ 候选 (未 prototype)：L2 cache-tag pinning of scale arrays (8 MB scale fits in 32 MB L2)、persistent-scale LDS prefill (DEAD-END at occ=2 / 160 KB cap)、per-buffer TCC counter split。
+
+- **小 N (KV) 7-19% gap**: Dev A 3 个 hypothesis 全 dead-end. H1 (BLOCK_N=128) blocked by hardcoded `static_assert(BLK==256)` in `crr_mxfp8_exact_8wave_fastpath.inc:37` + `crr_mxfp8_4wave_fastpath.inc:86` + multiple V2 preshuffle helper assumptions. RBM/RBN, scale-pack counts, ST_v2/ST_v2a shapes 全 hardcoded. **Multi-day rewrite needed for tile reshape**, 不在 R26 90-min budget 内。
+
+- **4096³ Q/O V2 0.92 (vs 8192³ 0.99)**: Dev D amortization curve 揭示 **gap is structural to MXFP8 not V2-specific** (FP8 -21%, V2 -24% from 8192→4096). 1024³→8192³ 全 size 都 < 0.95 gate. 真实 fix 路径：减小 macro-tile prologue (scale-load + LDS preload fixed cost per block) 或新增 128×128 macro tile，与 Dev A small-N 同样 multi-day rewrite。
+
+### R26 infrastructure 落地 main
+
+- **954ba8b4** (cherry-pick of r26-a Dev A): `analysis/fp8_gemm/mi350x/preheat_then_bench.py` + `preheat_fp8_bench.py` — per-process DPM preheat wrappers (避免 R25-style cold-throttle measurement artifact)。新规范：跑 multi-shape baseline 必须用这两个 wrapper。
+- **ee5f985a** (cherry-pick of r26-rev Reviewer): `r26_reverify.json` — corrected 5-cell numbers (10x reps, iters=300, GPU7 clean). Future LLaMA baseline reproductions 应以此 5 cell 为对照。
+
+### R26 corrected LLaMA gap landscape (paradigm 再修正)
+
+| Cell | R25 ratio | R26 reviewer 10x | Drift | 状态 |
+|---|---:|---:|---:|---|
+| 70B KV V2-CRR | 0.69 | **0.84** | +21% | R25 throttled, R26 clean |
+| 70B Gate V2-CRR | 0.84 | 0.84 | 0% | CONFIRM real |
+| 70B Down V2-CRR | 0.84 | 0.85 | +1% | CONFIRM real |
+| 8B KV V2-RRR | 0.81 | 0.81 | 0% | CONFIRM real |
+| 70B Down V2-RRR | **1.05 ✅** | 1.05 ✅ | 0% | CONFIRM, but mechanism = FP8 spill bug |
+
+实际 V2 vs FP8 gap 在 LLaMA shapes 上 **uniform 6-19%**，no extreme outliers，R25 报告的 0.69 是 sweep 测量协议 artifact。**所有 cells (除 Down-RRR) 仍未达 0.95 gate**, R26 0 production fix。
+
+## R27+ 优先级 (基于 R26 root-cause analysis)
+
+1. **【critical / multi-day】Tile shape rewrite**: 当前 BLK=256 hardcoded 是 small N (KV 0.81-0.84) + small M=N=K (4096³ 0.92) 的根本约束. 需 (a) 重写 V2 preshuffle helper 支持 BLK=128, (b) RBM/RBN/scale-pack count 参数化, (c) ST_v2/ST_v2a 重 shape. 多日工作但是覆盖最大 production area
+2. **【high / 1-2 day】L2 cache-tag pinning of scale arrays for large-N CRR**: Dev B R27 候选 #1. 8 MB scale data fits in 32 MB L2，可消除 V2 在 N=28672 上的 TA/VMEM scaling
+3. **【high / FP8-side work】Fix FP8-RRR spill at K≥12000**: Dev C 揭示的 FP8-RRR pathology. 修复后 LLaMA Down-RRR FP8 提升 12-15%, 让 V2-RRR 1.05 win 消失但 FP8 整体更快 (production benefit). 与 MXFP8 工作正交
+4. **【medium】Per-buffer TCC split for large-N CRR**: 确认 scale vs A vs B miss attribution (Dev B R27 候选 #3)
+5. **【low】8192³ V2-CRR -8.9%**: 原 R25 mainline target. 仍 real 但 production impact 最低 (LLaMA 不跑 8192³)
+
+## R25 LLaMA baseline 结果 (2026-04-18, GPU5, sclk 2320 MHz, commit `6be73744`/`05bf4fef`) ★ paradigm 再修正：8192³ near-parity 不能推广到 production shape — **R26 修正：70B KV CRR 0.69 实为 0.84 throttle artifact**
 
 R25 LLaMA shape baseline 正式跑完（8 build shape，覆盖 10 logical shape；FP8 + V2 各 5x，60 measurement run）。**结论：8192³ "V2 ≈ FP8" 的判断只在 8192³ 成立。LLaMA production shape 上 V2 显著落后 FP8。**
 
