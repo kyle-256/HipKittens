@@ -414,11 +414,16 @@ Three independent attacks (R22B B-NT, R24D A-NT, R24B extra-VMEM-pf, R24C outer-
   - **DLA7**: 4168 → 4456 TFLOPS (+6.92% vs baseline; +2.24% vs pfoff4-alone).
   - Stack also **most stable** of all 4 variants on DLA7 (no rc=-6 crashes, no 2× outliers).
   - Mechanism: gm6 = L2 B-tile reuse (steady-state), pfoff4 = tail VMEM freeing (epilogue). Orthogonal stalls.
-- **Wired into `bench_all_42.py`** as `_ts_gm6_v12_memc_dc_pfoff4` (DLA2-class) and `_ts_lgk2_gm6_v12_memc_pfoff4` (DLA7-class).
+- **Wired into `bench_all_42.py`** as `_ts_gm6_v12_memc_dc_pfoff4` (DLA2-class) and `_ts_lgk2_gm6_v12_memc_pfoff4` (DLA7-class). **Committed at `7ada8c70`.**
 - **Gap reduction**: DLA2 ratio 96.3% → ~98.9% (gap to aiter 4536: 6.7% → 1.1%). DLA7 ratio 96.9% → ~99.8% (gap 6.9% → 0.2%).
+- **R25 reviewer baseline check (2026-04-18, PASS with note)**: pre-R25-D bench measured 27/42 WIN with 2 noise-band flips at the 100% threshold (`4096×32768×6144` 100.6%→99.2%, `32768×4096×14336` 101.0%→98.8%). All R23/R24 macros confirmed `#ifndef`-guarded, default 0/inactive — no kernel pollution. Cached binaries used; R25-D wires NOT measured here. Verdict: kernel safe.
 
-## Remaining vectors (high-cost / high-risk only)
-- **DLA1 K-loop peel** — split main loop into head (k_iters-N-1, fully prefetched) + peeled tail (N iters, no pf). Would attack the K=128256 deep-LOSE that R25C couldn't help (gated off). Cost ~1-2d (duplicate ~200-line main-loop body).
+## In flight (2026-04-18)
+- **R25-D verify** (agent `a355a47a7cd86cda2`): full 42-shape autotune WITH R25-D wires picked up. Expects DLA2/DLA7 LOSE→WIN flip → 31/42 total.
+- **R25-E DLA1 K-loop peel** (agent `aa5d9ccf6befb238f`, in worktree): split main loop into head (K-1-N iters, full pf) + peeled tail (N iters, no pf). Macros `R25E_K_LOOP_PEEL_ITERS` (default 0) + `R25E_K_LIMIT_LO=65536` so only DLA1 (K=128256) activates.
+
+## Remaining vectors (high-cost / high-risk only — post-R25)
+- **R25-F (post-verify)**: extended `R25C_TAIL_PF_OFF_ITERS ∈ {5,6,7,8}` and `GROUP_SIZE_M ∈ {5,7}` cross-products on DLA2/DLA7 — possible additional +1-2pp.
 - **Tile-geometry axis** (BK depth) — pure structural rewrite, ~1-2d.
 - **MFMA_32X32X64** alternative tiling — major asm rewrite, AGPR pressure unclear.
 - **PERSISTENT_XCD kernel-bug rewrite** — risky, would need re-verification of all 29 WIN shapes.

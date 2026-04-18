@@ -302,8 +302,11 @@
   - `GROUP_SIZE_M=3` — too unstable (3.3% std); not commit-quality.
 
   **Frontier post-R25**: HBM-bandwidth saturation broken on K=4096 short-K shapes via tail-pf-off + gm6 stack. **Remaining vectors**:
-  - **R25-E — DLA1 K-loop peel (K=128256)**: split main loop into head (K-1-N iters fully prefetched) + peeled tail (N iters no-pf). Requires duplicating ~200-line main-loop body. Could close the largest remaining gap (DLA1 91.9%).
-  - **Other 11 mid-gap shapes (95.7-99.9%)**: re-bench with R25-D wires; many may flip WIN automatically.
+  - **R25-E — DLA1 K-loop peel (K=128256)** — IN FLIGHT (agent `aa5d9ccf6befb238f`): split main loop into head (K-1-N iters fully prefetched) + peeled tail (N iters no-pf). Working in worktree. Requires duplicating ~200-line main-loop body. Could close the largest remaining gap (DLA1 91.9%).
+  - **R25-D-verify — full 42-shape rebench WITH R25-D wires** — IN FLIGHT (agent `a355a47a7cd86cda2`): expects DLA2 96.3%→~98.9% and DLA7 96.9%→~99.8% to flip LOSE→WIN; total WIN count likely 31/42.
+  - **R25 reviewer baseline check (PASS, 2026-04-18)**: pre-R25-D bench measured 27/42 WIN with 2 noise-band flips (`4096×32768×6144`, `32768×4096×14336` both at 100% threshold ±2%). Cached binaries used; R25-D wires NOT measured in this run. See `r25_reviewer_baseline_check.md`. Verdict: kernel safe to proceed.
+  - **R25-F (post-verify)**: extended `R25C_TAIL_PF_OFF_ITERS ∈ {5,6,7,8}` and `GROUP_SIZE_M ∈ {5,7}` cross-products on DLA2/DLA7 — possible additional +1-2pp.
+  - **Other 11 mid-gap shapes (95.7-99.9%)**: re-bench with R25-D wires; the autotuner may pick the new variants for some of these and flip them automatically.
 
 - **Round 21 (2026-04-18, recon + audit + head-macro probe)**: 3 parallel agents; **0 new WINs**, but R21-recon delivered the highest-value finding of the post-R20 axis: DLA1/DLA2/DLA7 are **memory-stall bound**.
   - **R21-recon — rocprof PMC sweep on DLA2 + DLA7** (parallels R17A's DLA1 profile):
