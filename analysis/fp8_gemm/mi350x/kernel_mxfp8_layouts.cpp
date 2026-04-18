@@ -3751,6 +3751,18 @@ namespace tk_mxfp8_dispatch_trace {
 inline void emit(const char* layout, const char* name, int M, int N, int K);
 }
 
+// R43 Dev C — forward-declare MXFP8_DISPATCH_TRACE_ONCE so the unified
+// small-M dispatcher waterfall in dispatch<L> can use it. The macro just
+// expands to the forward-declared emit() above; it is identical to the
+// macro re-defined later (line ~5713) once the namespace body is fully
+// in scope. The later macro is #undef'd at its definition site to avoid
+// "macro redefined" warnings (the forward and full versions are textually
+// identical so semantics are preserved).
+#ifndef MXFP8_DISPATCH_TRACE_ONCE
+#define MXFP8_DISPATCH_TRACE_ONCE(LAYOUT, NAME, G) \
+    ::tk_mxfp8_dispatch_trace::emit((LAYOUT), (NAME), (G).m, (G).n, (G).k)
+#endif
+
 template<Layout L, bool PRESHUFFLED_QUANT=false>
 __global__ __launch_bounds__(_NUM_THREADS, GEMM_MIN_BLOCKS_PER_CU)
 void gemm_kernel(const layout_globals g) {
@@ -5472,37 +5484,129 @@ void dispatch(layout_globals g) {
     }
 #endif
 
+    // ========================================================================
+    // R43 Dev C — Unified small-M dispatcher waterfall
+    // ========================================================================
+    // Single intercept point for ALL M < BLK shapes. Replaces the previous
+    // pattern of independent macro-gated branches scattered through dispatch<>
+    // (R42 Dev A's MXFP8_DECODE_M1_ENABLE branch was here; R42 Dev B's
+    // MXFP8_SMALLM_B32_FASTPATH branch was at the bottom under the tail-kernel
+    // launch site). Folding both — plus future small-M kernels (R43 Dev B
+    // M=1 RRR/CRR via MXFP8_DECODE_M1_RRR_CRR_ENABLE; the placeholder
+    // MXFP8_SMALLM_BLK_M_16 from R42 Dev D's design) — into one waterfall
+    // means every additional small-M fastpath only edits this block, not
+    // multiple locations.
+    //
+    // Selection order (most-specific first; first match wins; falls through
+    // to V1-LEGACY tail kernel below if none match):
+    //   1. MXFP8_DECODE_M1_ENABLE          (R42A)  RCR M=1     — Dev A SHIP
+    //   2. MXFP8_DECODE_M1_RRR_CRR_ENABLE  (R43B)  RRR/CRR M=1 — Dev B SHIP
+    //   3. MXFP8_SMALLM_BLK_M_16           (FUTURE)            — placeholder
+    //   4. MXFP8_SMALLM_B32_FASTPATH       (R42B)  M=32/128    — Dev B SHIP
+    //
+    // Byte-identity contract for default 8192³ build (none of the macros
+    // defined): the entire `if (g.m < BLK)` shell still compiles, but its
+    // body short-circuits to the V1-LEGACY fall-through path (no return).
+    // For M=8192 (default), `g.m < BLK == 256` is false at runtime, so the
+    // block is skipped entirely. Symbol-set: zero new kernel symbols.
+    //
+    // Per-macro byte-identity contract (verified by R43 Dev C):
+    //   - Build with only MXFP8_DECODE_M1_ENABLE=1: kernel symbol set
+    //     identical to pre-R43 build (only gemv_m1_decode_kernel emitted).
+    //   - Build with only MXFP8_SMALLM_B32_FASTPATH=1: kernel symbol set
+    //     identical to pre-R43 build (only gemm_tail_kernel_smallm_b32
+    //     emitted).
+    //
+    // PRESHUFFLED_QUANT vs raw-MXFP8: M=1 RCR fastpath supports both (Dev A
+    // template parameter); SMALLM-B32-TAIL only fires on PRESHUFFLED_QUANT
+    // (raw-MXFP8 fall-through to original tail kernel for correctness
+    // reference, mirroring the original Dev B selection).
+    //
+    // R43 Dev C — fall-through semantics: if no small-M predicate fires,
+    // execution continues to the existing M-≥-BLK V2 / V1 chain below. This
+    // preserves R41 Dev C's measured V1-LEGACY-FALLBACK behavior for any
+    // unmatched small-M shape (e.g. M ∈ {2..15} with no fastpath gated in).
+    if (g.m < BLK) {
 #if MXFP8_DECODE_M1_ENABLE
-    // R42 Dev A — M=1 single-token decode fastpath (RCR only). Fires before
-    // the M-aligned V2 fastpath so M=1 short-circuits the legacy V1 + tail
-    // kernel that was previously the only routing target (R41 Dev C survey
-    // confirmed all 6 decode shapes hit V1-LEGACY-FALLBACK).
-    // Trace tag is forward-declared here; the trace helper namespace
-    // (tk_mxfp8_dispatch_trace) is defined later in this TU. We bind the
-    // macro indirection via a local lambda so the parser only resolves the
-    // macro at template instantiation time (after the macro body is seen).
-    if constexpr (L == Layout::RCR) {
-        if (can_use_decode_m1(g)) {
-            // R42 Dev A note: trace emit deferred until after macro is in
-            // scope; use raw helper call (the namespace IS already visible
-            // from the include of mxfp8_decode_m1_fastpath.inc which forward-
-            // declares nothing about traces). For now, emit via the trace
-            // helper's emit() function directly (visible at the point where
-            // the dispatch template is INSTANTIATED, which is after the
-            // namespace definition further down in this TU).
-            //
-            // Concretely: ::tk_mxfp8_dispatch_trace::emit(...) is a fully
-            // qualified call; name lookup at template instantiation time
-            // sees the namespace defined further down. Verified at compile
-            // time -- no MXFP8_DISPATCH_TRACE_ONCE macro needed here.
-            ::tk_mxfp8_dispatch_trace::emit(
-                "rcr_pq_v1", "RCR-DECODE-M1-FASTPATH (R42A)",
-                g.m, g.n, g.k);
-            dispatch_decode_m1<L, PRESHUFFLED_QUANT>(g);
+        if constexpr (L == Layout::RCR) {
+            if (can_use_decode_m1(g)) {
+                MXFP8_DISPATCH_TRACE_ONCE("rcr_pq_v1",
+                    "SMALLM-DECODE-M1-RCR (R42A)", g);
+                dispatch_decode_m1<L, PRESHUFFLED_QUANT>(g);
+                return;
+            }
+        }
+#endif
+#if MXFP8_DECODE_M1_RRR_CRR_ENABLE
+        // R43 Dev B placeholder hook — predicate / dispatch helper provided
+        // by `r43b_decode_m1_rrr_crr_fastpath.inc` when that work lands.
+        // Kept guarded so this build still works without those symbols.
+        if constexpr (L == Layout::RRR) {
+            if (can_use_decode_m1_rrr_crr(g)) {
+                MXFP8_DISPATCH_TRACE_ONCE("rrr_pq_v1",
+                    "SMALLM-DECODE-M1-RRR (R43B)", g);
+                dispatch_decode_m1_rrr_crr<L, PRESHUFFLED_QUANT>(g);
+                return;
+            }
+        }
+        if constexpr (L == Layout::CRR) {
+            if (can_use_decode_m1_rrr_crr(g)) {
+                MXFP8_DISPATCH_TRACE_ONCE("crr_pq_v1",
+                    "SMALLM-DECODE-M1-CRR (R43B)", g);
+                dispatch_decode_m1_rrr_crr<L, PRESHUFFLED_QUANT>(g);
+                return;
+            }
+        }
+#endif
+#if defined(MXFP8_SMALLM_BLK_M_16)
+        // R43 Dev C placeholder for R42 Dev D's BLK_M=16 alt-geometry
+        // (M ∈ {2..16} small-batch decode). When a kernel + predicate ship,
+        // wire them here. Default builds (macro undefined) compile this
+        // branch out entirely.
+        if (can_use_smallm_blk_m_16(g)) {
+            const char* lname = (L == Layout::RCR) ? "rcr_pq_v1"
+                              : (L == Layout::RRR) ? "rrr_pq_v1" : "crr_pq_v1";
+            MXFP8_DISPATCH_TRACE_ONCE(lname,
+                "SMALLM-BLK-M-16 (placeholder)", g);
+            dispatch_smallm_blk_m_16<L, PRESHUFFLED_QUANT>(g);
             return;
         }
-    }
 #endif
+#if MXFP8_SMALLM_B32_FASTPATH
+        // R42 Dev B — M=32 / M=128 (small-batch decode) tail-kernel fast
+        // path, K-loop scale-load hoisted. Only PRESHUFFLED_QUANT is wired
+        // (production decode uses preshuffle); raw-MXFP8 path falls through
+        // to the original tail kernel below for correctness reference. The
+        // launch geometry mirrors the legacy tail-kernel call site at the
+        // bottom of dispatch<L>: same grid (ceil_div on m,n), same block
+        // (TAIL_BLOCK_N x TAIL_BLOCK_M), and the kernel itself sees
+        // g.fast_m=g.fast_n=g.fast_k=0 (set just below in the standard
+        // V1 tail prep) so `fast_covers_cell=false` and full computation
+        // runs. We replicate the zeros locally here to keep the short-circuit
+        // self-contained.
+        if constexpr (PRESHUFFLED_QUANT) {
+            const char* lname = (L == Layout::RCR) ? "rcr_v2"
+                              : (L == Layout::RRR) ? "rrr_v2" : "crr_v2";
+            MXFP8_DISPATCH_TRACE_ONCE(lname, "SMALLM-B32-TAIL (R42B)", g);
+            g.fast_m = 0; g.fast_n = 0; g.fast_k = 0;
+            g.bpr = 0; g.bpc = 0; g.ki = 0;
+            dim3 tail_block(TAIL_BLOCK_N, TAIL_BLOCK_M);
+            dim3 tail_grid(
+                kittens::ceil_div(g.n, TAIL_BLOCK_N),
+                kittens::ceil_div(g.m, TAIL_BLOCK_M)
+            );
+            gemm_tail_kernel_smallm_b32<L, PRESHUFFLED_QUANT>
+                <<<tail_grid, tail_block, 0, g.stream>>>(g);
+            return;
+        }
+#endif
+        // No small-M predicate matched — fall through to the existing M≥BLK
+        // chain below. For M<BLK the V1 path will set g.fast_m=0 and route
+        // to the legacy gemm_tail_kernel, identical to pre-R42 behavior.
+    }
+    // ========================================================================
+    // END R43 Dev C unified small-M dispatcher waterfall
+    // ========================================================================
 
 #if MXFP8_RCR_EXACT_8WAVE_FAST_ENABLE
     if constexpr (L == Layout::RCR) {
@@ -5598,21 +5702,20 @@ void dispatch(layout_globals g) {
         // smallm_b32 kernel (per-k_block scale-load hoisted). Only PRESHUFFLED
         // path is wired (production decode uses preshuffle); non-PQ path
         // retains the original tail kernel (correctness reference).
-        // (Tracepoint inlined — MXFP8_DISPATCH_TRACE_ONCE macro is defined
-        // later in this TU, so we emit the trace string directly via the
-        // env-gated helper.)
+        //
+        // R43 Dev C — for M<BLK we now short-circuit at the top of dispatch<>
+        // (unified small-M waterfall), so this bottom branch only fires for
+        // M≥BLK with row-leftover (M%BLK!=0) or K-tail (K%BK!=0). The kernel
+        // handles `fast_covers_cell` correctly in both cases. Trace pattern
+        // refactored to use MXFP8_DISPATCH_TRACE_ONCE (forward-defined near
+        // the trace-helper forward decl) — replaces the prior inline
+        // std::getenv + static-int-once shim and de-duplicates per
+        // (predicate-name, shape) tuple consistent with R39 Dev C macro.
         if constexpr (PRESHUFFLED_QUANT) {
-            if (const char* dt = std::getenv("MXFP8_DISPATCH_TRACE"); dt && dt[0] == '1' && dt[1] == '\0') {
-                static int once = 0;
-                if (!once) {
-                    once = 1;
-                    const char* lname = (L == Layout::RCR) ? "rcr_v2"
-                                       : (L == Layout::RRR) ? "rrr_v2" : "crr_v2";
-                    std::fprintf(stderr,
-                        "[mxfp8_dispatch] %s: shape=(M=%d,N=%d,K=%d) -> SMALLM-B32-TAIL (R42B)\n",
-                        lname, g.m, g.n, g.k);
-                }
-            }
+            const char* lname = (L == Layout::RCR) ? "rcr_v2"
+                              : (L == Layout::RRR) ? "rrr_v2" : "crr_v2";
+            MXFP8_DISPATCH_TRACE_ONCE(lname,
+                "SMALLM-B32-TAIL-LEFTOVER (R42B/R43C)", g);
             gemm_tail_kernel_smallm_b32<L, PRESHUFFLED_QUANT><<<tail_grid, tail_block, 0, g.stream>>>(g);
         } else {
             gemm_tail_kernel<L, PRESHUFFLED_QUANT><<<tail_grid, tail_block, 0, g.stream>>>(g);
@@ -5710,8 +5813,15 @@ inline void emit(const char* layout, const char* name, int M, int N, int K) {
 
 }  // namespace tk_mxfp8_dispatch_trace
 
+// R43 Dev C — MXFP8_DISPATCH_TRACE_ONCE is also forward-defined near the
+// trace-helper forward decl (~line 3760) so dispatch<L> can use the macro
+// in the unified small-M waterfall before the namespace body is parsed.
+// The forward and here-defined macros are textually identical; this guard
+// avoids "macro redefined" diagnostics.
+#ifndef MXFP8_DISPATCH_TRACE_ONCE
 #define MXFP8_DISPATCH_TRACE_ONCE(LAYOUT, NAME, G) \
     ::tk_mxfp8_dispatch_trace::emit((LAYOUT), (NAME), (G).m, (G).n, (G).k)
+#endif
 
 template<Layout L>
 void dispatch_pq(layout_globals g) {
