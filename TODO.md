@@ -54,6 +54,79 @@
 
 **baseline 建立**：首次需在每个 LLaMA shape 上跑 FP8 per-tensor + MXFP8 V2 baseline 各 5x，记录 median TFLOPS 作为后续对照。
 
+## R43 cycle 完结 (2026-04-18, 4 devs + 1 reviewer) ★★★ DECODE-SHAPE EXPANSION + ★ R42 ESCALATION RESOLVED — Dev B M=1 RRR/CRR fastpath SHIP-LITE 11-17× speedup (MXFP8/FP8 954-1097% on 4 RRR/CRR cells, 688% lowest of 8 — closes M=1 layout coverage 6/6 → 8/8 with 2 new RRR/CRR cells SHIP) + Dev C unified small-M dispatcher waterfall SHIP (single `if (g.m < BLK)` block at top of `dispatch<L>` covering R42A M=1-RCR + R42B M=32/128-tail + R43B M=1-RRR/CRR + R42D M=16-placeholder, byte-identical default 8192³, paired BABA Δ within ±0.5%, MXFP8_DISPATCH_TRACE_ONCE refactored from R39C) + Dev A R42 ★ CRITICAL FAIL ROOT-CAUSED METHODOLOGY-FALSE-POSITIVE (R42 Reviewer P3.3 captured GPU6 in low-power state sclk=1826 MHz; same .so re-run on warmed GPUs gives min Δ%=+7.53%, t=+11.66 — kernel HEALTHY, R42 verdict OVERTURNED, regression NOT-A-REGRESSION) + Dev D gold-standard margin trajectory survey (1/6 8B-KV B1 mildly FALLING ~0.95pp/cycle, 5/6 stable; nm-gate catalog extended for R42 macros) + 13th-cycle baseline 765.86 TF (drift 0.78% from R42, envelope 3.85%) + 6/6 R42 decode SHIP STRICT RECONFIRM (M=1 RCR Δ%+677-780% vs ≥+500%; M=32/128 tail-hoist 99.02-99.25% vs ≥95%) + 3/3 production gold-standard PASS with WIDENED margins + 3/3 methodology PASS (Δ%-reproducibility R42 NEW rule VALIDATED — promote to MANDATORY) + 4 R43 NEW methodology rules
+
+R43 派 4 dev (A 8B-Down V2-RRR regression investigation, B M=1 RRR/CRR generalization, C dispatcher integration, D gold-standard margin survey) + Reviewer (13th-cycle baseline + 2 R42 decode STRICT RECONFIRM + 3 gold-standard re-bench + 3 methodology). **★★★ 2 SHIPs (B SHIP-LITE M=1 RRR/CRR + C SHIP unified waterfall) extending decode coverage to 8/8 + ★ R42 escalation RESOLVED as METHODOLOGY-FALSE-POSITIVE (Dev A) + 0 paradigm closures + 4 NEW methodology rules.**
+
+### R43 Dev A — 8B-Down V2-RRR regression investigation (`041fcb79` → `e2a2f718`, ~1 GPU-hr)
+- ROOT-CAUSE: METHODOLOGY-FALSE-POSITIVE. R42 Reviewer P3.3 `phase23.sh` harness captured GPU6 in deep low-power state (sclk-post-preheat **1826 MHz** vs operating gate 2200 MHz). At sub-2 GHz HBM/fclk/mclk also throttle, asymmetrically compressing V2-CRR vs V2-RRR gap from +7.5% to +2.3%. R42 phase23.sh has no sclk-gate / retry, unlike R38C `r38c_8bdown_orchestrate.sh` which implements R36 NEW 3-gate retry (G1/G2a/G2b).
+- Verification (identical .so md5 `2a1ec5119d5ba1c72c73cba113893c39`, no rebuild): GPU6 PREHEAT=60 (sclk=2265): CRR 2734.57/RRR 2950.53 → Δ=+7.90% t=14.65; GPU7 PREHEAT=90 (sclk=2301): Δ=+7.92% t=14.22; GPU7 PREHEAT=60 (sclk=2370): Δ=+7.53% t=11.66. min Δ%=+7.53% (R36B target ≥+5% PASS by +2.53pp; R38C STRICT min was +7.42%). min Welch t=+11.66 (clears R38C STRICT t>10 by +1.66).
+- Hypothesis matrix: H1 cherry-pick REFUTED, H2 compile-flag REFUTED, H3 driver/firmware IRRELEVANT, H4 wrong-kernel REFUTED, **H5 phase23.sh missing R36 3-gate retry CONFIRMED**.
+- Secondary finding: R42 Reviewer P3.1 (768 TF default) and P3.2 (661 TF default) absolute TFLOPS also ~6× below historical — same throttle issue, but relative Δ% gates passed because both kernels suffered same throttle. Future reviewers must add absolute-TFLOPS sanity gate alongside relative Δ%.
+- No code change. Kernel HEALTHY at HEAD `dbc08280`.
+
+### R43 Dev B — M=1 RRR/CRR decode fastpath (`a711b229` → `5d3578aa`, ~3 GPU-hr) ★ SHIP-LITE
+- New kernel `gemv_m1_decode_rrr_crr_kernel<L, PRESHUFFLED_QUANT>` mirrors Dev A's BLK_M=1 BLK_N=64 single-wave GEMV. B is `(K, N)` row-major in RRR/CRR — adjacent lanes (different cols, same `kk`) read 64 contiguous bytes per K-iter (one 128-byte cache line, wave-coalesced). A row + A_scale prefetched cooperatively into LDS once. VGPR=73, SGPR=83, no spill, 6 waves/SIMD occupancy.
+- Performance (GPU3, N_PAIRS=80, PREHEAT=15s, M=1): ×4096×4096 RRR=16.5×/CRR=11.2× over V1; ×8192×8192 12.9×/12.4×; ×14336×4096 13.7×/13.6×; ×4096×14336 11.4×/11.6×. MXFP8/FP8: 954-1097%. GPU6 triangulation: 629-1576% band; all 8 cells clear 95% gate.
+- Correctness: 6/6 parity cells max|delta|=0.0 vs V1-LEGACY-FALLBACK.
+- Macro-gated `MXFP8_DECODE_M1_RRR_CRR_ENABLE` (default OFF, 0 symbols). Default 8192³ build byte-identical.
+- Direction choice rationale (inspection): Dev A's M=1 RCR geometry ~9% HBM peak, mechanical to port; M=2..16 MFMA needs masked-row design (~3-5 days), infeasible in box → chose RRR/CRR over M=2..16.
+
+### R43 Dev C — Unified small-M dispatcher waterfall (`94c9abc2` → `c0b14356`, ~2 GPU-hr) ★ SHIP
+- Folded R42 Dev A `MXFP8_DECODE_M1_ENABLE` + R42 Dev B `MXFP8_SMALLM_B32_FASTPATH` (previously two independent macro-gated edits at distinct dispatch sites) into single unified small-M waterfall at top of `dispatch<L>`: `M=1 RCR (R42A) → M=1 RRR/CRR (R43B hook) → BLK_M=16 (R42D placeholder) → SMALLM-B32-TAIL (R42B) → V1-LEGACY-FALLBACK`.
+- Replaced 2 inline `std::getenv + static int once` trace shims with R39 Dev C's `MXFP8_DISPATCH_TRACE_ONCE` macro (forward-defined adjacent to trace-helper forward decl, original definition retained behind `#ifndef` guard).
+- Design deviation: gate placed in `dispatch<L>` not `dispatch_pq_v2<L>` (Dev D's sketch). Rationale: Dev A and Dev B kernels both already lived in `dispatch<L>` (V1 path), reachable from V2 via V1-LEGACY-FALLBACK. Putting the gate in `dispatch_pq_v2` would either require duplicate gate in `dispatch<L>` to cover V1 entry points (`gemm_rcr_pq`) or silently change V1 semantics.
+- nm-gate (3 builds, byte-identical): default 8192³, M1-only, B32-only. All diffs limited to randomized `__hip_cuid` + 3 intentionally-removed `static int once` symbols. All `gemv_m1_decode_kernel` (4) and `gemm_tail_kernel_smallm_b32` (12) symbols present.
+- Paired BABA (8 pairs, GPU2): M=1 Δ=+0.110%, M=32 Δ=−0.036%. Both within 0±0.5%.
+- Trace coverage: all three dispatch sites trace correctly under combined build (`MXFP8_DISPATCH_TRACE=1`); M=8192 default correctly bypasses waterfall.
+
+### R43 Dev D — Gold-standard margin tightening survey (`b69b9490` → `ca414333`, 0 GPU)
+- Per-gold-standard verdict (6/6): #1 70B-KV HB shrink B1 STABLE (slope ≈ −0.05 pp/cycle, R42 margin +0.17pp); #2 8B-KV HB shrink B1 **MILDLY FALLING** (slope ≈ −0.95 pp/cycle, last 4 cycles 27.15→24.29, R42 margin +0.29pp ← AT RISK); #3 8B-Down V2-RRR was COLLAPSED → resolved by Dev A as throttle artifact, restored to STABLE; #4 8B Gate/Up V2-RRR STABLE-OSCILLATING ±0.5pp; #5 8B QO V2-RCR STABLE/RISING; #6 70B QO V2-RCR monotonic RISING.
+- Drift-source hypothesis for #2: cumulative dispatcher insertion overhead at `kernel_mxfp8_layouts.cpp:5475/5596` (R42 A/B branches) + K=4096-specific silicon-bin drift (#1 70B-KV K=8192 unaffected, localising cause to K-routing).
+- Mitigations applied: extended `r38_nm_gate.sh` FEATURES catalog with `decode_m1` and `smallm_b32` entries (forward guard against R43+ accidental defaults). Both default-off `#if MACRO` so production builds clean, but gap was forward-drift risk.
+- R44+ spot-bench gate recommended: if 8B-KV B1 drops ≥0.3pp below +24%, run `git bisect` R37→R42 with PROD .so test on K=4096.
+- DO NOT modify dispatcher (R42 A/B macro guards correct; reverting would lose decode SHIPs).
+
+### R43 Reviewer (`026c4f6b` → `31aa9270`, ~3 GPU-hr)
+- **Phase 1 — 13-cycle 70B-KV V2-CRR baseline**: PASS. Median-of-4 = **765.86 TF** (GPU2 767.43 / GPU3 765.87 / GPU6 765.84 / GPU7 763.54). All 4 GPUs G1+G2a+G2b first attempt. Drift vs R42 = 0.78% (gate 3.5%). Envelope 3.81→3.85% (+0.04pp, monitoring only).
+- **Phase 2 — 6/6 R42 decode SHIP STRICT RECONFIRM**: PASS. M=1 RCR (`501e19c6`): 8B Δ%=+677%, 70B Δ%=+780% vs V1-PQ-FALLBACK (target ≥+500%, beats by 177-280pp). M=32/128 tail-hoist (`0c96d60a`): smallm/fp8 = 99.02-99.25% across 4 cells (target ≥95% by ≥4pp). Tighter than R42's 98.21-99.49% spread.
+- **Phase 3 — 3/3 gold-standards PASS with widened margins**: 70B-KV HB B1 Δ%=+28.49% (R42 +0.17pp → R43 +0.49pp); 8B-KV HB B1 Δ%=+26.96% (R42 +0.29pp → R43 +2.96pp **substantial widening**); 8B Gate/Up V2-RRR Δ%=+5.28%. 8B-Down V2-RRR DEFERRED per task spec (Dev A investigating).
+- **Phase 4 — 3/3 methodology PASS**: Δ%-reproducibility 8B QO V2-RCR 3-GPU spread 0.47pp (excl. GPU3 thermal-stuck), GPU2 N=10 vs N=20 = 0.27pp. R42 NEW rule **VALIDATED → MANDATORY**. r38_nm_gate.sh PASS. PY_MODULE_NAME defensive assert fires on synthetic collision.
+
+### R43 NEW methodology rules (4)
+1. **Paired-bench harness must enforce R36 3-gate retry** (G1 sclk-post-preheat ≥ 2200 MHz with up to 3 retries + G2a sclk-post-bench gate + G2b per-run stdev/mean ≤ 1%). Reference impl: `r38c_8bdown_orchestrate.sh:79-140`. **Mandatory** for any future paired-bench harness; lack of this caused R42 Reviewer P3.3 false-positive that would have triggered ~1 day of bisect work.
+2. **Reviewer must report absolute TFLOPS alongside relative Δ%** (sanity gate). R42 P3.1/P3.2 ran at ~6× below historical (768/661 TF default vs typical ~2700-4500) but relative Δ% gates passed because both kernels suffered the same throttle — masking the throttle. Add to gold-standard re-bench template.
+3. **Δ%-reproducibility (R42 NEW rule)** — **VALIDATED → promoted to MANDATORY**: when reviewer flags any predicate for SHIP/RECONFIRM, must measure Δ% across ≥ 3 GPUs (excluding any with sclk < 2200 MHz post-bench) with spread ≤ 0.6pp. R43 Reviewer P4 cleared 0.47pp on 8B QO V2-RCR.
+4. **nm-gate must extend with each new build-time macro in same commit** (recommended). R42 added 2 macros without updating `r38_nm_gate.sh` catalog; Dev D mitigated retroactively in R43.
+
+### R43 paradigm corrections (0 → cumulative 43 closed levers; R32:21 + R33:5 + R34:4 + R35:1 + R36:2 + R37:2 + R38:2 + R39:1 + R40:1 + R41:3 + R42:1 + R43:0)
+
+### R43 cumulative tally → 43 closed levers (UNCHANGED from R42; R43 added 2 SHIPs + 1 escalation-resolved + 4 methodology rules, no new paradigm closures)
+
+### R43 ★ R42 ESCALATION RESOLVED — 8B-Down V2-RRR
+- R42 verdict: ★ CRITICAL FAIL (Δ%+2.32% vs R36B target ≥+6.5%, hypothesized driver/firmware/compile-flag/cherry-pick contamination)
+- R43 Dev A finding: METHODOLOGY-FALSE-POSITIVE (sclk=1826 MHz throttle in P3.3 harness)
+- R43 verification: same .so on warmed GPUs → min Δ%=+7.53%, t=+11.66, kernel HEALTHY
+- Status: CLOSED — kernel correct, R36B SHIP intact, R42 ★ marker resolved
+- Methodology: NEW rule 1 + 2 added to prevent recurrence
+
+### R44+ priority list (rebuilt from R43 results)
+1. **8B-KV HB shrink B1 trajectory monitoring** (Dev D R43 finding) — set R44 spot-bench gate; if drops ≥ 0.3pp below +24%, dispatch git bisect R37→R42 PROD .so on K=4096 to localise drift source
+2. **M=2..16 MFMA fastpath** (R43 Dev B explicit recommendation) — separate scoping; BLK_M=1 GEMV cannot generalize, needs masked-row MFMA design (~3-5 days). High-value: covers prefill bs=2..16 + speculative-decode beam widths
+3. **Persistent-CU dispatch for very small N** (R43 Dev B recommendation) — KV at N=1024 currently 16 blocks underutilizes 304 CUs; persistent kernel pattern for occupancy
+4. **B-side packed-uint vectorization** (R43 Dev B recommendation) — would need warp-shuffle to gather strided K-elements; B-fp32 cache footprint reduction
+5. **R37/R38 margin tightening** — 70B-KV HB shrink B1 (margin +0.49pp) — investigate widening hardware-resource accounting; 8B Gate/Up V2-RRR (margin +0.28pp) — same
+6. **R36 3-gate retry harness migration** (NEW rule 1 enforcement) — audit all `r37_paired_bench_2so.py` invocations across cycles to ensure G1/G2a/G2b applied
+7. **Reviewer absolute-TFLOPS sanity gate** (NEW rule 2 enforcement) — extend gold-standard template with abs TFLOPS lower-bound check
+8. **R44 cycle Reviewer must use Δ%-reproducibility for ALL STRICT/SHIP gates** (NEW rule 3 promotion)
+
+### R43 Cherry-pick status (all on `feat/mxfp8-only`)
+- `e2a2f718` R43 Dev A — 8B-Down V2-RRR regression docs (no kernel change)
+- `ca414333` R43 Dev D — gold-standard survey + nm-gate extension
+- `31aa9270` R43 Reviewer — 13th-cycle baseline + RECONFIRMs + gold-standard + methodology
+- `c0b14356` R43 Dev C — unified small-M dispatcher waterfall (kernel)
+- `5d3578aa` R43 Dev B — M=1 RRR/CRR decode fastpath (kernel)
+
 ## R42 cycle 完结 (2026-04-18, 4 devs + 1 reviewer) ★★★ DECODE-SHAPE BREAKTHROUGH CYCLE — first decode SHIPs in R28-R42 history (Dev A M=1 fastpath 7.76×/8.74× speedup → MXFP8 NOW BEATS FP8 at 532%/504%; Dev B M=32/128 K-loop-hoist refactor 98-99% MXFP8/FP8 across all 4 production decode shapes) + 1 paradigm closure (Dev C `buffer_load_dword_lds` REFUTED-IN-TREE — already production via `kittens::load`, R29D→R30→R31C→R41D stale-recommendation chain closed, +43rd cumulative lever) + Dev D infrastructure (dispatcher waterfall design + 8/8 LLaMA prefill coverage confirmed + independent LDS-direct cross-validation) + 12th-cycle baseline 771.87 TF (drift 0.86% from R41; envelope widens to 3.81% — flagged not breached) + 2/2 R40 V2-RCR QO STRICT RECONFIRM + 3/4 gold-standard re-bench PASS + ★ CRITICAL FAIL surfaced (8B-Down V2-RRR production +2.32% vs R36B SHIP +6.5-9.51% — regression escalated to R43)
 
 R42 派 4 dev (A small-M MXFP8 fastpath M=1 prototype, B small-M MXFP8 fastpath M=32/128 prototype, C `buffer_load_dword_lds` VMEM→LDS scoping, D dispatcher gating infrastructure + shape coverage survey + LDS-direct audit) + Reviewer (12th-cycle baseline + 2 R40 STRICT RECONFIRM + 4 gold-standard re-bench + 3 methodology). **★★★ 2 SHIPs (A SHIP-LITE M=1 + B STRICT SHIP M=32/128) addressing R41 Dev C MAJOR FINDING + 1 closure (Dev C 43rd lever) + ★ CRITICAL FAIL surfaced (8B-Down V2-RRR regression — R43 must investigate).**
