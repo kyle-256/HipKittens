@@ -1,0 +1,75 @@
+===== R44 Dev C bisect cell=8b_kv sha=dbc08280 label=r42_head_gpu5 gpu=5 =====
+[orchestrate] N_PAIRS=10 WARMUP=30 ITERS=50 PREHEAT=60s WARMUP_PAIRS=2
+[orchestrate] R36 3-gate logic active: G1>=2200 G2a>=2200 G2b<=0.01, MAX_RETRIES=3
+Sat Apr 18 20:46:19 UTC 2026
+[checkout] git archive dbc08280 -> /shared_nfs/kyle/test/Hipkittens2/.claude/worktrees/agent-a35e4cd8/analysis/fp8_gemm/mi350x/r44c_bisect_runs/scratch_r42_head_gpu5
+/shared_nfs/kyle/test/Hipkittens2/.claude/worktrees/agent-a35e4cd8/analysis/fp8_gemm/mi350x/r44c_bisect_runs/scratch_r42_head_gpu5/analysis/fp8_gemm/mi350x/Makefile
+/shared_nfs/kyle/test/Hipkittens2/.claude/worktrees/agent-a35e4cd8/analysis/fp8_gemm/mi350x/r44c_bisect_runs/scratch_r42_head_gpu5/analysis/fp8_gemm/mi350x/kernel_mxfp8_layouts.cpp
+[build] tk_mxfp8_r44c_r42_head_gpu5_default.cpython-310-x86_64-linux-gnu.so (default CRR) at dbc08280
+[build r42_head_gpu5 default rc=0 md5=30df2f8beb70d97d912b4bba8b538bb6]
+[build] tk_mxfp8_r44c_r42_head_gpu5_b1.cpython-310-x86_64-linux-gnu.so (HB-shrink B1, BLK_M=128 PIPELINE=1) at dbc08280
+[build r42_head_gpu5 b1 rc=0 md5=08c9274635c50357ef535f202d1e1356]
+[bench attempt 1/3]
+[bench rc=0]
+[sclk-pre-preheat] GPU[5]		: sclk clock level: 1: (157Mhz)
+[preheat 60.0s] done 12284 iters
+[sclk-post-preheat] GPU[5]		: sclk clock level: 1: (2148Mhz)
+CORRECTNESS_A_default snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_B_b1 snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[5]		: sclk clock level: 1: (2368Mhz)
+WARMUP 0 B_b1=840.59 A_default=688.08
+WARMUP 1 B_b1=863.28 A_default=695.14
+PAIR 0 B_b1_1=881.01 A_default_1=695.27 B_b1_2=889.07 A_default_2=695.00
+PAIR 1 B_b1_1=891.16 A_default_1=693.57 B_b1_2=884.90 A_default_2=693.35
+PAIR 2 B_b1_1=883.89 A_default_1=695.44 B_b1_2=891.42 A_default_2=695.71
+PAIR 3 B_b1_1=887.20 A_default_1=694.03 B_b1_2=880.12 A_default_2=690.28
+PAIR 4 B_b1_1=886.50 A_default_1=693.64 B_b1_2=890.99 A_default_2=694.67
+PAIR 5 B_b1_1=886.83 A_default_1=694.21 B_b1_2=888.48 A_default_2=693.44
+PAIR 6 B_b1_1=872.53 A_default_1=696.56 B_b1_2=877.86 A_default_2=694.05
+PAIR 7 B_b1_1=882.30 A_default_1=690.94 B_b1_2=887.99 A_default_2=698.40
+PAIR 8 B_b1_1=887.07 A_default_1=692.92 B_b1_2=892.69 A_default_2=697.54
+PAIR 9 B_b1_1=893.25 A_default_1=691.79 B_b1_2=888.58 A_default_2=697.87
+[sclk-post-bench] GPU[5]		: sclk clock level: 1: (2395Mhz)
+CRR_DEFAULT  median=694.13 mean=694.43 stdev=2.15 n=20
+CRR_HBSHRINK median=887.13 mean=886.19 stdev=5.30 n=20
+Welch t (DEFAULT vs HBSHRINK) = 149.896  (positive = HBSHRINK faster)
+DELTA_MEDIAN_PCT HBSHRINK_vs_DEFAULT = +27.805%
+CRR_DEFAULT_TFLOPS_LIST 695.2750,695.0050,693.5687,693.3450,695.4441,695.7148,694.0287,690.2798,693.6356,694.6686,694.2079,693.4449,696.5607,694.0512,690.9352,698.3962,692.9194,697.5449,691.7927,697.8736
+CRR_HBSHRINK_TFLOPS_LIST 881.0104,889.0703,891.1571,884.8966,883.8927,891.4160,887.1975,880.1248,886.5012,890.9884,886.8325,888.4822,872.5263,877.8591,882.2967,887.9867,887.0701,892.6921,893.2496,888.5755
+--- stderr (head) ---
+W20260418 20:46:51.267102 140027874033664 agent.cpp:461] Attempt to enable hip visiblity for agent-2 which is not visible to HSA (ROCR)
+[orchestrate] attempt=1 rc=0 G1 sclk-post-preheat=2148MHz (gate=2200) G2a sclk-post-bench=2395MHz (gate=2200) PASS=0
+[orchestrate] attempt=1 FAILED gates; retry after 5s...
+[bench attempt 2/3]
+[bench rc=0]
+[sclk-pre-preheat] GPU[5]		: sclk clock level: S: (95Mhz)
+[preheat 60.0s] done 12284 iters
+[sclk-post-preheat] GPU[5]		: sclk clock level: 1: (2278Mhz)
+CORRECTNESS_A_default snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_B_b1 snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[5]		: sclk clock level: 1: (2344Mhz)
+WARMUP 0 B_b1=796.51 A_default=658.14
+WARMUP 1 B_b1=828.64 A_default=667.50
+PAIR 0 B_b1_1=818.86 A_default_1=662.26 B_b1_2=807.44 A_default_2=664.92
+PAIR 1 B_b1_1=811.88 A_default_1=663.61 B_b1_2=811.88 A_default_2=661.17
+PAIR 2 B_b1_1=825.14 A_default_1=665.72 B_b1_2=818.22 A_default_2=666.71
+PAIR 3 B_b1_1=820.00 A_default_1=667.43 B_b1_2=826.31 A_default_2=664.30
+PAIR 4 B_b1_1=819.81 A_default_1=659.42 B_b1_2=818.39 A_default_2=661.83
+PAIR 5 B_b1_1=818.30 A_default_1=663.41 B_b1_2=820.83 A_default_2=663.11
+PAIR 6 B_b1_1=814.06 A_default_1=665.56 B_b1_2=821.30 A_default_2=663.79
+PAIR 7 B_b1_1=820.86 A_default_1=663.89 B_b1_2=814.61 A_default_2=664.70
+PAIR 8 B_b1_1=818.27 A_default_1=659.99 B_b1_2=825.34 A_default_2=665.31
+PAIR 9 B_b1_1=816.18 A_default_1=663.89 B_b1_2=817.94 A_default_2=669.40
+[sclk-post-bench] GPU[5]		: sclk clock level: 1: (2389Mhz)
+CRR_DEFAULT  median=663.89 mean=664.02 stdev=2.42 n=20
+CRR_HBSHRINK median=818.35 mean=818.28 stdev=4.73 n=20
+Welch t (DEFAULT vs HBSHRINK) = 129.922  (positive = HBSHRINK faster)
+DELTA_MEDIAN_PCT HBSHRINK_vs_DEFAULT = +23.265%
+CRR_DEFAULT_TFLOPS_LIST 662.2553,664.9207,663.6054,661.1744,665.7244,666.7063,667.4326,664.3039,659.4185,661.8264,663.4112,663.1149,665.5593,663.7913,663.8934,664.6954,659.9864,665.3119,663.8937,669.3971
+CRR_HBSHRINK_TFLOPS_LIST 818.8615,807.4378,811.8793,811.8793,825.1384,818.2203,820.0020,826.3120,819.8145,818.3926,818.2986,820.8329,814.0648,821.3030,820.8635,814.6052,818.2683,825.3442,816.1838,817.9410
+--- stderr (head) ---
+W20260418 20:48:24.810149 140220689780736 agent.cpp:461] Attempt to enable hip visiblity for agent-2 which is not visible to HSA (ROCR)
+[orchestrate] attempt=2 rc=0 G1 sclk-post-preheat=2278MHz (gate=2200) G2a sclk-post-bench=2389MHz (gate=2200) PASS=1
+[orchestrate] PASS R36 3-gate at attempt=2; using as final.
+DONE label=r42_head_gpu5 sha=dbc08280 gpu=5 attempts=2
+Sat Apr 18 20:49:50 UTC 2026

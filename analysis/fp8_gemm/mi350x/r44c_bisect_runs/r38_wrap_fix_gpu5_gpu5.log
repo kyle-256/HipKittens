@@ -1,0 +1,47 @@
+===== R44 Dev C bisect cell=8b_kv sha=66ef02d8 label=r38_wrap_fix_gpu5 gpu=5 =====
+[orchestrate] N_PAIRS=10 WARMUP=30 ITERS=50 PREHEAT=60s WARMUP_PAIRS=2
+[orchestrate] R36 3-gate logic active: G1>=2200 G2a>=2200 G2b<=0.01, MAX_RETRIES=3
+Sat Apr 18 20:44:17 UTC 2026
+[checkout] git archive 66ef02d8 -> /shared_nfs/kyle/test/Hipkittens2/.claude/worktrees/agent-a35e4cd8/analysis/fp8_gemm/mi350x/r44c_bisect_runs/scratch_r38_wrap_fix_gpu5
+/shared_nfs/kyle/test/Hipkittens2/.claude/worktrees/agent-a35e4cd8/analysis/fp8_gemm/mi350x/r44c_bisect_runs/scratch_r38_wrap_fix_gpu5/analysis/fp8_gemm/mi350x/Makefile
+/shared_nfs/kyle/test/Hipkittens2/.claude/worktrees/agent-a35e4cd8/analysis/fp8_gemm/mi350x/r44c_bisect_runs/scratch_r38_wrap_fix_gpu5/analysis/fp8_gemm/mi350x/kernel_mxfp8_layouts.cpp
+[build] tk_mxfp8_r44c_r38_wrap_fix_gpu5_default.cpython-310-x86_64-linux-gnu.so (default CRR) at 66ef02d8
+[build r38_wrap_fix_gpu5 default rc=0 md5=c2a283cd8763805769130fbd75d481c9]
+[build] tk_mxfp8_r44c_r38_wrap_fix_gpu5_b1.cpython-310-x86_64-linux-gnu.so (HB-shrink B1, BLK_M=128 PIPELINE=1) at 66ef02d8
+[build r38_wrap_fix_gpu5 b1 rc=0 md5=13c88966966badd4ec347b55abc9d18b]
+[bench attempt 1/3]
+[bench rc=0]
+[sclk-pre-preheat] GPU[5]		: sclk clock level: S: (96Mhz)
+[preheat 60.0s] done 12284 iters
+[sclk-post-preheat] GPU[5]		: sclk clock level: 1: (2336Mhz)
+CORRECTNESS_A_default snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_B_b1 snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[5]		: sclk clock level: 1: (2370Mhz)
+WARMUP 0 B_b1=852.12 A_default=693.98
+WARMUP 1 B_b1=873.27 A_default=687.74
+PAIR 0 B_b1_1=876.82 A_default_1=695.32 B_b1_2=879.13 A_default_2=695.16
+PAIR 1 B_b1_1=888.52 A_default_1=695.42 B_b1_2=884.35 A_default_2=693.41
+PAIR 2 B_b1_1=873.08 A_default_1=699.77 B_b1_2=891.75 A_default_2=700.19
+PAIR 3 B_b1_1=893.27 A_default_1=688.97 B_b1_2=882.51 A_default_2=693.55
+PAIR 4 B_b1_1=878.61 A_default_1=696.36 B_b1_2=889.15 A_default_2=699.69
+PAIR 5 B_b1_1=875.53 A_default_1=696.63 B_b1_2=881.07 A_default_2=702.34
+PAIR 6 B_b1_1=886.59 A_default_1=697.60 B_b1_2=896.66 A_default_2=690.38
+PAIR 7 B_b1_1=893.68 A_default_1=691.00 B_b1_2=894.42 A_default_2=692.47
+PAIR 8 B_b1_1=893.79 A_default_1=696.46 B_b1_2=882.28 A_default_2=698.83
+PAIR 9 B_b1_1=885.81 A_default_1=692.96 B_b1_2=880.34 A_default_2=699.80
+[sclk-post-bench] GPU[5]		: sclk clock level: 1: (2393Mhz)
+CRR_DEFAULT  median=695.89 mean=695.82 stdev=3.64 n=20
+CRR_HBSHRINK median=885.08 mean=885.37 stdev=7.06 n=20
+Welch t (DEFAULT vs HBSHRINK) = 106.715  (positive = HBSHRINK faster)
+DELTA_MEDIAN_PCT HBSHRINK_vs_DEFAULT = +27.187%
+CRR_DEFAULT_TFLOPS_LIST 695.3206,695.1627,695.4219,693.4119,699.7728,700.1940,688.9742,693.5465,696.3577,699.6930,696.6279,702.3357,697.6016,690.3802,691.0019,692.4728,696.4588,698.8274,692.9647,699.7959
+CRR_HBSHRINK_TFLOPS_LIST 876.8187,879.1349,888.5189,884.3477,873.0762,891.7469,893.2696,882.5124,878.6129,889.1453,875.5327,881.0650,886.5931,896.6627,893.6775,894.4234,893.7901,882.2772,885.8082,880.3417
+--- stderr (head) ---
+W20260418 20:44:47.629699 140513891815424 agent.cpp:461] Attempt to enable hip visiblity for agent-2 which is not visible to HSA (ROCR)
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=1024, K=4096) is +8.13% to +8.63% faster on V2-RRR (R33 Dev C 8B KV SHIP, 4-GPU triangulated; min Δ% +8.13). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r33c_findings.md.
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=1024, K=4096) is +8.13% to +8.63% faster on V2-RRR (R33 Dev C 8B KV SHIP, 4-GPU triangulated; min Δ% +8.13). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r33c_findings.md.
+[tk_mxfp8_layouts] gemm_crr_pq_v2: HB shrink Stage B1 (BLK_M=128, PIPE=1) ACTIVE for N=1024 tall-thin (M=4096, N=1024, K=4096) — R37 Dev A/B SHIP, R38 wire-in fix. See analysis/fp8_gemm/mi350x/r38_reviewer_findings.md.
+[orchestrate] attempt=1 rc=0 G1 sclk-post-preheat=2336MHz (gate=2200) G2a sclk-post-bench=2393MHz (gate=2200) PASS=1
+[orchestrate] PASS R36 3-gate at attempt=1; using as final.
+DONE label=r38_wrap_fix_gpu5 sha=66ef02d8 gpu=5 attempts=1
+Sat Apr 18 20:46:13 UTC 2026

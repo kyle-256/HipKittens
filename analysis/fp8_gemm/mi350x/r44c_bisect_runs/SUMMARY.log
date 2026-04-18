@@ -1,0 +1,12 @@
+[orchestrate SUMMARY] sha=66ef02d8 label=r38_wrap_fix gpu=4 DELTA_MEDIAN_PCT HBSHRINK_vs_DEFAULT = +24.737%
+[orchestrate SUMMARY] sha=dbc08280 label=r42_head gpu=4 DELTA_MEDIAN_PCT HBSHRINK_vs_DEFAULT = +26.077%
+[orchestrate SUMMARY] sha=51a7c759 label=r43_head gpu=4 DELTA_MEDIAN_PCT HBSHRINK_vs_DEFAULT = +25.490%
+[orchestrate SUMMARY] sha=021d5a13 label=r39_trace gpu=4 DELTA_MEDIAN_PCT HBSHRINK_vs_DEFAULT = +25.386%
+[orchestrate SUMMARY] sha=0c96d60a label=r42b_smallm32 gpu=4 DELTA_MEDIAN_PCT HBSHRINK_vs_DEFAULT = +25.025%
+[orchestrate SUMMARY] sha=501e19c6 label=r42a_decode_m1 gpu=4 DELTA_MEDIAN_PCT HBSHRINK_vs_DEFAULT = +25.210%
+[orchestrate SUMMARY] sha=66ef02d8 label=r38_wrap_fix_gpu5 gpu=5 DELTA_MEDIAN_PCT HBSHRINK_vs_DEFAULT = +27.187%
+[orchestrate SUMMARY] sha=dbc08280 label=r42_head_gpu5 gpu=5 DELTA_MEDIAN_PCT HBSHRINK_vs_DEFAULT = +23.265%
+[orchestrate SUMMARY] sha=dbc08280 label=r42_head_gpu5b gpu=5 DELTA_MEDIAN_PCT HBSHRINK_vs_DEFAULT = +23.662%
+[orchestrate SUMMARY] sha=66ef02d8 label=r38_wrap_fix_gpu5b gpu=5 DELTA_MEDIAN_PCT HBSHRINK_vs_DEFAULT = +25.783%
+[orchestrate SUMMARY] sha=51a7c759 label=r43_head_gpu5 gpu=5 DELTA_MEDIAN_PCT HBSHRINK_vs_DEFAULT = +25.691%
+[orchestrate SUMMARY] sha=66ef02d8 label=r38_wrap_fix_gpu5c gpu=5 DELTA_MEDIAN_PCT HBSHRINK_vs_DEFAULT = +23.802%
