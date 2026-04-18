@@ -1,0 +1,73 @@
+--- 8B_4kx4k_rrr_FAST ---
+[mxfp8_dispatch] rrr_pq: shape=(M=0,N=0,K=0) -> V1-PQ-DEFAULT
+[mxfp8_dispatch] rrr_pq_v1: shape=(M=1,N=4096,K=4096) -> SMALLM-DECODE-M1-RRR (R43B)
+R43B_RESULT module=tk_mxfp8_decode_m1rc_8b_4kx4k kind=mxfp8 impl=decode_m1_rrr_crr layout=rrr shape=1x4096x4096 avg_ms=0.104561 tflops=0.3209 snr_db=47.71
+--- 8B_4kx4k_crr_FAST ---
+[mxfp8_dispatch] crr_pq: shape=(M=0,N=0,K=0) -> V1-PQ-DEFAULT
+[mxfp8_dispatch] crr_pq_v1: shape=(M=1,N=4096,K=4096) -> SMALLM-DECODE-M1-CRR (R43B)
+R43B_RESULT module=tk_mxfp8_decode_m1rc_8b_4kx4k kind=mxfp8 impl=decode_m1_rrr_crr layout=crr shape=1x4096x4096 avg_ms=0.105701 tflops=0.3174 snr_db=47.71
+--- 8B_4kx4k_rrr_V1 ---
+[mxfp8_dispatch] rrr_pq: shape=(M=0,N=0,K=0) -> V1-PQ-DEFAULT
+R43B_RESULT module=tk_mxfp8_legacy_8b_4kx4k kind=mxfp8 impl=legacy_v1pq layout=rrr shape=1x4096x4096 avg_ms=1.132491 tflops=0.0296 snr_db=47.71
+--- 8B_4kx4k_crr_V1 ---
+[mxfp8_dispatch] crr_pq: shape=(M=0,N=0,K=0) -> V1-PQ-DEFAULT
+R43B_RESULT module=tk_mxfp8_legacy_8b_4kx4k kind=mxfp8 impl=legacy_v1pq layout=crr shape=1x4096x4096 avg_ms=1.154131 tflops=0.0291 snr_db=47.71
+--- 8B_4kx4k_rrr_FP8 ---
+R43B_RESULT module=tk_fp8_baseline_8b_4kx4k kind=fp8 impl=fp8_pertensor layout=rrr shape=1x4096x4096 avg_ms=1.008310 tflops=0.0333 snr_db=47.64
+--- 8B_4kx4k_crr_FP8 ---
+R43B_RESULT module=tk_fp8_baseline_8b_4kx4k kind=fp8 impl=fp8_pertensor layout=crr shape=1x4096x4096 avg_ms=1.042430 tflops=0.0322 snr_db=47.64
+--- 70B_8kx8k_rrr_FAST ---
+[mxfp8_dispatch] rrr_pq: shape=(M=0,N=0,K=0) -> V1-PQ-DEFAULT
+[mxfp8_dispatch] rrr_pq_v1: shape=(M=1,N=8192,K=8192) -> SMALLM-DECODE-M1-RRR (R43B)
+R43B_RESULT module=tk_mxfp8_decode_m1rc_70b_8kx8k kind=mxfp8 impl=decode_m1_rrr_crr layout=rrr shape=1x8192x8192 avg_ms=0.201742 tflops=0.6653 snr_db=48.00
+--- 70B_8kx8k_crr_FAST ---
+[mxfp8_dispatch] crr_pq: shape=(M=0,N=0,K=0) -> V1-PQ-DEFAULT
+[mxfp8_dispatch] crr_pq_v1: shape=(M=1,N=8192,K=8192) -> SMALLM-DECODE-M1-CRR (R43B)
+R43B_RESULT module=tk_mxfp8_decode_m1rc_70b_8kx8k kind=mxfp8 impl=decode_m1_rrr_crr layout=crr shape=1x8192x8192 avg_ms=0.274142 tflops=0.4896 snr_db=48.00
+--- 70B_8kx8k_rrr_V1 ---
+[mxfp8_dispatch] rrr_pq: shape=(M=0,N=0,K=0) -> V1-PQ-DEFAULT
+R43B_RESULT module=tk_mxfp8_legacy_70b_8kx8k kind=mxfp8 impl=legacy_v1pq layout=rrr shape=1x8192x8192 avg_ms=2.588305 tflops=0.0519 snr_db=48.00
+--- 70B_8kx8k_crr_V1 ---
+[mxfp8_dispatch] crr_pq: shape=(M=0,N=0,K=0) -> V1-PQ-DEFAULT
+R43B_RESULT module=tk_mxfp8_legacy_70b_8kx8k kind=mxfp8 impl=legacy_v1pq layout=crr shape=1x8192x8192 avg_ms=2.501484 tflops=0.0537 snr_db=48.00
+--- 70B_8kx8k_rrr_FP8 ---
+R43B_RESULT module=tk_fp8_baseline_70b_8kx8k kind=fp8 impl=fp8_pertensor layout=rrr shape=1x8192x8192 avg_ms=2.026559 tflops=0.0662 snr_db=48.03
+--- 70B_8kx8k_crr_FP8 ---
+R43B_RESULT module=tk_fp8_baseline_70b_8kx8k kind=fp8 impl=fp8_pertensor layout=crr shape=1x8192x8192 avg_ms=2.098860 tflops=0.0639 snr_db=48.03
+--- 8B_14kx4k_rrr_FAST ---
+[mxfp8_dispatch] rrr_pq: shape=(M=0,N=0,K=0) -> V1-PQ-DEFAULT
+[mxfp8_dispatch] rrr_pq_v1: shape=(M=1,N=14336,K=4096) -> SMALLM-DECODE-M1-RRR (R43B)
+R43B_RESULT module=tk_mxfp8_decode_m1rc_8b_14kx4k kind=mxfp8 impl=decode_m1_rrr_crr layout=rrr shape=1x14336x4096 avg_ms=0.106561 tflops=1.1021 snr_db=47.85
+--- 8B_14kx4k_crr_FAST ---
+[mxfp8_dispatch] crr_pq: shape=(M=0,N=0,K=0) -> V1-PQ-DEFAULT
+[mxfp8_dispatch] crr_pq_v1: shape=(M=1,N=14336,K=4096) -> SMALLM-DECODE-M1-CRR (R43B)
+R43B_RESULT module=tk_mxfp8_decode_m1rc_8b_14kx4k kind=mxfp8 impl=decode_m1_rrr_crr layout=crr shape=1x14336x4096 avg_ms=0.104081 tflops=1.1284 snr_db=47.85
+--- 8B_14kx4k_rrr_V1 ---
+[mxfp8_dispatch] rrr_pq: shape=(M=0,N=0,K=0) -> V1-PQ-DEFAULT
+R43B_RESULT module=tk_mxfp8_legacy_8b_14kx4k kind=mxfp8 impl=legacy_v1pq layout=rrr shape=1x14336x4096 avg_ms=1.437074 tflops=0.0817 snr_db=47.85
+--- 8B_14kx4k_crr_V1 ---
+[mxfp8_dispatch] crr_pq: shape=(M=0,N=0,K=0) -> V1-PQ-DEFAULT
+R43B_RESULT module=tk_mxfp8_legacy_8b_14kx4k kind=mxfp8 impl=legacy_v1pq layout=crr shape=1x14336x4096 avg_ms=1.448614 tflops=0.0811 snr_db=47.85
+--- 8B_14kx4k_rrr_FP8 ---
+R43B_RESULT module=tk_fp8_baseline_8b_14kx4k kind=fp8 impl=fp8_pertensor layout=rrr shape=1x14336x4096 avg_ms=1.119791 tflops=0.1049 snr_db=47.80
+--- 8B_14kx4k_crr_FP8 ---
+R43B_RESULT module=tk_fp8_baseline_8b_14kx4k kind=fp8 impl=fp8_pertensor layout=crr shape=1x14336x4096 avg_ms=1.162012 tflops=0.1011 snr_db=47.80
+--- 8B_4kx14k_rrr_FAST ---
+[mxfp8_dispatch] rrr_pq: shape=(M=0,N=0,K=0) -> V1-PQ-DEFAULT
+[mxfp8_dispatch] rrr_pq_v1: shape=(M=1,N=4096,K=14336) -> SMALLM-DECODE-M1-RRR (R43B)
+R43B_RESULT module=tk_mxfp8_decode_m1rc_8b_4kx14k kind=mxfp8 impl=decode_m1_rrr_crr layout=rrr shape=1x4096x14336 avg_ms=0.347883 tflops=0.3376 snr_db=47.88
+--- 8B_4kx14k_crr_FAST ---
+[mxfp8_dispatch] crr_pq: shape=(M=0,N=0,K=0) -> V1-PQ-DEFAULT
+[mxfp8_dispatch] crr_pq_v1: shape=(M=1,N=4096,K=14336) -> SMALLM-DECODE-M1-CRR (R43B)
+R43B_RESULT module=tk_mxfp8_decode_m1rc_8b_4kx14k kind=mxfp8 impl=decode_m1_rrr_crr layout=crr shape=1x4096x14336 avg_ms=0.344944 tflops=0.3405 snr_db=47.88
+--- 8B_4kx14k_rrr_V1 ---
+[mxfp8_dispatch] rrr_pq: shape=(M=0,N=0,K=0) -> V1-PQ-DEFAULT
+R43B_RESULT module=tk_mxfp8_legacy_8b_4kx14k kind=mxfp8 impl=legacy_v1pq layout=rrr shape=1x4096x14336 avg_ms=3.948378 tflops=0.0297 snr_db=47.88
+--- 8B_4kx14k_crr_V1 ---
+[mxfp8_dispatch] crr_pq: shape=(M=0,N=0,K=0) -> V1-PQ-DEFAULT
+R43B_RESULT module=tk_mxfp8_legacy_8b_4kx14k kind=mxfp8 impl=legacy_v1pq layout=crr shape=1x4096x14336 avg_ms=4.015679 tflops=0.0292 snr_db=47.88
+--- 8B_4kx14k_rrr_FP8 ---
+R43B_RESULT module=tk_fp8_baseline_8b_4kx14k kind=fp8 impl=fp8_pertensor layout=rrr shape=1x4096x14336 avg_ms=3.510175 tflops=0.0335 snr_db=47.78
+--- 8B_4kx14k_crr_FP8 ---
+R43B_RESULT module=tk_fp8_baseline_8b_4kx14k kind=fp8 impl=fp8_pertensor layout=crr shape=1x4096x14336 avg_ms=3.631095 tflops=0.0323 snr_db=47.78
+=== sweep complete: r43b_runs/sweep_gpu2.log ===
