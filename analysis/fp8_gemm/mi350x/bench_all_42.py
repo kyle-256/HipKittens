@@ -574,6 +574,17 @@ def main():
          "-DR25C_TAIL_PF_OFF_ITERS=28 -DR25C_K_LIMIT=32768 -DR25C_K_EXACT=8192 "
          "-mllvm -amdgpu-sched-strategy=max-memory-clause "
          "-DBARRIER_TO_WAITCNT_ALL=1"),  # R25H WIN: SH6 4096x14336x8192 +9.26% vs parent
+        # R28-C PER-K WIN (u16 parent class): closes the wrong-parent gap on L8.
+        # u16 (UNROLL_K=16) parent dominates 16384x4096x14336; no _kx14336 K_EXACT
+        # entry existed on top of u16 (the existing _kx14336 entry above is on tv0
+        # parent). K_iters = 14336/256 = 56 → pfoff=52 (4 prefetches fire, R25-G recipe).
+        # 5-rep verify (warmup=200 iters=500 trim=10%, GPU 3): 5762.54±5.48 TFLOPS,
+        # +14.50% vs v1 best ts_u16 (5032.7), +12.07% vs comp (5142.1).
+        ("_ts_u16_gm7_pfoff52_kx14336_btw_all",
+         "-DTAIL_SPLIT=1 -DUNROLL_K=16 -DGROUP_SIZE_M=7 -DSTEP3_BARRIER_VMCNT=12 "
+         "-DR25C_TAIL_PF_OFF_ITERS=52 -DR25C_K_LIMIT=32768 -DR25C_K_EXACT=14336 "
+         "-mllvm -amdgpu-sched-strategy=max-memory-clause "
+         "-DBARRIER_TO_WAITCNT_ALL=1"),  # R28C WIN: L8 16384x4096x14336 +14.50% vs v1 best
     ]
     for n_val, k_val in nk_pairs:
         for suffix, cppflags in variants:

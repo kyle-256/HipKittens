@@ -1,0 +1,21 @@
+=== R28-C Bench: 16384x4096x14336 (L8) ===
+SO: tk_mxfp4_gluon_cpp_n4096_k14336_ts_u16_gm7_pfoff52_kx14336_btw_all.cpython-310-x86_64-linux-gnu.so
+v1 best: 5032.7 TFLOPS  competitor: 5142.1 TFLOPS  success: 5300.0 TFLOPS
+warmup=200 iters=500 trim=0.1 reps=5 GPU=3
+
+  rep0:  5770.08 TFLOPS  ms=0.3335  finite=0.697 nz=1.000  (5.1s)
+  rep1:  5766.30 TFLOPS  ms=0.3337  finite=0.695 nz=1.000  (5.2s)
+  rep2:  5757.79 TFLOPS  ms=0.3342  finite=0.696 nz=1.000  (5.1s)
+  rep3:  5757.64 TFLOPS  ms=0.3342  finite=0.695 nz=1.000  (5.2s)
+  rep4:  5760.91 TFLOPS  ms=0.334  finite=0.699 nz=1.000  (5.2s)
+
+--- Summary ---
+reps_ok=5/5
+mean = 5762.54 TFLOPS  std = 5.48
+vs v1 best (5032.7): +729.84 TFLOPS  (+14.50%)
+vs comp    (5142.1): +620.44 TFLOPS  (112.07%)
+vs success (5300.0): +462.54 TFLOPS
+min finite_frac = 0.6948, min nz_frac = 1.0000
+VERDICT: WIN
+
+Wrote /shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/R28C_BENCH_L8.json
