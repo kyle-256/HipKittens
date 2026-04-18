@@ -3715,6 +3715,10 @@ __host__ inline void dispatch_rcr_exact_8wave_scaled_v2(const layout_globals& g)
 // Internally guarded by MXFP8_CRR_RBM=32 so default build (RBM=64) sees
 // an empty translation unit and is byte-identical to pre-R33-D head.
 #include "crr_mxfp8_exact_8wave_subrbm_fastpath.inc"
+// R35 Dev C — Stage A2: WARPS_M=4 (× WARPS_N=2) V2-CRR fastpath scaffolding.
+// Internally guarded by MXFP8_CRR_WARPS_M=4 so default build (WARPS_M=2) sees
+// an empty translation unit and is byte-identical to pre-R35-C head.
+#include "crr_mxfp8_exact_8wave_warpsm4_fastpath.inc"
 
 template<Layout L, bool PRESHUFFLED_QUANT=false>
 __global__ __launch_bounds__(_NUM_THREADS, GEMM_MIN_BLOCKS_PER_CU)
