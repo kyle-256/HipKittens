@@ -5735,25 +5735,28 @@ void dispatch_pq_v2(layout_globals g) {
         // chain falls through to the standard v2-CRR call below.
         //
         // R37 Dev A — production predicate: HB shrink Stage B1 (PIPE=1
-        // cross-buffer DB) is only positive on 70B-KV (M=4096, N=1024,
-        // K=8192) — R36 Dev A measured +28.02% on 70B-KV but -25.03% on
-        // 8192³ square. Add an explicit shape gate so the production .so
-        // (built with -DMXFP8_CRR_BLK_M=128 -DMXFP8_CRR_HBSHRINK_PIPELINE=1
-        // -DM_DIM=4096 -DN_DIM=1024 -DK_DIM=8192) restricts the HB shrink
-        // path to the 70B-KV cell only. Default 8192³ build (no HB shrink
-        // flags) is byte-identical because this branch compiles out under
-        // MXFP8_CRR_BLK_M != 128. See analysis/fp8_gemm/mi350x/r37a_findings.md.
+        // cross-buffer DB) is only positive on N=1024 tall-thin rect shapes
+        // — R36 Dev A measured +28.02% on 70B-KV but -25.03% on 8192³ square,
+        // and R37 Dev B/C measured +24.96% on 8B-KV (K=4096) but -17% to -28%
+        // on wide-N (N=14336, N=28672) shapes. R38 Reviewer found the K=4096
+        // 8B-KV branch was missing here (only K=8192 was wired) — fixed in
+        // R38 cycle wrap to honor R37 Dev B's allow-list `{(4096,1024,8192),
+        // (4096,1024,4096)}`. Default 8192³ build (no HB shrink flags) is
+        // byte-identical because this branch compiles out under
+        // MXFP8_CRR_BLK_M != 128. See analysis/fp8_gemm/mi350x/r37a_findings.md
+        // and analysis/fp8_gemm/mi350x/r38_reviewer_findings.md.
 #if defined(MXFP8_CRR_BLK_M) && (MXFP8_CRR_BLK_M == 128)
-        if (g.m == 4096 && g.n == 1024 && g.k == 8192 &&
+        if (g.m == 4096 && g.n == 1024 && (g.k == 8192 || g.k == 4096) &&
             crr_can_use_exact_8wave_scaled_hbshrink(g)) {
-            static int warned_70b_kv_hbshrink = 0;
-            if (!warned_70b_kv_hbshrink) {
+            static int warned_n1024_hbshrink = 0;
+            if (!warned_n1024_hbshrink) {
                 std::fprintf(stderr,
                     "[tk_mxfp8_layouts] gemm_crr_pq_v2: HB shrink Stage B1 "
-                    "(BLK_M=128, PIPE=1) ACTIVE for 70B-KV (M=4096, N=1024, "
-                    "K=8192) — R36 Dev A SHIP +28.02%% / R37 Dev A production "
-                    "wire-in. See analysis/fp8_gemm/mi350x/r37a_findings.md.\n");
-                warned_70b_kv_hbshrink = 1;
+                    "(BLK_M=128, PIPE=1) ACTIVE for N=1024 tall-thin (M=%d, "
+                    "N=%d, K=%d) — R37 Dev A/B SHIP, R38 wire-in fix. See "
+                    "analysis/fp8_gemm/mi350x/r38_reviewer_findings.md.\n",
+                    g.m, g.n, g.k);
+                warned_n1024_hbshrink = 1;
             }
             dispatch_crr_exact_8wave_scaled_v2_hbshrink<true>(g);
             return;
