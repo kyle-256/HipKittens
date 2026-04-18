@@ -1,0 +1,29 @@
+===== R37 Reviewer SHIP verify cell=c_qo70 label=70b_qo M=4096 N=8192 K=8192 phys_gpu=1 mode=single_so =====
+Sat Apr 18 14:45:29 UTC 2026
+[build] tk_mxfp8_r37rev_c_qo70.cpython-310-x86_64-linux-gnu.so
+[build c_qo70 rc=0 md5=a58f4e0fa2f2793603808d952de74da3]
+[bench rc=0]
+[sclk-pre-preheat] GPU[1]		: sclk clock level: 1: (193Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[1]		: sclk clock level: 1: (2275Mhz)
+CORRECTNESS_CRR snr_db=49.59 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RCR snr_db=49.60 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[1]		: sclk clock level: 1: (2339Mhz)
+WARMUP 0 RCR=2804.72 CRR=2699.91 sclk=GPU[1]		: sclk clock level: 1: (2336Mhz)
+WARMUP 1 RCR=2759.29 CRR=2694.34 sclk=GPU[1]		: sclk clock level: 1: (2327Mhz)
+PAIR 0 RCR_1=2741.41 CRR_1=2739.27 RCR_2=2970.00 CRR_2=2726.54
+PAIR 1 RCR_1=2976.95 CRR_1=2696.88 RCR_2=2965.62 CRR_2=2700.40
+PAIR 2 RCR_1=2953.07 CRR_1=2702.46 RCR_2=2990.67 CRR_2=2795.30
+PAIR 3 RCR_1=2998.81 CRR_1=2702.43 RCR_2=2985.45 CRR_2=2742.32
+PAIR 4 RCR_1=2980.74 CRR_1=2758.54 RCR_2=2990.55 CRR_2=2728.46
+[sclk-post-bench] GPU[1]		: sclk clock level: 1: (2260Mhz)
+CRR  median=2727.50 mean=2729.26 stdev=31.30 n=10
+RCR  median=2978.84 mean=2955.33 stdev=76.37 n=10
+Welch t (CRR vs RCR) = 8.662  (positive = RCR faster)
+DELTA_MEDIAN_PCT RCR_vs_CRR = +9.215%
+CRR_TFLOPS_LIST 2739.2732,2726.5352,2696.8835,2700.4027,2702.4629,2795.2981,2702.4313,2742.3220,2758.5379,2728.4619
+RCR_TFLOPS_LIST 2741.4145,2970.0033,2976.9517,2965.6192,2953.0673,2990.6728,2998.8149,2985.4481,2980.7354,2990.5547
+--- stderr ---
+W20260418 14:45:39.408595 140653392564224 agent.cpp:461] Attempt to enable hip visiblity for agent-2 which is not visible to HSA (ROCR)
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=8192, K=8192) is +8.20% to +8.32% faster on V2-RCR (R35 Dev D 70B Q/O matrix; R36 Dev C autotune wire-in, cross-GPU triangulated). Prefer gemm_rcr_pq_v2 with A row-major (M,K) and B row-major (N,K). See analysis/fp8_gemm/mi350x/r36c_findings.md.
+Sat Apr 18 14:46:52 UTC 2026

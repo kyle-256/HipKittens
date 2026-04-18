@@ -1,0 +1,29 @@
+===== R37 Reviewer SHIP verify cell=c_qo8 label=8b_qo M=4096 N=4096 K=4096 phys_gpu=1 mode=single_so =====
+Sat Apr 18 14:42:34 UTC 2026
+[build] tk_mxfp8_r37rev_c_qo8.cpython-310-x86_64-linux-gnu.so
+[build c_qo8 rc=0 md5=211cb3f5d011bfee01029398ae38d5d5]
+[bench rc=0]
+[sclk-pre-preheat] GPU[1]		: sclk clock level: 1: (360Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[1]		: sclk clock level: 1: (2283Mhz)
+CORRECTNESS_CRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RCR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[1]		: sclk clock level: 1: (2364Mhz)
+WARMUP 0 RCR=2221.12 CRR=2194.87 sclk=GPU[1]		: sclk clock level: 1: (2363Mhz)
+WARMUP 1 RCR=2198.01 CRR=2095.77 sclk=GPU[1]		: sclk clock level: 1: (2371Mhz)
+PAIR 0 RCR_1=2254.81 CRR_1=2179.78 RCR_2=2429.40 CRR_2=2295.58
+PAIR 1 RCR_1=2480.21 CRR_1=2323.05 RCR_2=2524.09 CRR_2=2354.72
+PAIR 2 RCR_1=2533.17 CRR_1=2335.24 RCR_2=2527.84 CRR_2=2331.29
+PAIR 3 RCR_1=2523.94 CRR_1=2348.00 RCR_2=2528.80 CRR_2=2364.83
+PAIR 4 RCR_1=2530.78 CRR_1=2380.66 RCR_2=2533.73 CRR_2=2345.25
+[sclk-post-bench] GPU[1]		: sclk clock level: 1: (2342Mhz)
+CRR  median=2340.25 mean=2325.84 stdev=56.38 n=10
+RCR  median=2525.96 mean=2486.68 stdev=87.98 n=10
+Welch t (CRR vs RCR) = 4.867  (positive = RCR faster)
+DELTA_MEDIAN_PCT RCR_vs_CRR = +7.936%
+CRR_TFLOPS_LIST 2179.7757,2295.5778,2323.0480,2354.7212,2335.2438,2331.2906,2347.9983,2364.8341,2380.6645,2345.2530
+RCR_TFLOPS_LIST 2254.8105,2429.3961,2480.2064,2524.0897,2533.1670,2527.8398,2523.9404,2528.8035,2530.7760,2533.7284
+--- stderr ---
+W20260418 14:42:44.218175 140265076752384 agent.cpp:461] Attempt to enable hip visiblity for agent-2 which is not visible to HSA (ROCR)
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=4096, K=4096) is +5.83% to +7.05% faster on V2-RCR (R35 Dev D 8B Q/O matrix; R36 Dev C autotune wire-in, cross-GPU triangulated). Prefer gemm_rcr_pq_v2 with A row-major (M,K) and B row-major (N,K). See analysis/fp8_gemm/mi350x/r36c_findings.md.
+Sat Apr 18 14:43:56 UTC 2026

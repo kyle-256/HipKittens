@@ -1,0 +1,30 @@
+===== R37 Reviewer SHIP verify cell=c_b1 label=70b_kv_b1 M=4096 N=1024 K=8192 phys_gpu=7 mode=two_so =====
+Sat Apr 18 14:41:03 UTC 2026
+[build c_b1 default md5=e9fea5a1f03d7e73f2213b70a1c33135 (cached)]
+[build c_b1 b1 md5=66f06675c9918308d017439117de76c4 (cached)]
+[bench rc=0]
+[sclk-pre-preheat] GPU[7]		: sclk clock level: 1: (348Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[7]		: sclk clock level: 1: (2253Mhz)
+CORRECTNESS_A_default snr_db=49.60 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_B_b1 snr_db=49.60 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[7]		: sclk clock level: 1: (2391Mhz)
+WARMUP 0 B_b1=942.44 A_default=760.49
+WARMUP 1 B_b1=979.93 A_default=764.02
+PAIR 0 B_b1_1=968.23 A_default_1=764.64 B_b1_2=973.17 A_default_2=764.19
+PAIR 1 B_b1_1=980.14 A_default_1=765.18 B_b1_2=983.91 A_default_2=765.88
+PAIR 2 B_b1_1=976.86 A_default_1=761.98 B_b1_2=976.66 A_default_2=763.86
+PAIR 3 B_b1_1=974.15 A_default_1=761.31 B_b1_2=979.51 A_default_2=764.52
+PAIR 4 B_b1_1=983.80 A_default_1=763.80 B_b1_2=976.33 A_default_2=765.38
+[sclk-post-bench] GPU[7]		: sclk clock level: 1: (2403Mhz)
+CRR_DEFAULT  median=764.36 mean=764.07 stdev=1.45 n=10
+CRR_HBSHRINK median=976.76 mean=977.28 stdev=4.83 n=10
+Welch t (DEFAULT vs HBSHRINK) = 133.769  (positive = HBSHRINK faster)
+DELTA_MEDIAN_PCT HBSHRINK_vs_DEFAULT = +27.789%
+CRR_DEFAULT_TFLOPS_LIST 764.6423,764.1935,765.1808,765.8831,761.9836,763.8604,761.3081,764.5198,763.7992,765.3781
+CRR_HBSHRINK_TFLOPS_LIST 968.2299,973.1655,980.1394,983.9116,976.8619,976.6619,974.1472,979.5130,983.7984,976.3284
+--- stderr ---
+W20260418 14:41:06.253651 139801687801856 agent.cpp:461] Attempt to enable hip visiblity for agent-2 which is not visible to HSA (ROCR)
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=1024, K=8192) is +10.24% to +10.83% faster on V2-RRR (R33 Dev C 70B KV SHIP, 4-GPU triangulated; min Δ% +10.24). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r33c_findings.md.
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=1024, K=8192) is +10.24% to +10.83% faster on V2-RRR (R33 Dev C 70B KV SHIP, 4-GPU triangulated; min Δ% +10.24). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r33c_findings.md.
+Sat Apr 18 14:42:21 UTC 2026

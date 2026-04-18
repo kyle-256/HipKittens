@@ -1,0 +1,49 @@
+===== cell=70b_kv_crr kind=mxfp8 layout=crr M=4096 N=1024 K=8192 phys_gpu=4 =====
+[orchestrate] phys_gpu=4 N_RUNS=5 WARMUP=50 ITERS=100 sclk_gate=2200MHz post_bench_gate=2200MHz stdev_mean_gate=0.01 max_retries=3
+[orchestrate] R34 gate: bench retries up to 3x if sclk-post-preheat < 2200 MHz
+[orchestrate] R35 NEW gate (mandatory): also retry if sclk-post-bench < 2200 MHz OR per-run stdev/mean > 0.01
+Sat Apr 18 14:30:23 UTC 2026
+[pre-orchestrate sclk check]
+GPU[4]		: sclk clock level: 1: (159Mhz)
+[bench attempt 1/3]
+CORRECTNESS snr_db=49.60 pass_rate_pct=100.00
+DETERMINISM ok=True
+RUN 0 avg_ms=0.0904 tflops=760.54
+RUN 1 avg_ms=0.0896 tflops=767.28
+RUN 2 avg_ms=0.0893 tflops=769.64
+RUN 3 avg_ms=0.0895 tflops=767.86
+RUN 4 avg_ms=0.0895 tflops=767.73
+SUMMARY median=767.73 mean=766.61 stdev=3.51 runs=5
+TFLOPS_LIST 760.5423,767.2847,769.6360,767.8611,767.7307
+W20260418 14:30:33.762170 140499812970496 agent.cpp:461] Attempt to enable hip visiblity for agent-2 which is not visible to HSA (ROCR)
+[sclk-pre-preheat] phys_gpu=4 GPU[4]		: sclk clock level: 1: (157Mhz)
+[preheat] sustained 8s 16k matmul...
+[preheat] done 5116 iters
+[sclk-post-preheat] phys_gpu=4 GPU[4]		: sclk clock level: 1: (2062Mhz)
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=1024, K=8192) is +10.24% to +10.83% faster on V2-RRR (R33 Dev C 70B KV SHIP, 4-GPU triangulated; min Δ% +10.24). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r33c_findings.md.
+[sclk-pre-bench] phys_gpu=4 GPU[4]		: sclk clock level: 1: (2323Mhz)
+[sclk-post-bench] phys_gpu=4 GPU[4]		: sclk clock level: 1: (2378Mhz)
+[orchestrate] attempt=1 rc=0 sclk-post-preheat=2062MHz (gate=2200) sclk-post-bench=2378MHz (gate=2200) stdev/mean=0.004579 (gate=0.01 pass=1)
+[orchestrate] attempt=1 FAILED gate; retrying after 5s wait...
+[bench attempt 2/3]
+CORRECTNESS snr_db=49.60 pass_rate_pct=100.00
+DETERMINISM ok=True
+RUN 0 avg_ms=0.0866 tflops=793.69
+RUN 1 avg_ms=0.0863 tflops=796.55
+RUN 2 avg_ms=0.0863 tflops=796.04
+RUN 3 avg_ms=0.0865 tflops=794.37
+RUN 4 avg_ms=0.0865 tflops=794.88
+SUMMARY median=794.88 mean=795.11 stdev=1.18 runs=5
+TFLOPS_LIST 793.6867,796.5536,796.0367,794.3729,794.8803
+W20260418 14:31:19.425806 139934190415872 agent.cpp:461] Attempt to enable hip visiblity for agent-2 which is not visible to HSA (ROCR)
+[sclk-pre-preheat] phys_gpu=4 GPU[4]		: sclk clock level: 1: (157Mhz)
+[preheat] sustained 8s 16k matmul...
+[preheat] done 5116 iters
+[sclk-post-preheat] phys_gpu=4 GPU[4]		: sclk clock level: 1: (2304Mhz)
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=1024, K=8192) is +10.24% to +10.83% faster on V2-RRR (R33 Dev C 70B KV SHIP, 4-GPU triangulated; min Δ% +10.24). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r33c_findings.md.
+[sclk-pre-bench] phys_gpu=4 GPU[4]		: sclk clock level: 1: (2371Mhz)
+[sclk-post-bench] phys_gpu=4 GPU[4]		: sclk clock level: 1: (2389Mhz)
+[orchestrate] attempt=2 rc=0 sclk-post-preheat=2304MHz (gate=2200) sclk-post-bench=2389MHz (gate=2200) stdev/mean=0.001484 (gate=0.01 pass=1)
+[orchestrate] PASS R34+R35 gates at attempt=2; using this run.
+DONE gpu=4 attempts=2
+Sat Apr 18 14:31:57 UTC 2026
