@@ -146,6 +146,10 @@ elif [ "$MODE" = "two_so" ]; then
     echo "[nm-gate] WARNING: b1 .so missing hbshrink symbols (build flag not effective)" | tee -a "$OUTLOG"
   fi
 
+  # R44 Dev D: this historical R38-cycle script lacks R36 3-gate retry
+  # (R43 NEW methodology rule 1, MANDATORY for new harnesses).  DEPRECATED:
+  # use r43_reviewer_phase23.sh (BENCH_KIND=two_so) for any new dual-.so
+  # paired-BABA work; it implements G1+G2a+G2b retry per r38c reference.
   # Use r37_paired_bench_2so.py: dual-.so paired BABA on the SAME entrypoint (gemm_crr_pq_v2)
   BENCH_OUT="$OUTDIR/${CELL}_${LABEL}_gpu${PHYS_GPU}_bench.txt"
   BENCH_ERR="$OUTDIR/${CELL}_${LABEL}_gpu${PHYS_GPU}_bench.err"
