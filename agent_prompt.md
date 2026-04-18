@@ -54,6 +54,48 @@ python3 test_mxfp8_python.py 4096 14336 4096
 5. 禁止提交 `*.so`、`*.s`、`*_layout_results_*.json`、`.bak*`、`gpucore.*`、`__pycache__` 等（`.gitignore` 已覆盖）
 6. 每个子 agent 使用不同 `HIP_VISIBLE_DEVICES` 以免 GPU 冲突：Dev A → 0，Dev B → 1，Dev C → 2，Reviewer/formal → 7
 
+## R37 cycle 完结 (2026-04-18) ★★★ DOMAIN-LOCK — HB shrink B1 production-wired (70B-KV +30.39%) + 8B-KV STRICT SHIP fan-out (+24.96%) + 3/3 R36 STRICT RECONFIRM + B1 domain rule established (N=1024 tall-thin only) + B3 PIPE=3 hybrid CLOSED structural + first V2-CRR cell to clear FP8 reference (107.4%)
+
+R37 派 4 dev (A wire HB shrink B1 production predicate 70B-KV + 4-GPU triangulation, B HB shrink B1 fan-out to 8B-KV + 8B Gate/Up rect, C HB shrink B1 fan-out to 70B Gate/Up + investigate B3 PIPE=3, D median-of-medians retroactive + 4-GPU triangulation R36 Dev B 8B-Down) + Reviewer (7th-cycle baseline + Phase 2 RECONFIRM HB shrink B1 + 2 V2-RCR predicates). **2 STRICT SHIPs + 1 SHIP-LITE + 2 NO-SHIP** (NO-SHIPs lock the B1 domain rule).
+
+### ★★★ Headline result — Dev A HB shrink B1 PRODUCTION wire-in `ab8a80f7` (+30.39% on 70B-KV, FIRST V2-CRR cell to clear FP8)
+- Production median-of-medians **1010.70 TF** vs FP8 per-tensor 941.11 TF = **107.4%** (first V2-CRR cell ever to clear FP8 reference)
+- 4-GPU triangulation (GPU0/1/3/6, BABA paired N=6): min Δ% +25.13%, min Welch t +13.05 → STRICT PASS
+- Default 8192³ build byte-identical (md5 `33b17d2c…` pre/post-edit)
+- R36 Dev A HB shrink B1 PROMOTED SHIP → STRICT under R37 4-GPU triangulation
+- **R37 NEW methodology**: R36 G1 sclk-post-preheat over-aggressive under 4-concurrent-agent host (50% sample loss); recovered using `bench_mhz ≥ 2200 AND median > 500 TF` post-hoc filter (Dev A r37a recipe)
+
+### ★★ Dev B HB shrink B1 fan-out STRICT SHIP `46a42d18` (8B-KV +24.96%)
+- 8B-KV (4096×1024×4096): STRICT SHIP — Δ% +24.96%, min Welch t +32.1
+- 8B Gate/Up (4096×14336×4096): NO SHIP -17.26%, predicate refuses (production .so falls through with +0.04%)
+- Production allow-list now `{(4096,1024,8192), (4096,1024,4096)}`
+- **Domain rule established**: HB shrink B1 wins on N=1024 tall-thin rect regardless of K; loses on wide-N
+
+### Dev C `2cdb0ae4` (NO SHIP both, 2 paradigm closures)
+- 70B Gate/Up B1: -28.30% (BLK_M=128 grid-doubling overhead on wide-N — same failure mode as 8192³ -25%)
+- B3v2 PIPE=3 hybrid (`MXFP8_CRR_HBSHRINK_PIPELINE=4`): -17.74% (worse than B3 -6.27%) — **B1 LDS interleave fundamentally incompatible with single-buffered SB pipelining; "B4 SB+interleave hybrid" pursuit CLOSED**
+- Methodology note: per-build md5 unreliable in env (consecutive identical hipcc → different md5); recommend `nm -D | grep <feature>` gate for compile-flag dead-code verification
+
+### Dev D `5fd5596d` (methodology + 8B-Down 4-GPU)
+- Median-of-medians retroactive R31-R36: 7/24 baselines bimodal; max per-cycle shift 0.23%; **NO PRIOR SHIPS INVALIDATED**
+- 8B-Down V2-RRR 4-GPU: SHIP-LITE CONFIRM (min Δ% +7.25% > STRICT 5.0 ✓; min Welch t +6.36 < STRICT 10.0 ✗). Need N_PAIRS=10-15 or quieter host for STRICT promotion.
+
+### Reviewer Phase 1+2 `a5f2f3a4` (7th-cycle baseline + 3/3 STRICT RECONFIRMS)
+- **R37 baseline 786.64 TF** (+1.48% vs R36 775.15; first "no high outlier" cycle since R33)
+- 3/3 STRICT RECONFIRMS independent on GPU1+GPU7: HB shrink B1 70B-KV +28.79%/+27.79%; V2-RCR 8B Q/O +7.94%/+6.75%; V2-RCR 70B Q/O +9.22%/+8.90%
+- R36 NEW 3-gate orchestrate validated; G1 sometimes too aggressive under high contention (GPU5 EXHAUSTED 12 attempts/3 sessions)
+
+### R37 paradigm corrections (2 → cumulative 35 closed levers; R32:21 + R33:5 + R34:4 + R35:1 + R36:2 + R37:2)
+- HB shrink B1 domain rule: N=1024 tall-thin rect ONLY (regardless of K). Wide-N and square out-of-domain.
+- B1 LDS interleave + single-buffered PIPE=3 fundamentally incompatible. No further "B4-style" pipelining permutations on hbshrink path.
+
+### R38+ priority (rebuilt from R37)
+1. 【high】4-GPU STRICT-promote 8B-Down V2-RRR with N_PAIRS=10-15 on quiet host (currently SHIP-LITE 2 cycles)
+2. 【medium】Investigate non-rect alternative: BLK_N reduction (BLK_N=64 + HB_N=32) for wide-N shapes (8B Gate/Up, 70B Gate/Up, 8B-Down) — parallel "HB-N shrink" SKU candidate
+3. 【medium】R38 NEW orchestrate: relax G1 to `bench_mhz ≥ 2200 AND median > 500 TF` post-hoc filter for high-contention runs
+4. 【medium】R38 NEW dead-code gate: `nm -D | grep <feature_symbol> == 0` instead of md5 (md5 unreliable in env)
+5. 【methodology】All R29-R36 rules carry forward + R37 NEW two methodology rules above
+
 ## R36 cycle 完结 (2026-04-18) ★★ MAJOR — 4 SHIPs CONFIRMED + R32 PIPE=3 -15% structural ceiling SMASHED + first V2-RCR autotune predicates + 7 predicates/11 LLaMA cells + R35 NEW second sclk gate validated in production + GPU6 outlier hypothesis BROKEN
 
 R36 派 4 dev (A GPU3 HB shrink Stage 2 re-pipelining critical, B GPU1/4 6th V2-RRR predicate 8B-Down, C GPU1/2/7 RCR Q/O verify+wire, D GPU6 methodology + GPU6 outlier root-cause) + Reviewer (GPU0/4/5/6 6th-cycle baseline + Phase 2 with R35 NEW gate). **4 SHIPs CONFIRMED**.

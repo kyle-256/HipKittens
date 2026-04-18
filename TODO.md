@@ -54,6 +54,79 @@
 
 **baseline 建立**：首次需在每个 LLaMA shape 上跑 FP8 per-tensor + MXFP8 V2 baseline 各 5x，记录 median TFLOPS 作为后续对照。
 
+## R37 cycle 完结 (2026-04-18, 4 devs + 1 reviewer) ★★★ DOMAIN-LOCK CYCLE — HB shrink B1 production-wired + 2nd rect shape STRICT-shipped (8B-KV) + 3/3 R36 STRICT RECONFIRM + B1 domain rule established (N=1024 tall-thin only) + B3 PIPE=3 hybrid CLOSED as structural + first V2-CRR cell to clear FP8 reference (107.4%)
+
+R37 派 4 dev (A wire HB shrink B1 production predicate for 70B-KV + 4-GPU triangulation, B HB shrink B1 fan-out to 8B-KV + 8B Gate/Up rect shapes, C HB shrink B1 fan-out to 70B Gate/Up + investigate B3 PIPE=3 regression, D apply median-of-medians retroactive + 4-GPU triangulation of R36 Dev B 8B-Down) + Reviewer (7th-cycle baseline + Phase 2 RECONFIRMS for R36 Dev A HB shrink B1 + 2 V2-RCR predicates). **2 STRICT SHIPs CONFIRMED** (Dev A HB shrink B1 production wire-in 70B-KV +30.39%, Dev B 8B-KV +24.96%); **1 SHIP-LITE CONFIRM** (Dev D 4-GPU 8B-Down +7.25% — STRICT min-t cap not cleared); **2 NO-SHIPs** (Dev B 8B Gate/Up -17.26%, Dev C 70B Gate/Up -28.30%) — both establish B1 domain rule: N=1024 tall-thin rect ONLY (regardless of K). **R36 Dev A's HB shrink B1 PROMOTED SHIP → STRICT** under R37 4-GPU triangulation (min Δ%=+25.13%, min Welch t=+13.05). **First V2-CRR cell to ever clear FP8 per-tensor reference**: HB shrink B1 production = 1010.70 TF vs FP8 941.11 TF = 107.4%.
+
+### R37 Reviewer — 7th-cycle baseline + 3/3 SHIP STRICT CONFIRMS (cherry-picked `a5f2f3a4`)
+
+7-cycle 70B-KV V2-CRR median (8192³ FP8 vs MXFP8 V2 paired baseline):
+- R31: 766.72 / R32: 772.51 / R33: 766.17 / R34: 767.59 / R35: 768.07 / R36: 775.15 / **R37: 786.64** (new high; +1.48% vs R36, partly confounded by including GPU1+GPU3 not in R31-R36 set)
+- 7-cycle min-to-max spread: 766.17 → 786.64 = 2.67% — first "no high outlier" cycle since R33 (GPU4 +1.05%, sub-1.5% threshold)
+- R36 NEW 3-gate orchestrate (G1+G2a+G2b) validated on contended host: GPU5 EXHAUSTED after 12 attempts/3 sessions (sclk pinned 1639-1942 MHz under persistent neighbor contention from GPU2) — gate refused all and auto-advanced. **G1 sometimes too aggressive under 4-concurrent-agent host load** (Dev A noted: would drop ~50% of valid samples; Dev A's r37a recipe relaxes to `bench_mhz ≥ 2200 AND median > 500 TF` filter)
+
+R37 Reviewer Phase 2 — 3/3 STRICT CONFIRMS (independent GPU1+GPU7 re-bench):
+- **R36 Dev A HB shrink B1 70B-KV** (commit `30d298e8`): GPU1 +28.79% t=+177.3; GPU7 +27.79% t=+133.8 → **STRICT CONFIRM** ★★ (R32 PIPE=3 ceiling smashed holds rock-solid)
+- **R36 Dev C V2-RCR 8B Q/O 4096³** (commit `2e63b801`): GPU1 +7.94% t=+4.87; GPU7 +6.75% t=+3.71 → **STRICT CONFIRM** (per R36C t≥3 gate)
+- **R36 Dev C V2-RCR 70B Q/O 4096×8192²** (commit `2e63b801`): GPU1 +9.22% t=+8.66; GPU7 +8.90% t=+7.73 → **STRICT CONFIRM**
+
+### R37 Dev results
+
+- **Dev A STRICT SHIP `66673811` → cherry-picked `ab8a80f7`** (★★★ CRITICAL): HB shrink Stage B1 production predicate WIRED for 70B-KV V2-CRR. Production .so md5 verified bit-identical for default 8192³ build (`33b17d2c7e5990e559bc267f352c016b` pre/post-edit). Production-bench median-of-medians **1010.70 TF** vs R36 baseline 775.15 TF = **+30.39%**, **vs FP8 per-tensor 941.11 TF = 107.4%** (first V2-CRR cell ever to clear FP8 reference). 4-GPU triangulation (GPU0/1/3/6, BABA paired N=6 reps, median-of-medians):
+  - GPU0: prod 1031.98 / base 793.11 / +30.12% / Welch t +13.05
+  - GPU1: prod 1031.62 / base 786.76 / +31.12% / Welch t +24.14
+  - GPU3: prod 989.79 / base 791.01 / +25.13% / Welch t +22.47
+  - GPU6: prod 988.54 / base 776.20 / +27.36% / Welch t +37.16
+  - min Δ% +25.13% (STRICT ≥ +5.0 PASS); min Welch t +13.05 (STRICT > 10.0 PASS)
+  - Correctness: SNR 49.60 dB, det 3/3, pass_rate 100% (bit-equal vs default CRR)
+  - **Methodology note R37 NEW**: R36 G1 sclk-post-preheat over-aggressive under 4-concurrent-agent host contention (≥50% sample-loss rate); recovered using `bench_mhz ≥ 2200 AND median > 500 TF` post-hoc filter. R38+ orchestrate should add this fallback path.
+
+- **Dev B STRICT SHIP `46a42d18`** (★★ HB shrink B1 fan-out, 2nd rect shape ships): HB shrink B1 production predicate WIRED for 8B-KV (M=4096 N=1024 K=4096). Per-shape outcome:
+  - **8B-KV (4096×1024×4096)**: STRICT SHIP — Δ% +24.96% (median-of-medians, 3 reps, GPU1×2 + GPU4 triangulation), min Welch t +32.1, SNR 49.61 dB, det 3/3
+  - **8B Gate/Up (4096×14336×4096)**: NO SHIP — Δ% -17.26% (2 reps), bit-exact correctness, predicate refuses (production .so falls through to default V2-CRR with +0.04% no-regression)
+  - Production allow-list: `{(4096,1024,8192), (4096,1024,4096)}` at `analysis/fp8_gemm/mi350x/crr_mxfp8_exact_8wave_hbshrink_fastpath.inc:683-705`
+  - **Domain rule established (R37 NEW)**: HB shrink Stage B1 wins on **N=1024 tall-thin rect** regardless of K (validated K=8192 and K=4096); loses on wide-N (N=14336) where BLK_M=128 grid-doubling overhead doesn't amortize.
+
+- **Dev C `2cdb0ae4`** (NO SHIP both parts, 2 paradigm closures):
+  - **Part A — HB shrink B1 70B Gate/Up (4096×28672×8192)**: NO SHIP at -28.30% (GPU0 clean PAIR 0-3, Welch t -4.6). Mechanism: BLK_M=128 doubles M-grid count → wide-N rect has 3584 B1 ctiles vs 1792 default; doubled scheduling overhead dominates per-ctile pipeline win. Same failure mode as R36 Dev A's 8192³ -25% probe. **Confirms Dev B's domain rule** — wide-N is paradigm-incompatible with HB shrink B1.
+  - **Part B — B3 PIPE=3 hybrid SB+interleave**: STRUCTURAL CLOSURE. Tested B3v2 (`MXFP8_CRR_HBSHRINK_PIPELINE=4`) with VMEM-after-cB ordering + redundant barrier removed: GPU2 -17.74% Welch t -127.7, **worse** than original B3 -6.27%. Removing VMEM-during-cB removes the only mechanism by which SB could hide VMEM latency. **B1 LDS interleave is fundamentally incompatible with single-buffered SB pipelining.** R37+ priority list item 4 ("B4 cross-buffer DB + interleave hybrid") is structurally already exactly what B1 SHIP delivers — paradigm CLOSED.
+  - Methodology note: per-build md5 hygiene unreliable in this env (two consecutive identical hipcc calls produce different md5). Recommend Reviewer adopt nm-based gate (`nm -D | grep hbshrink` = 0 symbols in default build).
+
+- **Dev D `5fd5596d`** (methodology + 4-GPU 8B-Down):
+  - **Task 1 — median-of-medians retroactive applied to R31-R36 baselines**: 7 of 24 (GPU × cycle) baselines bimodal (4 of 7 are GPU0). Per-GPU shifts max 0.63%; per-cycle med-of-4 shifts max 0.23%. Corrected table: R31 765.55 (was 766.73, -0.15%), R32 772.49 (was 772.51, -0.00%), R33-R35 unchanged, R36 773.40 (was 775.15, -0.23%). **NO PRIOR SHIPS INVALIDATED.** Caveat: true N≥3 BABA replicates don't exist for R31-R35 — best-available is post-hoc bimodality detection within each 5-iter sample.
+  - **Task 2 — 4-GPU triangulation of R36 Dev B 8B-Down V2-RRR SHIP-LITE** (commit `08452e02`): SHIP-LITE CONFIRM (no STRICT promotion). GPU4 +7.47% t=+6.36 PASS_3GATE; GPU5 +7.25% t=+8.33 FAIL_G1 only; GPU6 +7.29% t=+8.54 PASS_3GATE; GPU7 +8.32% t=+7.74 PASS_3GATE. min Δ%=+7.25% >> STRICT +5.0 ✓; min Welch t=+6.36 < STRICT 10.0 ✗. Performance gate clear; statistical-power gate caps at LITE — to reach STRICT min t>10 needs N_PAIRS=10-15 or quieter host. Consistent with R36 Dev B original 2-GPU LITE classification (min t=+5.87).
+
+### R37 paradigm corrections (2 — extends to 35 cumulative closed levers)
+
+- **HB shrink B1 domain rule (R37 NEW)**: SHIP scope is **N=1024 tall-thin rect ONLY** (regardless of K). Wide-N (N≥14336) and square (N=8192) regress -17% to -28% due to BLK_M=128 grid-doubling overhead. **Closed: "B1 generalizes across rect shapes" hypothesis.** Production allow-list now `{(4096,1024,8192), (4096,1024,4096)}`.
+- **B1 LDS interleave + single-buffered PIPE=3 fundamentally incompatible (R37 NEW)**: Removing VMEM-during-cB removes the only mechanism by which SB hides VMEM latency. **Closed: "B4 cross-buffer DB + interleave hybrid" pursuit** — this is already what B1 SHIP delivers; no further pipelining permutations on hbshrink path.
+
+### R37 cumulative tally → 35 closed levers (R32: 21 + R33: 5 + R34: 4 + R35: 1 + R36: 2 + R37: 2)
+
+### R38+ priority list (rebuilt from R37 results)
+
+1. **【high / 2-3 day】4-GPU STRICT-promote Dev D's 8B-Down V2-RRR predicate** with N_PAIRS=10-15 to clear min Welch t > 10 gate. Quieter host (single-agent run) recommended. Currently SHIP-LITE for 2 cycles running.
+2. **【medium / 2-3 day】Investigate non-rect, non-square HB shrink alternatives** for the wide-N shapes (8B Gate/Up 4096×14336×4096, 70B Gate/Up 4096×28672×8192, 8B-Down 4096×4096×14336). Since BLK_M=128 grid-doubling is the proven failure mode, candidate is BLK_N reduction (smaller N tile) instead. Test BLK_N=64 + HB_N=32 on wide-N shapes. May open a parallel "HB-N shrink" SKU.
+3. **【medium / 1-2 day】Investigate Dev D's R36 G1 over-aggressive failure mode** (50% sample loss rate under 4-concurrent-agent host). R38 NEW orchestrate candidate: relax G1 to `bench_mhz ≥ 2200 AND median > 500 TF` post-hoc filter (Dev A r37a recipe). Document the contention-aware fallback.
+4. **【medium / 1 day】Investigate Dev C's `nm`-based dead-code verification** as drop-in replacement for md5 build hygiene (md5 unreliable in this env — same source compiles to different md5 on consecutive runs). R38 NEW rule: `nm -D <so> | grep <feature_symbol> == 0` for dead-code verification of compile-flag-gated features.
+5. **【close — paradigm】"PIPE>1 impossible on V2-CRR" CLOSED at R36; "B1 generalizes across rect shapes" CLOSED at R37; "B4 SB+interleave hybrid worth pursuing" CLOSED at R37.** No further PIPE>1 or hbshrink permutations on rect shapes outside the N=1024 allow-list.
+6. **【methodology — R38+ rules, MUST follow】**:
+   - All R29-R36 rules carry forward.
+   - **R37 NEW (recommended)**: orchestrate fallback filter `bench_mhz ≥ 2200 AND median > 500 TF` for high-contention host runs (Dev A's recipe, used to recover Dev A's 4-GPU triangulation when R36 G1 dropped 50% of samples).
+   - **R37 NEW (recommended)**: `nm`-based dead-code gate for compile-flag-gated features when md5 build hygiene is unreliable.
+7. **【closed】**: 35 levers per cumulative tally. Do not re-prototype any of them.
+
+### R37 Cherry-pick status
+
+Cherry-picked to feat/mxfp8-only (in causal order, no conflicts beyond auto-merge):
+- `5fd5596d` (R37 Dev D — methodology retroactive + 8B-Down 4-GPU SHIP-LITE confirm; orchestrate scripts + analysis docs only)
+- `2cdb0ae4` (R37 Dev C — NO SHIP both parts, 2 paradigm closures; logs/findings only)
+- `ab8a80f7` (R37 Dev A — STRICT SHIP HB shrink B1 production wire-in 70B-KV; `dispatch_pq_v2<CRR>` predicate + 4-GPU bench logs)
+- `46a42d18` (R37 Dev B — STRICT SHIP HB shrink B1 fan-out 8B-KV + 8B Gate/Up NO SHIP; updated `crr_mxfp8_exact_8wave_hbshrink_fastpath.inc` allow-list)
+- `a5f2f3a4` (R37 Reviewer Phase 1+2 — 7th-cycle baseline + 3/3 STRICT RECONFIRMS)
+
+One auto-merge in `crr_mxfp8_exact_8wave_hbshrink_fastpath.inc` (Dev A's predicate-add and Dev B's allow-list extension touched adjacent regions). All R37 production additions guard under existing `MXFP8_CRR_BLK_M==128` macro; default 8192³ build remains byte-identical.
+
 ## R36 cycle 完结 (2026-04-18, 4 devs + 1 reviewer) ★★ MAJOR CYCLE — 4 SHIPs CONFIRMED + R32 PIPE=3 -15% ceiling SMASHED + first V2-RCR autotune predicates ever shipped + 7 predicates/11 LLaMA cells covered + R35 NEW second sclk gate validated in production + GPU6 "2-cycle outlier" hypothesis BROKEN (silicon-bin bimodal, not defect)
 
 R36 派 4 dev (A GPU3 HB shrink Stage 2 re-pipelining critical, B GPU1/4 6th V2-RRR predicate 8B-Down, C GPU1/2/7 RCR predicate verify + wire-in for square Q/O cells, D GPU6 methodology hardening 2nd sclk gate + GPU6 outlier root-cause) + Reviewer (GPU0/4/5/6 6th-cycle baseline + Phase 2 SHIP confirms with R35 NEW gate). **4 SHIPs CONFIRMED**: Dev A's HB shrink Stage B1 (+28.02% on 70B-KV V2-CRR, the FIRST major V2-CRR perf win after R32 PIPE=3 ceiling), Dev B's 6th V2-RRR predicate for 8B-Down (SHIP-LITE), Dev C's 2 STRICT V2-RCR predicates covering 4 square Q/O cells (the FIRST V2-RCR autotune predicates ever wired). **R32 PIPE=3 -15% structural ceiling is now SMASHED** by Dev A's PIPE=1 cross-buffer DB pattern (VGPR 160 = -74 vs default 234, bit-exact correctness, Welch t=+96.4 on 70B-KV). **GPU6 outlier hypothesis BROKEN** (Dev D RAS counters all 0, sustained sclk identical to GPU4/5; observed +2.85% R34/R35 was sampling bias on bimodal {763, 783} distribution; in R36 Reviewer GPU6 dropped to 770 and rotation restored to GPU0).
