@@ -1,30 +1,46 @@
 # MXFP4 GEMM Optimization TODO
 
-## Current State (2026-04-18, post-R26 FINAL v1)
+## Current State (2026-04-18, post-R26 FINAL v2 + R28-C)
 
-**Bench**: `bench_all42_results_R25_FINAL.{json,log}` (warmup=200 iters=500 trim=10%, 8-GPU parallel, 182.5 min wall)
-**Result**: **33/42 WIN, 9/42 LOSE, 0 ERR, avg ratio 109.5%** — up from 24/42 baseline (+9 net flips)
-**Projection**: R26-F coverage audit + FINAL v2 re-run still in flight; expected 35-38/42 once K-EXACT wiring gaps closed.
+**Bench**: `bench_all42_results_R25_FINAL_v2.{json,log}` (warmup=200 iters=500 trim=10%, 5-GPU parallel)
+**Result**: **40/42 WIN, 2/42 LOSE, 0 ERR, win rate 95%** — up from 33/42 v1 (+7 net flips), from 24/42 baseline (+16 net flips)
+**Status**: Saturated. Only 2 residuals: L4 (noise band) + L6/DLA1 (structural mega-K, V5 only remaining axis).
 
-### 9 residual LOSE shapes (post-R26 FINAL v1)
-| #  | Shape (M×N×K)         | Ours    | Comp    | Ratio  | Best Tag                                |
-|----|-----------------------|---------|---------|--------|------------------------------------------|
-| L1 | 4096×14336×16384      | 4870.3  | 5013.0  | 97.2%  | ts_lgk2_memc_btw_all                     |
-| L2 | 4096×28672×32768      | 5450.9  | 5649.9  | 96.5%  | ts_pf4_memc_btw_step3                    |
-| L3 | 4096×32768×6144       | 4532.9  | 4548.6  | 99.7%  | ts_gm2_v12_memc_btw_all                  |
-| L4 | 4096×32768×14336      | 5240.0  | 5296.1  | 98.9%  | ts_lgk2_memc_btw_all                     |
-| L5 | 4096×32768×28672      | 5272.0  | 5568.2  | 94.7%  | ts_gm8_v12_btw_step3                     |
-| L6 | 4096×32768×128256     | 5362.7  | 5781.1  | 92.8%  | ts_gm8_v12_btw_step3 (DLA1 — V1 target)  |
-| L7 | 14336×4096×32768      | 4965.3  | 5245.4  | 94.7%  | ts_pf4_memc_btw_step3                    |
-| L8 | 16384×4096×14336      | 5032.7  | 5142.1  | 97.9%  | ts_u16                                   |
-| L9 | 16384×4096×28672      | 5249.9  | 5525.3  | 95.0%  | v20_memc_btw_step3                       |
+### 2 residual LOSE shapes (post-R26 FINAL v2)
+| #  | Shape (M×N×K)         | Ours    | Comp    | Ratio  | Best Tag                              | Class                    |
+|----|-----------------------|---------|---------|--------|---------------------------------------|--------------------------|
+| L4 | 4096×32768×14336      | 5217.0  | 5296.1  | 98.5%  | ts_v12_tv0_memc_btw_all               | NOISE BAND (within ±2%)  |
+| L6 | 4096×32768×128256     | 5353.9  | 5781.1  | 92.6%  | ts_lgk2_v12_memc_btw_all (DLA1)       | STRUCTURAL (V5 only axis)|
 
-### GOAL PIVOT status: 24/42 ceiling BROKEN (now 33/42)
-The original "don't chase WIN, only gap-reduce" pivot from 2026-04-17 is **outdated**. R20A (+11 BARRIER_TO_WAITCNT shape closures) and R25-F/G/H (+8 K-bound flips via tail-pf-off + per-K K_EXACT gating) both paid off. **Both axes pay**: WIN flips and gap reduction work in tandem now. Continue both.
+### v2 NEW WIN flips (vs v1, +7)
+| Shape | v1 → v2 | Best Tag (v2) |
+|-------|---------|---------------|
+| L1 4096×14336×16384      | 97.2% → 115.3%  | ts_lgk2_gm7_memc_pfoff56_kx16384_btw_all |
+| L2 4096×28672×32768      | 96.5% → 115.6%  | ts_v12_tv0_memc_dc_gm7_pfoff120_kx32768_btw_all |
+| L3 4096×32768×6144       | 99.7% → 116.2%  | ts_v12_gm7_memc_pfoff19_kx6144_btw_all |
+| L5 4096×32768×28672      | 94.7% → 116.6%  | ts_lgk2_gm7_memc_pfoff104_kx28672_btw_all |
+| L7 14336×4096×32768      | 94.7% → 115.9%  | ts_v12_tv0_memc_dc_gm7_pfoff120_kx32768_btw_all |
+| L8 16384×4096×14336      | 97.9% → 116.6%  | ts_v12_tv0_memc_dc_gm7_pfoff54_kx14336_btw_all |
+| L9 16384×4096×28672      | 95.0% → 116.0%  | ts_lgk2_gm7_memc_pfoff104_kx28672_btw_all |
 
-### R25 + R26 commit summary
+### Bonus mega-WIN
+- shape 24 (4096×128256×32768): 199.5% via `ts_v12_tv0_memc_dc_gm7_pfoff120_kx32768_btw_all`
+- DLA2 (128256×32768×4096): 109.0% via `ts_lgk2_gm7_v12_memc_pfoff14`
+
+### GOAL PIVOT status: 24/42 ceiling BROKEN (now 40/42 = 95%)
+The original "don't chase WIN, only gap-reduce" pivot from 2026-04-17 is **fully obsoleted**. Sequence:
+- R20A (+11 BARRIER_TO_WAITCNT shape closures): 24 → 35 projected
+- R25-F/G/H (+8 K-bound flips via tail-pf-off + per-K K_EXACT gating): mid-K saturated
+- R26-D (+5 wiring fixes via auto-tune audit): 24 → 33 actual (v1 bench)
+- R28-C (+1 K=14336 K_EXACT u16 variant): committed `d45e35103`
+- v2 auto-tune (+7 flips): **33 → 40 (95%)**, only L4 noise + L6 DLA1 left
+
+### R25 + R26 + R28 commit summary
 | Commit     | Round  | Effect                                                                 |
 |------------|--------|------------------------------------------------------------------------|
+| d45e35103  | R28-C  | u16+kx14336 K_EXACT — +14.5% on 16384×4096×14336 (L8 flip)             |
+| d77c71fe   | R27-D  | per-shape bottleneck matrix for 9 LOSE residuals                       |
+| f0780765   | R27    | V5 MFMA_32X32X64 scout — verdict BACKBURNER                            |
 | 5d0b5fd2   | R26-G  | STEP12_BR_LGKMCNT axis DEAD on R25 stack                               |
 | 1454235e   | R26-D  | V2 audit WIN — fixed bench wiring bug, flipped 5+ shapes via K_EXACT   |
 | a2c85d86   | R25-H  | SMALL-K WIN — 4 K-EXACT flips at K∈{2048,6144,7168,8192}               |
@@ -45,10 +61,11 @@ The original "don't chase WIN, only gap-reduce" pivot from 2026-04-17 is **outda
 - **Cache hints / NT stores / persistent-XCD / EARLY_SCALE_PF / EARLY_BL_PF / DIRECT_BL** — all confirmed DEAD pre-R26
 - **outer-K pull-forward / extra L2 pf** — R24B/C: VMEM-issue-bound, not VMEM-latency-bound
 
-### R27 vector candidates (only 1 remaining structural axis)
-- **V5 — MFMA_32X32X64 tiling rewrite** (LOW priority for R26 timescale, HIGH ceiling). Per R26_PLAN.md §3.V5: 32×32 MFMAs allow 4× more concurrent MFMAs in flight at the same total acc footprint, may relieve VMEM-issue saturation that R24B/C confirmed. ≥1 week of work; 0-5pp on K-bound deep-LOSE; high uncertainty. Only remaining structural lever.
-- **R26-A DLA1 K-loop peel (V1)** — still in flight via worktree `r25e-kpeel`. If it lands, will close DLA1 (L6) which is the largest remaining gap (92.8%).
-- **R26-F coverage audit + FINAL re-run v2** — still in flight; will close any remaining K_EXACT wiring gaps.
+### R29+ vector candidates (post-v2 — only L6/DLA1 has real headroom)
+- **V5 — MFMA_32X32X64 tiling rewrite** — only remaining structural lever for L6/DLA1. ≥1 week of work; 0-5pp on K-bound deep-LOSE; high uncertainty. Per R27 V5 scout (`f0780765`): BACKBURNER unless dedicated 1-week sprint.
+- **R26-A DLA1 K-loop peel (V1)** — `pf495` was unstable noise (false alarm); verify on `r25e-kpeel` worktree showed std=1729 TFLOPS, mean swing 1672→5546 across 5 reps. DEAD.
+- **R27-C DLA1 K_EXACT bypass** — DEAD via aperture violation (HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION rc=-6 on all 5 reps). Kernel HARD-GATE at K_DIM ≤ 32768 documented in `kernel_mxfp4_gluon_cpp.cpp:85-91`. `R27C_VERIFY_VERDICT.md`.
+- **L4 4096×32768×14336 (98.5%)** — noise band, not worth structural attack. Single-shape variance is ±2-3% in this region.
 
 ---
 

@@ -1,0 +1,59 @@
+{
+  "total_sec": 5.2,
+  "results": [
+    {
+      "tag": "R28-B",
+      "N": 4096,
+      "K": 28672,
+      "suffix": "_ts_v12_tv0_memc_dc_gm7_pfoff104_kx28672_btw_all",
+      "module_name": "tk_mxfp4_gluon_cpp_n4096_k28672_ts_v12_tv0_memc_dc_gm7_pfoff104_kx28672_btw_all",
+      "so_path": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/tk_mxfp4_gluon_cpp_n4096_k28672_ts_v12_tv0_memc_dc_gm7_pfoff104_kx28672_btw_all.cpython-310-x86_64-linux-gnu.so",
+      "compile_sec": 4.9,
+      "returncode": 0,
+      "log_path": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/compile_R28-B_n4096_k28672.log",
+      "so_size_bytes": 283016,
+      "so_size_kb": 276.4,
+      "vgpr": null,
+      "agpr": null,
+      "sgpr": null,
+      "spills": null,
+      "status": "PASS",
+      "resource_usage": [
+        "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/wrap_n4096_k28672_ts_v12_tv0_memc_dc_gm7_pfoff104_kx28672_btw_all.cpp:2168:1: remark:     TotalSGPRs: 76 [-Rpass-analysis=kernel-resource-usage]",
+        "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/wrap_n4096_k28672_ts_v12_tv0_memc_dc_gm7_pfoff104_kx28672_btw_all.cpp:2168:1: remark:     VGPRs: 218 [-Rpass-analysis=kernel-resource-usage]",
+        "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/wrap_n4096_k28672_ts_v12_tv0_memc_dc_gm7_pfoff104_kx28672_btw_all.cpp:2168:1: remark:     AGPRs: 256 [-Rpass-analysis=kernel-resource-usage]",
+        "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/wrap_n4096_k28672_ts_v12_tv0_memc_dc_gm7_pfoff104_kx28672_btw_all.cpp:2168:1: remark:     ScratchSize [bytes/lane]: 0 [-Rpass-analysis=kernel-resource-usage]",
+        "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/wrap_n4096_k28672_ts_v12_tv0_memc_dc_gm7_pfoff104_kx28672_btw_all.cpp:2168:1: remark:     Occupancy [waves/SIMD]: 1 [-Rpass-analysis=kernel-resource-usage]",
+        "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/wrap_n4096_k28672_ts_v12_tv0_memc_dc_gm7_pfoff104_kx28672_btw_all.cpp:2168:1: remark:     SGPRs Spill: 0 [-Rpass-analysis=kernel-resource-usage]",
+        "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/wrap_n4096_k28672_ts_v12_tv0_memc_dc_gm7_pfoff104_kx28672_btw_all.cpp:2168:1: remark:     VGPRs Spill: 0 [-Rpass-analysis=kernel-resource-usage]"
+      ]
+    },
+    {
+      "tag": "R28-C",
+      "N": 4096,
+      "K": 14336,
+      "suffix": "_ts_u16_gm7_pfoff52_kx14336_btw_all",
+      "module_name": "tk_mxfp4_gluon_cpp_n4096_k14336_ts_u16_gm7_pfoff52_kx14336_btw_all",
+      "so_path": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/tk_mxfp4_gluon_cpp_n4096_k14336_ts_u16_gm7_pfoff52_kx14336_btw_all.cpython-310-x86_64-linux-gnu.so",
+      "compile_sec": 5.2,
+      "returncode": 0,
+      "log_path": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/compile_R28-C_n4096_k14336.log",
+      "so_size_bytes": 315752,
+      "so_size_kb": 308.4,
+      "vgpr": null,
+      "agpr": null,
+      "sgpr": null,
+      "spills": null,
+      "status": "PASS",
+      "resource_usage": [
+        "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/wrap_n4096_k14336_ts_u16_gm7_pfoff52_kx14336_btw_all.cpp:2168:1: remark:     TotalSGPRs: 76 [-Rpass-analysis=kernel-resource-usage]",
+        "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/wrap_n4096_k14336_ts_u16_gm7_pfoff52_kx14336_btw_all.cpp:2168:1: remark:     VGPRs: 256 [-Rpass-analysis=kernel-resource-usage]",
+        "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/wrap_n4096_k14336_ts_u16_gm7_pfoff52_kx14336_btw_all.cpp:2168:1: remark:     AGPRs: 256 [-Rpass-analysis=kernel-resource-usage]",
+        "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/wrap_n4096_k14336_ts_u16_gm7_pfoff52_kx14336_btw_all.cpp:2168:1: remark:     ScratchSize [bytes/lane]: 124 [-Rpass-analysis=kernel-resource-usage]",
+        "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/wrap_n4096_k14336_ts_u16_gm7_pfoff52_kx14336_btw_all.cpp:2168:1: remark:     Occupancy [waves/SIMD]: 1 [-Rpass-analysis=kernel-resource-usage]",
+        "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/wrap_n4096_k14336_ts_u16_gm7_pfoff52_kx14336_btw_all.cpp:2168:1: remark:     SGPRs Spill: 0 [-Rpass-analysis=kernel-resource-usage]",
+        "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/wrap_n4096_k14336_ts_u16_gm7_pfoff52_kx14336_btw_all.cpp:2168:1: remark:     VGPRs Spill: 30 [-Rpass-analysis=kernel-resource-usage]"
+      ]
+    }
+  ]
+}

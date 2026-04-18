@@ -2,29 +2,33 @@
 
 你在继续推进 `HipKittens` 的 MXFP4 GEMM 优化工作，跟 Cursor (Hipkittens2) 竞赛。
 
-## ⚠️ 当前优化目标 (2026-04-17 用户最新指令 — 必读)
+## ⚠️ 当前优化目标 (2026-04-18, post-v2)
+> 24/42 ceiling 早已被打破: 现在 **40/42 WIN (95%)** = saturated.
+> 唯一剩余有意义的目标: **L6 / DLA1 (4096×32768×128256, 92.6%)** — V5 MFMA_32X32X64 重写 (BACKBURNER, 1周).
+> L4 (98.5%) 在噪声边缘, 不值得结构性攻击.
+
+**历史指令** (2026-04-17, 已过时):
 > "24win 已经卡了好久了，现在把优化目标改成优化剩下那几个差的比较多的。"
+> 当时认为 24/42 是天花板; R25-F/G/H + R26-D + R28-C 后已证实是错的.
 
-**翻 LOSE→WIN 的工作 STOP**. 24/42 WIN 已被 4 轮饱和, 是当前架构天花板. 不要再跑 full-sweep auto-tune 了.
+### 重点 shape (post-R26 FINAL v2 + R28-C, 2026-04-18)
+**40/42 WIN** = 95% 命中率. 仅 2 残留:
 
-**改为**: 缩小 deep-LOSE shape 的 gap. 即使 88% → 92% 也算真实进步, **+1pp 即可 commit**.
+| 优先级 | Shape (M×N×K)         | Ratio | Best Tag (v2)                          | 类别              | 备注 |
+|-------|----------------------|-------|----------------------------------------|------------------|------|
+| P0    | 4096×32768×128256    | 92.6% | ts_lgk2_v12_memc_btw_all (DLA1)        | 大N+mega-K       | R27-C/R26-A 全部 DEAD; 仅剩 V5 MFMA32 重写 (BACKBURNER ≥1周) |
+| 噪声  | 4096×32768×14336     | 98.5% | ts_v12_tv0_memc_btw_all                | 大K+大N          | 噪声边缘 (±2-3pp), 不值得结构性攻击 |
 
-### 重点 shape (post-R26 FINAL v1, 2026-04-18)
-9 残留 LOSE shapes — 全部为大 K / 大 N 型, 大多数最佳 tag 是 BTW-all 系列, 表明 BARRIER_TO_WAITCNT axis 已 saturate; 真正还有空间的是 V1 (R25-E K-loop peel for DLA1) 和 V5 (MFMA_32X32X64 重写).
-
-| 优先级 | Shape (M×N×K)         | Ratio | Best Tag (current)                  | 类别              | 备注 |
-|-------|----------------------|-------|-------------------------------------|------------------|------|
-| **P0** | 4096×32768×128256    | 92.8% | ts_gm8_v12_btw_step3                | DLA1 mega-K + 大N | R26-A V1 (R25-E peel) in flight |
-| **P0** | 14336×4096×32768     | 94.7% | ts_pf4_memc_btw_step3               | 大K + 大M         | R25-G/H 已尝试; 残留 |
-| **P0** | 4096×32768×28672     | 94.7% | ts_gm8_v12_btw_step3                | 大K + 大N         | 同上 |
-| **P0** | 16384×4096×28672     | 95.0% | v20_memc_btw_step3                  | 大K + 大M         | 同上 |
-| P1     | 4096×28672×32768     | 96.5% | ts_pf4_memc_btw_step3               | 大K + 大N         |  |
-| P1     | 4096×14336×16384     | 97.2% | ts_lgk2_memc_btw_all                | 大K + 大N         |  |
-| P1     | 16384×4096×14336     | 97.9% | ts_u16                              | 大K + 大M         |  |
-| P2     | 4096×32768×14336     | 98.9% | ts_lgk2_memc_btw_all                | 大K + 大N         | 临界, 噪声边缘 |
-| P2     | 4096×32768×6144      | 99.7% | ts_gm2_v12_memc_btw_all             | 大N + 中K         | 临界, 0.3pp |
-
-**已 WIN (post-R26)**: DLA2 (128256×32768×4096) 108.6%, DLA7 (28672×32768×4096) 113.3%, 32768×4096×14336 118.0% — 全部由 R25-F/G/H × R26-D 翻 LOSE→WIN.
+**v2 翻 LOSE→WIN (+7)**:
+| Shape | v1→v2 | Best Tag (v2) |
+|-------|-------|---------------|
+| L1 4096×14336×16384      | 97.2% → **115.3%** | ts_lgk2_gm7_memc_pfoff56_kx16384_btw_all |
+| L2 4096×28672×32768      | 96.5% → **115.6%** | ts_v12_tv0_memc_dc_gm7_pfoff120_kx32768_btw_all |
+| L3 4096×32768×6144       | 99.7% → **116.2%** | ts_v12_gm7_memc_pfoff19_kx6144_btw_all |
+| L5 4096×32768×28672      | 94.7% → **116.6%** | ts_lgk2_gm7_memc_pfoff104_kx28672_btw_all |
+| L7 14336×4096×32768      | 94.7% → **115.9%** | ts_v12_tv0_memc_dc_gm7_pfoff120_kx32768_btw_all |
+| L8 16384×4096×14336      | 97.9% → **116.6%** | ts_v12_tv0_memc_dc_gm7_pfoff54_kx14336_btw_all |
+| L9 16384×4096×28672      | 95.0% → **116.0%** | ts_lgk2_gm7_memc_pfoff104_kx28672_btw_all |
 
 ### R26 死路 (DO NOT REVISIT — 本轮+累计)
 本轮 R26 死路 (4 axes):
@@ -53,12 +57,14 @@ R25-G 之前各类已知 dead (history): `iterative-ilp` 编译器 bug, BK=256 L
 - **大 K (≥14336) shapes** 是主战场: 该类的 gap 主要来自 LDS broadcast bandwidth 不足 + B tile reuse 效率低.
 - **mega-M shape 128256×32768×4096** 已被验证为 **register-pressure / MFMA-pipeline bound** (Round 4 PERSISTENT_XCD_QUEUE 实证), **不是 launch-bound**. 不要再尝试 dispatch 优化.
 
-### 推荐探索方向 (post-R26 — 只剩 1 个 R27 候选)
+### 推荐探索方向 (post-v2 — 只剩 V5 一条结构性路径)
 | 方向 | 风险 | 预期 | 备注 |
 |------|------|------|------|
-| **R26-A V1 — DLA1 K-loop peel (R25-E)** | 中 | +5-10pp on DLA1 | In flight via worktree `r25e-kpeel`. 静态 loop split (R25-C 的 runtime-if 在 K_iters>32 不 fold), DLA1 K=128256 → K_iters=501, 最大潜力. 见 `R26_PLAN.md` §3.V1 |
-| **R26-F coverage audit + FINAL re-run v2** | 低 | +1-3 flips | In flight. 修补 K_EXACT 路由漏掉的 shape |
-| **V5 — MFMA_32X32X64_TILING 重构** (R27+) | 高 | 0-5pp on deep-LOSE | **唯一剩余结构性 axis**. ≥1 周 asm 重写. 32×32 MFMAs 允许 4× concurrent in-flight @ same acc footprint, 可能松开 R24B/C 确认的 VMEM-issue saturation. 高不确定性 |
+| **V5 — MFMA_32X32X64_TILING 重构** (R29+) | 高 | 0-5pp on L6/DLA1 | **唯一剩余结构性 axis**. ≥1 周 asm 重写. 32×32 MFMAs 允许 4× concurrent in-flight @ same acc footprint, 可能松开 R24B/C 确认的 VMEM-issue saturation. 高不确定性. 见 `R27_V5_MFMA32_SCOUT.md` |
+
+DEAD post-R28 (不要再尝试 — 已 reproduce 过):
+- ~~R26-A V1 DLA1 K-loop peel (R25-E pf495)~~ — 5-rep verify std=1729 TFLOPS, mean swing 1672→5546, 不稳定 false alarm
+- ~~R27-C DLA1 K_EXACT bypass~~ — HSA aperture violation rc=-6 全 5/5 reps; kernel HARD-GATE K≤32768 (`kernel_mxfp4_gluon_cpp.cpp:85-91`)
 
 DEAD (不要再尝试 — 已 reproduce 过):
 - ~~per-shape compiler flag (LLVM sched-strategy per-K-bucket)~~ — `iterative-ilp` LLVM bug (aperture violation), 其它 strategy ±0.4% noise
@@ -76,11 +82,13 @@ DEAD (不要再尝试 — 已 reproduce 过):
 - **工作目录**: `analysis/fp8_gemm/mi350x`
 - **Cursor Repo**: `/shared_nfs/kyle/test/Hipkittens2` (只读参考)
 
-## 当前成绩 (2026-04-18, post-R26 FINAL v1)
-- **FINAL v1 bench**: `bench_all42_results_R25_FINAL.{json,log}` — **33/42 WIN, 9/42 LOSE, 0 ERR, avg ratio 109.5%** (warmup=200 iters=500 trim=10%, 8-GPU parallel, 182.5 min wall). Up from 24/42 baseline (+9 net flips since R20).
+## 当前成绩 (2026-04-18, post-R26 FINAL v2 + R28-C)
+- **FINAL v2 bench**: `bench_all42_results_R25_FINAL_v2.{json,log}` — **40/42 WIN, 2/42 LOSE, 0 ERR, win rate 95%** (warmup=200 iters=500 trim=10%, 5-GPU parallel). Up from v1 33/42 (+7 net flips), from 24/42 baseline (+16 net flips since R20).
+- **R28-C win (`d45e35103`)**: u16 + kx14336 K_EXACT — +14.5% on 16384×4096×14336 (L8 flip).
 - **R26-D V2 audit WIN (`1454235e`)**: found `bench_all42_parallel_R25_FINAL.py` wiring bug, re-wired R25-G/H K_EXACT .so files for 5+ shapes. Bulk of the 24→33 jump.
+- **R27-C DEAD**: HSA aperture violation (rc=-6) — kernel HARD-GATE K≤32768 cannot be bypassed. `R27C_VERIFY_VERDICT.md`.
+- **R26-A pf495 false alarm**: std=1729 TFLOPS, unstable, NOT a real win.
 - **R26 dead axes (`f43ea34b` + `5d0b5fd2`)**: V3 PF_N, V4 TAIL_VMCNT, gm5/gm9, STEP12_BR_LGKMCNT — all flat or within noise.
-- **In flight**: R26-A V1 (DLA1 K-loop peel via `r25e-kpeel` worktree), R26-F coverage audit + FINAL v2 re-run. Projection 35-38/42 once K_EXACT wiring gaps close.
 - **R25-G PER-K-BUCKET WIN (committed `7f200b76`)**: extends R25-F insight to 6 mid-gap K=14336+ shapes. Per-K optimum `pfoff = K_iters - {4..8}`. **6/6 WIN, +13.68 to +20.84% per shape**. Implementation: `R25C_K_EXACT` compile-time gate so each pfoff variant only activates on its target K.
 - **R25-F EXTENDED-SWEEP MASSIVE WIN (committed `e5083bad`)**: `gm7 + pfoff14` dominates K=4096 shapes — **+10.86% DLA2, +13.51% DLA7** vs R25-D. Vs original baseline: DLA2 ~+17%, DLA7 ~+21%.
 - **R25-D STACK WIN (committed `7ada8c70`, superseded by R25-F/G)**: gm6 × pfoff4 super-additive on DLA2/DLA7. Kept as fallback.
