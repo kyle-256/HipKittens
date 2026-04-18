@@ -392,6 +392,16 @@ constexpr int RBN_RECT  = BLK_N / WARPS_N / 2;  // 32 default, 16 rect
 #ifndef MXFP8_RCR_EXACT_PQ_PIPELINE_SCALE_ENABLE
 #define MXFP8_RCR_EXACT_PQ_PIPELINE_SCALE_ENABLE 1
 #endif
+// R31 Dev C: VGPR-prefetch second-buffer for V2-RCR scales.
+// When enabled: maintain a 2nd set of scale_pack VGPRs and issue
+// the (k_pair+1) load at the start of do_k_iter_body<0> for k_pair,
+// rotating buffers at end of do_k_iter_body<1>.
+// This is a VGPR-pipeline lever (NOT an LDS lever — V2-RCR has zero
+// scale LDS path per R31 Dev C SASS audit). Test whether explicit
+// next-iter prefetch beats the LLVM scheduler's natural hoisting.
+#ifndef MXFP8_RCR_V2_SCALE_PREFETCH
+#define MXFP8_RCR_V2_SCALE_PREFETCH 0
+#endif
 #ifndef MXFP8_RCR_EXACT_PQ_HOIST_HI_ENABLE
 #define MXFP8_RCR_EXACT_PQ_HOIST_HI_ENABLE 1
 #endif
@@ -3194,6 +3204,87 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
                 load_scale_packs_for_pair(k_pair);
             }
         };
+#if MXFP8_RCR_V2_SCALE_PREFETCH
+        // R31 Dev C: VGPR-prefetch second-buffer experiment.
+        // Next-iter scale_packs (separate VGPR set). Load (k_pair+1) at
+        // end of iter k_pair so VMEM latency hides under MMA dispatches.
+        fp8e8m0_4 a0_scale_packs_next[RBM / 32];
+        fp8e8m0_4 a1_scale_packs_next[RBM / 32];
+        fp8e8m0_4 b0_scale_packs_next[(RBN + 31) / 32];
+        fp8e8m0_4 b1_scale_packs_next[(RBN + 31) / 32];
+        auto load_scale_buffer_next = [&](int k_pair) __attribute__((always_inline)) {
+            if constexpr (PRESHUFFLED_QUANT) {
+                if constexpr (SCALE_VERSION == 2) {
+                    const uint32_t a_voff =
+                        (static_cast<uint32_t>(lane_kblk) << 8) |
+                        (static_cast<uint32_t>(lane_nonk) << 4);
+                    const uint32_t a_soff = static_cast<uint32_t>(k_pair) << 10;
+                    const __uint128_t a_raw =
+                        llvm_amdgcn_raw_buffer_load_b128(a_v2_srsrc, a_voff, a_soff, MXFP8_RCR_V2_SCALE_CACHEPOLICY);
+                    a0_scale_packs_next[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw      ));
+                    a1_scale_packs_next[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw >> 32));
+                    if constexpr (RBM / 32 > 1) {
+                        a0_scale_packs_next[1] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw >> 64));
+                        a1_scale_packs_next[1] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw >> 96));
+                    }
+                    const uint32_t b_voff =
+                        (static_cast<uint32_t>(lane_kblk) << 7) |
+                        (static_cast<uint32_t>(lane_nonk) << 3);
+                    const uint32_t b_soff = static_cast<uint32_t>(k_pair) << 9;
+                    const uint64_t b_raw =
+                        llvm_amdgcn_raw_buffer_load_b64(b_v2_srsrc, b_voff, b_soff, MXFP8_RCR_V2_SCALE_CACHEPOLICY);
+                    b0_scale_packs_next[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(b_raw      ));
+                    b1_scale_packs_next[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(b_raw >> 32));
+                }
+            }
+        };
+        auto swap_scale_buffer = [&]() __attribute__((always_inline)) {
+            if constexpr (PRESHUFFLED_QUANT && SCALE_VERSION == 2) {
+                #pragma unroll
+                for (int p = 0; p < RBM / 32; ++p) {
+                    a0_scale_packs[p] = a0_scale_packs_next[p];
+                    a1_scale_packs[p] = a1_scale_packs_next[p];
+                }
+                #pragma unroll
+                for (int p = 0; p < (RBN + 31) / 32; ++p) {
+                    b0_scale_packs[p] = b0_scale_packs_next[p];
+                    b1_scale_packs[p] = b1_scale_packs_next[p];
+                }
+            }
+        };
+        // Prime: load k_pair=0 into primary; load k_pair=1 into next.
+        if (k_pairs > 0) {
+            load_scale_buffer(0);
+            if (k_pairs > 1) {
+                load_scale_buffer_next(1);
+            }
+            for (int k_pair = 0; k_pair < k_pairs; k_pair++) {
+                do_k_iter_body.template operator()<0>(k_pair * 2);
+                tic ^= 1; toc ^= 1;
+                do_k_iter_body.template operator()<1>(k_pair * 2 + 1);
+                tic ^= 1; toc ^= 1;
+                if (k_pair + 1 < k_pairs) {
+                    swap_scale_buffer();
+                    if (k_pair + 2 < k_pairs) {
+                        load_scale_buffer_next(k_pair + 2);
+                    } else if (k_remainder) {
+                        // Pre-load the remainder into next buffer, swap before its body
+                        load_scale_buffer_next(k_pairs);
+                    }
+                } else if (k_remainder) {
+                    swap_scale_buffer();
+                }
+            }
+            if (k_remainder) {
+                do_k_iter_body.template operator()<0>(k_pairs * 2);
+                tic ^= 1; toc ^= 1;
+            }
+        } else if (k_remainder) {
+            load_scale_buffer(k_pairs);
+            do_k_iter_body.template operator()<0>(k_pairs * 2);
+            tic ^= 1; toc ^= 1;
+        }
+#else
         for (int k_pair = 0; k_pair < k_pairs; k_pair++) {
             load_scale_buffer(k_pair);
             do_k_iter_body.template operator()<0>(k_pair * 2);
@@ -3206,6 +3297,7 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
             do_k_iter_body.template operator()<0>(k_pairs * 2);
             tic ^= 1; toc ^= 1;
         }
+#endif
 #else
         for (int k_pair = 0; k_pair < k_pairs; k_pair++) {
 #if !MXFP8_RCR_EXACT_PQ_KPAIR_INLINE_SCALE_ENABLE

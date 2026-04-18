@@ -1,0 +1,17 @@
+R31 Dev C — V2-RCR SASS audit summary (kernel _Z29rcr_exact_8wave_scaled_kernelILb1ELi2EE)
+=========================================================================================
+
+Source file: r31c_v2_rcr.s (extracted from r31c_baseline.hsaco md5 4ae07863a9642d91acb2ab6c7b4ceac3)
+Total kernel SASS lines: 1314
+
+Instruction inventory:
+  ds_write / ds_store        : 0
+  ds_read*                   : 392   (all tile-LDS reads; ds_read_b64_tr_b8 etc.)
+  buffer_load* (total)       : 112
+  buffer_load_*x4 ... lds    : 96    (TK G::load tile fills; VMEM->LDS direct)
+  buffer_load_*x4|2 ... offen (no lds)
+                             : 16    (scale loads; VMEM->VGPR direct)
+  v_mfma_scale_f32_16x16x128_f8f6f4
+                             : 384
+
+Confirmed: V2-RCR has ZERO LDS round-trip for scales.
