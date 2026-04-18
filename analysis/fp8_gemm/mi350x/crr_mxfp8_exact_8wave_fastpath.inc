@@ -6,6 +6,11 @@
 #ifndef MXFP8_CRR_EXACT_PQ_PIPELINE_SCALE_ENABLE
 #define MXFP8_CRR_EXACT_PQ_PIPELINE_SCALE_ENABLE 1
 #endif
+// R27 Dev A H1: cachepolicy bits for V2 scale buffer loads (b128/b64).
+// Default 0 = previous behavior. 1=GLC, 2=SLC, 3=GLC|SLC.
+#ifndef MXFP8_CRR_V2_SCALE_CACHEPOLICY
+#define MXFP8_CRR_V2_SCALE_CACHEPOLICY 0
+#endif
 
 #ifndef CRR_USE_EXACT_8WAVE_FASTPATH
 #define CRR_USE_EXACT_8WAVE_FASTPATH 1
@@ -315,7 +320,7 @@ void crr_exact_8wave_scaled_kernel(const layout_globals g)
                     (static_cast<uint32_t>(lane_nonk) << 4);
                 const uint32_t a_soff = static_cast<uint32_t>(k_pair) << 10;
                 const __uint128_t a_raw =
-                    llvm_amdgcn_raw_buffer_load_b128(a_v2_srsrc, a_voff, a_soff, 0);
+                    llvm_amdgcn_raw_buffer_load_b128(a_v2_srsrc, a_voff, a_soff, MXFP8_CRR_V2_SCALE_CACHEPOLICY);
                 a0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw      ));
                 a1_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw >> 32));
                 if constexpr (crr_a_pack_count > 1) {
@@ -327,7 +332,7 @@ void crr_exact_8wave_scaled_kernel(const layout_globals g)
                     (static_cast<uint32_t>(lane_nonk) << 3);
                 const uint32_t b_soff = static_cast<uint32_t>(k_pair) << 9;
                 const uint64_t b_raw =
-                    llvm_amdgcn_raw_buffer_load_b64(b_v2_srsrc, b_voff, b_soff, 0);
+                    llvm_amdgcn_raw_buffer_load_b64(b_v2_srsrc, b_voff, b_soff, MXFP8_CRR_V2_SCALE_CACHEPOLICY);
                 b0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(b_raw      ));
                 b1_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(b_raw >> 32));
                 return;

@@ -1,0 +1,44 @@
+===== cp=0 crr 4096 1024 8192 =====
+[preheat] sustained 8s 16k matmul...
+[preheat] done 5116 iters
+CORRECTNESS snr_db=49.60 pass_rate_pct=100.00
+DETERMINISM ok=True
+RUN 0 avg_ms=0.0877 tflops=783.76
+RUN 1 avg_ms=0.0873 tflops=787.02
+RUN 2 avg_ms=0.0874 tflops=785.89
+RUN 3 avg_ms=0.0874 tflops=786.71
+RUN 4 avg_ms=0.0877 tflops=783.39
+SUMMARY median=785.89 stdev=1.68 runs=5
+===== cp=1 crr 4096 1024 8192 =====
+[preheat] sustained 8s 16k matmul...
+[preheat] done 5116 iters
+CORRECTNESS snr_db=49.60 pass_rate_pct=100.00
+DETERMINISM ok=True
+RUN 0 avg_ms=0.0878 tflops=783.02
+RUN 1 avg_ms=0.0880 tflops=780.73
+RUN 2 avg_ms=0.0869 tflops=791.04
+RUN 3 avg_ms=0.0872 tflops=787.92
+RUN 4 avg_ms=0.0870 tflops=789.53
+SUMMARY median=787.92 stdev=4.39 runs=5
+===== cp=2 crr 4096 1024 8192 =====
+[preheat] sustained 8s 16k matmul...
+[preheat] done 5116 iters
+CORRECTNESS snr_db=49.60 pass_rate_pct=100.00
+DETERMINISM ok=True
+RUN 0 avg_ms=0.0942 tflops=729.82
+RUN 1 avg_ms=0.0945 tflops=727.35
+RUN 2 avg_ms=0.0937 tflops=733.05
+RUN 3 avg_ms=0.0939 tflops=731.67
+RUN 4 avg_ms=0.0939 tflops=731.88
+SUMMARY median=731.67 stdev=2.23 runs=5
+===== cp=3 crr 4096 1024 8192 =====
+[preheat] sustained 8s 16k matmul...
+[preheat] done 5116 iters
+CORRECTNESS snr_db=49.60 pass_rate_pct=100.00
+DETERMINISM ok=True
+RUN 0 avg_ms=0.0943 tflops=728.56
+RUN 1 avg_ms=0.0942 tflops=729.56
+RUN 2 avg_ms=0.0941 tflops=730.57
+RUN 3 avg_ms=0.0939 tflops=731.79
+RUN 4 avg_ms=0.0936 tflops=734.02
+SUMMARY median=730.57 stdev=2.11 runs=5
