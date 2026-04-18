@@ -1,22 +1,29 @@
 # MXFP4 GEMM Optimization TODO
 
-## Current State (2026-04-18, post-R31)
+## Current State (2026-04-18, post-R32)
 
 **Bench**: `bench_all42_results_R25_FINAL_v2.{json,log}` + R29 single-shape verifies
 **Result**: **41/42 WIN, 1/42 LOSE, 0 ERR, projected win rate 97.6%** — unchanged since R29.
-**Status**: **STRUCTURALLY SATURATED, RE-CONFIRMED.** R31 deployed 3 parallel L6-targeted optimizers, all DEAD:
+**Status**: **STRUCTURALLY SATURATED, RE-CONFIRMED ACROSS 4 ROUNDS (R29/R30/R31/R32).** R32 ran 1 deep-decider + 2 parallel optimizers; all DEAD:
+- **R32 decider** (`R32_DECIDER_VERDICT.md`): full preprocessor inventory of ~50 build-time toggles; ~20 never sampled at L6. Identified A1.d K_LOOP_SYNC_EVERY_2 (untested, 20% EV/0.4pp), A5 NONTEMPORAL_LOAD (10% EV/0.2pp), A3 V6 split-K min-scope (12 hr). HONEST STOP recommended.
+- **R32 Opt A** (`R32_OPT_A_VERDICT.md`): K_LOOP_SYNC_EVERY_2 builds but VGPR=256 / 32 spills / 132 B scratch (vs parent 212/0/0) AND corrupts output (n_diff=23M, max_abs_diff=bf16 max). NONTEMPORAL_LOAD (A+B) builds clean but **HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION rc=-6 after 191s** at K=128256. Combined V3 same as V1. **All 3 DEAD**.
+- **R32 Opt B** (`R32_OPT_B_VERDICT.md` + commit `52b8d54c`): V6 split-K POC fully implemented and bit-clean — `kernel_mxfp4_gluon_cpp_v6.cpp` builds, K_SPLIT=1 sanity matches incumbent ±0.2%, K_SPLIT=2 + epilogue **−11.53%**, K_SPLIT=4 + epilogue **−23.37%**. Mechanism: **L6 grid is already fully saturated** (2048 tiles ÷ 608 WGs = 3.4 iters/WG); intra-K splitting adds S kernel launches without adding parallelism, no FLOPs/VMEM gain. Per-flop speed in per-split kernels (2425-2648 TFLOPS) is LOWER than incumbent (2942) due to launch-startup amortization.
+
+**Net R32 finding**: **V6 split-K is STRUCTURALLY DEAD on grid-saturated shapes** like L6. The decider's 12-hr / 3-6pp estimate was wrong — split-K only helps when grid is NOT saturated (small M×N tile counts). L6's 4096×32768 = 2048 tiles already exceeds the 608 WG launch by 3.4×.
+
+R31 (prior round) summary — 3 parallel L6-targeted optimizers, all DEAD:
 - Opt A (UNROLL_K∈{1,2,4,16,32} sweep on L6 with `ts_lgk2_v12_memc_btw_all` parent): all 5 lose. u16/u32 5-rep at -0.55%/-0.58%; u1/u2/u4 single-rep -3.6/-6.4/-1.8%. Decider's per_variant audit was right: u8/u16/u32 already in v2 table at 4997-5181 TFLOPS (-3 to -7%). **UNROLL_K axis fully saturated on L6.**
 - Opt B (Persistent-XCD / STATIC_XCD_REMAP scout, 4 variants): V1/V3 (PERSISTENT_XCD=1) GPU-fault — residual kernel-side bug despite R24A Fix A/B/C. V2 (STATIC_XCD_REMAP=1) loses 1.80%. V4 (STATIC_XCD_REMAP+gm8) mid-bench HSA aperture violation. Existing tall-XCDs + GROUP_M=4 swizzle is already optimal for L6's 4096×32768 grid; re-bucketing reduces per-XCD B-tile reuse window.
 - Opt C (STEP3_BARRIER_VMCNT∈{4,8,10,16,20,24} sweep on `ts_lgk2_v12_memc_btw_all`): v8/v10/v16 lose 0.81-1.12%. **v20/v24 CRASH** (HSA aperture viol). v4 lose 0.82% but 2/3 reps crash. **v12 is the ONLY stable value on K=128256** — high VMCNT lets prefetch outrun SRD bounds; low VMCNT races. Mechanism: K_iters=501 amplifies prefetch-vs-SRD timing window vs smaller K shapes.
 
 R30 (prior round) summary: Opt A cross-shape transplant DEAD (5/5 HSA aperture viol, BARRIER_TO_WAITCNT_* unsafe outside btw_all-already-stable shapes); Opt B K_EXACT parent-stack audit AUDIT-CLEAN.
 
-Only L6/DLA1 remains (4096×32768×128256, 92.6%). **All sub-2hr levers exhausted across R29+R30+R31.** Path forward = V5 MFMA32×32×64 rewrite (≥1 week), V6 split-K (≥3 days, requires bf16 store-path → FP32 workspace rewrite), or V7 stream-K (≥2 weeks). See `R30_DECIDER_VERDICT.md`, `R31_DECIDER_VERDICT.md`, `R31_OPT_{A,B,C}_VERDICT.md`.
+Only L6/DLA1 remains (4096×32768×128256, 92.6%). **All sub-2hr levers AND V6 split-K exhausted across R29+R30+R31+R32.** Path forward = **V5 MFMA32×32×64 rewrite (≥1 week)** OR **V7 stream-K dynamic K-partitioning (≥2 weeks)** — both multi-week. V6 split-K is now confirmed structurally dead on grid-saturated shapes (R32 Opt B). See `R30_DECIDER_VERDICT.md`, `R31_DECIDER_VERDICT.md`, `R31_OPT_{A,B,C}_VERDICT.md`, `R32_DECIDER_VERDICT.md`, `R32_OPT_{A,B}_VERDICT.md`.
 
 ### 1 residual LOSE shape (post-R29)
 | #  | Shape (M×N×K)         | Ours    | Comp    | Ratio  | Best Tag                              | Class                                |
 |----|-----------------------|---------|---------|--------|---------------------------------------|--------------------------------------|
-| L6 | 4096×32768×128256     | 5353.9  | 5781.1  | 92.6%  | ts_lgk2_v12_memc_btw_all (DLA1)       | STRUCTURAL — V5/V8 dead, only path is V6 split-K (≥3 days) or V7 stream-K (≥2 weeks) |
+| L6 | 4096×32768×128256     | 5353.9  | 5781.1  | 92.6%  | ts_lgk2_v12_memc_btw_all (DLA1)       | STRUCTURAL — V5/V6/V8 all dead; only remaining path is V5 MFMA32 (≥1 week) or V7 stream-K (≥2 weeks). 7.4pp gap is VMEM-issue-bound at vmcnt(8) per R32 A5 ISA analysis. |
 
 ### R29 wins (this round)
 | Shape | Old → New | Variant | Notes |
@@ -72,6 +79,11 @@ The original "don't chase WIN, only gap-reduce" pivot from 2026-04-17 is **fully
 - **WAVES_PER_EU=3** — `__launch_bounds__(_NUM_THREADS, 1)` already clamps to 1 wave/SIMD on K-bound shapes; wpeu axis is theoretically inert
 - **Cache hints / NT stores / persistent-XCD / EARLY_SCALE_PF / EARLY_BL_PF / DIRECT_BL** — all confirmed DEAD pre-R26
 - **outer-K pull-forward / extra L2 pf** — R24B/C: VMEM-issue-bound, not VMEM-latency-bound
+
+### R32 axes confirmed DEAD (DO NOT REVISIT)
+- **K_LOOP_SYNC_EVERY_2 on L6** (`R32_OPT_A_VERDICT.md`) — kernel:391-395, 2826-2862. Halves 16 per-iter `s_barrier`s. Builds with VGPR=256 / 32 spills / 132 B scratch (vs parent 212/0/0) and **corrupts output** at K=128256 (n_diff=23M, max_abs_diff=bf16 max). Cross-wave LDS ordering is load-bearing per K-iter; cannot statically halve.
+- **B/A_LOAD_NONTEMPORAL on L6** (`R32_OPT_A_VERDICT.md`) — kernel:325-350. Builds clean (212/0/0) but **HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION rc=-6 after 191s** at K=128256. Same crash class as R31-C STEP3_BARRIER_VMCNT≥20 — NT hint changes load ordering, allows prefetch to outrun SRD bounds.
+- **V6 split-K on L6** (`R32_OPT_B_VERDICT.md` + commit `52b8d54c`) — full POC implemented in `kernel_mxfp4_gluon_cpp_v6.cpp` + 50-line epilogue add-and-cast. K_SPLIT=1 sanity matches incumbent ±0.2%, K_SPLIT=2 **−11.53%**, K_SPLIT=4 **−23.37%**. **Mechanism (durable lesson)**: L6 grid is grid-saturated (2048 tiles ÷ 608 WGs = 3.4 iters/WG); intra-K splitting adds S launches without parallelism gain. Per-flop in per-split kernels (2425-2648 TFLOPS) < incumbent (2942) due to launch amortization. **V6 split-K is structurally dead on grid-saturated shapes; do not retry.**
 
 ### R31 axes confirmed DEAD (DO NOT REVISIT)
 - **UNROLL_K sweep on L6** (`R31_OPT_A_VERDICT.md`) — UNROLL_K ∈ {1,2,4,16,32} on L6's `ts_lgk2_v12_memc_btw_all` parent. All 5 lose. u16/u32 5-rep at -0.55%/-0.58%; smaller values worse. Default `#pragma unroll 8` (kernel:2448) is already optimal at K=128256; smaller unroll adds loop overhead in 501-iter loop, larger doesn't help (occupancy is AGPR-limited, not unroll-limited).

@@ -2,11 +2,12 @@
 
 你在继续推进 `HipKittens` 的 MXFP4 GEMM 优化工作，跟 Cursor (Hipkittens2) 竞赛。
 
-## ⚠️ 当前优化目标 (2026-04-18, post-R31)
-> 41/42 WIN (97.6%) = **structurally saturated, RE-CONFIRMED 3 rounds**.
-> R29 (V8 peel DEAD), R30 (transplant + K_EXACT audit DEAD), R31 (UNROLL_K + Persistent-XCD + STEP3_BARRIER_VMCNT 全 DEAD).
-> R31 新发现: **v12 (STEP3_BARRIER_VMCNT=12) 在 K=128256 是唯一稳定值** — high VMCNT (≥20) 让 prefetch 越过 SRD bounds; low VMCNT (≤4) race. K_iters=501 放大了 prefetch-vs-SRD timing window.
-> 唯一剩余目标: **L6 / DLA1 (4096×32768×128256, 92.6%)** — 仅剩 V5 MFMA32 (≥1周) / V6 split-K (≥3天) / V7 stream-K (≥2周) 多日重写. 所有 sub-2hr levers 已在 R29+R30+R31 全部耗尽.
+## ⚠️ 当前优化目标 (2026-04-18, post-R32)
+> 41/42 WIN (97.6%) = **structurally saturated, RE-CONFIRMED 4 rounds**.
+> R29 (V8 peel DEAD), R30 (transplant + K_EXACT audit DEAD), R31 (UNROLL_K + Persistent-XCD + STEP3_BARRIER_VMCNT 全 DEAD), R32 (K_LOOP_SYNC + NT_LOAD + V6 split-K 全 DEAD).
+> R32 新发现: **V6 split-K 在 grid-saturated shapes 上 STRUCTURALLY DEAD** — L6 grid 已 saturated (2048 tiles ÷ 608 WGs = 3.4 iters/WG), 切 K 只增加 launch overhead 不增加并行度. Per-flop in per-split kernels (2425-2648) < incumbent (2942). split=2 −11.53%, split=4 −23.37%. **POC 干净实现 (`kernel_mxfp4_gluon_cpp_v6.cpp`, commit 52b8d54c) 但 mechanically dead on this shape.**
+> R31 累计发现: v12 (STEP3_BARRIER_VMCNT=12) 在 K=128256 是唯一稳定值 — high VMCNT (≥20) 让 prefetch 越过 SRD bounds; low VMCNT (≤4) race. K_iters=501 放大了 prefetch-vs-SRD timing window.
+> 唯一剩余目标: **L6 / DLA1 (4096×32768×128256, 92.6%)** — 仅剩 V5 MFMA32 (≥1周) / V7 stream-K (≥2周) 多日重写. **V6 split-K 已确认死. 所有 sub-2hr levers 已在 R29+R30+R31+R32 全部耗尽.**
 
 **历史指令** (2026-04-17, 已过时):
 > "24win 已经卡了好久了，现在把优化目标改成优化剩下那几个差的比较多的。"
@@ -63,10 +64,17 @@ R25-G 之前各类已知 dead (history): `iterative-ilp` 编译器 bug, BK=256 L
 - **大 K (≥14336) shapes** 是主战场: 该类的 gap 主要来自 LDS broadcast bandwidth 不足 + B tile reuse 效率低.
 - **mega-M shape 128256×32768×4096** 已被验证为 **register-pressure / MFMA-pipeline bound** (Round 4 PERSISTENT_XCD_QUEUE 实证), **不是 launch-bound**. 不要再尝试 dispatch 优化.
 
-### 推荐探索方向 (post-v2 — 只剩 V5 一条结构性路径)
+### 推荐探索方向 (post-R32 — 只剩 V5 / V7 多周路径; V6 已确认死)
 | 方向 | 风险 | 预期 | 备注 |
 |------|------|------|------|
-| **V5 — MFMA_32X32X64_TILING 重构** (R29+) | 高 | 0-5pp on L6/DLA1 | **唯一剩余结构性 axis**. ≥1 周 asm 重写. 32×32 MFMAs 允许 4× concurrent in-flight @ same acc footprint, 可能松开 R24B/C 确认的 VMEM-issue saturation. 高不确定性. 见 `R27_V5_MFMA32_SCOUT.md` |
+| **V5 — MFMA_32X32X64_TILING 重构** (R29+) | 高 | 0-5pp on L6/DLA1 | ≥1 周 asm 重写. 32×32 MFMAs 允许 4× concurrent in-flight @ same acc footprint, 可能松开 R24B/C/R32-A5 确认的 VMEM-issue saturation at vmcnt(8). 高不确定性. 见 `R27_V5_MFMA32_SCOUT.md` |
+| **V7 — Stream-K 动态 K-partitioning** | 高 | 0-5pp on L6 | ≥2 周. 动态在 grid-saturated 和 grid-starved 之间 rebalance. 比 V5 更通用但 implementation 更重. |
+| ~~V6 — split-K~~ | — | 死 | R32 Opt B (`52b8d54c`): POC 干净实现但 grid-saturated shape 上 mechanically dead. K_SPLIT=2 −11.53%, K_SPLIT=4 −23.37%. 不要重试. |
+
+DEAD post-R32 (不要再尝试 — 已 reproduce 过):
+- ~~K_LOOP_SYNC_EVERY_2 on L6~~ — `R32_OPT_A_VERDICT.md`. kernel:391-395, 2826-2862. 静态 halve 16 per-iter `s_barrier`s. Build 出 VGPR=256 / 32 spills / 132B scratch (vs parent 212/0/0) 并且 **corrupts output** at K=128256 (n_diff=23M, max_abs_diff=bf16 max). Cross-wave LDS ordering 在 K-iter 间 load-bearing, 不能静态 halve.
+- ~~B/A_LOAD_NONTEMPORAL on L6~~ — `R32_OPT_A_VERDICT.md`. kernel:325-350. Build clean 但 **HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION rc=-6 after 191s** at K=128256. 同 R31-C STEP3_BARRIER_VMCNT≥20 的 crash class — NT hint 改 load ordering, 让 prefetch 越过 SRD bounds.
+- ~~V6 split-K on L6~~ — `R32_OPT_B_VERDICT.md` + commit `52b8d54c`. **POC 完全实现** (`kernel_mxfp4_gluon_cpp_v6.cpp` + 50-line epilogue add-and-cast). K_SPLIT=1 sanity ±0.2%, K_SPLIT=2 **−11.53%**, K_SPLIT=4 **−23.37%**. **Mechanism (durable lesson)**: L6 grid-saturated (2048 tiles ÷ 608 WGs = 3.4 iters/WG); intra-K split 加 S launches 不加并行度. Per-flop in per-split (2425-2648) < incumbent (2942) 因为 launch amortization. **V6 split-K 在 grid-saturated shapes 上 structurally dead, 不要重试.**
 
 DEAD post-R31 (不要再尝试 — 已 reproduce 过):
 - ~~UNROLL_K sweep on L6~~ — `R31_OPT_A_VERDICT.md`. UNROLL_K∈{1,2,4,16,32} on L6 best parent. 5/5 lose. u16/u32 5-rep -0.55%/-0.58%, smaller worse. 默认 unroll 8 (kernel:2448) 在 K=128256 已最优.
