@@ -74,6 +74,20 @@ Welch B vs B0: Δ=+61.49 TFLOPS / +2.61%, t=+12.83. Matches R27 +2.7%/t≈+13 to
 
 R28 in flight: Dev B s_setprio sweep on V2-CRR cp=2 baseline (GPU1), R27 Reviewer baseline matrix (GPU4).
 
+### R28 Dev B = NO SHIP + paradigm correction (`ffb10af5` r28-b only)
+
+s_setprio sweep on top of cp=2: best (MFMA=2, VMEM=0) gives only +7.72 TFLOPS / +0.33% / Welch t=+2.30 — falls below SHIP gate (≥+30 / +1.2% / t>3.0) on all three thresholds.
+
+**R28 paradigm correction #1 — `s_setprio` is a CLOSED lever**:
+- The 8-wave V2-CRR kernel does NOT have a wave-id branch. All 8 waves run identical interleaved VMEM+MFMA code in lockstep.
+- Pre-R28 code ALREADY uses `__builtin_amdgcn_s_setprio(1)` to elevate priority during MFMA-heavy segments and `s_setprio(0)` to drop back. Removing this bracket = -21 TFLOPS. Keeping MFMA elevated without restore = -74 TFLOPS.
+- Pushing MFMA prio above 1 hits a hard ceiling (+0.3%, sub-ship) because 8 waves on a CU all hit the same setprio call in lockstep — no relative reordering possible. Unlocking more would require breaking wave-uniformity (large restructure).
+- **NEVER prototype "elevate MFMA wave priority" again.** The lever is fully exploited.
+
+### R28 Dev C/D in flight (GPU0/GPU1)
+- Dev C: cp=3 (GLC|SLC) vs cp=2 A/B verification on auto-select gate. R27 saw cp=3=+3.1% vs cp=2=+2.7%. If t>3 holds → switch gate to cp=3 for +0.4%.
+- Dev D: rectangular BLK_M=256/BLK_N=128 scaffolding (R28 #2 critical). Goal = compile-ready + V1 fallback PASS, NOT perf SHIP this cycle.
+
 ## R27 cycle 完结 (2026-04-18, 4 dev + 1 reviewer，1 partial production ship + 3 paradigm corrections)
 
 R27 派 5 agent (Dev A GPU0, Dev B GPU1, Dev C GPU2, Dev D GPU3, Reviewer GPU4) 攻 R26 后剩下的 V2 levers。**1 个 macro infrastructure SHIP** (cherry-pick `12785d98`)，**3 paradigm correction**。

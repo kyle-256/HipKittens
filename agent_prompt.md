@@ -64,6 +64,16 @@ Extends R27's `MXFP8_CRR_V2_SCALE_CACHEPOLICY` macro at `analysis/fp8_gemm/mi350
 
 R28 dev B in flight: s_setprio sweep on V2-CRR cp=2 baseline.
 
+### R28 Dev B = NO SHIP + paradigm correction (closed lever)
+
+`s_setprio` sweep on cp=2 baseline: best (MFMA=2, VMEM=0) only +7.72 TFLOPS / +0.33% / Welch t=+2.30 (gate ≥+30/+1.2%/t>3.0).
+
+**Paradigm correction (DO NOT re-litigate)**: The 8-wave V2-CRR kernel does NOT have a wave-id branch. All 8 waves run identical interleaved VMEM+MFMA code in lockstep. Pre-R28 code ALREADY uses `__builtin_amdgcn_s_setprio(1)` during MFMA segments and `s_setprio(0)` to restore. Removing it = -21 TFLOPS; keeping MFMA elevated without restore = -74 TFLOPS. Pushing MFMA prio above 1 hits a hard ceiling (+0.3%) because 8 waves hit setprio in lockstep — no relative reordering possible. **NEVER prototype "elevate MFMA wave priority" again — the lever is fully exploited.**
+
+### R28 Dev C/D in flight
+- Dev C (GPU0): cp=3 vs cp=2 A/B on auto-select gate (~+0.4% if cp=3 holds with t>3)
+- Dev D (GPU1): rectangular BLK_M=256/N=128 scaffolding (R28 #2 critical, 90 min compile/correctness goal NOT perf SHIP this cycle)
+
 ## R27 cycle 完结 (2026-04-18) ★ 1 partial production ship (cachepolicy macro infra) + 3 paradigm correction
 
 5 agent (Dev A GPU0, Dev B GPU1, Dev C GPU2, Dev D GPU3, Reviewer GPU4) 攻 R26 后剩下的 V2 levers。
