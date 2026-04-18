@@ -29,21 +29,29 @@
 5. 禁止提交 `*.so`、`*.s`、`*_layout_results_*.json`、`.bak*`、`gpucore.*`、`__pycache__` 等（`.gitignore` 已覆盖）
 6. 每个子 agent 使用不同 `HIP_VISIBLE_DEVICES` 以免 GPU 冲突：Dev A → 0，Dev B → 1，Dev C → 2，Reviewer/formal → 7
 
-## Baseline (R23 2026-04-18 GPU0/1/2/3 reverify confirmed，★ V2 stable，0 R23 production commit；新瓶颈 SQC dcache)
+## Baseline (R24 2026-04-18 GPU0 fresh reverify ★ paradigm correction：V2 实际 ≈ FP8 parity；R23 cycle-level 数字 invalidated as PMC-mode + cold-throttle artifacts)
 
 | 版本 | TFLOPS | SNR | 备注 |
 | --- | ---: | --- | --- |
-| **FP8 RCR (长期 target)** | **3252** (R23) | 49.61 PASS | R23 5x median, std 6.40 |
-| **★ MXFP8 RCR PRESHUFFLE V2 (default on, R21 SHIP)** | **3074** (R23 reverify, R21: 3078.09) | 49.60 PASS | gap -178 / -5.5% (R23 vs R23 FP8) |
-| MXFP8 RCR V1 (RUNTIME=0 fallback) | 3022.43 | 49.60 PASS | -0.094% drift vs R18 (stable) |
-| **★ MXFP8 RRR PRESHUFFLE V2 (default on, R22-A SHIP, commit dabeffa0)** | **3033** (R23 reverify, R22-A: ~3038) | 49.59 PASS | gap -219 / -6.7% (R23 vs R23 FP8) |
+| **FP8 RCR (长期 target)** | **3232** (R24) | 49.61 PASS | R24 5x median GPU0, std 9.48 |
+| **★ MXFP8 RCR PRESHUFFLE V2 (default on, R21 SHIP)** | **3214** (R24 fresh) | 49.60 PASS | **gap -17 / -0.5% ★ near-parity** |
+| MXFP8 RCR V1 (RUNTIME=0 fallback) | 3022.43 | 49.60 PASS | unchanged |
+| **★ MXFP8 RRR PRESHUFFLE V2 (default on, R22-A SHIP, commit dabeffa0)** | **3156** (R24 fresh) | 49.59 PASS | **gap -76 / -2.4%** |
 | MXFP8 RRR V1 (RUNTIME=0 fallback) | ~2878 | 49.59 PASS | V1 had 19 spills/80B scratch; V2 collapsed to 0 |
-| **★ MXFP8 CRR PRESHUFFLE V2 (default on, R22-B SHIP, commit 9a0d0624)** | **2811** (R23 reverify, R22-B GPU1: 2732.33; +79 drift) | 49.60 PASS | gap -441 / -13.6% (R23 vs R23 FP8) |
+| **★ MXFP8 CRR PRESHUFFLE V2 (default on, R22-B SHIP, commit 9a0d0624)** | **2943** (R24 fresh) | 49.60 PASS | **gap -289 / -8.9% ← ONLY meaningful gap remaining** |
 | MXFP8 CRR V1 (RUNTIME=0 fallback) | 2711.78 | 49.60 PASS | V1 already PIPELINE_SCALE single-shot 4×b32; CRR baseline more MFMA-bound |
 
 **R22 综合**：V2 preshuffle paradigm 完整覆盖三 layout（RCR + RRR + CRR）全 SHIPPED default-on。V1→V2 收益排序 RRR (5.54%) > RCR (1.84%) > CRR (0.76%)，与 V1 baseline 的 spills + VMEM-issue rate 排序一致。所有 V1 路径保留为 RUNTIME=0 fallback。
 
-**R23 综合**：R22 V2 三 layout 经一个 session reverify 全 stable，drift < 0.5%。3 个 dev 全 exhausted（V3 preshuffle REJECTED -2.99%；CRR A-LDS Route X FAIL SNR -2.71 dB 第二次 hit R11 wall；Dev C cycle diagnostic 找到 SQC_DCACHE_BUSY_CYCLES +441% 作为 R10/R12/R18 历史从未 instrumented 的 NEW #1 lever, 估 +80-150 TFLOPS aggregate 1-day audit）。R23 = 0 production commit + 1 docs commit + 6 ranked NEW levers for R24+。**关键 paradigm 更新**: SQ_INSTS_VMEM 是 transaction count 不是 byte count → R18+R21 "减 VMEM count" paradigm 在 V2 之后 SATURATED，下一步必须找其他 bottleneck (SQC dcache / SPI launch / TCC working-set)。
+**R24 综合 (paradigm correction)**：R23 cycle-level diagnostic 数字全部 invalidated as PMC-mode + GPU3 cold-throttle artifacts。R24 fresh GPU0 measurement (sclk 2353 MHz verified, warmup=100, per-iter sync) 显示 V2-RCR -0.5% / V2-RRR -2.4% / V2-CRR -8.9%，远好于 R23 报告的 -5.5/-6.7/-13.6%。R24 派 3 dev (SQC dcache cut / RRR TCC re-tile / SPI occupancy) 全部 DEAD-END，0 production commit, 2 side-branch commits (5cf85e58 + 76848ea9, NOT cherry-picked)。**Real status**: V2-RCR essentially at FP8 parity; V2-RRR -2.4% within close range; V2-CRR -8.9% 是唯一 structurally real remaining gap (col-major A-LDS layout, R10 census + R11/R23 SNR wall)。
+
+**R24 INVALIDATED hypotheses** (don't re-invest):
+- SQC_DCACHE_BUSY +441% (R23 #1 lever) → R24 fresh +38%, readfirstlane SRD-pin no-op (V2 SRDs already SGPR), Welch t -1.06 null
+- TCC_MISS V2-RRR +166% (R23 #3 lever) → R24 fresh +3.1%, sched_barrier TA spread Welch t -0.17 null
+- SPI VGPR_SIMD_FULL +18.7% (R23 #5 lever) → V2 actually uses fewer VGPRs than FP8 (V2-RCR 246 vs FP8 254); occ=3 architecturally impossible (V2 LDS 131-139 KB > 160000/3 cap)
+- All R23 PMC numbers should be treated as cold-cache + dispatch-aggregation artifacts unless reproduced with warmup≥100 + GPU sclk verified ≥2GHz
+
+**R23 综合 (HISTORICAL, INVALIDATED by R24)**：~~R22 V2 三 layout 经一个 session reverify 全 stable，drift < 0.5%。3 个 dev 全 exhausted（V3 preshuffle REJECTED -2.99%；CRR A-LDS Route X FAIL SNR -2.71 dB 第二次 hit R11 wall；Dev C cycle diagnostic 找到 SQC_DCACHE_BUSY_CYCLES +441% 作为 NEW #1 lever）。~~ R24 reverify 推翻 R23 cycle-level numbers; R23 ranked NEW levers (SQC/TCC/SPI/MFMA-VALU coexec) 全部 invalidated. **关键 paradigm 仍正确**: SQ_INSTS_VMEM 是 transaction count 不是 byte count → V3 preshuffle b64→b128 width promotion 给 0% VMEM cut, R23 Dev A confirmed -2.99% regression。
 
 **R21 VERIFIED PASS metrics (Reviewer GPU0 indep reproduction, RCR)**: V2 mean 3080.18 / median 3078.09 / std 4.63；V1 mean 3021.53 / median 3022.43 / std 3.19；Δ +55.66 TFLOPS / +1.84%；Welch t=23.33 (p<<0.001)；rocprofv3 SQ_INSTS_VMEM byte-exact match V1=6,815,744 → V2=5,767,168 (-15.38%)；correctness 256³/1024³/8192³ 全 SNR ≥49.5 + det 3/3 PASS。
 

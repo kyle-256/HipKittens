@@ -6,20 +6,22 @@
 
 协议：`test_mxfp8_python.py` / `test_python.py` 内的 per-iteration sync + `output.zero_()`，warmup=100 iters=200。
 
-## 当前 baseline（GPU0/1/2，per-iter sync，8192^3）— **R23 reverify (2026-04-18) ★ V2 stable，无 SHIP candidate；SQC dcache 新瓶颈定位**
+## 当前 baseline（GPU0，per-iter sync，8192^3）— **R24 reverify (2026-04-18) ★ paradigm 大修正：V2 ≈ FP8 (RCR -0.5%, RRR -2.4%)，R23 SQC/TCC 大幅"瓶颈"全为 PMC-mode 测量伪影**
 
 | 版本 | TFLOPS | SNR | 相对 FP8 RCR |
 | --- | ---: | --- | ---: |
-| **FP8 per-tensor RCR (长期目标)** | **3252** (R23 reverify, R21: 3243.67) | 49.61 dB PASS | 100.0% |
-| **MXFP8 RCR PRESHUFFLE V2 (R23 5x median, ★ default-on)** | **3074** (R21: 3078.09) | 49.60 dB PASS | 94.5% (gap -178 / -5.5%) |
-| **MXFP8 RRR PRESHUFFLE V2 (R23 5x median, ★ default-on)** | **3033** (R22-A indep: ~3038) | 49.59 dB PASS | 93.3% (gap -219 / -6.7%) |
-| **MXFP8 CRR PRESHUFFLE V2 (R23 5x median, ★ default-on)** | **2811** (R22-B GPU1 sanity: 2732.33, +79 cross-session drift) | 49.60 dB PASS | 86.4% (gap -441 / -13.6%) |
-| MXFP8 RCR V1 (R21 reproduced 5x median, RUNTIME=0 fallback) | 3022.43 | 49.60 dB PASS | 98.19% of V2 |
-| MXFP8 RRR V1 (R22 fallback) | ~2878 | 49.59 dB PASS | — |
-| MXFP8 CRR V1 (R22 fallback) | 2711.78 | 49.60 dB PASS | — |
-| **gap MXFP8 RCR V2 vs FP8 RCR** | **−165.58** (−5.10%) | | (R21 closed 27% of R20 gap) |
-| **gap MXFP8 RRR V2 vs FP8 RCR** | **~−212** (~−6.3%) | | **R22 RRR closed 43% of R21 gap (−371 → −212)** |
-| **gap MXFP8 CRR V2 vs FP8 RCR** | **~−517** (~−15.9%) | | **R22 CRR closed +20.55 TFLOPS (small uplift, baseline more MFMA-bound)** |
+| **FP8 per-tensor RCR (长期目标)** | **3232** (R24 reverify, R23: 3252) | 49.61 dB PASS | 100.0% |
+| **MXFP8 RCR PRESHUFFLE V2 (R24 fresh baseline, ★ default-on)** | **3214** (R23: 3074, +140) | 49.60 dB PASS | 99.4% (gap -17 / -0.5%) ★ near-parity |
+| **MXFP8 RRR PRESHUFFLE V2 (R24 fresh baseline, ★ default-on)** | **3156** (R23: 3033, +123) | 49.59 dB PASS | 97.6% (gap -76 / -2.4%) |
+| **MXFP8 CRR PRESHUFFLE V2 (R24 fresh baseline, ★ default-on)** | **2943** (R23: 2811, +132) | 49.60 dB PASS | 91.1% (gap -289 / -8.9%) ← 唯一仍有 meaningful gap |
+| MXFP8 RCR V1 (RUNTIME=0 fallback) | 3022.43 (R21) | 49.60 dB PASS | — |
+| MXFP8 RRR V1 (RUNTIME=0 fallback) | ~2878 (R22) | 49.59 dB PASS | — |
+| MXFP8 CRR V1 (RUNTIME=0 fallback) | 2711.78 (R22) | 49.60 dB PASS | — |
+| **gap MXFP8 RCR V2 vs FP8 RCR** | **−17** (−0.5%) ★ | | **R24 reveal: 实际近 parity，R23 -178 是 PMC-mode 协议差异 + GPU3 cold-throttle artifact** |
+| **gap MXFP8 RRR V2 vs FP8 RCR** | **−76** (−2.4%) | | **R24 reveal: R23 -219 同样高估** |
+| **gap MXFP8 CRR V2 vs FP8 RCR** | **−289** (−8.9%) | | **R24 reveal: 唯一 meaningful gap; CRR-specific bottleneck (col-major A-LDS) 仍是真问题** |
+
+**R24 paradigm 修正**：R23 cycle-level diagnostic 数字 (SQC_DCACHE_BUSY +441%, TCC_MISS +166%) **R24 fresh measurement 不可复现** (SQC +38%, TCC_MISS +3.1%)。根因：(a) PMC-mode 强制 dispatch 序列化，多次产生 +200% 假信号；(b) GPU3 cold-throttle 在 R23 Dev C 报告里就 noted；(c) R23 vs R24 不同 warmup/protocol。R23 列出的 6 ranked NEW levers 全部基于这些噪声放大数字 → R24 全部 invalidate。**真实状态**: V2 已基本追平 FP8 RCR/RRR；剩余只有 CRR -8.9% 是 structurally real。
 
 **R22 综合**：V2 preshuffle paradigm 推广到三 layout（RCR + RRR + CRR）全 SHIPPED default-on。RRR 大额收益 (+5.54%) 因 V1 RRR 有 19 spills/80B scratch 这次 V2 collapsed to 0 spills；CRR 小额 (+0.76%) 因 baseline 已 MFMA-bound + 已用 PIPELINE_SCALE 单 shot 4×b32。所有 V1 路径保留为 RUNTIME=0 fallback。
 
@@ -281,7 +283,68 @@ CRR PQ：**2737.94 TFLOPS** (93.55% of RCR) → 差 **42.34 TFLOPS (1.55%)** 才
     - Diagnostic-S：完成（paradigm-shift 发现，见上）
   - **R12 行动结论**：4 个 dev 全 timeout 无 commit；唯一产出是 Diagnostic-S 的瓶颈定性更正。要 commit 代码必须重派 dev，**强烈建议下轮按 Diagnostic-S 的 SPI 启动器假说派活**：(1) 缩减 CRR LDS/block（单缓冲 A 或 B，packing 重叠）、(2) `__launch_bounds__(512, 3)` 提示 SPI 预留更多 slots、(3) 减少 SQC_DCACHE 压力（per-CTA 常量改 s_load_b256 单次加载）。**不要** 再投资 LDS bank conflict / LDS pipe / re-stripe stride 方向（已证 0 conflict，无收益）
 
+- **第二十四轮评审 (2026-04-18) — ★ R23 cycle-level findings 推翻为 PMC-mode 测量伪影；R24 fresh baseline 显示 V2-RCR 实际 ≈ FP8 RCR (-0.5%)，V2-RRR -2.4%，唯有 V2-CRR -8.9% 是真 structural gap；3 个 dev 全 DEAD-END (SQC dcache cut / RRR TCC re-tile / SPI occupancy)；0 production commit；2 side-branch commits (5cf85e58 + 76848ea9 NOT cherry-picked)；R25+ priority list rebuilt around CRR-only**
+  - **R24 派 1 Reviewer + 3 Dev (A/B/C) 并行（GPU0/1/2/3 隔离），按 R23 priority list 执行: SQC dcache cut (NEW #1) / RRR TCC re-tile / SPI occupancy fix**
+  - **Reviewer (GPU0) — baseline reverify + R23 levers reverify: ★ MAJOR PARADIGM CORRECTION ★**
+    - GPU0 sclk verified 2353 MHz under load; warmup=100, iters=200, per-iter sync
+    - **R24 fresh baseline (5x median)**: V2-RCR **3214** (std 7.21), V2-RRR **3156** (std 8.93), V2-CRR **2943** (std 11.44), FP8-RCR **3232** (std 9.48)
+    - 全 SNR ≥49.5 + det 3/3 PASS
+    - **Real gaps**: V2-RCR vs FP8 = **-17 / -0.5%** (★ near-parity); V2-RRR -76 / -2.4%; V2-CRR -289 / -8.9% (only meaningful gap)
+    - **R23 cycle-level diagnostic 不可复现**:
+      - R23 Dev C reported SQC_DCACHE_BUSY +441% on V2-RCR vs FP8-RCR; R24 Reviewer fresh PMC measure: **+38%** (factor 11× discrepancy)
+      - R23 reported TCC_MISS +166% on V2-RRR; R24 fresh: **+3.1%** (factor 50× discrepancy)
+      - R23 reported SPI_RA_LDS_CU_FULL +18.7% uniform across V2; R24 fresh: ±2% noise band
+    - **Root cause of R23 noise amplification**: (a) PMC mode 强制 dispatch 序列化 (官方 known caveat) 在 cold-cache 第一次 hit 时给假 +200-400%; (b) GPU3 在 R23 Dev C report 里就 noted "1872-1995 MHz under load" 是 cold-throttle state (vs GPU0 healthy 2353 MHz); (c) R23 protocols 用了 warmup=10 PMC mode wasn't long enough; R24 用 warmup=100 fresh
+    - **All R23 ranked NEW levers INVALIDATED by fresh measurement**: SQC dcache (#1), RRR TCC (#3), SPI (#5), MFMA-VALU coexec (#6) 全部基于 noise-amplified PMC numbers
+    - **Real V2 status**: V2 paradigm 比 R23 docs 描述的更接近 FP8 parity；R20→R22 cumulative wins 已经 close 大部分 RCR gap
+  - **Dev A (GPU1) — SQC dcache cut (R23 NEW #1 lever): ★ DEAD-END, SIDE COMMIT 5cf85e58 (NOT cherry-picked) ★**
+    - branch `r24-a-sqc-dcache @ /tmp/wt-r24-a`
+    - **Approach**: precompute V2 scale slab base SRDs into SGPR via `__builtin_amdgcn_readfirstlane` at use site (helper `mxfp8_v2_pin_srd_to_sgpr` + `MXFP8_V2_PIN_SRD(srd)` macro); flag `MXFP8_V2_HOIST_SCALE_PTRS_ENABLE=1` (default 0)
+    - **Build**: clean compile (VGPR/LDS/spills identical to baseline); applied at 2 V2-RCR call sites + RRR/CRR fastpath helpers (+34/+2/+2 LOC)
+    - **Critical finding**: hipcc -S 显示 V2 scale SRDs **已经在 SGPR** (s[24:27], s[40:43] 等)，readfirstlane 是 no-op；compiler scheduler 已经把 SRD pin 到 scalar regs。R23 假说 "V2 SRDs spilling to VGPR causing SQC pressure" **完全错误**
+    - **PMC reverify (R24 protocol)**: SQC_DCACHE_BUSY V2 vs FP8 = +38% (not +441% as R23 reported); with HOIST_HI flag: -3% within noise (target -50%)
+    - **Perf A/B (5x GPU1)**: V2 baseline 3211 vs HOIST_SCALE_PTRS 3208, **Δ -3 TFLOPS / -0.09%, Welch t=-1.06** (statistical null)
+    - Side-branch commit `5cf85e58c917b7effa081a7537997f176af11adc` retained for archival; **NOT cherry-picked**
+  - **Dev B (GPU2) — V2-RRR TCC working-set re-tile (R23 NEW #3 lever): ★ DEAD-END, SIDE COMMIT 76848ea9 (NOT cherry-picked) ★**
+    - branch `r24-b-rrr-tcc-tile @ /tmp/wt-r24-b`
+    - **Original scope (B-side 32×32 re-tile)**: 直接重 tile RRR B 操作数需要重写 ST/swizzle，不在 1-day scope; substituted approach
+    - **Substituted approach**: TA arbiter spread via splitting `load_scale_packs` into `load_scale_packs_a_v2` + `load_scale_packs_b_v2` with `__builtin_amdgcn_sched_barrier(0)` between them, forcing TA arbiter to interleave A/B scale loads in different cycles
+    - **Build**: clean (compile flag `MXFP8_V2_RRR_TCC_TILE_ENABLE=1`, default 0; flag-OFF 与 baseline byte-identical .so verified via sha256sum)
+    - **PMC reverify (R24 protocol)**: TCC_MISS V2-RRR vs FP8-RRR = **+3.1%** (not +166% R23 reported); SQ_VMEM_TA_ADDR_FIFO_FULL **+597%** R23 → +25% R24; with sched_barrier: TA_ADDR_FIFO_FULL **-16.9%** (target -50%, partial), TCC_MISS unchanged
+    - **Perf A/B (5x GPU2)**: V2-RRR baseline 3155 vs TA-spread 3153, **Δ -2 TFLOPS / -0.07%, Welch t=-0.17** (statistical null); TCC working-set 不是真实瓶颈，sched_barrier 仅 reorder issue 不改 data flow
+    - Side-branch commit `76848ea978abe88a38c834cf3c907a8ace9a3119` retained; **NOT cherry-picked**
+  - **Dev C (GPU3) — SPI occupancy fix (R23 NEW #5 lever): ★ DEAD-END (architectural impossibility) ★**
+    - **Approach**: try `__launch_bounds__(threads, 3)` + recover 8-16 VGPRs to unlock occupancy=3
+    - **Critical discovery — gfx950 LDS hard cap**: MI355X CU LDS = **160000 B**; V2 RCR 131 KB / RRR 135 KB / CRR 139 KB → **3 blocks/CU 需 393-417 KB > 160 KB → architectural impossible**
+    - Compiler **silently ignored** `__launch_bounds__(_, 3)` because LDS not VGPR is the binding constraint
+    - V2 实际 VGPR usage **less than FP8** (RCR V2: 246 vs FP8: 254; **-8 VGPR**) — R23 SPI VGPR_SIMD_FULL +18.7% 信号是 PMC noise artifact, not actual VGPR pressure
+    - **occ=2 是 V2 paradigm 的 architectural ceiling** (与 R6 occ=1 architectural impossibility 同级 finding)
+    - All edits reverted; no commit
+  - **R24 综合产出 = 0 production commits + 2 side-branch commits (5cf85e58 + 76848ea9, NOT cherry-picked) + 1 paradigm correction docs commit**:
+    1. **★ R23 cycle-level findings 全部 INVALIDATED ★** as PMC-mode + cold-throttle artifacts; all 6 R23 ranked NEW levers based on noise-amplified data
+    2. **★ V2 实际近 FP8 parity ★**: V2-RCR -0.5%, V2-RRR -2.4% (R23 高估了 5-7×); 累计 R20-R22 V2 工作 close 了远比 R23 docs 描述更多的 gap
+    3. **V2 SRDs 已经在 SGPR**: readfirstlane no-op, R23 SQC dcache 假说 falsified
+    4. **TCC working-set 不是瓶颈**: TCC_MISS R24 fresh +3.1% (not +166%), sched_barrier 重排无效
+    5. **gfx950 LDS hard cap = 160000 B/CU**: V2 occ=3 architecturally impossible (similar to R6 occ=1 impossibility)
+  - **R24 confirms**:
+    - **PMC mode 不能用作 perf 比较的 absolute counter，必须 fresh measurement reverify before acting on PMC-derived hypotheses**
+    - V2 paradigm 的 V1→V2 收益已经 deliver 了大部分 gap closure，剩余 CRR -8.9% 是唯一 meaningful structural gap
+    - GPU 状态 (sclk, thermal) 必须前置 verify (R22 经验 + R23/R24 reaffirm)
+  - **R25+ 路径**（基于 R24 evidence rebuild）：
+    1. **CRR -8.9% 是 ONLY meaningful gap** (RCR/RRR essentially at parity)
+    2. **CRR-specific bottlenecks 仍未解**：col-major A-LDS layout (R10 census + R11/R23 SNR wall)；要 unblock 必须 layout-matching microbenchmark 或 element-dump kernel
+    3. **真 RRR scale-prefetch pipeline**：extend `MXFP8_RRR_EXACT_PQ_PIPELINE_SCALE_ENABLE` 到 V2 b128/b64 with double-buffered scale registers
+    4. **Per-instruction PMC sampling (rocprofv3 ATT mode)** to identify actual SQC source — 不要再信 dispatch-level PMC summary
+    5. **不要再** 重新基于 R23 PMC 数字派活 (SQC/TCC/SPI/MFMA-VALU coexec 全 invalidated); 不要重新 revisit V3 preshuffle (R23 -2.99% confirmed); 不要重新 revisit V1 b64 / sched hints / SCALE_LDS / naive CRR A-LDS memcpy
+  - **新经验 (R24 起)**：
+    - **PMC mode artifacts**: rocprofv3 PMC 模式在 cold cache + dispatch-level aggregation 下放大 200-400% 假信号；必须 (a) warmup ≥100, (b) GPU sclk verified ≥2GHz, (c) cross-protocol reproduce before treating as bottleneck
+    - **不要把 PMC 数字直接当 perf hypothesis**: R23 ranking 6 NEW levers 全部基于一次 PMC measurement, R24 fresh 全部不可复现
+    - **gfx950 LDS hard cap = 160000 B/CU**: V2 (131-139 KB/block) hard-capped at 1 block/CU = 2 waves/SIMD; `__launch_bounds__(_,3)` silently ignored
+    - **side-branch + reviewer-confirm pattern still good**: Dev A/B 各自 commit on side branch, reviewer reverify 决定不 cherry-pick；clean audit trail without polluting feat/mxfp8-only
+
 - **第二十三轮评审 (2026-04-18) — ★ R22 V2 stable reverify (V2-RCR 3074 / V2-RRR 3033 / V2-CRR 2811 / FP8-RCR 3252)；3 个 dev 全 exhausted: V3-RCR REJECTED (-2.99%) / CRR A-LDS Route X FAIL SNR-2.71 dB (R11 wall reproduced) / Dev C diagnostic 找到 SQC_DCACHE pressure (+441%) 作为 NEW #1 lever；0 production commit；1 docs commit**
+
+  > **R24 retraction**: R23 Dev C 列出的 6 ranked NEW levers (SQC dcache +441%, TCC_MISS +166%, SPI +18.7%, etc.) 在 R24 fresh measurement 下不可复现 (SQC +38%, TCC_MISS +3.1%, SPI ±2% noise)。Root cause: PMC mode + GPU3 cold-throttle + warmup=10 协议差异。R23 priority list 已被 R24 invalidate; 见 R24 entry above for corrected baseline + R25+ rebuilt priorities.
   - **R23 派 1 Reviewer + 3 Dev (A/B/C) 并行（GPU0/1/2/3 隔离），按 R22 R23+ priority list 执行: V2 milestone-3 / CRR LDS rewrite / V2 cycle diagnostic**
   - **Reviewer (GPU0)** Task 1 — 5x 全 layout V2 baseline reverify: stable
     - V2-RCR median **3074** (std 6.20), V2-RRR median **3033** (std 4.14), V2-CRR median **2811** (std 6.83), FP8-RCR median **3252** (std 6.40)
