@@ -1,0 +1,16 @@
+{
+  "tag": "R29-L8-pf48",
+  "module_name": "tk_mxfp4_gluon_cpp_n4096_k14336_ts_v12_tv0_memc_btw_all_pfoff48_kx14336",
+  "so_path": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/tk_mxfp4_gluon_cpp_n4096_k14336_ts_v12_tv0_memc_btw_all_pfoff48_kx14336.cpython-310-x86_64-linux-gnu.so",
+  "compile_sec": 4.8,
+  "so_size_kb": 276.3,
+  "vgpr": null,
+  "agpr": null,
+  "sgpr": null,
+  "spills": null,
+  "scratch": 0,
+  "occupancy": 1,
+  "M": 16384,
+  "N": 4096,
+  "K": 14336
+}

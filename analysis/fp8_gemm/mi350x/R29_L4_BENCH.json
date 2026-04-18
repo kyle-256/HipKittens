@@ -1,0 +1,107 @@
+{
+  "shape": [
+    4096,
+    32768,
+    14336
+  ],
+  "comp": 5296.1,
+  "current_best": 5256.46,
+  "current_best_tag": "ts_v12_tv0_memc_btw_all",
+  "warmup": 200,
+  "iters": 500,
+  "trim": 0.1,
+  "reps": 5,
+  "gpu": "0",
+  "variants": [
+    {
+      "pfoff": 48,
+      "verdict": "DEAD",
+      "reps": [
+        6168.36,
+        6172.49,
+        6183.35,
+        6179.85,
+        6165.62
+      ],
+      "mean": 6173.934,
+      "std": 7.515605764008934,
+      "min_finite_frac": 0.4847120940685272,
+      "min_nz_frac": 0.9999997019767761,
+      "reps_ok": 5,
+      "reps_total": 5,
+      "errors_count": 0
+    },
+    {
+      "pfoff": 50,
+      "verdict": "WIN",
+      "reps": [
+        6121.08,
+        6118.3,
+        6112.09,
+        6114.84,
+        6111.71
+      ],
+      "mean": 6115.604,
+      "std": 4.041971053830007,
+      "min_finite_frac": 0.545486330986023,
+      "min_nz_frac": 0.9999996423721313,
+      "reps_ok": 5,
+      "reps_total": 5,
+      "errors_count": 0
+    },
+    {
+      "pfoff": 52,
+      "verdict": "WIN",
+      "reps": [
+        5922.41,
+        5901.82,
+        5914.3,
+        5915.62,
+        5927.47
+      ],
+      "mean": 5916.324,
+      "std": 9.698336455289791,
+      "min_finite_frac": 0.5668939352035522,
+      "min_nz_frac": 0.9999996423721313,
+      "reps_ok": 5,
+      "reps_total": 5,
+      "errors_count": 0
+    },
+    {
+      "pfoff": 54,
+      "verdict": "WIN",
+      "reps": [
+        6154.81,
+        6165.67,
+        6161.38,
+        6158.76,
+        6153.89
+      ],
+      "mean": 6158.902,
+      "std": 4.843322206915283,
+      "min_finite_frac": 0.7887661457061768,
+      "min_nz_frac": 0.9999996423721313,
+      "reps_ok": 5,
+      "reps_total": 5,
+      "errors_count": 0
+    },
+    {
+      "pfoff": 55,
+      "verdict": "WIN",
+      "reps": [
+        5555.56,
+        5542.09,
+        5545.46,
+        5542.94,
+        5561.27
+      ],
+      "mean": 5549.464,
+      "std": 8.507545474459981,
+      "min_finite_frac": 0.7089403867721558,
+      "min_nz_frac": 0.9999987483024597,
+      "reps_ok": 5,
+      "reps_total": 5,
+      "errors_count": 0
+    }
+  ]
+}

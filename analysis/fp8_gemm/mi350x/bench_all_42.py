@@ -585,6 +585,19 @@ def main():
          "-DR25C_TAIL_PF_OFF_ITERS=52 -DR25C_K_LIMIT=32768 -DR25C_K_EXACT=14336 "
          "-mllvm -amdgpu-sched-strategy=max-memory-clause "
          "-DBARRIER_TO_WAITCNT_ALL=1"),  # R28C WIN: L8 16384x4096x14336 +14.50% vs v1 best
+        # R29 PER-K WIN (tv0 parent class for L4): the existing K_EXACT=14336 entry
+        # above (`_ts_v12_tv0_memc_dc_gm7_pfoff54_kx14336_btw_all`) was tuned for L8's
+        # M=16384, N=4096 geometry and produces only 3.6% on L4 (M=4096, N=32768) —
+        # the _dc_gm7 stack is wrong for the {wide-N, low-M} regime. L4's correct
+        # parent is `ts_v12_tv0_memc_btw_all` (no _dc, no gm7). K_iters=14336/256=56
+        # → pfoff=48 (8 prefetches fire, R25-G recipe at K_iters - 8 lower edge).
+        # 5-rep verify (warmup=200 iters=500 trim=10%, GPU 0): 6173.93±7.52 TFLOPS,
+        # +17.45% vs parent (5256.46), 116.58% of comp (5296.1). L4 LOSE→WIN.
+        ("_ts_v12_tv0_memc_btw_all_pfoff48_kx14336",
+         "-DTAIL_SPLIT=1 -DSTEP3_BARRIER_VMCNT=12 -DTAIL_BARRIER_VMCNT=0 "
+         "-DR25C_TAIL_PF_OFF_ITERS=48 -DR25C_K_LIMIT=32768 -DR25C_K_EXACT=14336 "
+         "-mllvm -amdgpu-sched-strategy=max-memory-clause "
+         "-DBARRIER_TO_WAITCNT_ALL=1"),  # R29 WIN: L4 4096x32768x14336 +17.45% vs parent
     ]
     for n_val, k_val in nk_pairs:
         for suffix, cppflags in variants:

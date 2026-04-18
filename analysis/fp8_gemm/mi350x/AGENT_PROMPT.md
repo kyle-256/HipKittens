@@ -2,22 +2,27 @@
 
 你在继续推进 `HipKittens` 的 MXFP4 GEMM 优化工作，跟 Cursor (Hipkittens2) 竞赛。
 
-## ⚠️ 当前优化目标 (2026-04-18, post-v2)
-> 24/42 ceiling 早已被打破: 现在 **40/42 WIN (95%)** = saturated.
-> 唯一剩余有意义的目标: **L6 / DLA1 (4096×32768×128256, 92.6%)** — V5 MFMA_32X32X64 重写 (BACKBURNER, 1周).
-> L4 (98.5%) 在噪声边缘, 不值得结构性攻击.
+## ⚠️ 当前优化目标 (2026-04-18, post-R29)
+> 24/42 ceiling 早已被打破: 现在 **41/42 WIN (97.6%)** = effectively saturated.
+> 唯一剩余目标: **L6 / DLA1 (4096×32768×128256, 92.6%)** — V5 MFMA_32X32X64 重写 (BACKBURNER, 1周). V8 R25E peel 也 DEAD (state-hazard).
+> L4 已 R29 修复 (LOSE→WIN +17.45% via parent-stack 修正).
 
 **历史指令** (2026-04-17, 已过时):
 > "24win 已经卡了好久了，现在把优化目标改成优化剩下那几个差的比较多的。"
 > 当时认为 24/42 是天花板; R25-F/G/H + R26-D + R28-C 后已证实是错的.
 
-### 重点 shape (post-R26 FINAL v2 + R28-C, 2026-04-18)
-**40/42 WIN** = 95% 命中率. 仅 2 残留:
+### 重点 shape (post-R29, 2026-04-18)
+**41/42 WIN** = 97.6% 命中率. 仅 1 残留:
 
-| 优先级 | Shape (M×N×K)         | Ratio | Best Tag (v2)                          | 类别              | 备注 |
+| 优先级 | Shape (M×N×K)         | Ratio | Best Tag                               | 类别              | 备注 |
 |-------|----------------------|-------|----------------------------------------|------------------|------|
-| P0    | 4096×32768×128256    | 92.6% | ts_lgk2_v12_memc_btw_all (DLA1)        | 大N+mega-K       | R27-C/R26-A 全部 DEAD; 仅剩 V5 MFMA32 重写 (BACKBURNER ≥1周) |
-| 噪声  | 4096×32768×14336     | 98.5% | ts_v12_tv0_memc_btw_all                | 大K+大N          | 噪声边缘 (±2-3pp), 不值得结构性攻击 |
+| P0    | 4096×32768×128256    | 92.6% | ts_lgk2_v12_memc_btw_all (DLA1)        | 大N+mega-K       | R27-C/R26-A/V8 全部 DEAD; 仅剩 V5 MFMA32 重写 (BACKBURNER ≥1周) 或 V6 split-K (≥3天) / V7 stream-K (≥2周) |
+
+**R29 翻 LOSE→WIN (+1)**:
+| Shape | Old → New | Variant |
+|-------|-----------|---------|
+| L4 4096×32768×14336 | 99.25% → **116.58%** (+17.45%) | `_ts_v12_tv0_memc_btw_all_pfoff48_kx14336` (parent-stack 修正: L4 应用 `btw_all`, 不是 L8 的 `_dc_gm7`) |
+| L8 16384×4096×14336 (bonus) | 116.6% → +3.21% | 同上 variant 顺手 beat L8 incumbent +184 TFLOPS |
 
 **v2 翻 LOSE→WIN (+7)**:
 | Shape | v1→v2 | Best Tag (v2) |
@@ -62,9 +67,10 @@ R25-G 之前各类已知 dead (history): `iterative-ilp` 编译器 bug, BK=256 L
 |------|------|------|------|
 | **V5 — MFMA_32X32X64_TILING 重构** (R29+) | 高 | 0-5pp on L6/DLA1 | **唯一剩余结构性 axis**. ≥1 周 asm 重写. 32×32 MFMAs 允许 4× concurrent in-flight @ same acc footprint, 可能松开 R24B/C 确认的 VMEM-issue saturation. 高不确定性. 见 `R27_V5_MFMA32_SCOUT.md` |
 
-DEAD post-R28 (不要再尝试 — 已 reproduce 过):
+DEAD post-R29 (不要再尝试 — 已 reproduce 过):
 - ~~R26-A V1 DLA1 K-loop peel (R25-E pf495)~~ — 5-rep verify std=1729 TFLOPS, mean swing 1672→5546, 不稳定 false alarm
 - ~~R27-C DLA1 K_EXACT bypass~~ — HSA aperture violation rc=-6 全 5/5 reps; kernel HARD-GATE K≤32768 (`kernel_mxfp4_gluon_cpp.cpp:85-91`)
+- ~~V8 R25E static-loop-split peel on L6/DLA1~~ — `R29_L6_V8_VERDICT.md`. PEEL=2/4 runtime HSA memory access fault; PEEL=8 catastrophic -71% regression (1529 TFLOPS). State-hazard between unroll-8 main loop & peel TAIL via pf_a0/a1/bl/br scale registers. Kernel 已 revert.
 
 DEAD (不要再尝试 — 已 reproduce 过):
 - ~~per-shape compiler flag (LLVM sched-strategy per-K-bucket)~~ — `iterative-ilp` LLVM bug (aperture violation), 其它 strategy ±0.4% noise

@@ -1,16 +1,21 @@
 # MXFP4 GEMM Optimization TODO
 
-## Current State (2026-04-18, post-R26 FINAL v2 + R28-C)
+## Current State (2026-04-18, post-R29)
 
-**Bench**: `bench_all42_results_R25_FINAL_v2.{json,log}` (warmup=200 iters=500 trim=10%, 5-GPU parallel)
-**Result**: **40/42 WIN, 2/42 LOSE, 0 ERR, win rate 95%** — up from 33/42 v1 (+7 net flips), from 24/42 baseline (+16 net flips)
-**Status**: Saturated. Only 2 residuals: L4 (noise band) + L6/DLA1 (structural mega-K, V5 only remaining axis).
+**Bench**: `bench_all42_results_R25_FINAL_v2.{json,log}` (warmup=200 iters=500 trim=10%, 5-GPU parallel) + R29 single-shape verifies
+**Result**: **41/42 WIN, 1/42 LOSE, 0 ERR, projected win rate 97.6%** — L4 flipped LOSE→WIN by R29 (+1 from v2 40/42).
+**Status**: Effectively saturated. Only L6/DLA1 remains (structural mega-K, V5 + V8 both DEAD).
 
-### 2 residual LOSE shapes (post-R26 FINAL v2)
-| #  | Shape (M×N×K)         | Ours    | Comp    | Ratio  | Best Tag                              | Class                    |
-|----|-----------------------|---------|---------|--------|---------------------------------------|--------------------------|
-| L4 | 4096×32768×14336      | 5217.0  | 5296.1  | 98.5%  | ts_v12_tv0_memc_btw_all               | NOISE BAND (within ±2%)  |
-| L6 | 4096×32768×128256     | 5353.9  | 5781.1  | 92.6%  | ts_lgk2_v12_memc_btw_all (DLA1)       | STRUCTURAL (V5 only axis)|
+### 1 residual LOSE shape (post-R29)
+| #  | Shape (M×N×K)         | Ours    | Comp    | Ratio  | Best Tag                              | Class                                |
+|----|-----------------------|---------|---------|--------|---------------------------------------|--------------------------------------|
+| L6 | 4096×32768×128256     | 5353.9  | 5781.1  | 92.6%  | ts_lgk2_v12_memc_btw_all (DLA1)       | STRUCTURAL — V5/V8 dead, only path is V6 split-K (≥3 days) or V7 stream-K (≥2 weeks) |
+
+### R29 wins (this round)
+| Shape | Old → New | Variant | Notes |
+|-------|-----------|---------|-------|
+| L4 4096×32768×14336 | 99.25% → **116.58%** (+17.45%) | `_ts_v12_tv0_memc_btw_all_pfoff48_kx14336` | Wrong-parent fix: existing K_EXACT used `_dc_gm7` (L8's parent), produced 3.6% on L4. Used L4's correct parent `ts_v12_tv0_memc_btw_all`. K_iters=56 → pfoff=48. 5-rep std 0.12%. |
+| L8 16384×4096×14336 | 116.6% → **115.7%→+3.21%** (5947 vs 5762) | same variant | Bonus: same L4-tuned variant beats L8 incumbent `_ts_u16_gm7_pfoff52_kx14336_btw_all` by +184 TFLOPS. Auto-tune picks max per shape. |
 
 ### v2 NEW WIN flips (vs v1, +7)
 | Shape | v1 → v2 | Best Tag (v2) |

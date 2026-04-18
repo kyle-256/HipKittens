@@ -1,0 +1,31 @@
+{
+  "shape": [
+    4096,
+    32768,
+    14336
+  ],
+  "so": "tk_mxfp4_gluon_cpp_n32768_k14336_ts_v12_tv0_memc_btw_all.cpython-310-x86_64-linux-gnu.so",
+  "verdict": "LOSE",
+  "reps": [
+    5248.74,
+    5269.55,
+    5263.67,
+    5255.91,
+    5244.41
+  ],
+  "mean": 5256.456,
+  "std": 10.34934200807004,
+  "min": 5244.41,
+  "max": 5269.55,
+  "v2_best": 5217.0,
+  "comp": 5296.1,
+  "ratio_pct": 99.25144917958497,
+  "stability_pct": 0.19688820772151505,
+  "min_finite_frac": 0.31940656900405884,
+  "min_nz_frac": 0.9999995827674866,
+  "warmup": 200,
+  "iters": 500,
+  "trim": 0.1,
+  "reps_total": 5,
+  "reps_ok": 5
+}
