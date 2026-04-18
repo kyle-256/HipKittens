@@ -7,7 +7,59 @@
 - SNR ≥ 48 dB (FP8) / ≥ 47 dB (BF16 vs torch.mm), bit-exact determinism are hard gates.
 - Never commit `*.so`, `.autotune_cache.json` is OK to keep (it's text), logs are not.
 
-## Current Status (2026-04-18, post-P18 close — Lever A m0 hoist works on 4-wave but autotuner routes to 8-wave; P19 = port hoist to 8-wave)
+## Current Status (2026-04-18, post-P19 close — m0 hoist landed on 8-wave (commit 49647b11, +0.27/+0.47pp cross-GPU); BF16 CRR bottleneck characterized as LDS pressure; P20 = b64_tr_b16 → b128 + v_perm refactor)
+
+P19 dispatched 2 Devs in parallel + 1 Reviewer (cross-GPU validation).
+Dev A landed; Dev B characterization complete.
+
+- **Dev A (8-wave RCR m0-broadcast hoist, GPU 6, opus, worktree
+  `agent-afebc9c7`)** — ported P18 Dev A's inline-asm recipe (A1+A2
+  only; A3 was dead) from 4-wave to the production 8-wave RCR kernel
+  via a local `rcr_8w_load_hoist<N_THREADS>(...)` helper (44 G::load
+  call sites in `kernel_fp8_layouts.cpp` lines 1037-1535). Asm-verify
+  unambiguous: `v_readfirstlane` 42→17 (-60%), `s_nop` 18→6 (-67%),
+  VGPRs 238→222 (-16, occupancy unchanged at 2). Dev A wall-clock on
+  GPU 6: 4 gate_up shapes geo-mean 0.8980 → 0.9007 (**+0.27pp**).
+
+- **Reviewer (cross-GPU validation, GPU 0, opus)** — confirmed LAND.
+  Build parity (gate-OFF md5 byte-identical to pristine baseline).
+  GPU-0 wall-clock: 0.9122 → 0.9169 (**+0.47pp**, larger than Dev A
+  on GPU 6 — rules out per-GPU noise artifact). All 56-shape
+  non-regression gates PASS (RCR 0.991x, RRR 1.511x, CRR 1.951x).
+  SNR 49.6 dB, det 10/10. **LANDED as commit `49647b11`** with macro
+  `RCR_8W_HOIST_M0` defaulting to 1 in production.
+
+- **Dev B (BF16 CRR rocprofv3 + disasm characterization, GPU 7, opus,
+  worktree `agent-a28d496e`)** — **definitive BF16 CRR bottleneck**.
+  Worst shape `(4096,10240,8192)` KI=128: TK and BL execute identical
+  MFMA inst counts (41.94M); pure cycle-efficiency gap. **MFMA pipe
+  utilization: TK 49% vs BL 67% → 17pp gap fully explains the runtime
+  delta.** Critical deltas (per-MFMA): LDS-reads 3× more (TK uses
+  `ds_read_b64_tr_b16` 8B/lane vs BL `ds_read_b128` 16B/lane +
+  `v_perm_b32`); LDS bank conflicts 384× more; LDS-wait cycles 26×
+  more. **Spill is a RED HERRING**: `v_writelane`/`v_readlane` to
+  VGPR `v244`, executed once per kernel — confirms P9-P14's negative
+  results were correct. **FP8-RCR m0-hoist would NOT port to BF16 CRR**:
+  BF16 m0 cost is 0.125/MFMA (1-inst, no `v_readfirstlane` cluster) vs
+  FP8-RCR-4w 0.625/MFMA — would buy <0.5pp.
+
+**P20 dispatch — H1 (highest confidence, target 3-5pp on worst CRR /
+1-2pp on CRR mean):**
+
+Switch CRR LDS path from `ds_read_b64_tr_b16` → `ds_read_b128` +
+post-`v_perm_b32`, mirroring hipBLASLt's `LDSB0_LRVW8_VWA8_VWB8`
+Tensile config. Touches `ST_A` / `A_reg_t` types in
+`analysis/bf16_gemm/mi350x/kernel_bf16_dynamic.cpp:43-59`,
+`subtile_inplace` calls (lines 173-176), and `mma_AtB` invocation.
+Source-level achievable (compiler emits b128 + v_perm if storage
+layout is swapped). 2-3 Dev sessions: one to reshape CRR tile types,
+one for autotune+validation.
+
+If H1 lands less than expected (<2pp), the next lever is H4
+(`s_setprio` rebalance, 0.5-1pp). H2 (Stream-K) and H5 (spill fix)
+are explicitly closed.
+
+## [P19 archive] Earlier Status (2026-04-18, post-P18 close)
 
 P18 dispatched 2 Devs in parallel against the P17 dispatch.
 **Both returned NO-LAND with definitive findings.** No code committed;

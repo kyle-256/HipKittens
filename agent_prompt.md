@@ -183,6 +183,117 @@ BF16 work is paused unless a clean structural restructure is on the table
 
 ## Session Log
 
+### 2026-04-18 — P19 (1 implementation Dev + 1 cross-GPU Reviewer + 1 research Dev; GPUs 0/6/7; CLOSE — Dev A LANDED, Dev B characterization → P20 dispatch)
+
+**Outcome: Dev A's 8-wave m0 hoist LANDED as commit `49647b11`
+(+0.27pp on GPU 6, +0.47pp Reviewer cross-GPU on GPU 0; asm-clean
+-60% v_readfirstlane / -67% s_nop / -16 VGPRs). Dev B characterized
+BF16 CRR's −4.7pp gap as LDS pressure (3× LDS issues, 384× bank
+conflicts), NOT spill (red herring) and NOT m0-broadcast (would buy
+<0.5pp). P20 dispatch: switch CRR LDS path from `ds_read_b64_tr_b16`
+→ `ds_read_b128` + `v_perm_b32` (3-5pp upside on worst CRR).**
+
+- **Dev A (8-wave RCR m0 hoist, GPU 6, opus, worktree `agent-afebc9c7`)**
+  Ported P18 Dev A's inline-asm recipe (A1+A2 only — A3 dead per
+  P18 Dev B's asm refutation) to the production 8-wave RCR kernel.
+  New macro `RCR_8W_HOIST_M0` defaults ON in production. Local helper
+  `rcr_8w_load_hoist<N_THREADS>(...)` replaces 44 `G::load(...)` call
+  sites in the `if constexpr (L == Layout::RCR)` branch
+  (`kernel_fp8_layouts.cpp` lines 1037-1535). RRR/CRR sites untouched.
+
+  Asm-verify (8-wave RCR full-kernel slice):
+  - `v_readfirstlane`: 42 → 17 (-60%)
+  - `s_nop`:           18 → 6  (-67%)
+  - VGPRs:            238 → 222 (occupancy unchanged at 2)
+  - DTL/MFMA traffic preserved (40 DTL, 160 MFMA, 120 ds_read_b128)
+  - `__launch_bounds__` unchanged (no occupancy bump unlocked at this step)
+
+  Wall-clock GPU 6 (3 trials × 100 iters × 3 reruns):
+  | Run | baseline | hoist  |
+  |-----|---------:|-------:|
+  | 1   |   0.8964 | 0.8990 |
+  | 2   |   0.8963 | 0.8980 |
+  | 3   |   0.9013 | 0.9050 |
+  | avg |   0.8980 | 0.9007 (+0.27pp) |
+
+- **Reviewer (cross-GPU validation, GPU 0, opus)** — confirmed LAND.
+  Build parity verified: gate-OFF `.so` md5 byte-identical to pristine
+  baseline `843d7d59...`; gate-ON md5 matches Dev A's `971dd6aa...`
+  exactly. GPU-0 wall-clock (3-session avg): 0.9122 → 0.9169 (+0.47pp,
+  larger signal than GPU 6 — rules out per-GPU noise artifact). All
+  56-shape non-regression PASS: RCR 0.991x, RRR 1.511x, CRR 1.951x.
+  SNR 49.6 dB across 5 reps × 3 layouts; det 10/10. One process note:
+  Makefile build (no `-save-temps`) produces a different `.so` md5
+  than Dev A's hand-typed command (with `-save-temps`); both are
+  functionally identical.
+
+- **Dev B (BF16 CRR rocprofv3 + disasm research, GPU 7, opus,
+  worktree `agent-a28d496e`)** — definitive BF16 CRR characterization.
+  Worst shape `(4096,10240,8192)` KI=128: TK and BL identical MFMA
+  inst counts (41.94M); pure cycle-efficiency gap. **MFMA pipe util:
+  TK 49% vs BL 67% → 17pp gap.** Critical per-MFMA deltas:
+  - LDS-reads / MFMA: TK 0.750 vs BL 0.250 (3.0× — TK transpose-on-read)
+  - LDS-bank-conflict / MFMA: TK 1.500 vs BL 0.004 (384×)
+  - LDS-wait / MFMA: TK 1.849 vs BL 0.071 (25.9× cycles)
+  - VALU / MFMA: TK 1.05 vs BL 2.11 (TK has slack — not VALU-bound)
+  - HBM FETCH: TK 0.79× BL (TK *better*, not the bottleneck)
+
+  **Spill is a RED HERRING**: SGPR-Spill=26 on KI=128/172/296 is a
+  `v_writelane` / `v_readlane` to VGPR `v244` pseudo-spill, executed
+  **once per kernel** (writes clustered in loop preamble around offset
+  0xAB7C-0xB278). At ~1% of issue cycles. Confirms P9-P14's negative
+  results were correct: P9 Dev 1's `unroll 1` (-0.88pp) and P14 Dev E's
+  `__launch_bounds__(_,1)` regressed for the right reason — spill is
+  an LLVM-scheduler artifact of the heavy unroll, not the bottleneck.
+
+  **FP8-RCR m0-hoist would NOT port**: BF16 CRR DOES use DTL with
+  m0-broadcast (1 `s_mov m0` per load = 0.125/MFMA), but BF16 omits
+  FP8's `(v_or, s_nop, v_readfirstlane, s_mov m0, s_nop)` 5-inst
+  cluster (LDS-base addressing is wave-uniform out of the box).
+  Per-MFMA cost: BF16 m0 = 0.125 vs FP8-RCR-4w = 0.625. Porting P18
+  would buy <0.5pp.
+
+**P20 dispatch — H1 (highest confidence):** switch CRR LDS path from
+`ds_read_b64_tr_b16` → `ds_read_b128` + post-`v_perm_b32`, mirroring
+hipBLASLt's `LDSB0_LRVW8_VWA8_VWB8` Tensile config. Touches
+`kernel_bf16_dynamic.cpp:43-59` (`ST_A` / `A_reg_t`),
+`subtile_inplace` calls (lines 173-176), and `mma_AtB` invocation.
+Source-level achievable (compiler emits b128 + v_perm if storage
+layout swapped) — unlike FP8 P16 which was blocked at inline-asm-only.
+Expected upside: 3-5pp on worst CRR / 1-2pp on CRR mean (closes ~half
+the 17pp utilization gap; bank-conflict reduction comes free with
+wider read). 2-3 Dev sessions: one to reshape CRR tile types, one for
+autotune+validation. If H1 lands <2pp, fall back to H4 (`s_setprio`
+rebalance, 0.5-1pp). H2 (Stream-K) and H5 (spill fix) explicitly closed.
+
+**Lessons (P19):**
+1. **Cross-GPU validation discriminates noise from signal** — when
+   Dev A's win is at the noise floor (+0.27pp), a Reviewer on a
+   different GPU produces an apples-to-apples bench whose direction
+   either confirms or refutes. GPU 0's +0.47pp signal (larger than
+   GPU 6's) ruled out per-GPU noise artifact and made LAND defensible.
+2. **Per-MFMA mnemonic counts > raw inst counts** for cross-kernel
+   comparisons. BF16 CRR's 0.75 LDS-reads/MFMA vs FP8 RCR's matched
+   0.50 reveals a fundamentally different bottleneck class — same
+   methodology (Dev B's per-iter slice mirrors P15 Dev A + P17 Dev A
+   pattern) reaches different lever recommendations because the
+   counts diverge.
+3. **Suspect-chain priors are VERY brittle** — the BF16 SGPR-spill=26
+   was the prime suspect for 4 sessions (P9-P14) before P19 Dev B's
+   disasm proved it was a once-per-kernel `v_writelane` pseudo-spill.
+   Always verify the suspect appears in the **hot path** (per-iter
+   disasm), not just in a static resource-usage report.
+4. **The autotuner is the source of truth for "which kernel ships"** —
+   reaffirms P18's lesson. Dev A correctly built into the 8-wave
+   `gemm_kernel<RCR,KI>` and benched only the autotuner-default path;
+   no time wasted on forced-4-wave numbers (which the production
+   workflow never exercises).
+5. **LANDED-with-NEUTRAL-by-itself is OK if asm-verify is unambiguous
+   AND non-regression gates PASS AND a Reviewer cross-GPU confirms
+   direction.** The +0.27/+0.47pp wall-clock is small, but the 16
+   freed VGPRs + cleaner asm have independent value (headroom toward
+   future occupancy work).
+
 ### 2026-04-18 — P18 (2 implementation Devs, all opus; GPUs 3/5; CLOSE — both NO-LAND)
 
 **Outcome: Both Devs returned NO-LAND with definitive findings.
