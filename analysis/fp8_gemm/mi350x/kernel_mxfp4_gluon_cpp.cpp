@@ -75,6 +75,28 @@ using namespace kittens;
 #define FUSED_STEP34 0
 #endif
 
+// R25-C: K-loop tail epilogue specialization. When set to N>0, the last N
+// iterations of the steady-state main loop use PF_N=0 (no global prefetch) for
+// the Step3/Step4 KPAIR calls. Rationale: clamped pf_bt re-fetches the same
+// trailing K-tile, wasting saturated VMEM slots on stale lines. Default 0 →
+// baseline (no behavior change). Only takes effect on TAIL_SPLIT=1, non-FUSED
+// path (the path used by all DLA shapes).
+//
+// Empirical (R25C smoke 2026-04-18): runtime tail branch FOLDS for shapes that
+// fully unroll (k_byte_iters ≤ 32, e.g. K=4096 → 16 iters, DLA2/DLA7) → WIN.
+// For shapes where the K-loop is `pragma unroll 8`-only (k_byte_iters > 32,
+// e.g. K=128256 → 501 iters, DLA1) the branch becomes a runtime check inside
+// the hot loop and code-size doubles → catastrophic regression.
+// Therefore we gate R25C on K_DIM ≤ 32768 (≤ 128 K-tiles), where pragma unroll
+// fully unrolls and the branch folds.
+#ifndef R25C_TAIL_PF_OFF_ITERS
+#define R25C_TAIL_PF_OFF_ITERS 0
+#endif
+#ifndef R25C_K_LIMIT
+#define R25C_K_LIMIT 32768
+#endif
+#define R25C_ACTIVE ((R25C_TAIL_PF_OFF_ITERS > 0) && (K_DIM <= R25C_K_LIMIT))
+
 #ifndef DIRECT_BL
 #define DIRECT_BL 0
 #endif
@@ -2770,6 +2792,28 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         // Step 3: A1*Bl (32 MFMAs) + ds_read A0[nxt] + prefetch
         float4 nxt_a0_d[8];
         float4 nxt_bl_d[8];
+
+        // R25-C: in the last R25C_TAIL_PF_OFF_ITERS iters, drop global prefetch
+        // (PF_N=0). Branch folds to compile-time when the K-loop fully unrolls
+        // (R25C_ACTIVE gates K_DIM ≤ R25C_K_LIMIT); becomes constexpr false
+        // otherwise.
+#if R25C_ACTIVE
+        const bool _r25c_tail_no_pf = (bt >= k_byte_iters - 1 - R25C_TAIL_PF_OFF_ITERS);
+#else
+        constexpr bool _r25c_tail_no_pf = false;
+#endif
+
+        if (_r25c_tail_no_pf) {
+#if SPREAD_LDS
+            kpair_32mfma_with_lds_rowspread_pf<0, STEP3_EMBED_BARRIER>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
+#else
+            kpair_32mfma_with_lds_and_pf<0, STEP3_EMBED_BARRIER>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
+#endif
+                nxt_a0_d[0], nxt_a0_d[1], nxt_a0_d[2], nxt_a0_d[3],
+                nxt_a0_d[4], nxt_a0_d[5], nxt_a0_d[6], nxt_a0_d[7],
+                sel_a0_p0, sel_a0_p1, pf_a0_p, pf_a1_p);
+            // emit_pf_tail<0> is a no-op
+        } else {
 #if K_LOOP_SYNC_EVERY_4 || K_LOOP_SYNC_EVERY_2
         // R20C: barrier coarsening — emit barrier only every 2 (or 4) iters.
         // Compiler unrolls the K-loop and statically resolves the parity per copy.
@@ -2808,6 +2852,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
             sel_a0_p0, sel_a0_p1, pf_a0_p, pf_a1_p);
 #endif // K_LOOP_SYNC_EVERY_*
         emit_pf_tail<STEP3_PF_N>(pf_a0_p, pf_a1_p);
+        } // end !_r25c_tail_no_pf (Step3)
 
         // Step 4: A1*Br (32 MFMAs) + load next Bl
 #if DIRECT_BL
@@ -2819,6 +2864,17 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         #pragma unroll
         for (int pi = 0; pi < PF_MPT; ++pi) emit_one_pf(pf_br_p, pi);
 #else
+        if (_r25c_tail_no_pf) {
+#if SPREAD_LDS
+            kpair_32mfma_with_lds_rowspread_pf<0>(acc_A1Br, tA1, tBr, a1_raw, br_raw,
+#else
+            kpair_32mfma_with_lds_and_pf<0>(acc_A1Br, tA1, tBr, a1_raw, br_raw,
+#endif
+                nxt_bl_d[0], nxt_bl_d[1], nxt_bl_d[2], nxt_bl_d[3],
+                nxt_bl_d[4], nxt_bl_d[5], nxt_bl_d[6], nxt_bl_d[7],
+                sel_bl_p0, sel_bl_p1, pf_bl_p, pf_br_p);
+            // emit_pf_tail<0> and external Br pf are no-ops on tail-no-pf
+        } else {
 #if SPREAD_LDS
         kpair_32mfma_with_lds_rowspread_pf<STEP4_PF_N>(acc_A1Br, tA1, tBr, a1_raw, br_raw,
 #else
@@ -2833,6 +2889,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 #else
         emit_pf_tail<STEP4_PF_N>(pf_bl_p, pf_br_p);
 #endif
+        } // end !_r25c_tail_no_pf (Step4)
 #endif // DIRECT_BL
 #endif // FUSED_STEP34
 

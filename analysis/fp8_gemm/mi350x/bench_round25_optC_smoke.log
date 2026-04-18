@@ -1,0 +1,39 @@
+R25C smoke: 15 bench jobs (3 shapes x 5 variants), GPUs [4, 6, 7]
+warmup=200 iters=500 trim=0.1
+==============================================================================================================
+  DLA1   _r25c_pfoff2                   gpu=7   5056.97 TFLOPS
+  DLA1   _r25c_baseline                 gpu=4   4969.26 TFLOPS
+  DLA1   _r25c_pfoff1                   gpu=6   4642.36 TFLOPS
+  DLA1   _r25c_pfoff3                   gpu=4   4876.97 TFLOPS
+  DLA1   _r25c_pfoff4                   gpu=6   5089.90 TFLOPS
+  DLA2   _r25c_baseline                 gpu=7   4236.59 TFLOPS
+  DLA2   _r25c_pfoff1                   gpu=4   4205.19 TFLOPS
+  DLA2   _r25c_pfoff2                   gpu=6   4264.88 TFLOPS
+  DLA2   _r25c_pfoff3                   gpu=7   4347.13 TFLOPS
+  DLA7   _r25c_baseline                 gpu=6   4160.03 TFLOPS
+  DLA7   _r25c_pfoff1                   gpu=7   4180.59 TFLOPS
+  DLA2   _r25c_pfoff4                   gpu=4   4301.67 TFLOPS
+  DLA7   _r25c_pfoff2                   gpu=4   4267.43 TFLOPS
+  DLA7   _r25c_pfoff3                   gpu=6   4298.56 TFLOPS
+  DLA7   _r25c_pfoff4                   gpu=7   4361.93 TFLOPS
+
+Elapsed: 49.6s
+
+==============================================================================================================
+SUMMARY (Δ vs _r25c_baseline, +1.5pp gate)
+==============================================================================================================
+  DLA1 baseline = 4969.26 TFLOPS
+    _r25c_pfoff1                     4642.36  Δ=-326.90 (-6.58%)  LOSE
+    _r25c_pfoff2                     5056.97  Δ=+87.71 (+1.77%)  WIN
+    _r25c_pfoff3                     4876.97  Δ=-92.29 (-1.86%)  LOSE
+    _r25c_pfoff4                     5089.90  Δ=+120.64 (+2.43%)  WIN
+  DLA2 baseline = 4236.59 TFLOPS
+    _r25c_pfoff1                     4205.19  Δ=-31.40 (-0.74%)  LOSE
+    _r25c_pfoff2                     4264.88  Δ=+28.29 (+0.67%)  borderline
+    _r25c_pfoff3                     4347.13  Δ=+110.54 (+2.61%)  WIN
+    _r25c_pfoff4                     4301.67  Δ=+65.08 (+1.54%)  WIN
+  DLA7 baseline = 4160.03 TFLOPS
+    _r25c_pfoff1                     4180.59  Δ=+20.56 (+0.49%)  borderline
+    _r25c_pfoff2                     4267.43  Δ=+107.40 (+2.58%)  WIN
+    _r25c_pfoff3                     4298.56  Δ=+138.53 (+3.33%)  WIN
+    _r25c_pfoff4                     4361.93  Δ=+201.90 (+4.85%)  WIN
