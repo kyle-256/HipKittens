@@ -183,6 +183,83 @@ BF16 work is paused unless a clean structural restructure is on the table
 
 ## Session Log
 
+### 2026-04-18 — P16 (2 implementation Devs, all opus; GPUs 1/3; CLOSE — both NO-LAND)
+
+**Outcome: Both Devs returned NO-LAND with definitive findings. Critical
+reframing — P15's "uniform 6-shape" framing was wrong; the dispatch
+threshold splits weak-6 into 4-wave gate_up (4 shapes, low tail) and
+8-wave mlp_down (2 shapes, high tail) cohorts with disjoint bottlenecks.**
+
+- **Dev A (operand-reuse restructure on `rcr_exact_8wave_kernel`,
+  GPU 1, opus, worktree `agent-a082aaf9`)** — prototyped 2-tile-batch
+  BREADS hoist (+75 lines, gated by `RCR_TWO_TILE_BATCH_BREADS` macro).
+  **Build was disasm-identical to baseline at the modified byte
+  offsets** — LLVM amdgpu scheduler already normalizes source-level
+  operand-reuse. Reads/MFMA stayed at 0.75 (target 0.50). Bench
+  Δ=-0.0006 mean (within DVFS noise on 5 shapes × 3 layouts). VGPRs/
+  SGPRs/spills/occupancy all unchanged. Diff left in worktree.
+
+- **Dev B (consumer-side `s_waitcnt` micro-tuning, GPU 3, opus,
+  worktree `agent-aa5327b6`)** — Phase 1: TK 11 waits/iter vs BL 4.
+  TK has +3× `lgkmcnt(0)`, +2× `lgkmcnt(8)` PREFETCH waits (BL omits),
+  +2 extra `vmcnt(6)` (vs BL's `vmcnt(15)` once). Phase 2: 4-knob
+  sweep K1 (PREFETCH_LGKM=15), K2 (TWO_TILE_MID_VMCNT=15), K1+K2,
+  K4 (PREFETCH_LGKM=0). All variants within 0.26pp of baseline; per-
+  config A/B rerun = 0.17pp; max cross-config delta = 0.26pp. Same
+  noise discriminator as P14 Dev D's CRR_STEADY1/2_LGKM close.
+
+**Critical reframing — `kernel_fp8_layouts.cpp:2334-2356` dispatch:**
+
+| (M,N,K)              | bpr*bpc | k     | path   | tail_pct | ratio |
+|----------------------|--------:|------:|--------|---------:|------:|
+| 16384,37888, 3584    |  9472   |  3584 | 4-wave |  2.70%   | 0.890 |
+| 16384, 8192,29568    |  2048   | 29568 | 8-wave | 18.75%   | 0.932 |
+| 16384,28672, 4096    |  7168   |  4096 | 4-wave |  1.79%   | 0.910 |
+|  8192,37888, 3584    |  4736   |  3584 | 4-wave |  2.70%   | 0.914 |
+| 16384, 3584,18944    |   896   | 18944 | 8-wave | 35.71%   | 0.946 |
+|  8192,28672, 4096    |  3584   |  4096 | 4-wave |  1.79%   | 0.917 |
+
+4 gate_up → 4-wave (low tail, structural ceiling, unknown bottleneck).
+2 mlp_down → 8-wave (high tail, Lever C compiles away, Stream-K is
+the targeted lever).
+
+**P17 dispatch:**
+- Dev A: per-shape rocprofv3 + disasm of the **4-wave** RCR kernel on
+  the 4 gate_up shapes. Bound the actual bottleneck.
+- Dev B: strictly-2-shape Stream-K prototype gated on `tail_pct > 10%`.
+  Reference `bc4392bf` abandonment in brief.
+
+**Lessons additive to P15:**
+1. **Verify dispatch routing before scoping a shape-cohort lever.**
+   P15 designed Lever C as a uniform fix for 6 shapes that share a
+   ratio range but NOT a kernel path. A 5-line calc of `grid_size =
+   (M/BLK)*(N/BLK)` and `k <= 8192` per shape would have flagged the
+   4-wave/8-wave split before P16 Dev A's 1363-second worktree run.
+   Add to research-Dev prompts: "if your lever targets ≥2 shapes,
+   first verify they hit the same kernel path".
+2. **LLVM amdgpu scheduler normalizes source-level operand-reuse
+   patterns on RCR.** Re-issuing identical ds_read sequences in a
+   2-tile-batched form vs interleaved produces disasm-identical code
+   at the same byte offsets. Source-level scheduling levers are dead
+   on this kernel; only structural changes (tile-geometry, kernel-
+   variant choice, instruction-set features) can move ds_read counts.
+3. **Makefile hardcodes `CXXFLAGS := -w`** after `?=`, silently
+   dropping env CXXFLAGS overrides. Thread `-D` macros via
+   `HIPFLAGS=-D...` instead. ALWAYS asm-verify (`grep -oE
+   'lgkmcnt\([0-9]+\)' <disasm>` or similar) that an override reaches
+   codegen before benching — saved by Dev B's discipline this session.
+4. **GPU 3 per-config noise floor for FP8 weak shapes ≈ 0.17pp** at
+   warmup=30/iters=100/trials=3. Tighter than BF16's ~0.66pp because
+   FP8 weak-shape kernels are large (>10ms each, less per-launch
+   variance). Need ≥1pp signal to declare a winner above noise.
+5. **Baseline-vs-baseline rerun is the cheapest noise discriminator.**
+   5 minutes of identical-code A/B saves you from misreading variant
+   spread as signal. Always run before declaring a knob "wins".
+6. **`lgkmcnt(15)` and `vmcnt(15)` are effective NOPs on gfx950**
+   (max outstanding = 16). Useful for verifying a knob reaches codegen
+   without changing semantics — but if a knob has a real perf effect,
+   those should still move runtime, and Dev B's K1/K2 did not.
+
 ### 2026-04-18 — P15 (3 research-only Devs, all opus; GPUs 0/3/5; CLOSE)
 
 **Outcome: All 3 Devs returned definitive findings. Dev A + Dev C

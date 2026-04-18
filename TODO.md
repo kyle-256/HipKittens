@@ -7,6 +7,72 @@
 - SNR ≥ 48 dB (FP8) / ≥ 47 dB (BF16 vs torch.mm), bit-exact determinism are hard gates.
 - Never commit `*.so`, `.autotune_cache.json` is OK to keep (it's text), logs are not.
 
+## Current Status (2026-04-18, post-P16 close — Lever C source-level dead, weak-6 splits into 4-wave gate_up + 8-wave mlp_down)
+
+P16 dispatched 2 implementation Devs in parallel against the P15 Lever C
+hypothesis. **Both returned NO-LAND with definitive findings, AND P15's
+"uniform 6-shape" framing was wrong.** No code committed; substantial
+process insight that reframes P17.
+
+- **Dev A (operand-reuse restructure on `rcr_exact_8wave_kernel`,
+  GPU 1, opus, worktree `agent-a082aaf9`)** — prototyped 2-tile-batch
+  BREADS hoist (+75 lines, gated by `RCR_TWO_TILE_BATCH_BREADS` macro).
+  **Disasm-identical to baseline at the modified byte offsets** —
+  LLVM amdgpu scheduler already normalizes source-level operand-reuse.
+  Reads/MFMA stayed at 0.75 (target was 0.50). Bench Δ=-0.0006 mean
+  (within DVFS noise). VGPRs/SGPRs/spills/occupancy all unchanged.
+  Diff left in worktree, not committed.
+- **Dev B (consumer-side `s_waitcnt` micro-tuning, GPU 3, opus,
+  worktree `agent-aa5327b6`)** — Phase 1 disasm classification: TK's
+  11 waits per K-iter vs BL's 4 decompose as +3× `lgkmcnt(0)`,
+  +2× `lgkmcnt(8)` (TK PREFETCH waits BL omits), +2 extra `vmcnt(6)`
+  vs BL's `vmcnt(15)`. Phase 2 3-knob sweep: K1 (`PREFETCH_LGKM` 8→15),
+  K2 (`TWO_TILE_MID_VMCNT` 6→15), K1+K2. Per-config A/B noise floor =
+  0.17pp; max cross-config delta = 0.25pp. Same noise discriminator as
+  P14 Dev D's CRR_STEADY1/2_LGKM close — knob-induced signal
+  indistinguishable from DVFS noise. K3 (coarsen `lgkmcnt(0)` drains)
+  deferred — risky and K1+K2 didn't move.
+
+**Critical reframing — dispatch routing splits the weak-6:**
+
+The dispatch logic at `kernel_fp8_layouts.cpp:2334-2356` routes RCR by
+`grid_size>=3200 AND k<=8192 → 4-wave; else 8-wave`. For BLK=256:
+
+| (M,N,K)              | bpr*bpc | k     | path   | tail_pct | ratio |
+|----------------------|--------:|------:|--------|---------:|------:|
+| 16384,37888, 3584    |  9472   |  3584 | 4-wave |  2.70%   | 0.890 |
+| 16384, 8192,29568    |  2048   | 29568 | 8-wave | 18.75%   | 0.932 |
+| 16384,28672, 4096    |  7168   |  4096 | 4-wave |  1.79%   | 0.910 |
+|  8192,37888, 3584    |  4736   |  3584 | 4-wave |  2.70%   | 0.914 |
+| 16384, 3584,18944    |   896   | 18944 | 8-wave | 35.71%   | 0.946 |
+|  8192,28672, 4096    |  3584   |  4096 | 4-wave |  1.79%   | 0.917 |
+
+Two disjoint problem classes:
+1. **4-wave gate_up (4 shapes, geo-mean 0.908)** — low tail (<3%),
+   uses already-tighter 4-wave kernel. Bottleneck is NEITHER
+   reads/MFMA-on-8-wave NOR Stream-K-amenable tail. Real bottleneck
+   unknown — needs per-shape rocprofv3 on the **4-wave** path.
+2. **8-wave mlp_down (2 shapes, geo-mean 0.939)** — high tail (>10%),
+   uses 8-wave. Lever C compiles away. Real bottleneck = **tail
+   effect**. Stream-K is the targeted lever (P15 Dev B's contingent
+   2-shape plan).
+
+**P17 dispatch (next session):**
+- **Dev A — 4-wave RCR rocprofv3 + disasm characterization on the 4
+  gate_up shapes.** Bound the actual bottleneck. BL Cijk_ choice at
+  large grid_size + small K may differ from the MT256x256x128 SK3
+  family P14 Dev F profiled — re-profile on the 4-wave-routed shapes.
+- **Dev B — strictly-2-shape Stream-K prototype** for the 2 mlp_down
+  shapes (gated `tail_pct > 10%`). Reference `bc4392bf` abandonment
+  in brief. Per P15 Dev B's contingent plan.
+
+**Levers killed conclusively (do NOT redispatch on RCR weak-6):**
+- DTL (P13/P14/P15)
+- Lever C wider-instruction swap (P15 Dev C — gfx950 ISA ceiling)
+- Lever C source-level operand-reuse (P16 Dev A — LLVM normalizes)
+- Lever C waitcnt micro-tuning (P16 Dev B — within DVFS noise)
+- Stream-K aggregate weak-6 (P15 Dev B — bad cost/benefit)
+
 ## Current Status (2026-04-18, post-P15 close — Lever C reframed: count gap, not width gap; P16 = operand-reuse restructure)
 
 P15 launched 3 research-only Devs to bound the surviving FP8 RCR weak-shape
@@ -363,17 +429,35 @@ for archival; do NOT redispatch unless the constraint changes:
       `ds_read_b128_tr_b16` instruction. Both TK and BL use pure
       `ds_read_b128` for RCR. The "wider instruction swap" framing of
       Lever C is dead.
-- [P16] **Operand-reuse restructure of TK RCR 8-wave inner loop** —
-      Dev A per-iter disasm shows TK does 48 `ds_read_b128` per 64-MFMA
-      iter; BL does 32 (1.50× count gap at same MT/MIWT/MFMA/DTL). BL
-      fuses more MFMAs per ds_read pair. Target: collapse 16 redundant
-      ds_read_b128 from `rcr_exact_8wave_kernel` K-loop in
-      `analysis/fp8_gemm/mi350x/kernel_fp8_layouts.cpp`. Source call
-      sites: `include/ops/warp/memory/tile/shared_to_register.cuh:99-104`
-      and `:177-186`. Risk gates: VGPR pressure (256-cap, occupancy
-      2→1), SGPR spill (cf. CRR/296 26-spill), ST_v2a swizzle
-      preservation (no preshuffle). 1-Dev 1-day prototype; gate on
-      rocprofv3 reads/MFMA → 0.50 BEFORE 6-shape benchmark.
+- [P16-NO-LAND] ~~Operand-reuse restructure of TK RCR 8-wave inner loop~~ —
+      P16 Dev A prototyped 2-tile-batch BREADS hoist (+75 lines, gated
+      by `RCR_TWO_TILE_BATCH_BREADS` macro) in worktree
+      `agent-a082aaf9`. Build was disasm-identical to baseline at the
+      modified byte offsets — LLVM amdgpu scheduler already normalizes
+      source-level operand-reuse. Reads/MFMA stayed at 0.75 (target
+      0.50). Bench Δ=-0.0006 mean within DVFS noise. Diff left in
+      worktree, NOT landed. **Do not redispatch** — source-level
+      scheduling is structurally dead on this kernel.
+- [P16-NO-LAND] ~~Consumer-side `s_waitcnt` micro-tuning
+      (PREFETCH_LGKM, TWO_TILE_MID_VMCNT, K3 lgkmcnt(0) coarsening)~~ —
+      P16 Dev B 4-knob sweep showed all variants within 0.26pp of
+      baseline; per-config A/B noise = 0.17pp. Same close pattern as
+      P14 Dev D's CRR_STEADY1/2_LGKM. Knob space conclusively closed.
+- [P17] **Per-shape rocprofv3 + disasm of the 4-wave RCR kernel** on
+      the 4 gate_up weak shapes (16384-37888-3584, 16384-28672-4096,
+      8192-37888-3584, 8192-28672-4096). These hit the 4-wave path
+      (`grid_size>=3200 AND k<=8192`) which has not been profiled. P14
+      Dev F profiled the 8-wave path; its bottleneck (reads/MFMA) does
+      not apply to the 4-wave kernel which is at structural ceiling.
+      Bound the actual bottleneck: candidates include per-CU occupancy,
+      register pressure, dispatch overhead at large grid_size (9472),
+      small-K wait-pattern asymmetry. Research-only Dev, no code.
+- [P17] **Strictly-2-shape Stream-K prototype** for the 2 mlp_down
+      8-wave shapes (16384-8192-29568, 16384-3584-18944). Dispatch
+      gated `tail_pct > 10%` so gate_up shapes continue using the
+      data-parallel kernel. Reference `bc4392bf` BF16 abandonment
+      precedent in brief. Per P15 Dev B's contingent plan in
+      `project_streamk_persistent_grid.md`.
 - [P13-CLOSED] ~~Direct-To-LDS (DTLA1+DTLB1) implementation for RCR (TN).~~
       P13 Dev C disassembly grep proved TK ALREADY uses gfx950 wide-DTL
       for 100% of hot-path loads. P14 Decider re-verified after Dev F
