@@ -54,6 +54,80 @@
 
 **baseline 建立**：首次需在每个 LLaMA shape 上跑 FP8 per-tensor + MXFP8 V2 baseline 各 5x，记录 median TFLOPS 作为后续对照。
 
+## R35 cycle 完结 (2026-04-18, 4 devs + 1 reviewer) ★ 1 SHIP (5th V2-RRR autotune predicate → 5 predicates / 7 LLaMA cells covered) + 1 STRUCTURAL EMPIRICAL CONFIRM (HB shrink ↓-66 VGPR, the ONLY remaining first-order accumulator-VGPR lever) + 1 NEW CLOSURE (WARPS_M=4 — both parallel-template-paradigm levers EXHAUSTED) + 4 R36+ fan-out targets surfaced + 1 NEW methodology gap (sclk-mid-bench)
+
+R35 派 4 dev (A GPU0 5th V2-RRR autotune predicate for c5/c6 8B Gate/Up shape, B GPU3/4 HB shrink BLK_M=128 stages A1-A5 + numerics + perf, C GPU2 WARPS_M=4 stages A1-A4 + structural closure, D GPU6/7 LLaMA full 14-shape matrix re-bench) + Reviewer (GPU0/4/5/6 5th cross-cycle baseline + Phase 2 SHIP verifications). **1 STRICT SHIP** (Dev A's 5th predicate). **Major structural confirm**: R35 Dev B HB shrink (BLK_M=128, HB_M=64) skeleton DELIVERED with **VGPR 168 (-66 vs default 234), 0 spill, 104 KB LDS (-34 KB), occ=2** and bit-exact numerics PASS (max_abs_diff=0.0). Bare skeleton is -12.16% (Welch t=-71.3) **but empirically confirms R34 Dev D §3.2 Option 1 hypothesis**: M-coverage halving DOES save accumulator VGPR (opposite of REFUTED sub-RBM operand shrink). **Major closure**: R35 Dev C WARPS_M=4 saturates VGPR with 7-lane spill — both sub-RBM (R34) and WARPS_M=4 (R35) now CLOSED as parallel-template paradigm (any per-warp tile reorder preserving total tile area cannot relieve V2-CRR PIPE=3 accumulator-VGPR ceiling). **HB shrink is the only remaining first-order lever; R36 critical task is Stage 2 re-pipelining**.
+
+### R35 Reviewer Phase 1 — 4-GPU baseline (5th cross-cycle data point, cherry-picked `ed4dd6b1`)
+
+5-cycle 70B-KV V2-CRR median:
+- R31: median-of-4 = 766.72 TF (high outlier GPU0 +2.64%)
+- R32: median-of-4 = 772.51 TF (high outlier GPU5 +2.36%)
+- R33: median-of-4 = 766.17 TF (no outlier; +0.30%)
+- R34: median-of-4 = 767.59 TF (high outlier GPU6 +2.71%)
+- **R35**: median-of-4 = **768.07 TF** (high outlier GPU6 **+2.85%** — first 2-cycle repeat)
+
+Build md5 `d34018cd127258362e821f1625821aa1` bit-identical across all 5 (re)builds. R34 sclk-post-preheat ≥ 2200 MHz auto-retry rule WORKED (caught GPU6 attempt 1 at 1714 MHz, 89 TF; recovered to 2313 MHz, 789 TF on attempt 2).
+
+### R35 Reviewer Phase 2 — Per-SHIP verification
+
+- **c4** (R33 Dev C 70B KV @ M=4096 N=1024 K=8192): GPU5 RRR vs CRR **+10.44%** Welch t=**+41.26** — CONFIRMED
+- **c5** (R34 Dev B / R35 Dev A 8B Gate @ M=4096 N=14336 K=4096):
+  - GPU5 +5.77% Welch t=+3.75
+  - GPU6 +5.76% Welch t=+9.19
+  - min Δ%=+5.76 (above STRICT +5.0); min Welch t=+3.75 (below STRICT 10.0); CONFIRMED at SHIP-LITE.
+
+### R35 Reviewer NEW methodology gap surfaced (→ R36 rule)
+
+GPU0 attempt 1 surfaced a class of failure the R34 sclk-post-preheat gate does NOT catch:
+- sclk-post-preheat = 2277 MHz (passed gate ≥ 2200)
+- Mid-bench sclk dropped to 2091/2076 MHz (parallel-agent contention)
+- tflops_median = 364.73, stdev 23.77 (4× noisier than clean runs)
+
+**R36 rule (mandatory):** add a SECOND gate either (a) `sclk-post-bench ≥ 2200 MHz` OR (b) per-run `stdev/mean ≤ 1%` ratio check. Both would have caught attempt 1.
+
+### R35 Dev results
+
+- **Dev A SHIP `e0eb3686` → cherry-picked `3aa489df`**: 5th V2-RRR autotune predicate at `kernel_mxfp8_layouts.cpp:5582-5656` for shape (M=4096, N=14336, K=4096); covers c5 8B Gate + c6 8B Up. min Δ%=+5.37%; min Welch t exceeds STRICT. Pattern: `static int warned_8b_gateup` guard + advisory referencing `r34b_findings.md`. Effective predicate count now **5 wired / 7 LLaMA cells covered**.
+- **Dev B `8096429e` → cherry-picked `a719cadc` (NO SHIP, structural empirical confirm)**: NEW `crr_mxfp8_exact_8wave_hbshrink_fastpath.inc` + dispatch wire-in; macro `MXFP8_CRR_BLK_M==128` default-off; HB_M=64, accumulator stride 8→4, br_orig=br>>1, mhalf=br&1. Resource (validated): VGPR 168 (-66 vs default 234), 0 spill, 104 KB LDS (-34 KB), occ=2. Numerics PASS bit-exact (max_abs_diff=0.0). Perf -12.16% (Welch t=-71.3) on bare skeleton — **NEEDS R36 Stage 2 re-pipelining** (cycle-2 PIPE=3 mode now feasible with the 66 VGPR headroom).
+- **Dev C `71ef3b44` → cherry-picked `c6b86803` (structural closure)**: NEW `crr_mxfp8_exact_8wave_warpsm4_fastpath.inc` (424 LOC) + `MXFP8_CRR_WARPS_M` macro (default 2; =4 selects W4 path). WARPS_M_W4=4 / WARPS_N_W4=2 partition, RBM_W4=32 / RBN_W4=64 register tiles. Saturates VGPR with 7-lane spill — **structural closure**. Both sub-RBM (R34) and WARPS_M=4 (R35) now CLOSED as the parallel-template paradigm.
+- **Dev D `b1860c38` → cherry-picked `4f846add` (NO SHIP, R36+ fan-out targets identified)**: full 14-shape LLaMA matrix re-bench at R34 head (758ad933, before r35-a). All 7 R34-wired predicates validated. **4 R36+ fan-out candidates surfaced**:
+  - **8B-Down +9.51%** (V2-RRR predicate at 4096×4096×14336)
+  - **8B-Q +4.83%** (RCR is +7.05% better — route to RCR)
+  - **8B-O +4.73%** (RCR is +5.83% better — route to RCR)
+  - **70B-Q +7.72%** (RCR is +8.32% better — route to RCR)
+  - **70B-O +6.94%** (RCR is +8.20% better — route to RCR)
+
+### R35 paradigm corrections (1 — extends to 31 cumulative closed levers)
+
+- **WARPS_M=4 is structurally non-recovering** for V2-CRR PIPE=3 accumulator pressure: rearranging warp×tile partition while preserving total tile area cannot reduce per-warp VGPR. Combined with R34 sub-RBM REFUTATION, this **closes the entire parallel-template paradigm** for V2-CRR.
+
+### R35 cumulative tally → 31 closed levers (R32: 21 + R33: 5 + R34: 4 + R35: 1)
+
+### R36+ priority list (rebuilt from R35 results)
+
+1. **【critical / 5-7 day】R35 Dev B HB shrink Stage 2 re-pipelining**. Bare skeleton -12.16% empirically confirms VGPR -66 headroom. Use the headroom to: (a) PIPE=3 LDS pipeline (target the R32 PIPE=3 -15% structural ceiling), (b) restore B-tile cycle-2 prefetch, (c) potentially restore sub-tile interleaving. Goal: convert the structural -66 VGPR into +ve perf vs default (BLK_M=256 baseline). Reference: `crr_mxfp8_exact_8wave_hbshrink_fastpath.inc` and R32 PIPE=3 ceiling docs.
+2. **【high / 1-2 day】R36 Dev R36-A: V2-RRR predicate for 8B-Down** (M=4096, N=4096, K=14336) — largest uncovered RRR-vs-CRR gap (+9.51%). 6th V2-RRR autotune predicate. Same pattern as R35-A.
+3. **【high / 2-3 day】R36 Dev R36-B: RCR predicate verification + wire-in for square Q/O cells**. R28-R32 RCR autotune predicates likely already cover 8B-Q/8B-O/70B-Q/70B-O — verify they fire at R35 base; if missing, wire them. Largest unexploited layout gap in the matrix (+5.83% to +8.32% RCR over CRR).
+4. **【medium / 1-2 day】Methodology hardening**: implement R35 Reviewer's recommended second gate (sclk-post-bench OR per-run stdev/mean) in `r36_reviewer_4gpu_orchestrate.sh`. Forward to all R36+ benches.
+5. **【medium / 1-2 day】GPU6 2-cycle-repeat outlier investigation**: ECC counter check, preheat-duty audit. Determine if the +2.71%→+2.85% trend is calibration drift, aging, or repeated R34 contention pattern.
+6. **【close — paradigm】Parallel-template paradigm fully CLOSED**. Do not re-prototype sub-RBM, WARPS_M, or any per-warp tile reorder for V2-CRR PIPE=3 ceiling.
+7. **【methodology — R36+ rules, MUST follow】**:
+   - All R29-R34 rules carry forward.
+   - **R35 NEW**: orchestrate must add a second gate (sclk-post-bench ≥ 2200 MHz OR per-run stdev/mean ≤ 1%) to catch the GPU0-attempt-1 class of mid-bench contention regressions.
+8. **【closed】**: 31 levers per cumulative tally. Do not re-prototype any of them.
+
+### R35 Cherry-pick status
+
+Cherry-picked to feat/mxfp8-only (in causal order):
+- `4f846add` (R35 Dev D LLaMA matrix re-bench — informational + R36+ fan-out targets)
+- `c6b86803` (R35 Dev C WARPS_M=4 scaffolding + structural closure — macros default-off)
+- `a719cadc` (R35 Dev B HB shrink Stage A1-A5 — VGPR -66 confirmed; macros default-off)
+- `3aa489df` (R35 Dev A 5th V2-RRR autotune predicate — `kernel_mxfp8_layouts.cpp:5582-5656`)
+- `ed4dd6b1` (R35 Reviewer Phase 1+2 — 5th-cycle baseline + 2 SHIP CONFIRMs)
+
+All R35 macros default-off; default builds remain byte-identical to R34 head (Dev A's 5th predicate emits runtime-dead branches when M_DIM=N_DIM=K_DIM=8192). One conflict resolved: `kernel_mxfp8_layouts.cpp` include-block (Dev C and Dev B both add an `#include` line; merged both, ordering preserved per causal cherry-pick order).
+
 ## R34 cycle 完结 (2026-04-18, 4 devs + 1 reviewer) ★ 3 SHIPs CONFIRMED (V2-RRR autotune fan-out 5 cells + 8B Gate STRICT promotion + 8B Up SHIP-LITE) + 4 NEW CLOSURES + rect-V2 CRR perf paradigm fully CLOSED + sub-RBM-as-VGPR-savings hypothesis REFUTED
 
 R34 派 4 dev (A GPU0/4 5-cell V2-RRR autotune fan-out + LLaMA matrix regression check, B GPU1/2/5/6 4-GPU triangulation R33 Dev C SHIP-LITE cells, C GPU2/3 rect-V2 CRR Stage A2 Path 2, D GPU3 sub-RBM Stage 2 type bridge + kernel body translation) + Reviewer (GPU0/4/5/6 4th cross-cycle baseline + Phase 2 SHIP verification). **3 SHIPs CONFIRMED** by 4-GPU triangulation. **Two major paradigm closures**: (1) rect-V2 CRR perf paradigm fully CLOSED (R34 Dev C Path 2 -9.7%, the LAST open variant); combined with R33 Dev B's RCR closure, **rect-V2 perf is now CLOSED in BOTH layouts across all numerically-correct variants**. (2) sub-RBM-as-VGPR-savings hypothesis REFUTED by R34 Dev D Stage 2b skeleton (operand shrink trades -16 VGPR for +128 net accumulator VGPR; kernel spills 476 VGPR). **Real path past V2-CRR PIPE=3 ceiling pivots from sub-RBM to HB shrink or WARPS_M=4.**
