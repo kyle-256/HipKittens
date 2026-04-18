@@ -3740,6 +3740,16 @@ __host__ inline void dispatch_rcr_exact_8wave_scaled_v2(const layout_globals& g)
 // kernel symbol gemv_m1_decode_kernel<RCR,true|false> is only emitted
 // when the .so is built with -DMXFP8_DECODE_M1_ENABLE=1.
 #include "mxfp8_decode_m1_fastpath.inc"
+// R43 Dev B — M=1 decode fastpath, RRR + CRR layout extension. Mirrors
+// Dev A's RCR design with B-coalescing adjusted for the (K, N) row-major
+// B layout used by RRR/CRR (LLaMA SwiGLU / KV decode shapes). Internally
+// guarded by MXFP8_DECODE_M1_RRR_CRR_ENABLE so default build sees an
+// empty translation unit. Provides `can_use_decode_m1_rrr_crr` and
+// `dispatch_decode_m1_rrr_crr<L, PQ>` symbols that the R43 Dev C
+// small-M waterfall (~line 5540) calls when the macro is defined.
+// Orthogonal to MXFP8_DECODE_M1_ENABLE — both flags can be enabled
+// independently in a single production .so to cover all 3 layouts.
+#include "r43b_decode_m1_rrr_crr_fastpath.inc"
 
 // R42 Dev A — forward declaration of the dispatch-trace emit() helper.
 // The full definition lives ~line 5621 (after the dispatch<> template) but
