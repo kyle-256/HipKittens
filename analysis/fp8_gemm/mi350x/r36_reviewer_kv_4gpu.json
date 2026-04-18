@@ -1,0 +1,143 @@
+{
+  "cycle": "R36",
+  "phase": 1,
+  "shape": {"M": 4096, "N": 1024, "K": 8192, "layout": "crr", "cell": "70b_kv_crr"},
+  "base_commit": "40d77d98",
+  "bench_harness": "r35_reviewer_bench5x.py (bit-identical, reused; R34 sclk-fix carried forward)",
+  "orchestrate": "r36_reviewer_4gpu_orchestrate.sh (NEW: R35 mandatory second sclk gate -- post-bench >=2200 MHz OR per-run stdev/mean <=0.01; combined with R34 post-preheat >=2200 MHz auto-retry)",
+  "build_md5_all_gpus": "551da0c05c1c5bd3a35861690db5b935",
+  "build_md5_note": "Bit-identical across all 4 builds. Differs from R35 baseline md5 d34018cd127258362e821f1625821aa1 because source moved from R35 base 758ad933 to R36 base 40d77d98 (R35 wrap added Dev A 5th V2-RRR predicate + Dev B HB shrink scaffolding + Dev C WARPS_M=4 scaffolding -- macros default-off so ABI is functionally equivalent on default 8192^3 build, but the rect-shape (4096,1024,8192) build pulls in the new Dev A predicate path).",
+  "phys_gpus_used": [0, 4, 5, 6],
+  "run_order": "GPU0 -> GPU4 -> GPU5 -> GPU6 -> GPU0 (re-run sequence due to heavy parallel-agent contention on the host)",
+  "results": [
+    {
+      "phys_gpu": 0,
+      "tflops_median": 789.66,
+      "tflops_mean": 788.85,
+      "tflops_stdev": 4.15,
+      "tflops_list": [786.4425, 783.4762, 790.1390, 789.6560, 794.5131],
+      "snr_db": 49.60,
+      "determinism": "PASS",
+      "sclk_pre_preheat_mhz": 1884,
+      "sclk_post_preheat_mhz": 2336,
+      "sclk_pre_bench_mhz": 2393,
+      "sclk_post_bench_mhz": 2394,
+      "attempts": 2,
+      "retry_history": [
+        {"attempt": 1, "sclk_post_preheat": 1882, "sclk_post_bench": 1847, "stdev_mean": 0.217660, "tflops_median": 746.80, "verdict": "FAILED both R34 (post-preheat 1882<2200) and R35 (stdev 21.8% > 1%) gates -- mid-bench contention; auto-retried"},
+        {"attempt": 2, "sclk_post_preheat": 2336, "sclk_post_bench": 2394, "stdev_mean": 0.005261, "tflops_median": 789.66, "verdict": "PASSED R34 + R35 NEW gates; used as final"}
+      ],
+      "notes": "GPU0 is the R36 HIGH-STATE OUTLIER (+2.54% above other-3 median 770.07). High-outlier rotation: R31 GPU0 -> R32 GPU5 -> R33 none -> R34 GPU6 -> R35 GPU6 -> R36 GPU0. The GPU6 2-cycle-repeat hypothesis from R35 is BROKEN; rotation pattern is restored."
+    },
+    {
+      "phys_gpu": 4,
+      "tflops_median": 767.55,
+      "tflops_mean": 766.91,
+      "tflops_stdev": 1.89,
+      "tflops_list": [764.2786, 768.4257, 767.5506, 765.6415, 768.6490],
+      "snr_db": 49.60,
+      "determinism": "PASS",
+      "sclk_pre_preheat_mhz": null,
+      "sclk_post_preheat_mhz": 2316,
+      "sclk_pre_bench_mhz": null,
+      "sclk_post_bench_mhz": 2383,
+      "attempts": 1,
+      "retry_history": [
+        {"attempt": 1, "sclk_post_preheat": 2316, "sclk_post_bench": 2383, "stdev_mean": 0.002464, "tflops_median": 767.55, "verdict": "PASSED R34 + R35 NEW gates on first attempt; used as final"}
+      ],
+      "notes": "Clean on first attempt. Note: an earlier orchestrate run (PHYS_GPU=4 MAX_RETRIES=3) failed all 3 attempts with stdev/mean ratios 0.29-0.35 -- the entire host was contended by parallel mxfp4/mxfp8 agents at the time. After contention cleared and re-running with MAX_RETRIES=5, attempt 1 PASSED both gates cleanly. R35 NEW gate added strong defensive value here."
+    },
+    {
+      "phys_gpu": 5,
+      "tflops_median": 780.23,
+      "tflops_mean": 777.47,
+      "tflops_stdev": 5.02,
+      "tflops_list": [770.4063, 773.9428, 780.2347, 781.3062, 781.4733],
+      "snr_db": 49.60,
+      "determinism": "PASS",
+      "sclk_pre_preheat_mhz": null,
+      "sclk_post_preheat_mhz": 2278,
+      "sclk_pre_bench_mhz": null,
+      "sclk_post_bench_mhz": 2393,
+      "attempts": 3,
+      "retry_history": [
+        {"attempt": 1, "sclk_post_preheat": 1727, "sclk_post_bench": 1717, "stdev_mean": 0.034932, "verdict": "FAILED R34 + R35 gates (post-preheat 1727<2200, stdev 3.5%>1%); auto-retried"},
+        {"attempt": 2, "sclk_post_preheat": 1743, "sclk_post_bench": 1735, "stdev_mean": 0.004640, "verdict": "FAILED R34 (post-preheat 1743<2200) -- BUT PASSED R35 NEW gate (stdev 0.46%); combined-gate logic correctly required BOTH; auto-retried"},
+        {"attempt": 3, "sclk_post_preheat": 2278, "sclk_post_bench": 2393, "stdev_mean": 0.006457, "tflops_median": 780.23, "verdict": "PASSED R34 + R35 NEW gates; used as final"}
+      ],
+      "notes": "GPU5 needed 3 attempts. Slightly elevated within cluster (+1.32% above 2nd-lowest), not a high-state outlier."
+    },
+    {
+      "phys_gpu": 6,
+      "tflops_median": 770.07,
+      "tflops_mean": 768.77,
+      "tflops_stdev": 2.70,
+      "tflops_list": [765.5486, 766.2244, 770.4651, 770.0679, 771.5480],
+      "snr_db": 49.60,
+      "determinism": "PASS",
+      "sclk_pre_preheat_mhz": null,
+      "sclk_post_preheat_mhz": 2369,
+      "sclk_pre_bench_mhz": null,
+      "sclk_post_bench_mhz": 2397,
+      "attempts": 1,
+      "retry_history": [
+        {"attempt": 1, "sclk_post_preheat": 2369, "sclk_post_bench": 2397, "stdev_mean": 0.003512, "tflops_median": 770.07, "verdict": "PASSED R34 + R35 NEW gates on first attempt; used as final"}
+      ],
+      "notes": "GPU6 returns to cluster baseline (770.07). The R35 GPU6 2-cycle-repeat (R34 787.13, R35 789.28) hypothesis is BROKEN this cycle -- GPU6 is no longer the high outlier (R36 high rotated back to GPU0). ECC drift / aging hypothesis is REFUTED for now (more cycles needed)."
+    }
+  ],
+  "summary_stats": {
+    "median_of_4_gpus": 775.15,
+    "min_of_4_gpus_R33_subrule": 767.55,
+    "max_of_4_gpus": 789.66,
+    "mean_of_4_medians": 776.88,
+    "spread_tflops": 22.11,
+    "spread_pct": 2.88,
+    "high_state_outlier": {"gpu": 0, "value": 789.66, "cluster_median_other_3": 770.07, "excess_pct": 2.54}
+  },
+  "cross_cycle_table": {
+    "70b_kv_v2_crr_median": {
+      "R31": {"GPU0": 786.38, "GPU4": 767.31, "GPU5": 764.28, "GPU6": 766.14, "median_of_4": 766.72},
+      "R32": {"GPU0": 768.43, "GPU4": 768.37, "GPU5": 786.59, "GPU6": 776.60, "median_of_4": 772.51},
+      "R33": {"GPU0": 766.63, "GPU4": 767.97, "GPU5": 764.81, "GPU6": 765.71, "median_of_4": 766.17},
+      "R34": {"GPU0": 765.12, "GPU4": 766.30, "GPU5": 768.88, "GPU6": 787.13, "median_of_4": 767.59},
+      "R35": {"GPU0": 764.57, "GPU4": 768.74, "GPU5": 767.40, "GPU6": 789.28, "median_of_4": 768.07},
+      "R36": {"GPU0": 789.66, "GPU4": 767.55, "GPU5": 780.23, "GPU6": 770.07, "median_of_4": 775.15}
+    }
+  },
+  "rotating_high_outlier_N6": [
+    {"cycle": "R31", "high_gpu": "GPU0", "high_median": 786.38, "other3_median": 766.14, "excess_pct": 2.64, "verdict": "outlier present"},
+    {"cycle": "R32", "high_gpu": "GPU5", "high_median": 786.59, "other3_median": 768.43, "excess_pct": 2.36, "verdict": "outlier present (rotated GPU0->GPU5)"},
+    {"cycle": "R33", "high_gpu": "none", "high_median": 767.97, "other3_median": 765.71, "excess_pct": 0.30, "verdict": "no outlier"},
+    {"cycle": "R34", "high_gpu": "GPU6", "high_median": 787.13, "other3_median": 766.30, "excess_pct": 2.71, "verdict": "outlier present (rotated to GPU6)"},
+    {"cycle": "R35", "high_gpu": "GPU6", "high_median": 789.28, "other3_median": 767.40, "excess_pct": 2.85, "verdict": "outlier present (GPU6 stays high - first repeat)"},
+    {"cycle": "R36", "high_gpu": "GPU0", "high_median": 789.66, "other3_median": 770.07, "excess_pct": 2.54, "verdict": "outlier present (rotated GPU6->GPU0 -- 2-cycle GPU6 hypothesis BROKEN)"}
+  ],
+  "phase2_ship_confirms": {
+    "c4_70b_kv_v2_crr_RRR_vs_CRR": {
+      "shape": {"M": 4096, "N": 1024, "K": 8192},
+      "predicate_source": "R33 Dev C SHIP / wired in R34 Dev A predicate at kernel_mxfp8_layouts.cpp",
+      "build_md5": "see r36_reviewer_devXXX_verify/build_md5.log",
+      "results_per_gpu": [
+        {"phys_gpu": 4, "delta_pct": 10.510, "welch_t": 25.405, "crr_median": 788.99, "rrr_median": 871.91, "snr_db": 49.60, "det_ok": true, "advisory_fired": true},
+        {"phys_gpu": 5, "delta_pct": 10.808, "welch_t": 46.445, "crr_median": 793.41, "rrr_median": 879.16, "snr_db": 49.60, "det_ok": true, "advisory_fired": true}
+      ],
+      "min_delta_pct": 10.510,
+      "min_welch_t": 25.405,
+      "verdict": "STRICT CONFIRM (Δ% >= +5.0 strict gate, min Welch t = 25.4 >> 10 strict gate)"
+    },
+    "c5_8b_gate_v2_crr_RRR_vs_CRR": {
+      "shape": {"M": 4096, "N": 14336, "K": 4096},
+      "predicate_source": "R34 Dev B SHIP / R35 Dev A 5th V2-RRR autotune predicate at kernel_mxfp8_layouts.cpp:5582-5656",
+      "build_md5": "see r36_reviewer_devXXX_verify/build_md5.log",
+      "results_per_gpu": [
+        {"phys_gpu": 4, "delta_pct": 6.964, "welch_t": 6.830, "crr_median": 2418.64, "rrr_median": 2587.07, "snr_db": 49.61, "det_ok": true, "advisory_fired": true},
+        {"phys_gpu": 5, "delta_pct": 5.045, "welch_t": 6.283, "crr_median": 2387.55, "rrr_median": 2508.01, "snr_db": 49.61, "det_ok": true, "advisory_fired": true}
+      ],
+      "min_delta_pct": 5.045,
+      "min_welch_t": 6.283,
+      "verdict": "SHIP-LITE CONFIRM (Δ% min = +5.045 above STRICT +5.0; min Welch t = 6.283 below STRICT 10.0; consistent with R35 Reviewer SHIP-LITE classification)"
+    },
+    "gpu6_excluded_reason": "GPU6 was heavily contended throughout the c4 verify (sclk stuck at 1717-1735 MHz; bench TFLOPS bimodal 250 / 530 / 600 -- DETERMINISTIC paired-bench would still show direction but stdev/mean was 0.39 CRR + 0.61 RRR, far above gate). GPU6 c4 attempts kept in repo as r36_reviewer_devXXX_verify/c4_70b_kv_gpu6.txt for transparency."
+  }
+}

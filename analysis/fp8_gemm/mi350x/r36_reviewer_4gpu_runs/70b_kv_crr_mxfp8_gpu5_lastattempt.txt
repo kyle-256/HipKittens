@@ -1,0 +1,9 @@
+CORRECTNESS snr_db=49.60 pass_rate_pct=100.00
+DETERMINISM ok=True
+RUN 0 avg_ms=0.3010 tflops=228.29
+RUN 1 avg_ms=0.2968 tflops=231.53
+RUN 2 avg_ms=0.2913 tflops=235.87
+RUN 3 avg_ms=0.2972 tflops=231.20
+RUN 4 avg_ms=0.2958 tflops=232.30
+SUMMARY median=231.53 mean=231.83 stdev=2.72 runs=5
+TFLOPS_LIST 228.2867,231.5261,235.8685,231.1952,232.2969

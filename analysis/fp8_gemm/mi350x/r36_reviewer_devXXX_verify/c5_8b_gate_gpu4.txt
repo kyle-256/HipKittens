@@ -1,0 +1,30 @@
+===== R36 Reviewer SHIP verify cell=c5 label=8b_gate M=4096 N=14336 K=4096 phys_gpu=4 =====
+Sat Apr 18 13:49:41 UTC 2026
+[build] tk_mxfp8_r36rev_c5.cpython-310-x86_64-linux-gnu.so
+[build c5 rc=0 md5=4c9d0a773cfce64ae76041131c521bad]
+[bench rc=0]
+[sclk-pre-preheat] GPU[4]		: sclk clock level: 1: (1744Mhz)
+[preheat 45.0s] done 7164 iters
+[sclk-post-preheat] GPU[4]		: sclk clock level: 1: (2362Mhz)
+CORRECTNESS_CRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[4]		: sclk clock level: 1: (2376Mhz)
+WARMUP 0 RRR=2388.06 CRR=2337.59 sclk=GPU[4]		: sclk clock level: 1: (2357Mhz)
+WARMUP 1 RRR=2373.18 CRR=2342.77 sclk=GPU[4]		: sclk clock level: 1: (2361Mhz)
+PAIR 0 RRR_1=2377.17 CRR_1=2336.56 RRR_2=2582.59 CRR_2=2413.89
+PAIR 1 RRR_1=2598.60 CRR_1=2415.92 RRR_2=2584.72 CRR_2=2423.42
+PAIR 2 RRR_1=2586.72 CRR_1=2417.77 RRR_2=2587.41 CRR_2=2422.53
+PAIR 3 RRR_1=2580.02 CRR_1=2420.28 RRR_2=2592.07 CRR_2=2416.43
+PAIR 4 RRR_1=2594.36 CRR_1=2419.50 RRR_2=2595.34 CRR_2=2429.24
+[sclk-post-bench] GPU[4]		: sclk clock level: 1: (2346Mhz)
+CRR  median=2418.64 mean=2411.55 stdev=26.72 n=10
+RRR  median=2587.07 mean=2567.90 stdev=67.28 n=10
+Welch t (CRR vs RRR) = 6.830  (positive = RRR faster)
+DELTA_MEDIAN_PCT RRR_vs_CRR = +6.964%
+CRR_TFLOPS_LIST 2336.5611,2413.8927,2415.9190,2423.4167,2417.7749,2422.5287,2420.2757,2416.4336,2419.4974,2429.2424
+RRR_TFLOPS_LIST 2377.1698,2582.5882,2598.6050,2584.7200,2586.7214,2587.4110,2580.0179,2592.0738,2594.3551,2595.3407
+--- stderr ---
+W20260418 13:49:52.501025 140215100657664 agent.cpp:461] Attempt to enable hip visiblity for agent-2 which is not visible to HSA (ROCR)
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=14336, K=4096) is +5.0% to +6.5% faster on V2-RRR (R34 Dev B 8B Gate/Up SHIP, 4-GPU triangulated; min Δ% +5.025, min Welch t +10.13). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r34b_findings.md.
+[R35 gate post-hoc] stdev/mean CRR=0.011048 RRR=0.026006 (gate <=0.02 for paired BABA tolerable; <=0.01 for single-layout)
+Sat Apr 18 13:51:09 UTC 2026

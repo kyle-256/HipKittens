@@ -1,0 +1,29 @@
+===== R36 Reviewer SHIP verify cell=c4 label=70b_kv M=4096 N=1024 K=8192 phys_gpu=5 =====
+Sat Apr 18 13:48:19 UTC 2026
+[build c4 md5=d9bebe44705eaa4f0254b323412a79d9 (cached)]
+[bench rc=0]
+[sclk-pre-preheat] GPU[5]		: sclk clock level: 1: (157Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[5]		: sclk clock level: 1: (2341Mhz)
+CORRECTNESS_CRR snr_db=49.60 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RRR snr_db=49.60 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[5]		: sclk clock level: 1: (2344Mhz)
+WARMUP 0 RRR=850.20 CRR=796.97 sclk=GPU[5]		: sclk clock level: 1: (2388Mhz)
+WARMUP 1 RRR=854.01 CRR=796.68 sclk=GPU[5]		: sclk clock level: 1: (2393Mhz)
+PAIR 0 RRR_1=861.78 CRR_1=794.42 RRR_2=880.15 CRR_2=794.96
+PAIR 1 RRR_1=879.46 CRR_1=793.28 RRR_2=875.90 CRR_2=794.78
+PAIR 2 RRR_1=878.86 CRR_1=793.52 RRR_2=879.80 CRR_2=793.31
+PAIR 3 RRR_1=874.07 CRR_1=792.84 RRR_2=879.52 CRR_2=792.92
+PAIR 4 RRR_1=879.54 CRR_1=794.63 RRR_2=877.40 CRR_2=792.97
+[sclk-post-bench] GPU[5]		: sclk clock level: 1: (2396Mhz)
+CRR  median=793.41 mean=793.76 stdev=0.84 n=10
+RRR  median=879.16 mean=876.65 stdev=5.58 n=10
+Welch t (CRR vs RRR) = 46.445  (positive = RRR faster)
+DELTA_MEDIAN_PCT RRR_vs_CRR = +10.808%
+CRR_TFLOPS_LIST 794.4209,794.9576,793.2838,794.7813,793.5183,793.3059,792.8375,792.9250,794.6267,792.9691
+RRR_TFLOPS_LIST 861.7848,880.1512,879.4576,875.8972,878.8628,879.7996,874.0701,879.5210,879.5384,877.4004
+--- stderr ---
+W20260418 13:48:22.782082 139852339261440 agent.cpp:461] Attempt to enable hip visiblity for agent-2 which is not visible to HSA (ROCR)
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=1024, K=8192) is +10.24% to +10.83% faster on V2-RRR (R33 Dev C 70B KV SHIP, 4-GPU triangulated; min Δ% +10.24). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r33c_findings.md.
+[R35 gate post-hoc] stdev/mean CRR=0.001059 RRR=0.006347 (gate <=0.02 for paired BABA tolerable; <=0.01 for single-layout)
+Sat Apr 18 13:49:35 UTC 2026

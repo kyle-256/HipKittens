@@ -1,0 +1,29 @@
+===== R36 Reviewer SHIP verify cell=c5 label=8b_gate M=4096 N=14336 K=4096 phys_gpu=5 =====
+Sat Apr 18 13:51:27 UTC 2026
+[build c5 md5=4c9d0a773cfce64ae76041131c521bad (cached)]
+[bench rc=0]
+[sclk-pre-preheat] GPU[5]		: sclk clock level: S: (107Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[5]		: sclk clock level: 1: (2355Mhz)
+CORRECTNESS_CRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[5]		: sclk clock level: 1: (2368Mhz)
+WARMUP 0 RRR=2361.50 CRR=2342.40 sclk=GPU[5]		: sclk clock level: 1: (2346Mhz)
+WARMUP 1 RRR=2363.29 CRR=2348.14 sclk=GPU[5]		: sclk clock level: 1: (2349Mhz)
+PAIR 0 RRR_1=2344.52 CRR_1=2344.99 RRR_2=2512.47 CRR_2=2388.23
+PAIR 1 RRR_1=2510.23 CRR_1=2343.01 RRR_2=2508.64 CRR_2=2386.87
+PAIR 2 RRR_1=2486.99 CRR_1=2395.78 RRR_2=2500.30 CRR_2=2389.00
+PAIR 3 RRR_1=2491.33 CRR_1=2382.31 RRR_2=2509.36 CRR_2=2369.82
+PAIR 4 RRR_1=2507.38 CRR_1=2395.41 RRR_2=2525.00 CRR_2=2392.93
+[sclk-post-bench] GPU[5]		: sclk clock level: 1: (2308Mhz)
+CRR  median=2387.55 mean=2378.84 stdev=19.83 n=10
+RRR  median=2508.01 mean=2489.62 stdev=52.12 n=10
+Welch t (CRR vs RRR) = 6.283  (positive = RRR faster)
+DELTA_MEDIAN_PCT RRR_vs_CRR = +5.045%
+CRR_TFLOPS_LIST 2344.9909,2388.2265,2343.0083,2386.8713,2395.7816,2389.0041,2382.3127,2369.8244,2395.4089,2392.9313
+RRR_TFLOPS_LIST 2344.5153,2512.4660,2510.2324,2508.6400,2486.9859,2500.2952,2491.3345,2509.3640,2507.3763,2525.0005
+--- stderr ---
+W20260418 13:51:31.105895 140227700269056 agent.cpp:461] Attempt to enable hip visiblity for agent-2 which is not visible to HSA (ROCR)
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=14336, K=4096) is +5.0% to +6.5% faster on V2-RRR (R34 Dev B 8B Gate/Up SHIP, 4-GPU triangulated; min Δ% +5.025, min Welch t +10.13). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r34b_findings.md.
+[R35 gate post-hoc] stdev/mean CRR=0.008306 RRR=0.020781 (gate <=0.02 for paired BABA tolerable; <=0.01 for single-layout)
+Sat Apr 18 13:52:55 UTC 2026
