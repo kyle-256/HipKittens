@@ -162,6 +162,19 @@ using namespace kittens;
 #define CRR_ENABLE_SCHED_BARRIER 0
 #endif
 
+// R31 Dev D: persistent-CU prototype for V2-RCR.
+// 0 = baseline (grid = (M/BLK)*(N/BLK))
+// 1 = persistent grid (grid = MXFP8_RCR_V2_PERSISTENT_GRID), each block
+//     iterates over multiple (br,bc) tiles via top-level loop.
+#ifndef MXFP8_RCR_V2_PERSISTENT
+#define MXFP8_RCR_V2_PERSISTENT 0
+#endif
+// Persistent grid size — 304 CUs × 2 occupancy = 608 default to maintain
+// occupancy=2 LDS slots when persistent is enabled.
+#ifndef MXFP8_RCR_V2_PERSISTENT_GRID
+#define MXFP8_RCR_V2_PERSISTENT_GRID 608
+#endif
+
 #ifndef CRR_INIT0_VMCNT
 #define CRR_INIT0_VMCNT 2
 #endif
@@ -2323,6 +2336,23 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
         zero(cA); zero(cB); zero(cC); zero(cD);
     }
 
+    // R31 Dev D: persistent-CU dispatch wrapper.
+    // When MXFP8_RCR_V2_PERSISTENT=1, the host dispatcher launches with
+    // grid=MXFP8_RCR_V2_PERSISTENT_GRID (608 default = 304 CUs * occ=2)
+    // and each block does the original (br, bc) tile if bid < total_tiles,
+    // else early-exits. This is the simplest possible persistent variant —
+    // tests whether SPI redistributes CTAs to give better effective
+    // wave-fill at occupancy=2. (For 4096^3 with 256 tiles < 608 grid,
+    // strictly cannot improve since 256 < 304 CUs already; documented as
+    // structural ceiling.) For 8192^3 (1024 tiles > 608 grid) it would
+    // require inner-loop persistence which is prohibitively invasive — see
+    // r31d_findings.md for full analysis.
+    constexpr int total_tiles_compile = (M_DIM / BLK) * (N_DIM / BLK);
+#if MXFP8_RCR_V2_PERSISTENT
+    if (blockIdx.x >= total_tiles_compile) {
+        return;
+    }
+#endif
     const int bid = blockIdx.x;
     const int br = bid / blocks_per_col;
     const int bc = bid % blocks_per_col;
@@ -3604,7 +3634,14 @@ __host__ inline void dispatch_rcr_exact_8wave_scaled(const layout_globals& g) {
 // preshuffle_scale_matrix_mfma16_v2_rcr_a/b).
 template<bool PRESHUFFLED_QUANT>
 __host__ inline void dispatch_rcr_exact_8wave_scaled_v2(const layout_globals& g) {
+#if MXFP8_RCR_V2_PERSISTENT
+    // R31 Dev D: persistent-CU dispatch (wave-fill experiment).
+    // grid = MXFP8_RCR_V2_PERSISTENT_GRID (608 default = 304 CUs * occ=2).
+    // Kernel early-exits if bid >= (M/BLK)*(N/BLK).
+    const dim3 grid(MXFP8_RCR_V2_PERSISTENT_GRID);
+#else
     const dim3 grid((g.m / BLK) * (g.n / BLK));
+#endif
     rcr_exact_8wave_scaled_kernel<PRESHUFFLED_QUANT, 2><<<grid, dim3(_NUM_THREADS), 0, g.stream>>>(g);
 }
 
@@ -5530,7 +5567,10 @@ __global__ void diag_load_transpose_kernel(
     }
 }
 
-PYBIND11_MODULE(tk_mxfp8_layouts, m) {
+#ifndef PY_MODULE_NAME
+#define PY_MODULE_NAME tk_mxfp8_layouts
+#endif
+PYBIND11_MODULE(PY_MODULE_NAME, m) {
     m.doc() = "MXFP8 GEMM reference path with layout-aware scales";
     py::bind_function<dispatch<Layout::RCR>>(m, "gemm_rcr",
         &layout_globals::a, &layout_globals::b,
