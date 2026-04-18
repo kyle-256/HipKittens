@@ -3751,6 +3751,18 @@ __host__ inline void dispatch_rcr_exact_8wave_scaled_v2(const layout_globals& g)
 // independently in a single production .so to cover all 3 layouts.
 #include "r43b_decode_m1_rrr_crr_fastpath.inc"
 
+// R44 Dev A — small-batch decode MXFP8 fastpath for M ∈ [2..16] across all
+// three layouts (RCR/RRR/CRR). Generalises R42 Dev A (M=1 RCR) and R43
+// Dev B (M=1 RRR/CRR) via a multi-row masked-GEMV design (single wavefront
+// per WG, BLK_N=64 lane-per-col, M_PAD=16 padded accumulators, K-tiled
+// LDS A staging). Internally guarded by MXFP8_DECODE_M2_16_ENABLE so
+// default build sees an empty translation unit. Provides
+// `can_use_decode_m2_16` and `dispatch_decode_m2_16<L, PQ>` symbols that
+// the R43 Dev C small-M waterfall (~line 5540) calls when the macro is
+// defined. Orthogonal to MXFP8_DECODE_M1_ENABLE / MXFP8_DECODE_M1_RRR_CRR_ENABLE
+// — all three flags can be enabled independently in a single .so.
+#include "r44a_decode_m2_16_fastpath.inc"
+
 // R42 Dev A — forward declaration of the dispatch-trace emit() helper.
 // The full definition lives ~line 5621 (after the dispatch<> template) but
 // dispatch<> needs to resolve the name at the point where it calls into
@@ -5511,8 +5523,9 @@ void dispatch(layout_globals g) {
     // to V1-LEGACY tail kernel below if none match):
     //   1. MXFP8_DECODE_M1_ENABLE          (R42A)  RCR M=1     — Dev A SHIP
     //   2. MXFP8_DECODE_M1_RRR_CRR_ENABLE  (R43B)  RRR/CRR M=1 — Dev B SHIP
-    //   3. MXFP8_SMALLM_BLK_M_16           (FUTURE)            — placeholder
-    //   4. MXFP8_SMALLM_B32_FASTPATH       (R42B)  M=32/128    — Dev B SHIP
+    //   3. MXFP8_DECODE_M2_16_ENABLE       (R44A)  M=2..16     — Dev A SHIP-LITE
+    //   4. MXFP8_SMALLM_BLK_M_16           (FUTURE)            — placeholder
+    //   5. MXFP8_SMALLM_B32_FASTPATH       (R42B)  M=32/128    — Dev B SHIP
     //
     // Byte-identity contract for default 8192³ build (none of the macros
     // defined): the entire `if (g.m < BLK)` shell still compiles, but its
@@ -5566,6 +5579,23 @@ void dispatch(layout_globals g) {
                 dispatch_decode_m1_rrr_crr<L, PRESHUFFLED_QUANT>(g);
                 return;
             }
+        }
+#endif
+#if MXFP8_DECODE_M2_16_ENABLE
+        // R44 Dev A — M=2..16 small-batch decode. Single wavefront per WG,
+        // BLK_N=64 lane-per-col, M_PAD=16 padded accumulators with epilogue
+        // mask on g.m. Closes the M=2..16 prefill-batch + speculative-decode
+        // beam-width gap left by R42A (M=1 RCR), R43B (M=1 RRR/CRR), and
+        // R42B (M=32/128 K-loop-hoist scalar tail). All three layouts wired.
+        if (can_use_decode_m2_16(g)) {
+            const char* lname = (L == Layout::RCR) ? "rcr_pq_v1"
+                              : (L == Layout::RRR) ? "rrr_pq_v1" : "crr_pq_v1";
+            const char* tname = (L == Layout::RCR) ? "SMALLM-DECODE-M2-16-RCR (R44A)"
+                              : (L == Layout::RRR) ? "SMALLM-DECODE-M2-16-RRR (R44A)"
+                                                   : "SMALLM-DECODE-M2-16-CRR (R44A)";
+            MXFP8_DISPATCH_TRACE_ONCE(lname, tname, g);
+            dispatch_decode_m2_16<L, PRESHUFFLED_QUANT>(g);
+            return;
         }
 #endif
 #if defined(MXFP8_SMALLM_BLK_M_16)
