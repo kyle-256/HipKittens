@@ -1,0 +1,24 @@
+===== cell=70b_kv_crr kind=mxfp8 layout=crr M=4096 N=1024 K=8192 phys_gpu=6 =====
+[orchestrate] phys_gpu=6 N_RUNS=5 WARMUP=50 ITERS=100
+[orchestrate] sclk readings now use phys_gpu=6 (R31 Reviewer fix applied)
+Sat Apr 18 09:12:57 UTC 2026
+[pre-orchestrate sclk check]
+GPU[6]		: sclk clock level: 1: (161Mhz)
+W20260418 09:13:07.302447 140493470208000 agent.cpp:461] Attempt to enable hip visiblity for agent-2 which is not visible to HSA (ROCR)
+[sclk-pre-preheat] phys_gpu=6 GPU[6]		: sclk clock level: S: (100Mhz)
+[preheat] sustained 8s 16k matmul...
+[preheat] done 5116 iters
+[sclk-post-preheat] phys_gpu=6 GPU[6]		: sclk clock level: 1: (2069Mhz)
+CORRECTNESS snr_db=49.60 pass_rate_pct=100.00
+DETERMINISM ok=True
+[sclk-pre-bench] phys_gpu=6 GPU[6]		: sclk clock level: 1: (2333Mhz)
+RUN 0 avg_ms=0.0897 tflops=765.71
+RUN 1 avg_ms=0.0896 tflops=766.98
+RUN 2 avg_ms=0.0895 tflops=767.58
+RUN 3 avg_ms=0.0898 tflops=765.14
+RUN 4 avg_ms=0.0898 tflops=764.97
+[sclk-post-bench] phys_gpu=6 GPU[6]		: sclk clock level: 1: (2384Mhz)
+SUMMARY median=765.71 mean=766.08 stdev=1.15 runs=5
+TFLOPS_LIST 765.7139,766.9789,767.5817,765.1407,764.9671
+DONE gpu=6
+Sat Apr 18 09:13:44 UTC 2026

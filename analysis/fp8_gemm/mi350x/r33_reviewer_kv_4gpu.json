@@ -1,0 +1,213 @@
+{
+  "shape": {
+    "M": 4096,
+    "N": 1024,
+    "K": 8192,
+    "layout": "CRR"
+  },
+  "method": "5x preheat-then-bench (8s 16k FP16 preheat, warmup=50, iters=100); rocm-smi -d $PHYS_GPU (R31 Reviewer fix applied; carried forward in R33)",
+  "kind": "MXFP8 V2 (gemm_crr_pq_v2)",
+  "build_md5": [],
+  "results": {
+    "GPU0": {
+      "tflops_median": 766.63,
+      "tflops_mean": 764.84,
+      "tflops_stdev": 4.99,
+      "tflops_list": [
+        763.1626,
+        756.8984,
+        768.7116,
+        766.626,
+        768.7871
+      ],
+      "bench_snr_db": 43.71,
+      "correctness_snr_db": 49.6,
+      "det_pass": true,
+      "md5": null,
+      "sclk_pre_preheat": "94Mhz",
+      "sclk_post_preheat": "2337Mhz",
+      "sclk_pre_bench": "2352Mhz",
+      "sclk_post_bench": "2385Mhz"
+    },
+    "GPU4": {
+      "tflops_median": 767.97,
+      "tflops_mean": 767.77,
+      "tflops_stdev": 0.55,
+      "tflops_list": [
+        767.9696,
+        766.7975,
+        767.8977,
+        768.1033,
+        768.0727
+      ],
+      "bench_snr_db": 62.92,
+      "correctness_snr_db": 49.6,
+      "det_pass": true,
+      "md5": null,
+      "sclk_pre_preheat": "157Mhz",
+      "sclk_post_preheat": "2276Mhz",
+      "sclk_pre_bench": "2342Mhz",
+      "sclk_post_bench": "2381Mhz"
+    },
+    "GPU5": {
+      "tflops_median": 764.81,
+      "tflops_mean": 764.24,
+      "tflops_stdev": 2.0,
+      "tflops_list": [
+        766.086,
+        760.9755,
+        763.8583,
+        765.4783,
+        764.8137
+      ],
+      "bench_snr_db": 51.62,
+      "correctness_snr_db": 49.6,
+      "det_pass": true,
+      "md5": null,
+      "sclk_pre_preheat": "157Mhz",
+      "sclk_post_preheat": "2144Mhz",
+      "sclk_pre_bench": "2363Mhz",
+      "sclk_post_bench": "2394Mhz"
+    },
+    "GPU6": {
+      "tflops_median": 765.71,
+      "tflops_mean": 766.08,
+      "tflops_stdev": 1.15,
+      "tflops_list": [
+        765.7139,
+        766.9789,
+        767.5817,
+        765.1407,
+        764.9671
+      ],
+      "bench_snr_db": 56.45,
+      "correctness_snr_db": 49.6,
+      "det_pass": true,
+      "md5": null,
+      "sclk_pre_preheat": "100Mhz",
+      "sclk_post_preheat": "2069Mhz",
+      "sclk_pre_bench": "2333Mhz",
+      "sclk_post_bench": "2384Mhz"
+    }
+  },
+  "summary": {
+    "median_of_4_gpus": 766.17,
+    "mean_of_4_gpu_medians": 766.28,
+    "max": 767.97,
+    "min": 764.81,
+    "spread_pct": 0.413,
+    "spread_abs_tflops": 3.16,
+    "verdict": "cross-GPU spread 0.41% within bench-precision; high outlier GPU=GPU4 (767.97 TF), ++0.30% above other-3 median 765.71",
+    "high_outlier_gpu_this_cycle": "GPU4",
+    "high_outlier_excess_pct": 0.295,
+    "sclk_post_preheat_per_gpu": {
+      "GPU0": "2337Mhz",
+      "GPU4": "2276Mhz",
+      "GPU5": "2144Mhz",
+      "GPU6": "2069Mhz"
+    },
+    "sclk_pre_bench_per_gpu": {
+      "GPU0": "2352Mhz",
+      "GPU4": "2342Mhz",
+      "GPU5": "2363Mhz",
+      "GPU6": "2333Mhz"
+    },
+    "per_gpu_drift_vs_r32": {
+      "GPU0": {
+        "r32_median": 768.43,
+        "r33_median": 766.63,
+        "drift_tflops": -1.8,
+        "drift_pct": -0.234
+      },
+      "GPU4": {
+        "r32_median": 768.37,
+        "r33_median": 767.97,
+        "drift_tflops": -0.4,
+        "drift_pct": -0.052
+      },
+      "GPU5": {
+        "r32_median": 786.59,
+        "r33_median": 764.81,
+        "drift_tflops": -21.78,
+        "drift_pct": -2.769
+      },
+      "GPU6": {
+        "r32_median": 776.6,
+        "r33_median": 765.71,
+        "drift_tflops": -10.89,
+        "drift_pct": -1.402
+      }
+    },
+    "per_gpu_drift_vs_r31": {
+      "GPU0": {
+        "r31_median": 786.38,
+        "r33_median": 766.63,
+        "drift_tflops": -19.75,
+        "drift_pct": -2.512
+      },
+      "GPU4": {
+        "r31_median": 767.31,
+        "r33_median": 767.97,
+        "drift_tflops": 0.66,
+        "drift_pct": 0.086
+      },
+      "GPU5": {
+        "r31_median": 764.28,
+        "r33_median": 764.81,
+        "drift_tflops": 0.53,
+        "drift_pct": 0.069
+      },
+      "GPU6": {
+        "r31_median": 766.14,
+        "r33_median": 765.71,
+        "drift_tflops": -0.43,
+        "drift_pct": -0.056
+      }
+    },
+    "median_of_4_drift_vs_r32": {
+      "r32_median_of_4": 772.51,
+      "r33_median_of_4": 766.17,
+      "drift_tflops": -6.34,
+      "drift_pct": -0.821
+    },
+    "median_of_4_drift_vs_r31": {
+      "r31_median_of_4": 766.72,
+      "r33_median_of_4": 766.17,
+      "drift_tflops": -0.55,
+      "drift_pct": -0.072
+    },
+    "rotating_high_outlier_3cycle_hypothesis": {
+      "R31": {
+        "high_gpu": "GPU0",
+        "high_median": 786.38,
+        "low3_median": 766.14
+      },
+      "R32": {
+        "high_gpu": "GPU5",
+        "high_median": 786.59,
+        "low3_median": 768.43
+      },
+      "R33": {
+        "high_gpu": "GPU4",
+        "high_median": 767.97,
+        "other3_median": 765.71
+      }
+    }
+  },
+  "historical_baselines_for_comparison": {
+    "R27_GPU4": 787.96,
+    "R29_GPU4": 766.86,
+    "R30_GPU0_DevA": 791.25,
+    "R30_GPU5": 767.23,
+    "R31_GPU0": 786.38,
+    "R31_GPU4": 767.31,
+    "R31_GPU5": 764.28,
+    "R31_GPU6": 766.14,
+    "R31_median_of_4": 766.72,
+    "R32_GPU0": 768.43,
+    "R32_GPU4": 768.37,
+    "R32_GPU5": 786.59,
+    "R32_GPU6": 776.6,
+    "R32_median_of_4": 772.51
+  }
+}
