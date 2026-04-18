@@ -1,0 +1,8 @@
+W20260418 16:00:48.906959 139989392809984 agent.cpp:461] Attempt to enable hip visiblity for agent-2 which is not visible to HSA (ROCR)
+[sclk-pre-preheat] phys_gpu=2 GPU[2]		: sclk clock level: 1: (389Mhz)
+[preheat] sustained 8s 16k matmul...
+[preheat] done 5116 iters
+[sclk-post-preheat] phys_gpu=2 GPU[2]		: sclk clock level: 1: (2300Mhz)
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=1024, K=8192) is +10.24% to +10.83% faster on V2-RRR (R33 Dev C 70B KV SHIP, 4-GPU triangulated; min Δ% +10.24). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r33c_findings.md.
+[sclk-pre-bench] phys_gpu=2 GPU[2]		: sclk clock level: 1: (2369Mhz)
+[sclk-post-bench] phys_gpu=2 GPU[2]		: sclk clock level: 1: (2392Mhz)

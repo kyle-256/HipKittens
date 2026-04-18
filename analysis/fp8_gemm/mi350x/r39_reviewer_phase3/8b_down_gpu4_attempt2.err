@@ -1,0 +1,2 @@
+W20260418 16:16:57.349971 140029284847616 agent.cpp:461] Attempt to enable hip visiblity for agent-2 which is not visible to HSA (ROCR)
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=4096, K=14336) is ~+9.5% faster on V2-RRR (R35 Dev D LLaMA matrix re-bench identified largest uncovered RRR-vs-CRR gap; R36 Dev B 2-GPU triangulated). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r35d_findings.md and r36b_findings.md.
