@@ -183,6 +183,110 @@ BF16 work is paused unless a clean structural restructure is on the table
 
 ## Session Log
 
+### 2026-04-18 — P23 Session 2 (5 Devs; GPUs 2/3/4/5/6; CLOSE — **PADDED-B128 LEVER DEAD**; row_l half-height fix lands as gated infrastructure (commit `0f57bd8e`); Reviewer's bank-conflict-zero claim was wrong by ∞; project memory's "67.6M baseline RCR conflicts" was misread of P21 RRR data — actual baseline RCR = 0 conflicts)
+
+**Outcome: P23 Session 2 closes the BF16 RCR Route 1 padded-b128 lever
+as DEAD. 3 gated branches landed (col_l Path A, col_l Path B, row_l
+half-height fix) with `BF16_RCR_PADDED_B128 = 0` default. Flag=0 .so
+SHA256-identical to pre-P23 baseline `47f76ea6...`. Flag=1 builds
+clean and PASSES the Step 5 correctness gate on all 3 layouts but
+REGRESSES perf 5-7pp on every RCR weak shape due to a fundamental
+bank-conflict miscalculation in the P22 design.**
+
+**Key empirical finding (Dev D + Dev E PMC measurement):**
+- Baseline RCR has **0 SQ_LDS_BANK_CONFLICT** (not 67.6M as project
+  memory claimed; the 67.6M was P21 Dev C's RRR measurement).
+- Flag=1 introduces +88,080,384 conflicts (1.5/MFMA), +35.33%
+  SQ_WAIT_INST_LDS, +15.19% GRBM_GUI_ACTIVE.
+- Per-lane formula `64*M + 16*K_oct` engages only 8 of 32 banks per
+  cycle (M-stride 16 dwords = 2 banks across M; K-octet stride 4
+  dwords = 8 banks; combined 8-way conflict every cycle).
+- 32B inter-subtile padding is bank-page-aligned (8 dwords) — shifts
+  but does not reduce conflict count.
+
+**Real bug worth keeping (Dev E):** `load(row_l)` Branch A in
+`shared_to_register.cuh` integer-truncates `subtiles_per_col =
+ST::rows / RT::tile_size_row = 32/64 = 0` when st_subtile is
+half-height. Outer loop runs zero times → register tile uninit →
+NaN. New gated branch handles half-height st_subtiles + honors
+`src.row_offset/col_offset`. Real bug; landed dead-flag in case
+future layouts need it.
+
+**The 5 Devs:**
+
+- **Dev A (GPU 2, P23 S2 col_l Path A, opus, worktree
+  `agent-a594f898`)** — added Path A `if constexpr` branch in
+  `shared_to_register.cuh` `load(col_l)` Branch A bf16 block; gated
+  `BF16_RCR_PADDED_B128`. flag=0 build byte-identical (md5
+  `19c23b13...`); flag=1 fatbin disasm byte-identical (no kernel
+  uses new shape via col_l yet); RCR/RRR/CRR Step 5 gate PASS.
+  VERDICT: PATH A LANDS but is dead-flag because RCR uses row_l, not
+  col_l (per `kernel_bf16_dynamic.cpp:208-211`).
+
+- **Dev B (GPU 3, P23 S2 col_l Path B, opus, worktree `p23_s2_dev_b`)** —
+  added Path B `if constexpr` branch (4 b128 issues per (subtile, r),
+  one per K-octet) in `shared_to_register.cuh` `load(col_l)`; gated
+  `BF16_RCR_PADDED_B128_PATH_B`. Same dead-flag fate as Path A.
+
+- **Dev C (GPU 4, P23 S2 kernel wiring, opus, worktree `p23_s2_dev_c`)** —
+  added `RCR_PADDED_B128_MODE` macro (default 0) +
+  `rcr_padded_st_shape` typedef in `kernel_bf16_dynamic.cpp:44-79`;
+  restructured ST_A/ST_B from 2-way to nested 3-way
+  `std::conditional_t` for RCR-isolated swap (lines 177-200);
+  annotated load_a_subtile/load_b_subtile entry points (lines
+  354-372). Surprise finding: flag=1 builds clean (does NOT
+  compile-error as PREP charter expected), VGPRs 240→220 in RCR-448
+  variant — but as Dev D later confirmed, runtime correctness fails.
+
+- **Dev D (GPU 5, P23 S2 PMC measurement, opus)** — measured
+  flag=1 reality: RCR correctness FAILS (max_abs=NaN, output 1e30+
+  off ref). SQ_LDS_BANK_CONFLICT 0→58.7M (1 conflict per MFMA);
+  GRBM_GUI_ACTIVE +22.9%; perf regresses. **Critical framing
+  correction: baseline RCR has 0 bank conflicts, not 67.6M. The
+  67.6M in project memory was actually RRR's number from P21 Dev C.**
+
+- **Dev E (GPU 6, P23 S2 row_l diagnosis, opus)** — root-caused
+  the row_l Branch A failure (H1 confirmed: integer truncation of
+  `subtiles_per_col = 32/64 = 0` for half-height B subtile). Added
+  ~150-line gated branch in `load(row_l)` Branch A that handles
+  half-height st_subtiles and honors runtime row/col offsets.
+  Correctness PASS on rcr/rrr/crr at smoke shape (256, 256, 128)
+  with fix. **Phase 2 paired bench: -5.15pp / -5.97pp / -7.19pp on
+  3 RCR weak shapes** — fix is correct but lever is dead. PMC diff
+  proves Reviewer's REVIEW.md §1c/§2 "all 32 banks engaged per
+  cycle" was wrong; actual is 8 of 32 banks engaged → 8-way
+  conflict every cycle. VERDICT: OUTCOME A DEAD-END.
+
+**P23 Session 2 close-out summary table:**
+
+| Item                                              | Status | Notes                                              |
+|---------------------------------------------------|:------:|----------------------------------------------------|
+| Padded-b128 lever for RCR Route 1                 | **DEAD** | -5 to -7pp on RCR weak shapes; Reviewer's bank-conflict math was wrong |
+| `load(row_l)` half-height st_subtile bug fix      | LANDED dead-flag | real bug; ~150 LOC; gated `BF16_RCR_PADDED_B128`; flag=0 byte-identical |
+| col_l Path A branch (Dev A)                       | LANDED dead-flag | Branch A 4-`j`-loop fan-out; correct per spec but unused (RCR uses row_l) |
+| col_l Path B branch (Dev B)                       | LANDED dead-flag | mechanical fallback at 4× cost; same RCR-routing fate |
+| Kernel wiring (Dev C)                             | LANDED dead-flag | nested 3-way conditional_t for ST_A/ST_B; flag default 0 |
+| Project memory baseline framing (67.6M)           | CORRECTED | actual baseline RCR = 0 SQ_LDS_BANK_CONFLICT; 67.6M was P21 RRR data |
+| Reviewer bank-conflict-zero claim                 | OVERTURNED | per-lane formula `64*M + 16*K_oct` → 8 of 32 banks per cycle, 8-way conflict |
+| commit `0f57bd8e`                                 | LANDED | gated infra; flag=0 .so SHA256 = `47f76ea6...` (pre-P23 baseline) |
+
+**Memo for future Decider runs (REINFORCE):** Probe-kernel "0 bank
+conflicts" results validate the LDS WRITE side only. The READ side
+under MFMA's per-lane mapping can compose to a different bank
+pattern. **Always measure SQ_LDS_BANK_CONFLICT empirically with
+rocprofv3 BEFORE concluding a layout is conflict-free.** Analytical
+proofs that omit MFMA lane-folding are insufficient. Also: when
+project memory cites a counter measurement, check the source — it
+may be from the wrong layout.
+
+**Post-P23 pivot recommendation:** RCR's actual bottleneck is
+op-reuse deficit (TK 8-wave 2M×4N = 2.67 MFMAs/b128 vs BL
+MIWT8_8 4-wave 2M×2N = 4.0). Wave-grid change requires VGPR
+reduction = multi-session work. Padded-b128 was attacking a
+non-existent bank-conflict bottleneck on RCR; reopening would need
+either XOR-based swizzle or 32B K-octet stride (rt_16x32_s
+redesign). Both are major scope changes.
+
 ### 2026-04-18 — P23 Session 1 (3 Devs + 1 Reviewer; GPUs 5/7; CLOSE — `st_64x32_padded_b128` shape LANDED additive; identity row-major swizzle CONFIRMED correct; Path A approved for Step 4; Step 5 correctness gate landed)
 
 **Outcome: P23 Session 1 lands additive infrastructure for the
