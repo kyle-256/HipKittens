@@ -7,6 +7,59 @@
 - SNR ≥ 48 dB (FP8) / ≥ 47 dB (BF16 vs torch.mm), bit-exact determinism are hard gates.
 - Never commit `*.so`, `.autotune_cache.json` is OK to keep (it's text), logs are not.
 
+## Current Status (2026-04-18, post-P14 partial — Dev F memo landed as research; D/E in flight)
+
+P14 launched 3 Devs (D: FP8 CRR_STEADY 2D sweep on GPU 0; E: BF16 CRR
+`__launch_bounds__(_,1)` KI=296 surgical re-attempt on GPU 4; F: FP8 RCR
+weak-shape per-shape rocprofv3 research on GPU 6). Session ended (loop
+runtime expired) with **only Dev F complete**; D and E are mid-bench
+in their worktrees and should be picked up next session.
+
+- **Dev F (FP8 RCR weak-shape rocprofv3, GPU 6, complete)** — definitive
+  per-shape PMC memo. All 6 weakest TK_RCR shapes show identical 0.92×
+  speedup vs BL with **flat 0.75 LDS/MFMA on TK vs flat 0.50 on BL**
+  (TK does 1.47–1.50× more LDS-issued instructions per MFMA than BL on
+  every weak shape). hipBLASLt picks the same Tensile family for all 6:
+  `Cijk_Alik_Bljk_F8BS_..._MT256x256x128_MI16x16x1_..._DTLA1_DTLB1_PGR2_PLR0_SK3_...`
+  → MT256×256×128 + 256-thread WG + StreamK SK3 persistent grid +
+  PGR2 (DTL on both operands) + PLR0 (no LDS prefetch). Ranked levers:
+  (A) DTL on both operands, (B) StreamK persistent grid, (C) wider LDS
+  reads. Dev F flagged inconsistency: 0.75 LDS/MFMA + 0 bank conflicts
+  looks like reg-staged stores, not pure DTL. **Decider disassembly
+  recheck (this session, on `kernel_fp8_layouts-hip-amdgcn-amd-amdhsa-gfx950.o`):**
+  658× `buffer_load_dwordx4`, 1336× `ds_read_b128`, 1360×
+  `ds_read_b64_tr_b8`, 2688× `v_mfma_f32_16x16x128_f8f6f4`,
+  **0× `ds_write*`** — reconfirms P13 Dev C: TK already uses DTL on
+  *both* A and B. The PMC LDS-instruction counter Dev F observed counts
+  consumer-side `ds_read` ops; the 1.47× gap is therefore **wider /
+  fewer LDS reads + StreamK** (BL likely uses `ds_read_b128_tr_b16` or
+  similar to halve ds_read count per MFMA), NOT adding DTL. Ranked
+  P15 levers reduce to: **(B) StreamK persistent grid, (C) wider LDS
+  reads / `ds_read_b128_tr_b16` if applicable.**
+- **Dev D (CRR_STEADY 2D sweep, GPU 0, in flight)** — running 16-config
+  grid (S1∈{0,2,4,6}, S2∈{0,2,4,6}) on Dev F P12 worktree
+  `agent-a5b15c06`. First 2 configs returned: S1=0,S2=0 → CRR geo-mean
+  vs BL 1.955× (TK avg 2627.9); S1=0,S2=2 → 1.962× (TK avg 2628.7).
+  Δ = +0.007×, well within DVFS noise. ~5 min/config × 14 remaining
+  ≈ 70 min more. Resume next session — read partial JSONs at
+  `.claude/worktrees/agent-a5b15c06/analysis/fp8_gemm/mi350x/bench_devD_S1*_S2*.json`.
+- **Dev E (BF16 CRR `__launch_bounds__(_,1)` KI=296 only, GPU 4,
+  complete)** — NO LAND. Restructured `gemm_kernel` into
+  `gemm_kernel_body` + a thin `__global__` wrapper, added explicit
+  `gemm_kernel<CRR,296>` specialization with
+  `amdgpu_waves_per_eu(1, 2)`. Build-log resource: VGPRs 245→170,
+  AGPRs 0→192, occupancy 2→1, **SGPR-Spill stays 26**. Plus
+  K=18944 CRR shape now hits `hipErrorLaunchFailure` (RCR/RRR fine).
+  Definitive conclusion: the 26-SGPR-spill is **scheduling pressure
+  from the unroll-2 main-loop address arithmetic, not a VGPR-budget
+  contention** — relaxing occupancy doesn't address the root cause.
+  Combined with P9 Dev 1's finding (unroll-1 drives spill to 0 but
+  costs +0.88pp wall-clock on GPU 2), the BF16 CRR KI=296 spill is
+  now confirmed as **an LLVM-scheduler artifact whose elimination via
+  either unroll-1 or launch_bounds costs more than the spill itself**.
+  Worktree `agent-a66b0af1`. Build log
+  `bench_k18944_devE_lb1.log` / `build_p13_devE_lb1.log`.
+
 ## Current Status (2026-04-18, post-P13 — no code change landed; key correction filed)
 
 P11 + P12 + P13 ran 10 Dev agents + 1 Reviewer + 2 research agents across
@@ -219,10 +272,25 @@ for archival; do NOT redispatch unless the constraint changes:
   large tile only helps because it pairs with DTLA1+DTLB1 (Direct-To-LDS),
   which TK doesn't have an implementation for.
 
-### FP8 RCR — only remaining headroom (~3% to BL_RCR custom kernel)
+### FP8 RCR — only remaining headroom (~3% to BL_RCR custom kernel; ~8% on weak shapes)
+- [P14] **Stream-K persistent grid** (Dev F P14 lever B) — hipBLASLt
+      uses `SK3` (StreamK) on all 6 weak FP8 RCR shapes. Persistent-grid
+      kernel that re-issues tiles inside one workgroup eliminates tail
+      effect on small-K large-N shapes. Multi-session implementation;
+      no clean TK precedent.
+- [P14] **Wider / fewer LDS reads** (Dev F P14 lever C) — TK does
+      1.47-1.50× more `ds_read*` per MFMA than BL on every weak shape.
+      Investigate `ds_read_b128_tr_b16` if compatible with the FP8 ST_v2a
+      swizzle layout (BL ds_read mix unknown — would need disassembly
+      sample of one Cijk_ kernel to compare). Net effect bounded by the
+      0.75→0.50 LDS/MFMA gap (one of two factors in the 8% weak-shape
+      gap; the other is StreamK).
 - [P13-CLOSED] ~~Direct-To-LDS (DTLA1+DTLB1) implementation for RCR (TN).~~
       P13 Dev C disassembly grep proved TK ALREADY uses gfx950 wide-DTL
-      for 100% of hot-path loads. Lever does not exist; do not redispatch.
+      for 100% of hot-path loads. P14 Decider re-verified after Dev F
+      flagged inconsistency: 0× `ds_write*`, 658× `buffer_load_dwordx4`,
+      2696× `ds_read*` / 2688× MFMAs in the prebuilt .o. Both A and B
+      operands DTL. Lever does not exist; do not redispatch.
 - [ ] Per-tile-shape exploration: BL_RCR uses MT256×256×128 with
       256-VGPR/1-wave. TK uses smaller MT with 2-wave. A dedicated
       large-MT RCR variant could close the LDS/MFMA gap (0.75→0.50)
@@ -272,6 +340,15 @@ for archival; do NOT redispatch unless the constraint changes:
 
 ## Closed / Completed
 
+- 2026-04-18 P14 — Fourth agent-team session (3 Devs, all opus, GPUs 0/4/6).
+  Dev D in flight at session end (CRR_STEADY 2D sweep, 2/16 configs both
+  within DVFS noise); Dev E NO LAND with definitive close on BF16 CRR
+  KI=296 launch_bounds; Dev F shipped per-shape PMC research memo for the
+  6 weakest TK_RCR shapes. **Decider disassembly recheck reconfirmed
+  P13 Dev C: TK uses DTL on both A and B operands (0× ds_write,
+  658× buffer_load_dwordx4 in the prebuilt .o).** Ranked P15 levers
+  reduce to: (B) StreamK persistent grid, (C) wider/fewer LDS reads
+  (e.g. `ds_read_b128_tr_b16` if compatible with FP8 swizzle).
 - 2026-04-18 P13 — Third back-to-back agent-team session (3 Devs, all opus,
   GPUs 0/4/6). **Nothing landed.** Headline result: P13 Dev C disproved
   P12 Dev G's DTL hypothesis — TK already uses gfx950 wide-DTL.

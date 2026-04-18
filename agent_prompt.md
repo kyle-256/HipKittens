@@ -183,6 +183,83 @@ BF16 work is paused unless a clean structural restructure is on the table
 
 ## Session Log
 
+### 2026-04-18 — P14 (3 Devs, all opus; GPUs 0/4/6)
+
+**Outcome: Dev F memo + Decider disassembly recheck = the only research
+deliverables. Dev D in flight at session end; Dev E NO LAND with
+definitive close. Nothing landed.**
+
+- **Dev D (FP8 CRR_STEADY1/2_LGKM 2D sweep, GPU 0, in flight at session
+  end)** — running 16-config grid (S1∈{0,2,4,6}, S2∈{0,2,4,6}) on Dev F
+  P12 worktree `agent-a5b15c06` (the macro infrastructure that ships at
+  identity). First 2 configs returned: S1=0,S2=0 → CRR vs BL geo-mean
+  1.955×; S1=0,S2=2 → 1.962× — Δ +0.007× = noise. Estimated 70 min more
+  for the remaining 14 configs. Resume next session.
+- **Dev E (BF16 CRR `__launch_bounds__(_,1)` KI=296 only, GPU 4,
+  complete)** — NO LAND. Restructured `gemm_kernel` into
+  `gemm_kernel_body` + `__global__` wrapper, added explicit
+  `gemm_kernel<CRR,296>` specialization with
+  `amdgpu_waves_per_eu(1, 2)`. Build-log resource: VGPRs 245→170,
+  AGPRs 0→192, occupancy 2→1, **SGPR-Spill stays 26 (UNCHANGED)**. The
+  K=18944 CRR shape additionally hits `hipErrorLaunchFailure`. Verdict:
+  the 26-SGPR-spill is **scheduling pressure from the unroll-2
+  main-loop address arithmetic, not a VGPR-budget contention** —
+  relaxing occupancy doesn't address root cause. Combined with P9 Dev 1's
+  finding that unroll-1 fixes the spill but costs +0.88pp wall-clock on
+  GPU 2: **BF16 CRR KI=296 SGPR spill is now confirmed as an
+  LLVM-scheduler artifact whose elimination via either unroll-1 or
+  launch_bounds costs more than the spill itself**. Worktree
+  `agent-a66b0af1`.
+- **Dev F (FP8 RCR weak-shape per-shape rocprofv3, GPU 6, complete)** —
+  Per-shape PMC memo for the 6 weakest TK_RCR shapes. All show identical
+  0.92× speedup vs BL with **flat 0.75 LDS/MFMA on TK vs flat 0.50 on
+  BL** — TK does 1.47-1.50× more LDS-issued instructions per MFMA on
+  every weak shape. hipBLASLt picks the same Tensile family for all 6:
+  `Cijk_Alik_Bljk_F8BS_..._MT256x256x128_MI16x16x1_..._DTLA1_DTLB1_PGR2_PLR0_SK3_...`
+  → MT256×256×128 + 256-thread WG + StreamK SK3 persistent grid +
+  PGR2 + PLR0. Ranked levers: (A) DTL, (B) StreamK persistent grid,
+  (C) wider LDS reads. **Dev F flagged inconsistency** that 0.75
+  LDS/MFMA + 0 bank conflicts looks like reg-staged stores, not pure
+  DTL. Decider performed disassembly recheck on
+  `kernel_fp8_layouts-hip-amdgcn-amd-amdhsa-gfx950.o`: 658×
+  `buffer_load_dwordx4`, 1336× `ds_read_b128`, 1360×
+  `ds_read_b64_tr_b8`, 2688× `v_mfma_f32_16x16x128_f8f6f4`, **0×
+  `ds_write*`** — reconfirms P13 Dev C: TK uses DTL on both A and B.
+  The PMC LDS-instruction counter Dev F observed counts the
+  consumer-side `ds_read` operations; the 1.47× gap is therefore
+  **wider-or-fewer LDS reads + StreamK persistent grid**, NOT adding
+  DTL. Ranked P15 levers reduce to: **(B) StreamK persistent grid,
+  (C) wider/fewer LDS reads (e.g. `ds_read_b128_tr_b16` if applicable
+  to the FP8 swizzle layout).**
+
+**Lessons additive to P13:**
+1. **Two-step verification on PMC observations.** Dev F observed
+   "TK 0.75 LDS/MFMA, BL 0.50 LDS/MFMA" and ranked DTL as lever (A)
+   based on hipBLASLt's `DTLA1_DTLB1` autotune string. Disassembly
+   showed TK already has DTL on both operands. **Counter labels
+   (`SQ_INSTS_LDS`) include `ds_read*`, not just `ds_write*` — a
+   high LDS-instruction count is consistent with all-DTL global loads
+   plus heavy consumer ds_reads.** Always disambiguate counter
+   semantics before mapping a number to a lever name.
+2. **Dev F's "flag the inconsistency" pattern is a model for research
+   Devs.** Rather than landing a wrong recommendation, Dev F said
+   "this looks inconsistent — recheck disassembly". That single
+   sentence saved a P15 implementation Dev. Add to research-Dev
+   prompts: "If your data conflicts with prior memory or established
+   ISA behavior, raise the conflict explicitly rather than picking
+   one side."
+3. **Dev E's mechanism-level conclusion has shipping value.** Even
+   with NO LAND, the build-log evidence (Spill=26 invariant under
+   occupancy halving) closes the door on a category of attempts
+   ("relax occupancy to fix CRR spill"). File this alongside P9's
+   "unroll-1 fixes spill but regresses wall-clock" — the BF16 CRR
+   KI=296 spill is now bracketed on both sides.
+4. **Loop runtime expiration is a session-end signal.** When the
+   `<<autonomous-loop-dynamic>>` scheduler refuses (loop ended), treat
+   it as the user wrapping the conversation: write up partial state
+   and commit docs immediately, rather than sleeping further on
+   in-flight Devs.
+
 ### 2026-04-18 — P13 (3 Devs, all opus; GPUs 0/4/6)
 
 **Outcome: nothing landed; P12 Dev G's DTL premise refuted.**
