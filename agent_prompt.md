@@ -70,9 +70,14 @@ R28 dev B in flight: s_setprio sweep on V2-CRR cp=2 baseline.
 
 **Paradigm correction (DO NOT re-litigate)**: The 8-wave V2-CRR kernel does NOT have a wave-id branch. All 8 waves run identical interleaved VMEM+MFMA code in lockstep. Pre-R28 code ALREADY uses `__builtin_amdgcn_s_setprio(1)` during MFMA segments and `s_setprio(0)` to restore. Removing it = -21 TFLOPS; keeping MFMA elevated without restore = -74 TFLOPS. Pushing MFMA prio above 1 hits a hard ceiling (+0.3%) because 8 waves hit setprio in lockstep — no relative reordering possible. **NEVER prototype "elevate MFMA wave priority" again — the lever is fully exploited.**
 
-### R28 Dev C/D in flight
-- Dev C (GPU0): cp=3 vs cp=2 A/B on auto-select gate (~+0.4% if cp=3 holds with t>3)
-- Dev D (GPU1): rectangular BLK_M=256/N=128 scaffolding (R28 #2 critical, 90 min compile/correctness goal NOT perf SHIP this cycle)
+### R28 Dev C = NO SHIP (cp=3 vs cp=2 indistinguishable, t=-0.77)
+
+cp=3 (GLC|SLC) vs cp=2 (SLC) on 70B Gate V2-CRR: Δ=-0.088%, Welch t=-0.77 — fails ship gate. R27's apparent cp=3 lead was within sd noise. **cp=2 confirmed as correct gate value.**
+
+Diagnostic confirms gate region is doing real work — forcing cp=3 outside gate regresses 70B KV -7.5% and 8B Gate -5%. No production change.
+
+### R28 Dev D in flight (GPU1)
+- Rectangular BLK_M=256/N=128 scaffolding (R28 #2 critical, 90 min compile/correctness goal NOT perf SHIP this cycle)
 
 ## R27 cycle 完结 (2026-04-18) ★ 1 partial production ship (cachepolicy macro infra) + 3 paradigm correction
 

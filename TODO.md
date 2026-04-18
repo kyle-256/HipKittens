@@ -84,9 +84,17 @@ s_setprio sweep on top of cp=2: best (MFMA=2, VMEM=0) gives only +7.72 TFLOPS / 
 - Pushing MFMA prio above 1 hits a hard ceiling (+0.3%, sub-ship) because 8 waves on a CU all hit the same setprio call in lockstep — no relative reordering possible. Unlocking more would require breaking wave-uniformity (large restructure).
 - **NEVER prototype "elevate MFMA wave priority" again.** The lever is fully exploited.
 
-### R28 Dev C/D in flight (GPU0/GPU1)
-- Dev C: cp=3 (GLC|SLC) vs cp=2 A/B verification on auto-select gate. R27 saw cp=3=+3.1% vs cp=2=+2.7%. If t>3 holds → switch gate to cp=3 for +0.4%.
-- Dev D: rectangular BLK_M=256/BLK_N=128 scaffolding (R28 #2 critical). Goal = compile-ready + V1 fallback PASS, NOT perf SHIP this cycle.
+### R28 Dev C = NO SHIP (`297249bb` r28-c only)
+
+cp=3 (GLC|SLC) vs cp=2 (SLC) on 70B Gate V2-CRR (4096×28672×8192): Δ=-2.15 TFLOPS / -0.088% / Welch t=-0.77. R27's apparent cp=3=+11 TFLOPS over cp=2 was within R27 noise (cp=3 sd alone was 11.72). **cp=2 confirmed as the right gate value.** No production change.
+
+Diagnostic no-regress (cp=3 forced on out-of-gate shapes, confirms gate region is doing real work):
+- 70B KV 4096×1024×8192 cp=3: -7.46% vs cp=0 baseline
+- 8B Gate 4096×14336×4096 cp=3: -4.95% vs cp=0 baseline
+- 8192³ cp=3: -0.91% (within noise)
+
+### R28 Dev D in flight (GPU1)
+- Rectangular BLK_M=256/BLK_N=128 scaffolding (R28 #2 critical). Goal = compile-ready + V1 fallback PASS, NOT perf SHIP this cycle.
 
 ## R27 cycle 完结 (2026-04-18, 4 dev + 1 reviewer，1 partial production ship + 3 paradigm corrections)
 
