@@ -1,0 +1,100 @@
+MXFP4 Parallel Benchmark R22 - GPUs: [0, 1, 2, 3, 4, 5, 6, 7]
+Variants: 129, Shapes: 42
+warmup=200, iters=500, trim=0.1
+Per-variant timeout: 180s
+================================================================================
+[ 2/42]  16384x  4096x  3072   3880.9 vs  3492.3  (111.1%)  WIN  [ts_lgk2_memc_btw_all]  GPU1
+[ 1/42]  16384x  4096x  2048   3351.4 vs  2995.0  (111.9%)  WIN  [ts_lgk2_memc_btw_all]  GPU0
+[ 5/42]  32768x  4096x  3072   4042.3 vs  3630.6  (111.3%)  WIN  [ts_v12_tv0_memc_btw_all]  GPU4
+[ 3/42]  16384x  6144x  2048   3419.8 vs  3047.6  (112.2%)  WIN  [ts_v12_tv0_memc]  GPU2
+[ 4/42]  32768x  4096x  2048   3465.2 vs  3131.8  (110.6%)  WIN  [ts_lgk2_v12_memc_btw_all]  GPU3
+[ 7/42]  16384x 14336x  2048   3584.0 vs  3301.3  (108.6%)  WIN  [ts_lgk2_memc_btw_all]  GPU6
+[ 6/42]  32768x  6144x  2048   3474.7 vs  3239.9  (107.2%)  WIN  [ts_gm2_v12_memc_dc_btw_all]  GPU5
+[ 8/42]  16384x 28672x  2048   3420.1 vs  3482.3  ( 98.2%)  LOSE  [ts_gm2_v12_memc_dc_btw_all]  GPU7
+[11/42]   4096x  4096x 16384   4828.0 vs  4642.1  (104.0%)  WIN  [ts_lgk2_btw_step3]  GPU2
+[13/42]   6144x  4096x 16384   4571.3 vs  4428.1  (103.2%)  WIN  [v20_memc_btw_step3]  GPU4
+[14/42]   4096x  4096x  8192   4385.5 vs  3959.9  (110.7%)  WIN  [ts_v12_tv0_memc_btw_all]  GPU5
+[15/42]   4096x  4096x 32768   5257.7 vs  5152.8  (102.0%)  WIN  [ts_lgk2_btw_step3]  GPU6
+[12/42]   4096x 14336x 16384   5007.3 vs  5013.0  ( 99.9%)  LOSE  [ts_lgk2_memc_btw_all]  GPU3
+[16/42]   4096x  6144x 32768   4822.6 vs  3784.2  (127.4%)  WIN  [lgk2_dc_btw_all]  GPU7
+[10/42]  32768x 28672x  2048   3443.1 vs  3353.4  (102.7%)  WIN  [ts_gm2_v12_memc_btw_all]  GPU1
+[ 9/42]  32768x 14336x  2048   3590.6 vs  3351.4  (107.1%)  WIN  [ts_gm2_v12_memc_btw_all]  GPU0
+[19/42]   4096x 32768x  4096   4318.2 vs  4166.5  (103.6%)  WIN  [ts_gm2_v12_memc_dc_btw_all]  GPU2
+[20/42]   4096x 32768x  6144   4575.4 vs  4548.6  (100.6%)  WIN  [ts_lgk2_v12_memc_btw_all]  GPU3
+[17/42]   4096x 14336x  8192   4663.3 vs  4345.8  (107.3%)  WIN  [v20_memc_btw_step3]  GPU0
+[21/42]   4096x 32768x 14336   5101.0 vs  5296.1  ( 96.3%)  LOSE  [ts_v12_tv0_memc_btw_all]  GPU4
+[22/42]   4096x 32768x 28672   5386.4 vs  5568.2  ( 96.7%)  LOSE  [lgk2_dc_btw_all]  GPU5
+[18/42]   4096x 28672x 32768   5426.7 vs  5649.9  ( 96.0%)  LOSE  [ts_lgk2_btw_step3]  GPU1
+[24/42]   4096x128256x 32768   5207.9 vs  3195.3  (163.0%)  WIN  [v20_memc_btw_step3]  GPU7
+[25/42]   6144x  4096x  8192   4151.8 vs  3822.0  (108.6%)  WIN  [v20_memc_btw_step3]  GPU0
+[29/42]  16384x  4096x  4096   4306.5 vs  3951.8  (109.0%)  WIN  [ts_v12_tv0_memc_btw_all]  GPU4
+[27/42]  14336x  4096x 32768   5022.4 vs  5245.4  ( 95.7%)  LOSE  [ts_lgk2_v12_memc_btw_all]  GPU2
+[28/42]  14336x 32768x  4096   4450.1 vs  4462.6  ( 99.7%)  LOSE  [ts_lgk2_v12_memc_btw_all]  GPU3
+[30/42]  16384x  4096x  6144   4711.6 vs  4259.9  (110.6%)  WIN  [ts_lgk2_v12_memc_btw_all]  GPU5
+[26/42]   6144x 32768x  4096   4415.1 vs  4291.0  (102.9%)  WIN  [ts_lgk2_v12_memc_btw_all]  GPU1
+[23/42]   4096x 32768x128256   5315.1 vs  5781.1  ( 91.9%)  LOSE  [ts_lgk2_btw_step3]  GPU6
+[32/42]  16384x  4096x 14336   5179.2 vs  5142.1  (100.7%)  WIN  [ts_gm8_v12_btw_all]  GPU7
+[33/42]  16384x  4096x 28672   5430.1 vs  5525.3  ( 98.3%)  LOSE  [v20_memc_btw_step3]  GPU0
+[35/42]  16384x 14336x  4096   4480.5 vs  4255.8  (105.3%)  WIN  [ts_lgk2_v12_memc_btw_all]  GPU2
+[34/42]  16384x  6144x  4096   4388.3 vs  4042.5  (108.6%)  WIN  [ts_lgk2_memc_btw_all]  GPU1
+[38/42]  28672x  4096x 16384   5255.0 vs  5350.6  ( 98.2%)  LOSE  [ts_lgk2_btw_step3]  GPU5
+[36/42]  16384x 28672x  4096   4350.5 vs  4411.7  ( 98.6%)  LOSE  [ts_gm2_v12_memc_dc_btw_all]  GPU3
+[37/42]  28672x  4096x  8192   4855.7 vs  4810.0  (101.0%)  WIN  [ts_pf4_memc_btw_step3]  GPU4
+[31/42]  16384x  4096x  7168   4684.0 vs  4443.2  (105.4%)  WIN  [ts_lgk2_memc_btw_all]  GPU6
+[40/42]  32768x  4096x  7168   4692.2 vs  4666.8  (100.5%)  WIN  [ts_v12_tv0_memc_btw_all]  GPU7
+[41/42]  32768x  4096x 14336   5276.3 vs  5223.4  (101.0%)  WIN  [ts_v12_tv0_memc_btw_all]  GPU0
+[39/42]  28672x 32768x  4096   4327.9 vs  4466.6  ( 96.9%)  LOSE  [ts_lgk2_v12_memc_btw_all]  GPU6
+[42/42] 128256x 32768x  4096   4369.6 vs  4536.4  ( 96.3%)  LOSE  [ts_v12_tv0_memc_btw_all]  GPU1
+
+Completed in 101.1 minutes
+
+================================================================================
+      M       N       K     Ours     Comp   Ratio                    Tag Result
+------------------------------------------------------------------------------------------
+  16384    4096    2048   3351.4   2995.0  111.9%   ts_lgk2_memc_btw_all WIN
+  16384    4096    3072   3880.9   3492.3  111.1%   ts_lgk2_memc_btw_all WIN
+  16384    6144    2048   3419.8   3047.6  112.2%        ts_v12_tv0_memc WIN
+  32768    4096    2048   3465.2   3131.8  110.6% ts_lgk2_v12_memc_btw_all WIN
+  32768    4096    3072   4042.3   3630.6  111.3% ts_v12_tv0_memc_btw_all WIN
+  32768    6144    2048   3474.7   3239.9  107.2% ts_gm2_v12_memc_dc_btw_all WIN
+  16384   14336    2048   3584.0   3301.3  108.6%   ts_lgk2_memc_btw_all WIN
+  16384   28672    2048   3420.1   3482.3   98.2% ts_gm2_v12_memc_dc_btw_all LOSE
+  32768   14336    2048   3590.6   3351.4  107.1% ts_gm2_v12_memc_btw_all WIN
+  32768   28672    2048   3443.1   3353.4  102.7% ts_gm2_v12_memc_btw_all WIN
+   4096    4096   16384   4828.0   4642.1  104.0%      ts_lgk2_btw_step3 WIN
+   4096   14336   16384   5007.3   5013.0   99.9%   ts_lgk2_memc_btw_all LOSE
+   6144    4096   16384   4571.3   4428.1  103.2%     v20_memc_btw_step3 WIN
+   4096    4096    8192   4385.5   3959.9  110.7% ts_v12_tv0_memc_btw_all WIN
+   4096    4096   32768   5257.7   5152.8  102.0%      ts_lgk2_btw_step3 WIN
+   4096    6144   32768   4822.6   3784.2  127.4%        lgk2_dc_btw_all WIN
+   4096   14336    8192   4663.3   4345.8  107.3%     v20_memc_btw_step3 WIN
+   4096   28672   32768   5426.7   5649.9   96.0%      ts_lgk2_btw_step3 LOSE
+   4096   32768    4096   4318.2   4166.5  103.6% ts_gm2_v12_memc_dc_btw_all WIN
+   4096   32768    6144   4575.4   4548.6  100.6% ts_lgk2_v12_memc_btw_all WIN
+   4096   32768   14336   5101.0   5296.1   96.3% ts_v12_tv0_memc_btw_all LOSE
+   4096   32768   28672   5386.4   5568.2   96.7%        lgk2_dc_btw_all LOSE
+   4096   32768  128256   5315.1   5781.1   91.9%      ts_lgk2_btw_step3 LOSE
+   4096  128256   32768   5207.9   3195.3  163.0%     v20_memc_btw_step3 WIN
+   6144    4096    8192   4151.8   3822.0  108.6%     v20_memc_btw_step3 WIN
+   6144   32768    4096   4415.1   4291.0  102.9% ts_lgk2_v12_memc_btw_all WIN
+  14336    4096   32768   5022.4   5245.4   95.7% ts_lgk2_v12_memc_btw_all LOSE
+  14336   32768    4096   4450.1   4462.6   99.7% ts_lgk2_v12_memc_btw_all LOSE
+  16384    4096    4096   4306.5   3951.8  109.0% ts_v12_tv0_memc_btw_all WIN
+  16384    4096    6144   4711.6   4259.9  110.6% ts_lgk2_v12_memc_btw_all WIN
+  16384    4096    7168   4684.0   4443.2  105.4%   ts_lgk2_memc_btw_all WIN
+  16384    4096   14336   5179.2   5142.1  100.7%     ts_gm8_v12_btw_all WIN
+  16384    4096   28672   5430.1   5525.3   98.3%     v20_memc_btw_step3 LOSE
+  16384    6144    4096   4388.3   4042.5  108.6%   ts_lgk2_memc_btw_all WIN
+  16384   14336    4096   4480.5   4255.8  105.3% ts_lgk2_v12_memc_btw_all WIN
+  16384   28672    4096   4350.5   4411.7   98.6% ts_gm2_v12_memc_dc_btw_all LOSE
+  28672    4096    8192   4855.7   4810.0  101.0%  ts_pf4_memc_btw_step3 WIN
+  28672    4096   16384   5255.0   5350.6   98.2%      ts_lgk2_btw_step3 LOSE
+  28672   32768    4096   4327.9   4466.6   96.9% ts_lgk2_v12_memc_btw_all LOSE
+  32768    4096    7168   4692.2   4666.8  100.5% ts_v12_tv0_memc_btw_all WIN
+  32768    4096   14336   5276.3   5223.4  101.0% ts_v12_tv0_memc_btw_all WIN
+ 128256   32768    4096   4369.6   4536.4   96.3% ts_v12_tv0_memc_btw_all LOSE
+------------------------------------------------------------------------------------------
+WIN: 29/42  LOSE: 13/42  ERR: 0/42  Win rate: 69%
+Avg ratio: 105.3%
+
+Results saved to /shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/bench_all42_results_r22.json

@@ -1,0 +1,39 @@
+R22B smoke: 15 bench jobs (3 shapes x 5 variants), GPUs [4, 5]
+warmup=200 iters=500 trim=0.1
+==============================================================================================================
+  DLA1   _r22b_baseline                 gpu=4   5076.44 TFLOPS
+  DLA1   _r22b_bnt1                     gpu=5   4756.62 TFLOPS
+  DLA1   _r22b_bnt2                     gpu=4   4749.29 TFLOPS
+  DLA1   _r22b_bnt1_ant1                gpu=5   4057.25 TFLOPS
+  DLA2   _r22b_baseline                 gpu=5   4260.65 TFLOPS
+  DLA1   _r22b_bnt2_ant2                gpu=4   4064.31 TFLOPS
+  DLA2   _r22b_bnt2                     gpu=5   3993.45 TFLOPS
+  DLA2   _r22b_bnt1                     gpu=4   3926.38 TFLOPS
+  DLA2   _r22b_bnt2_ant2                gpu=5   3706.17 TFLOPS
+  DLA2   _r22b_bnt1_ant1                gpu=4   3652.56 TFLOPS
+  DLA7   _r22b_baseline                 gpu=4   4128.80 TFLOPS
+  DLA7   _r22b_bnt1                     gpu=5   4094.68 TFLOPS
+  DLA7   _r22b_bnt2                     gpu=4   4062.83 TFLOPS
+  DLA7   _r22b_bnt1_ant1                gpu=5   3857.19 TFLOPS
+  DLA7   _r22b_bnt2_ant2                gpu=4   3846.50 TFLOPS
+
+Elapsed: 90.6s
+
+==============================================================================================================
+SUMMARY (Δ vs _r22b_baseline)
+==============================================================================================================
+  DLA1 baseline = 5076.44 TFLOPS
+    _r22b_bnt1                       4756.62  Δ=-319.82 (-6.30%)
+    _r22b_bnt2                       4749.29  Δ=-327.15 (-6.44%)
+    _r22b_bnt1_ant1                  4057.25  Δ=-1019.19 (-20.08%)
+    _r22b_bnt2_ant2                  4064.31  Δ=-1012.13 (-19.94%)
+  DLA2 baseline = 4260.65 TFLOPS
+    _r22b_bnt1                       3926.38  Δ=-334.27 (-7.85%)
+    _r22b_bnt2                       3993.45  Δ=-267.20 (-6.27%)
+    _r22b_bnt1_ant1                  3652.56  Δ=-608.09 (-14.27%)
+    _r22b_bnt2_ant2                  3706.17  Δ=-554.48 (-13.01%)
+  DLA7 baseline = 4128.80 TFLOPS
+    _r22b_bnt1                       4094.68  Δ=-34.12 (-0.83%)
+    _r22b_bnt2                       4062.83  Δ=-65.97 (-1.60%)
+    _r22b_bnt1_ant1                  3857.19  Δ=-271.61 (-6.58%)
+    _r22b_bnt2_ant2                  3846.50  Δ=-282.30 (-6.84%)

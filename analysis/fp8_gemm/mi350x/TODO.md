@@ -331,8 +331,46 @@ Decider 提出 5 个 untested vectors, 3 个 in-session 可执行. 启动 3 个 
   - 6 mask combos × 4 shapes = 24 builds. Tested: 0x004 (MFMA-only), 0x044 (MFMA+DS_R), 0x008 (VMEM), 0x040|0x080 (DS_R+W=0xc0), 0x004 size=2, 0x004 size=8.
   - Best smoke: DLA7 + `mfmadsr_h0f` mask=0x044 = +0.13% (noise). All other combos −0.5% to −14.7%. Gate failed on all.
   - Confirms R21B's diagnosis: even fine-grained scheduler hints disrupt the LLVM-tuned MFMA/prefetch interleave more than they help. The hooks are wired but no usable mask exists for these shapes.
-- **R22B — Streaming/non-temporal global loads on B-tile (status: aperture-probed, smoke pending)**.
-- **R22-rebench — full 42-shape rebench locking R20A's 11 wires (status: 8/42 complete, multiplexed across all 8 GPUs)**.
+- **R22B — Streaming/non-temporal global loads on B-tile (DEAD END, no commit)**:
+  - Macros wired: `B_LOAD_NONTEMPORAL=1/2`, `A_LOAD_NONTEMPORAL=1/2`. 5 variants × 3 DLA shapes built.
+  - Aperture inconclusive (overflow at K=128256 swamps hash oracle). Pivoted to direct perf smoke — cache hints don't change MFMA emit-order, only L2/SLC bypass.
+  - Smoke (warmup=200 iters=500): **all variants regress on all 3 DLA shapes**:
+    - DLA1: bnt1=−6.30%, bnt2=−6.44%, bnt1_ant1=−20.08%, bnt2_ant2=−19.94%
+    - DLA2: bnt1=−7.85%, bnt2=−6.27%, bnt1_ant1=−14.27%, bnt2_ant2=−13.01%
+    - DLA7: bnt1=−0.83%, bnt2=−1.60%, bnt1_ant1=−6.58%, bnt2_ant2=−6.84%
+  - **Mechanistic insight**: NT/streaming bypass actively HURTS on DLA shapes because B-tile is shared across K-iters within a CTA — bypass kills the only L2 reuse path we have. Confirms that the binding stall is producer-side L2 miss, not L2 thrash. NT helps only when L2 hit rate is already poor and we're polluting cache for *future* loads we don't need; here L2 reuse is essential.
+  - macros retained as zero-overhead opt-in.
+- **R22-rebench — full 42-shape rebench locking R20A's 11 wires (COMPLETE: 29/42 WIN, 13/42 LOSE, 0 ERR, avg ratio 105.3%)**:
+  - WIN +5 over R20B baseline (24→29). Best variant per shape consistently picks R20A wires on K-heavy shapes (ts_lgk2_memc_btw_all, ts_v12_tv0_memc_btw_all, ts_lgk2_btw_step3, lgk2_dc_btw_all, ts_gm2_v12_memc_dc_btw_all).
+  - 13 remaining LOSE: DLA1 91.9%, DLA2 96.3%, DLA7 96.9%, plus 10 mid-gap shapes 95.7-99.9%.
+  - Saved: bench_all42_results_r22.json, bench_all42_r22.log.
+
+## Round 23 (2026-04-18) — producer-side memory-stall axis (R23A/B both DEAD END)
+Per R22A's mechanistic correction (TCP_TA_DATA_STALL = producer-side `buffer_load_to_lds` L2-miss/HBM-latency).
+
+**Targets**: DLA1 (4096x32768x128256), DLA2 (128256x32768x4096), DLA7 (28672x32768x4096).
+
+- **R23A — STATIC_XCD_REMAP (DEAD END)**:
+  - 4 variants (_xcd_baseline, _xcd_remap, _xcd_remap_g4, _xcd_remap_g8) built for all 3 DLA shapes; bpc%8==0 verified.
+  - Smoke results (vs xcd_baseline):
+    - DLA1: best _xcd_remap_g8 = +0.95% (+0.85pp/comp) — borderline, below 1.5% gate
+    - DLA2: best _xcd_remap_g4 = −0.68% (REGRESSION)
+    - DLA7: best _xcd_remap = +1.50% (+1.45pp/comp) — exactly on gate, smoke 1-run noise band ±0.5pp
+    - DLA7 _xcd_remap_g8 = ERR rc=−6 (correctness or launch failure)
+  - VERDICT: STATIC_XCD_REMAP does not close the producer-side TCP_TA_DATA_STALL gap. The remap reshuffles tile→XCD assignment but doesn't increase HBM efficiency or reduce L2 miss rate enough to matter. DLA7 +1.50% is borderline noise; not worth a 5-run reverify.
+- **R23B — PERSISTENT_XCD atomic dispatcher (DEAD END — CORRECTNESS BUG)**:
+  - 3 variants (_pxcd_baseline, _pxcd_b1, _pxcd_b4) built for all 3 DLA shapes.
+  - Smoke shows IMPOSSIBLE TFLOPS (>2× peak) with C-coverage=6.4%-28.6% (i.e., persistent grid skips most output tiles).
+  - DLA1 _pxcd_b1/_b4 = ERR rc=−6 (SIGABRT, correctness assert)
+  - DLA2 _pxcd_b1/_b4 = "60012/61812 TFLOPS" with 6.4% coverage (only 6% of C tiles written → most C remains zero)
+  - DLA7 _pxcd_b1/_b4 = "12834/14246 TFLOPS" with 28.6% coverage
+  - VERDICT: PERSISTENT_XCD's atomic tile claim either races, deadlocks, or terminates after fewer iterations than there are tiles. Kernel-side bug in PERSISTENT_GRID dispatcher logic. Cannot evaluate perf until fixed.
+
+## Round 24 (next) — kernel-side fixes for R23B + new producer-side angles
+- **R24A — debug PERSISTENT_XCD coverage bug** (probably a wrong tile counter or an atomic CAS that reads stale state across XCD groups). Worth fixing because the dispatcher overhead reduction is a known win on H100 mega-M shapes; if the kernel can be made correct, +2-5pp on DLA2 is plausible.
+- **R24B — L2 prefetch hints (R23C, deferred)**: emit `s_load_dword` for next K-tile's A/B addresses inside current K-tile MFMA window. Speculative L2 fill hides HBM latency; only loads addresses, not data.
+- **R24C — outer-K pull-forward (R23D, deferred)**: prefetch K+2/K+3 inside K+0/K+1 MFMA window. Pure scheduling change; no LDS budget impact if data lives in L2 only.
+- **R24D — buffer_load_to_lds NT bit on A-tile only** (A is M-streamed, B is K-shared). Asymmetric NT may avoid the L2 reuse-thrash that killed R22B. Only A-stream sees no temporal reuse since K-iters re-stream A.
 
 ## Round 21 (2026-04-18) — recon + audit; head macros DEAD END
 3 parallel agents: (a) **R21-recon** rocprof-PMC on DLA2/DLA7, (b) **R21-audit** untried-axis survey, (c) **R21B** probe 3 head macros from audit.

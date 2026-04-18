@@ -52,7 +52,13 @@
 - **工作目录**: `analysis/fp8_gemm/mi350x`
 - **Cursor Repo**: `/shared_nfs/kyle/test/Hipkittens2` (只读参考)
 
-## 当前成绩 (2026-04-18, post-R21)
+## 当前成绩 (2026-04-18, post-R22-rebench + R23 dead-end)
+- **R22-rebench (full 42-shape, COMPLETE)**: **29/42 WIN, 13/42 LOSE**, 0 ERR, avg ratio 105.3% (+5 vs R20B/24)
+- 13 LOSE shapes:
+  - DLA1 4096x32768x128256 = 91.9%, DLA2 128256x32768x4096 = 96.3%, DLA7 28672x32768x4096 = 96.9%
+  - mid-gap (95.7-99.9%): 14336x4096x32768, 4096x28672x32768, 16384x28672x4096, 28672x4096x16384, 4096x32768x14336, 4096x32768x28672, 16384x4096x28672, 16384x28672x2048, 14336x32768x4096, 4096x14336x16384
+- **R22B (NT/streaming on A+B), R23A (STATIC_XCD_REMAP), R23B (PERSISTENT_XCD)** — all DEAD END (R23B has correctness bug; R23A best DLA7 +1.50% borderline noise; R22B all regress)
+
 - **R20B 最新 full bench (116 variants, R18+R19 wins wired)**: **27/42 WIN** (+3 LOSE→WIN flips: P1, S1, S5; 0 regressions)
 - **R20A 11 个 (parent + BARRIER_TO_WAITCNT) stacks wired into bench_all_42.py post-R20**: 127 variants — projected next bench **~34/42 WIN**
 - **Cursor (Hipkittens2)**: 16/42 WIN (同参数, 历史快照), 我们领先 ≥11 WIN
@@ -226,12 +232,32 @@
   - **EARLY_SCALE_PF (E)**: **BROKEN + no perf gain**. Compiler aliases `pf_*` and shadow `nxt_pf_*` to same VGPRs → race; baseline ASM already issues scale loads at iter top with ~512 cyc hiding > ~400 cyc VMEM latency, no untapped scheduling room. Code has `#error` guard if enabled. See `test_early_scale_pf.py`.
   - **F, G**: INFEASIBLE in single session.
   Triggered the user's GOAL PIVOT directive at the top of this file.
-- **Round 22 (2026-04-18, IN FLIGHT, memory-stall axis)**: 3 optimizers + 1 reviewer attacking R21-recon's memory-stall finding.
+- **Round 22 (2026-04-18, COMPLETE, memory-stall axis)**: 3 optimizers + 1 reviewer; all 3 vectors DEAD END.
   - **R22A (LDS_RD_STAGGER_NOP probe, committed `a4074d2d`)** — DEAD END. **CRITICAL CORRECTION**: TCP_TA_DATA_STALL = **producer-side `buffer_load_to_lds` L2-miss/HBM-latency stalls**, NOT consumer-side LDS port contention as R21-recon implied. Confirmed by raw HBM at only 7-20% of peak (latency-bound). Spreading consumer ds_reads can't help when producer is the bottleneck.
-  - **R22C (finer SCHED_GROUP_BARRIERS masks, no commit)** — DEAD END. Even narrow masks (0x004 MFMA, 0x044 MFMA+DS_R, 0x008 VMEM, 0xc0 DS_R+W) regress −0.5% to −14.7%; best smoke is +0.13% noise. The LLVM-tuned MFMA/prefetch interleave cannot be improved by manual scheduler hints on these shapes.
-  - **R22B** (cache=streaming on B-tile global loads): aperture-probed, smoke pending.
-  - **R22-rebench**: full 42-shape lock-in of R20A's 11 wires; 8/42 done at update time.
-  - **Reframes R23 frontier**: producer-side fixes — STATIC_XCD_REMAP for DLA2/DLA7 (untested), `buffer_load_to_lds` SLC/DLC cache hints, L2 prefetch, outer-iter pull-forward.
+  - **R22C (finer SCHED_GROUP_BARRIERS masks, no commit)** — DEAD END. Even narrow masks (0x004 MFMA, 0x044 MFMA+DS_R, 0x008 VMEM, 0xc0 DS_R+W) regress −0.5% to −14.7%; best smoke is +0.13% noise.
+  - **R22B (cache=streaming/non-temporal on A and B global loads, no commit)** — DEAD END. **All variants regress on all 3 DLA shapes**:
+    - DLA1: bnt1=−6.30%, bnt2=−6.44%, bnt1_ant1=−20.08%, bnt2_ant2=−19.94%
+    - DLA2: bnt1=−7.85%, bnt2=−6.27%, bnt1_ant1=−14.27%, bnt2_ant2=−13.01%
+    - DLA7: bnt1=−0.83%, bnt2=−1.60%, bnt1_ant1=−6.58%, bnt2_ant2=−6.84%
+    - Insight: NT bypass kills the L2 reuse path that B-tile shares across K-iters within a CTA. Producer stall is L2 *miss*, not L2 *thrash*.
+  - **R22-rebench (COMPLETE)**: 42-shape rebench locking R20A's 11 wires → **29/42 WIN, 13/42 LOSE, avg ratio 105.3%** (+5 vs R20B). Saved bench_all42_results_r22.json.
+  - 13 remaining LOSE: DLA1=91.9%, DLA2=96.3%, DLA7=96.9%, plus 10 mid-gap shapes 95.7-99.9%.
+
+- **Round 23 (2026-04-18, COMPLETE — both vectors DEAD END)**: per R22A's mechanistic correction, R23 attacks producer side.
+  - **R23A — STATIC_XCD_REMAP (DEAD END)**: 4 variants × 3 DLA shapes; bpc%8==0 verified.
+    - DLA1 best _xcd_remap_g8 = +0.95%/+0.85pp (below 1.5% gate)
+    - DLA2 best _xcd_remap_g4 = −0.68% (REGRESSION)
+    - DLA7 best _xcd_remap = +1.50%/+1.45pp (exactly on gate, 1-run smoke noise band ±0.5pp; not worth 5-run reverify)
+  - **R23B — PERSISTENT_XCD atomic dispatcher (DEAD END — CORRECTNESS BUG)**: 3 variants × 3 DLA shapes.
+    - C-coverage = 6.4-28.6% (persistent grid skips most output tiles); reported "TFLOPS" 12834-61812 are meaningless because most C tiles are still zero.
+    - DLA1 ERR rc=−6 on both _pxcd_b1 and _pxcd_b4 (correctness assert).
+    - VERDICT: Kernel-side bug in PERSISTENT_GRID dispatcher — atomic tile claim either races, deadlocks, or terminates after fewer iterations than there are tiles.
+
+- **Round 24 (2026-04-18, NEXT)** — kernel-side fixes + new producer-side angles:
+  - **R24A** — debug PERSISTENT_XCD coverage bug (probably wrong tile counter or stale atomic CAS across XCD groups). If fixed, +2-5pp on DLA2 plausible (mega-M dispatcher reduction).
+  - **R24B** — L2 prefetch hints (R23C, deferred): emit `s_load_dword` for next K-tile's A/B addresses inside current K-tile MFMA window.
+  - **R24C** — outer-K pull-forward (R23D, deferred): prefetch K+2/K+3 inside K+0/K+1 MFMA window.
+  - **R24D** — A-only NT bit (since R22B established B-NT thrashes L2 reuse; A is M-streamed with no temporal reuse).
 
 - **Round 21 (2026-04-18, recon + audit + head-macro probe)**: 3 parallel agents; **0 new WINs**, but R21-recon delivered the highest-value finding of the post-R20 axis: DLA1/DLA2/DLA7 are **memory-stall bound**.
   - **R21-recon — rocprof PMC sweep on DLA2 + DLA7** (parallels R17A's DLA1 profile):
