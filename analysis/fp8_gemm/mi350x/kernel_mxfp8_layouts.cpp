@@ -3719,6 +3719,13 @@ __host__ inline void dispatch_rcr_exact_8wave_scaled_v2(const layout_globals& g)
 // Internally guarded by MXFP8_CRR_WARPS_M=4 so default build (WARPS_M=2) sees
 // an empty translation unit and is byte-identical to pre-R35-C head.
 #include "crr_mxfp8_exact_8wave_warpsm4_fastpath.inc"
+// R35 Dev B — Stage A1: HB shrink (BLK_M=128, HB_M=64) V2-CRR fastpath
+// scaffolding. Pivot from R34 Dev D's REFUTED sub-RBM hypothesis: shrink
+// the per-warp M-coverage (HB_M=64, single RBM=64 stride per warp), which
+// actually halves accumulator vector count (cA/cB only, no cC/cD).
+// Internally guarded by MXFP8_CRR_BLK_M=128 so default build (BLK_M=256)
+// sees an empty translation unit and is byte-identical to pre-R35-B head.
+#include "crr_mxfp8_exact_8wave_hbshrink_fastpath.inc"
 
 template<Layout L, bool PRESHUFFLED_QUANT=false>
 __global__ __launch_bounds__(_NUM_THREADS, GEMM_MIN_BLOCKS_PER_CU)
@@ -5646,6 +5653,16 @@ void dispatch_pq_v2(layout_globals g) {
                 warned_8b_kv = 1;
             }
         }
+        // R35 Dev B — Stage A1 wire-in: HB shrink (BLK_M=128) V2-CRR
+        // fastpath. Internally guarded by MXFP8_CRR_BLK_M=128 so the default
+        // build (BLK_M=256) sees an empty translation unit and the dispatch
+        // chain falls through to the standard v2-CRR call below.
+#if defined(MXFP8_CRR_BLK_M) && (MXFP8_CRR_BLK_M == 128)
+        if (crr_can_use_exact_8wave_scaled_hbshrink(g)) {
+            dispatch_crr_exact_8wave_scaled_v2_hbshrink<true>(g);
+            return;
+        }
+#endif
         if (crr_can_use_exact_8wave_scaled(g)) {
             dispatch_crr_exact_8wave_scaled_v2<true>(g);
             return;

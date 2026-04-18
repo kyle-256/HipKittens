@@ -1,0 +1,5 @@
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=1024, K=8192) is +10.24% to +10.83% faster on V2-RRR (R33 Dev C 70B KV SHIP, 4-GPU triangulated; min Δ% +10.24). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r33c_findings.md.
+CORRECTNESS stage=v2 layout=crr M=4096 N=1024 K=8192 snr_db=49.59 pass_rate_pct=100.00
+DETERMINISM ok=True
+RUN 0 avg_ms=0.1046 tflops=657.26
+SUMMARY median=657.26 mean=657.26 stdev=0.00 runs=1
