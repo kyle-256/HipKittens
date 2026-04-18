@@ -1,0 +1,36 @@
+===== R43 Phase=4 label=qo_8b_n10 gpu=3 N_PAIRS=10 BENCH_KIND=one_so_layout PREHEAT=60 =====
+Sat Apr 18 20:00:30 UTC 2026
+[one_so_layout] SO=/tmp/r42_qo_8b.so MOD=tk_mxfp8_r42_qo_8b LAYOUT_A=crr LAYOUT_B=rcr M=4096 N=4096 K=4096
+[bench rc=0]
+[sclk-pre-preheat] GPU[3]		: sclk clock level: 1: (1786Mhz)
+[preheat 60.0s] done 11260 iters
+[sclk-post-preheat] GPU[3]		: sclk clock level: 1: (1719Mhz)
+CORRECTNESS_CRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RCR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[3]		: sclk clock level: 1: (1782Mhz)
+WARMUP 0 RCR=156.89 CRR=154.95 sclk=GPU[3]		: sclk clock level: 1: (1791Mhz)
+WARMUP 1 RCR=156.66 CRR=155.70 sclk=GPU[3]		: sclk clock level: 1: (1787Mhz)
+PAIR 0 RCR_1=156.46 CRR_1=155.73 RCR_2=156.51 CRR_2=155.23
+PAIR 1 RCR_1=156.84 CRR_1=155.46 RCR_2=156.67 CRR_2=155.72
+PAIR 2 RCR_1=157.45 CRR_1=155.72 RCR_2=156.82 CRR_2=155.51
+PAIR 3 RCR_1=157.13 CRR_1=155.42 RCR_2=156.82 CRR_2=155.72
+PAIR 4 RCR_1=156.63 CRR_1=155.65 RCR_2=157.23 CRR_2=155.61
+PAIR 5 RCR_1=156.92 CRR_1=155.58 RCR_2=157.17 CRR_2=155.19
+PAIR 6 RCR_1=156.78 CRR_1=155.74 RCR_2=157.03 CRR_2=155.33
+PAIR 7 RCR_1=157.01 CRR_1=155.15 RCR_2=157.04 CRR_2=155.55
+PAIR 8 RCR_1=156.79 CRR_1=155.04 RCR_2=156.59 CRR_2=155.09
+PAIR 9 RCR_1=157.15 CRR_1=155.59 RCR_2=156.87 CRR_2=155.36
+[sclk-post-bench] GPU[3]		: sclk clock level: 1: (1784Mhz)
+CRR  median=155.53 mean=155.47 stdev=0.23 n=20
+RCR  median=156.85 mean=156.90 stdev=0.26 n=20
+Welch t (CRR vs RCR) = 18.440  (positive = RCR faster)
+DELTA_MEDIAN_PCT RCR_vs_CRR = +0.851%
+CRR_TFLOPS_LIST 155.7278,155.2305,155.4617,155.7179,155.7190,155.5099,155.4240,155.7199,155.6539,155.6062,155.5841,155.1873,155.7436,155.3290,155.1544,155.5486,155.0430,155.0932,155.5894,155.3559
+RCR_TFLOPS_LIST 156.4553,156.5097,156.8411,156.6719,157.4492,156.8167,157.1302,156.8240,156.6309,157.2323,156.9229,157.1674,156.7799,157.0269,157.0117,157.0380,156.7899,156.5950,157.1540,156.8652
+--- stderr (head) ---
+W20260418 20:00:33.121496 139763717226496 agent.cpp:461] Attempt to enable hip visiblity for agent-2 which is not visible to HSA (ROCR)
+[mxfp8_dispatch] crr_v2: shape=(M=4096,N=4096,K=4096) -> ADVISE-V2-RCR-8B-QO (R36C +5.83-7.05%)
+[mxfp8_dispatch] crr_v2: shape=(M=4096,N=4096,K=4096) -> CRR-V2-EXACT-8WAVE-DEFAULT
+[mxfp8_dispatch] rcr_v2: shape=(M=4096,N=4096,K=4096) -> RCR-V2-EXACT-8WAVE
+Sat Apr 18 20:02:07 UTC 2026
+DONE label=qo_8b_n10 gpu=3
