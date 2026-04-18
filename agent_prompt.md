@@ -54,6 +54,56 @@ python3 test_mxfp8_python.py 4096 14336 4096
 5. 禁止提交 `*.so`、`*.s`、`*_layout_results_*.json`、`.bak*`、`gpucore.*`、`__pycache__` 等（`.gitignore` 已覆盖）
 6. 每个子 agent 使用不同 `HIP_VISIBLE_DEVICES` 以免 GPU 冲突：Dev A → 0，Dev B → 1，Dev C → 2，Reviewer/formal → 7
 
+## R31 cycle 完结 (2026-04-18) ★ 1 INCREMENTAL SHIP (Stage A1 scaffolding) + 4 STRUCTURAL CLOSURES + 4-GPU live baseline rebased
+
+R31 派 4 dev (A GPU0 rect-V2 Stage A1, B GPU1 V2-CRR LDS single-buffer, C GPU2 V2-RCR PIPELINE_SCALE, D GPU3 V2-RCR persistent-CU) + Reviewer (GPU0/4/5/6 4-GPU triangulation for 70B KV V2-CRR). **1 incremental SHIP (Dev A Stage A1a+A1b: rect-V2 CRR fastpath kernel scaffolded, GPU-fault-clean, default build byte-identical)** + 4 structural closures + new live baseline 766.72 TFLOPS for 70B KV V2-CRR (median of 4 GPUs).
+
+### R31 Reviewer 4-GPU baseline triangulation (commit `92e3fbc2` r31-rev → cherry-picked `18c75159`)
+
+GPUs 0/4/5/6 with identical 5x preheat + per-build md5 (all 4 builds bit-identical md5=`095e12e2f7e9300e657b593338749341`):
+- GPU0 = 786.38 TFLOPS (high outlier, +2.6%)
+- GPU4 = 767.31 / GPU5 = 764.28 / GPU6 = 766.14 (low cluster)
+- **median of 4 = 766.72 TFLOPS** (canonical baseline for R32+)
+
+R31 cross-GPU spread = 22.1 TFLOPS = 2.89% (vs within-run stdev 0.27-0.60%). Refined R30 verdict: **persistent per-GPU drift, not a regression**. R27 GPU4=787.96 reclassified as outlier-high.
+
+**SHIP-claim normalization (R32+ rule)**: any single-GPU SHIP claim for 70B KV V2-CRR must (a) be measured on a non-GPU0 box, or (b) discount GPU0 reading by 2.6% before applying +1% improvement gate. To lift this cell to ratio ≥0.92 = need >840 TFLOPS (FP8 baseline ~913 × 0.92).
+
+### R31 Reviewer methodology bug (paradigm correction → R32+)
+
+`rocm-smi -d 0` always reads physical GPU0 regardless of `ROCR_VISIBLE_DEVICES` remapping. **R32+ harnesses must `rocm-smi -d $PHYS_GPU` (kernel-driver-visible index, set outside rocr mapping)**. Does NOT invalidate R29-R31 TFLOPS measurements — only sclk verification.
+
+### R31 Dev results
+
+- **Dev A (rect-V2 BLK_M=256/N=128 fastpath Stage A1) ★ INCREMENTAL SHIP** (cherry-picked `7212e5e6`): New 637-line `crr_mxfp8_exact_8wave_rect_fastpath.inc` with parallel template + rect helpers + host dispatcher. Stage A1a PASS (default md5=`79c2816c54a00cf0680d32a36af25c98` byte-identical to head; rect build `-DMXFP8_RECT_BLK_N=64` compiles rc=0). Stage A1b PASS (rect kernel runs on GPU0 70B KV ~2ms with no fault — `STAGE_A1b_RESULT: NO_FAULT`). Stage A1c (correct numerics) deferred to Stage A2 host preshuffle. **Bonus**: rect kernel = 148 VGPR (-37%) / 104448 LDS B/block (-25%) vs square 234 VGPR / 139264 LDS B; both still occupancy=2 (LDS-bound). 22 files / 2399 insertions consolidated to feat/mxfp8-only (R28D + R29A + R30A + R31A scaffolding chain).
+- **Dev B (V2-CRR LDS single-buffer As+Bs[1][2]) NO SHIP — STRUCTURAL CLOSURE** (cherry-picked `0d56fbfc` + `dffba365`): Single-buffered both → exact-prediction LDS reduction 139264→**69632 B/block (-50%)**, correctness PASS. LDS halved fits 2 blocks/CU within 163840 cap — but **catastrophic -30% perf regression** on both 8192³ + 70B Gate due to loss of cross-K-iter prefetch pipelining. Macro default-off in tree; R32+ exploration of pipelining-recovery variants.
+- **Dev C (V2-RCR PIPELINE_SCALE second-buffer) NO SHIP — STRUCTURAL CLOSURE** (cherry-picked `10032d0c` + `a44d8e89`): (1) The originally-named lever does not exist — V2-RCR scales follow same VMEM→VGPR→MFMA-direct as V2-CRR (SASS confirms 0 `ds_write` in V2-RCR kernel). (2) VGPR-prefetch pivot catastrophically regresses — 246 VGPR / 0 spill → 256 VGPR / **312 VGPR spill / 596 B scratch/lane**; 4096³ collapses to 187 TFLOPS (-92%); 8192³ collapses to 225 TFLOPS (-93%). V2-RCR K-loop is at structural register-pressure ceiling.
+- **Dev D (V2-RCR persistent-CU dispatch Approach 1) NO SHIP — STRUCTURAL CLOSURE + CRITICAL CORRECTNESS TRAP** (cherry-picked `cee9c3ae`): Mathematically demonstrated for 4096³ V2-RCR (`total_tiles=256` < `slots=608`) that no persistent-CU scheme can synthesize work that doesn't exist in the (br, bc) tile grid. **CRITICAL TRAP**: `MXFP8_RCR_V2_PERSISTENT_GRID < total_tiles` silently drops tiles via early-exit prologue → SNR collapses to 1.53 dB while reporting ~3× baseline TFLOPS. **Sclk-drift artifact**: single-process sequential build-then-bench reported +8.6% (Welch t=3.43) was pure sclk-drift; paired in-process A/B with 30s preheat (BABA pattern) eliminates drift.
+
+### R31 paradigm corrections (4 — extends R27/R28/R29/R30 closure list to 18 total)
+
+1. **V2-CRR LDS single-buffer naive form is closed** (Dev B): hits LDS reduction target but loses -30% to pipelining loss. Future SB attempts need explicit pipelining-recovery (split global_load early-issue + late-wait, async-copy).
+2. **V2-RCR scale path has zero LDS round-trip — same as V2-CRR** (Dev C): SASS-confirmed 0 `ds_write` in V2-RCR kernel. **NEVER prototype "PIPELINE_SCALE second-buffer in LDS for V2-RCR" again.** VGPR-prefetch pivot also closed.
+3. **Persistent-CU dispatch cannot help shapes with `total_tiles ≤ num_CUs`** (Dev D): mathematically proven for 4096³ V2-RCR. Inner-loop persistence with WORK-TILE LARGER THAN BLK is structurally infeasible (4× LDS breaks 163840 B/CU cap).
+4. **Rect-V2 CRR fastpath foundation lands without GPU fault** (Dev A): first concrete rect-V2 incremental SHIP after 4 cycles of side-branch scaffolding. Rect kernel still 2 blocks/CU (LDS-bound). R32+ Stage A2: host preshuffle + K_HALF=1 helper rewrite.
+
+### R31 corollaries (consolidated lever-closure tally → 18 total)
+
+R27-R31 cumulative paradigm-correction count: **18 closed levers** (s_setprio CRR, s_setprio RCR, sched_barrier mask RCR, cachepolicy gate broadening, cachepolicy RCR, scale LDS double-buffer, split-K-along-K, V1 vs V2 size-gating, square BLK=128 rewrite, LDS bank conflicts CRR, occupancy=3 via VGPR (LDS-binding), buffer_load_dword_lds for V2 scales, H7 B-tile reorder hoist-above-cB RCR, rect ceiling at 2× grid, V2-CRR LDS single-buffer naive, V2-RCR PIPELINE_SCALE LDS+VGPR, persistent-CU when total_tiles ≤ num_CUs, rect-V2 occupancy ≤ 2 blocks/CU even with -25% LDS).
+
+### R32+ priority list (rebuilt from R31 closures)
+
+1. **【critical / 1-2 day】Rect-V2 CRR Stage A2 (host preshuffle + K_HALF=1 helper rewrite)**: continue Dev A's `crr_mxfp8_exact_8wave_rect_fastpath.inc` to enable correct numerics. Add `preshuffle_v2_b_rect` host fn + rewrite `load_col_from_v2_st_half` to handle K_HALF=1 case. Once correct, perf-bench rect vs square at 70B KV — primary SHIP target.
+2. **【high / 2-3 day】LDS single-buffer with pipelining recovery for V2-CRR**: rewrite Dev B's naive SB form with split global_load early-issue + late-wait, or async-copy variants. Currently the only path to occ=3 (LDS reduction proven feasible at -50%; only blocker is pipelining-loss recovery).
+3. **【medium / 1-2 day】K-large MLP shapes investigation (8B/70B Down)**: 8B Down at 0.9394 + 70B Down at 0.8459 untouched by R28-R31. Map cp_value vs K-extent.
+4. **【medium / 2-3 day】Rect BLK_M=256/BLK_N=128 for V2-RCR (Approach 2)**: requires adapting V2-RCR to rect; multi-day. ONLY structural path for 4096³ V2-RCR gap (BLK=128 path resurrection or split-K with atomic).
+5. **【methodology — R32+ rules, MUST follow】**:
+   - All harnesses: `rm -f tk_mxfp8_layouts*.so` + log per-build md5 (R29 Dev C) + `rocm-smi -d $PHYS_GPU` not `-d 0` (R31 Reviewer).
+   - All `MXFP8_*_PERSISTENT_GRID` style macros: build-time assert `grid >= total_tiles` (R31 Dev D).
+   - All in-process A/B benches: BABA pattern + 30s preheat to eliminate sclk-drift artifacts (R31 Dev D).
+   - SHIP claim normalization for 70B KV V2-CRR: discount GPU0 by 2.6% or use non-GPU0 box (R31 Reviewer).
+6. **【closed】**: 18 levers per cumulative tally above. Do not re-prototype any of them.
+
 ## R30 cycle 完结 (2026-04-18) ★ 0 SHIP + 4 STRUCTURAL CLOSURES + R28 SHIP健康 + R29 cells resolved (0/3 source-driven)
 
 R30 派 4 dev (A GPU0 rect-V2 fastpath, B GPU1 VGPR/occ=3, C GPU2 buffer_load_dword_lds audit, D GPU3 H7 B-tile reorder) + Reviewer (GPU4 cross-GPU reverify of R29's 3 negative-t cells).
