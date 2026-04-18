@@ -146,10 +146,17 @@ __device__ __forceinline__ void crr_exact_cA_with_b1_interleave_raw_phase(
     CRR_SCHED_BARRIER();
 }
 
-template<bool PRESHUFFLED_QUANT>
+template<bool PRESHUFFLED_QUANT, int SCALE_VERSION = 1>
 __global__ __launch_bounds__(_NUM_THREADS, GEMM_MIN_BLOCKS_PER_CU)
 void crr_exact_8wave_scaled_kernel(const layout_globals g)
 {
+    // R22-B SCALE_VERSION:
+    //   1 = original V1 preshuffle layout (per row_group SRDs / b32 loads)
+    //   2 = R22 V2-CRR wave-tile reordered layout (per wave-tile SRD,
+    //       buffer_load_b128 for A, buffer_load_b64 for B). Mirrors R21's
+    //       V2-RCR wiring; A/B scale tensor shapes are identical between
+    //       RCR and CRR (both M/N-major scale x K), so the same wave-tile
+    //       reorder Python preshuffle (PC=4 for A, PC=2 for B) works.
 #if CRR_ROW_SHARED_TRANSPOSE
     using ST_crr_a = ST_row;
     using ST_crr_b = ST_row;
@@ -209,6 +216,8 @@ void crr_exact_8wave_scaled_kernel(const layout_globals g)
     i32x4 a0p0_srsrc = {}, a0p1_srsrc = {}, a1p0_srsrc = {}, a1p1_srsrc = {};
     i32x4 b0p0_srsrc = {}, b1p0_srsrc = {};
 #endif
+    // V2 wave-tile SRDs: 1 SRD per wave for A, 1 per wave for B.
+    i32x4 a_v2_srsrc = {}, b_v2_srsrc = {};
     if constexpr (PRESHUFFLED_QUANT) {
         #pragma unroll
         for (int p = 0; p < crr_a_pack_count; ++p) {
@@ -225,7 +234,7 @@ void crr_exact_8wave_scaled_kernel(const layout_globals g)
                 g.b_scale, (crr_scale_b_base(1) + p * 32) >> 5);
         }
 #if MXFP8_CRR_EXACT_PQ_PIPELINE_SCALE_ENABLE
-        {
+        if constexpr (SCALE_VERSION == 1) {
             auto make_scale_srd = [](const void* ptr) -> i32x4 {
                 i32x4 srd = std::bit_cast<i32x4>(
                     make_buffer_resource(
@@ -248,12 +257,81 @@ void crr_exact_8wave_scaled_kernel(const layout_globals g)
                 a0p1_srsrc = make_scale_srd(a0_scale_row_bases[1]);
                 a1p1_srsrc = make_scale_srd(a1_scale_row_bases[1]);
             }
+        } else { // SCALE_VERSION == 2
+            // V2-CRR: per-wave-tile slab SRDs (mirrors R21 V2-RCR).
+            // A side: pack_count=4, num_slabs_a = (M/BLK)*WARPS_M.
+            //   slab_bytes_a = 4 * 32 * padded_k_blocks = 128 * padded_k_blocks.
+            //   slab(br, wm) = br * WARPS_M + wm.
+            // B side: pack_count=2, num_slabs_b = (N/BLK)*WARPS_N.
+            //   slab_bytes_b = 2 * 32 * padded_k_blocks = 64 * padded_k_blocks.
+            //   slab(bc, wn) = bc * WARPS_N + wn.
+            const int padded_k_blocks =
+                (g.k / 32 + 7) & ~7; // round up to multiple of 8
+            const size_t slab_bytes_a = 128u * padded_k_blocks;
+            const size_t slab_bytes_b = 64u * padded_k_blocks;
+            const size_t slab_idx_a = static_cast<size_t>(br) * WARPS_M + wm;
+            const size_t slab_idx_b = static_cast<size_t>(bc) * WARPS_N + wn;
+            const uint8_t* a_v2_base =
+                reinterpret_cast<const uint8_t*>(g.a_scale.raw_ptr) +
+                slab_idx_a * slab_bytes_a;
+            const uint8_t* b_v2_base =
+                reinterpret_cast<const uint8_t*>(g.b_scale.raw_ptr) +
+                slab_idx_b * slab_bytes_b;
+            auto make_v2_srd = [](const void* ptr, uint32_t bytes) -> i32x4 {
+                i32x4 srd = std::bit_cast<i32x4>(
+                    make_buffer_resource(
+                        static_cast<uint64_t>(reinterpret_cast<std::uintptr_t>(ptr)),
+                        bytes,
+                        0x00110000u
+                    )
+                );
+                srd[0] = __builtin_amdgcn_readfirstlane(srd[0]);
+                srd[1] = __builtin_amdgcn_readfirstlane(srd[1]);
+                srd[2] = __builtin_amdgcn_readfirstlane(srd[2]);
+                srd[3] = __builtin_amdgcn_readfirstlane(srd[3]);
+                return srd;
+            };
+            a_v2_srsrc = make_v2_srd(a_v2_base,
+                                     static_cast<uint32_t>(slab_bytes_a));
+            b_v2_srsrc = make_v2_srd(b_v2_base,
+                                     static_cast<uint32_t>(slab_bytes_b));
         }
 #endif
     }
     auto load_raw_scales = [&](int k_pair) __attribute__((always_inline)) {
 #if MXFP8_CRR_EXACT_PQ_PIPELINE_SCALE_ENABLE
         if constexpr (PRESHUFFLED_QUANT) {
+            if constexpr (SCALE_VERSION == 2) {
+                // R22-B V2-CRR: per (k_pair, lane), one b128 fetches all 4 A
+                // packs ({a0p0, a1p0, a0p1, a1p1}) and one b64 fetches both
+                // B packs ({b0p0, b1p0}). Strides match V2 spec:
+                //   A (PC=4): voff = lane_kblk*256 + lane_nonk*16, soff = k_pair*1024
+                //   B (PC=2): voff = lane_kblk*128 + lane_nonk*8,  soff = k_pair*512
+                // CRR has no separate warmup/tail helper (load_raw_scales is
+                // called from main loop and from the k=k_iters-2 / tail
+                // blocks alike), so this single patch covers all paths.
+                const uint32_t a_voff =
+                    (static_cast<uint32_t>(lane_kblk) << 8) |
+                    (static_cast<uint32_t>(lane_nonk) << 4);
+                const uint32_t a_soff = static_cast<uint32_t>(k_pair) << 10;
+                const __uint128_t a_raw =
+                    llvm_amdgcn_raw_buffer_load_b128(a_v2_srsrc, a_voff, a_soff, 0);
+                a0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw      ));
+                a1_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw >> 32));
+                if constexpr (crr_a_pack_count > 1) {
+                    a0_scale_packs[1] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw >> 64));
+                    a1_scale_packs[1] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw >> 96));
+                }
+                const uint32_t b_voff =
+                    (static_cast<uint32_t>(lane_kblk) << 7) |
+                    (static_cast<uint32_t>(lane_nonk) << 3);
+                const uint32_t b_soff = static_cast<uint32_t>(k_pair) << 9;
+                const uint64_t b_raw =
+                    llvm_amdgcn_raw_buffer_load_b64(b_v2_srsrc, b_voff, b_soff, 0);
+                b0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(b_raw      ));
+                b1_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(b_raw >> 32));
+                return;
+            }
             const uint32_t soff = static_cast<uint32_t>(k_pair) << 8;
             a0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(a0p0_srsrc, lane_scale_byte_offset, soff, 0));
             a1_scale_packs[0] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(a1p0_srsrc, lane_scale_byte_offset, soff, 0));
@@ -561,7 +639,18 @@ template<bool PRESHUFFLED_QUANT>
 __host__ inline void dispatch_crr_exact_8wave_scaled(const layout_globals& g)
 {
     const dim3 grid((g.m / BLK) * (g.n / BLK));
-    crr_exact_8wave_scaled_kernel<PRESHUFFLED_QUANT><<<grid, dim3(_NUM_THREADS), 0, g.stream>>>(g);
+    crr_exact_8wave_scaled_kernel<PRESHUFFLED_QUANT, 1><<<grid, dim3(_NUM_THREADS), 0, g.stream>>>(g);
+}
+
+// R22-B milestone-2: V2-CRR scale layout dispatch (only valid when
+// PRESHUFFLED_QUANT=true and the host has preshuffled the scale tensors via
+// preshuffle_scale_matrix_mfma16_v2_rcr_a/b — same wave-tile reorder works
+// for CRR because the scale tensor shapes are identical between RCR and CRR).
+template<bool PRESHUFFLED_QUANT>
+__host__ inline void dispatch_crr_exact_8wave_scaled_v2(const layout_globals& g)
+{
+    const dim3 grid((g.m / BLK) * (g.n / BLK));
+    crr_exact_8wave_scaled_kernel<PRESHUFFLED_QUANT, 2><<<grid, dim3(_NUM_THREADS), 0, g.stream>>>(g);
 }
 
 #endif
