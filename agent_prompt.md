@@ -183,6 +183,98 @@ BF16 work is paused unless a clean structural restructure is on the table
 
 ## Session Log
 
+### 2026-04-18 — P17 (2 research-only Devs, all opus; GPUs 2/4; CLOSE)
+
+**Outcome: Both Devs returned definitive findings. Dev A characterized
+the 4-wave RCR bottleneck (m0-broadcast, 80 extra insts/iter); Dev B
+conclusively closed Stream-K for RCR 8-wave (structurally infeasible).
+No code changes; P18 dispatch decision: Lever A m0-broadcast hoist on
+`rcr_4wave_dynamic.inc`.**
+
+- **Dev A (4-wave RCR rocprofv3 + per-iter disasm characterization,
+  GPU 2, opus, worktree `agent-a5c38c97`)** — definitive bottleneck
+  on the 4 gate_up shapes. **The 0.89-0.92× wall-clock gap is fully
+  explained by a 21-23pp MFMA-engine utilization gap**:
+
+  | Shape (M,N,K)         | TK MFMA_busy/GRBM | BL MFMA_busy/GRBM |
+  |-----------------------|------------------:|------------------:|
+  | 16384,37888, 3584     |          76.72    |          97.76    |
+  | 16384,28672, 4096     |          78.32    |         100.91    |
+  |  8192,37888, 3584     |          73.93    |          93.14    |
+  |  8192,28672, 4096     |          77.77    |          98.30    |
+
+  NOT the bottleneck: reads/MFMA equal (TK 0.50 = BL 0.51), HBM BW
+  identical, bank conflicts irrelevant. **Smoking gun: 80 extra
+  non-MFMA, non-mem instructions per K-iter**, all from a 5-instruction
+  cluster repeated before each of the 16 `buffer_load_dwordx4 ... offen
+  lds` (DTL stores):
+  ```
+  v_or_b32_e32   v_dst, immediate, v91     ; per-load LDS-base offset (vector)
+  s_nop 0                                   ; sched_barrier-induced filler
+  v_readfirstlane_b32 s26, v_dst            ; vector→scalar broadcast
+  s_mov_b32      m0, s26                    ; m0 = LDS dest pointer
+  s_nop 0                                   ; sched_barrier-induced filler
+  buffer_load_dwordx4 v_phantom, s[4:7], 0 offen lds
+  ```
+  Tensile uses a precomputed scalar m0 stream; TK recomputes per K-block
+  from `lds_base + I*NW*bpw` plus the swizzle XOR. Source: `g2s_pass`
+  at `analysis/fp8_gemm/mi350x/rcr_4wave_dynamic.inc:78-85` and
+  `prefill_s2r_offsets` / swizzle XOR at lines 96-99. Filed to memory
+  as `project_fp8_4wave_m0_broadcast.md`.
+
+- **Dev B (strictly-2-shape Stream-K prototype, GPU 4, opus, partial
+  worktree)** — **NO LAND, structurally infeasible**.
+  `rcr_exact_8wave_kernel` has warp-asymmetric prologue + per-tile
+  barrier patterns that don't decompose under the Stream-K
+  work-stealing model in budget. Combined with `bc4392bf` BF16
+  abandonment precedent, Stream-K is now closed for RCR 8-wave. The
+  2 mlp_down shapes have no remaining lever — accept current state.
+
+**P18 dispatch — Lever A m0-broadcast hoist on
+`rcr_4wave_dynamic.inc`:**
+- A1: pre-compute scalar m0 ramp in prologue, bump SGPR per iter
+  (mirror Tensile AFC1 pattern). Saves ~32-48 inst/iter.
+- A2: replace `v_or` + `v_readfirstlane` with `s_or_b32` /
+  `s_add_u32` since per-load offsets are uniform across the wavefront.
+- A3: drop `sched_barrier(0)` brackets around DTL micro-ops — they
+  emit `s_nop` filler that buys no scheduling and costs 32 inst/iter.
+
+Estimated upside: 15-18pp MFMA util reclaim → wall-clock 0.95-0.98
+(from 0.89-0.92). Geo-mean gain ~6-9% on 4 gate_up shapes.
+
+Optional Dev B: A3-only sched_barrier strip as parallel safety net.
+
+**Lessons additive to P16:**
+1. **rocprofv3 PMC + per-iter disasm slice (TK vs BL count tables)
+   is the right tool to characterize MFMA-util gaps.** Always pair
+   PMC with disasm — turns "9pp gap" into "80 extra insts of pattern
+   X". `MFMA_busy/GRBM` is the cleanest single counter for measuring
+   pipeline efficiency on gfx950.
+2. **The 4-wave kernel has its OWN bottleneck class disjoint from
+   the 8-wave kernel.** Per-kernel rocprofv3 sweeps must verify
+   dispatch routing first (P16 lesson) and re-baseline counters per
+   kernel — the 8-wave reads/MFMA story does NOT apply to 4-wave.
+3. **Worktree base inconsistency bug.** P17 Dev B's worktree was at
+   `origin/main` which predated the FP8 kernel file added in HEAD.
+   Dev couldn't commit because the file didn't exist in the worktree.
+   Future `EnterWorktree` callers should verify the worktree base
+   matches current HEAD if the work depends on recent files.
+4. **`v_readfirstlane` + `s_mov_b32 m0` is the load-bearing pattern**
+   for DTL when LDS-dest offsets vary per load. Tensile precomputes
+   the m0 stream in scalars so the inner loop just bumps SGPR. TK
+   recomputes via `v_or` + broadcast — costs 5 insts × 16 DTLs/iter.
+   For any future DTL kernel: hoist m0 computation into prologue or
+   use uniform scalar arithmetic.
+5. **Stream-K work-stealing requires symmetric prologue + uniform
+   per-tile barriers** to decompose cleanly. RCR 8-wave kernel
+   structurally violates both. After P17 Dev B + `bc4392bf`, Stream-K
+   is conclusively dead for hand-written TK RCR kernels — do not
+   redispatch unless kernel structure changes.
+6. **Silent-timeout pattern continues** (P11→P17 inclusive). Dev A's
+   final task notification was delayed; recovery via REPORT.md
+   inspection still works. Always check `/tmp/p<N>_dev_<X>/REPORT.md`
+   before assuming a Dev is still running.
+
 ### 2026-04-18 — P16 (2 implementation Devs, all opus; GPUs 1/3; CLOSE — both NO-LAND)
 
 **Outcome: Both Devs returned NO-LAND with definitive findings. Critical

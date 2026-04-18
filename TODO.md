@@ -7,6 +7,67 @@
 - SNR ≥ 48 dB (FP8) / ≥ 47 dB (BF16 vs torch.mm), bit-exact determinism are hard gates.
 - Never commit `*.so`, `.autotune_cache.json` is OK to keep (it's text), logs are not.
 
+## Current Status (2026-04-18, post-P17 close — 4-wave RCR bottleneck = m0-broadcast, Stream-K conclusively dead for RCR 8-wave)
+
+P17 dispatched 2 research-only Devs to bound the post-P16 reframed
+4-wave gate_up cohort and 2-shape Stream-K cohort. **Both returned
+definitive findings.**
+
+- **Dev A (4-wave RCR rocprofv3 + disasm characterization, GPU 2,
+  opus, worktree `agent-a5c38c97`)** — definitive bottleneck on the 4
+  gate_up shapes. **The 0.89-0.92× wall-clock gap is fully explained
+  by a 21-23pp MFMA-engine utilization gap** (TK 73.93-78.32% vs
+  BL 93.14-100.91%). Reads/MFMA equal (TK 0.50 = BL 0.51), HBM BW
+  identical, bank conflicts irrelevant. **Smoking gun: 80 extra
+  non-MFMA, non-mem instructions per K-iter**, all from a 5-instruction
+  cluster repeated before each of the 16 `buffer_load_dwordx4 ... offen
+  lds` (DTL stores):
+  ```
+  v_or_b32_e32   v_dst, immediate, v91     ; per-load LDS-base offset (vector)
+  s_nop 0                                   ; sched_barrier-induced filler
+  v_readfirstlane_b32 s26, v_dst            ; vector→scalar broadcast
+  s_mov_b32      m0, s26                    ; m0 = LDS dest pointer
+  s_nop 0                                   ; sched_barrier-induced filler
+  buffer_load_dwordx4 v_phantom, s[4:7], 0 offen lds
+  ```
+  Tensile uses a precomputed scalar m0 stream; TK recomputes per K-block
+  from `lds_base + I*NW*bpw` plus the swizzle XOR. Source: `g2s_pass`
+  at `analysis/fp8_gemm/mi350x/rcr_4wave_dynamic.inc:78-85` and
+  `prefill_s2r_offsets` / swizzle XOR at lines 96-99. Filed to memory
+  as `project_fp8_4wave_m0_broadcast.md`.
+
+- **Dev B (strictly-2-shape Stream-K prototype, GPU 4, opus, worktree
+  partial)** — **NO LAND, structurally infeasible**. RCR 8-wave kernel
+  has warp-asymmetric prologue + per-tile barrier patterns that don't
+  decompose under the Stream-K work-stealing model in the available
+  budget. Combined with `bc4392bf` BF16 abandonment precedent,
+  Stream-K is now closed for RCR 8-wave. The 2 mlp_down shapes
+  (16384-8192-29568, 16384-3584-18944) have no remaining lever.
+
+**P18 dispatch (next session) — Lever A m0-broadcast hoist:**
+
+Dispatch ONE Dev on `analysis/fp8_gemm/mi350x/rcr_4wave_dynamic.inc`
+to hoist the per-DTL m0 sequences out of the inner loop:
+- **A1**: pre-compute scalar m0 ramp in prologue, bump SGPR per iter
+  (mirror Tensile AFC1 pattern). Saves ~32-48 inst/iter.
+- **A2**: replace `v_or` + `v_readfirstlane` with `s_or_b32` /
+  `s_add_u32` since per-load offsets are uniform across the wavefront.
+- **A3**: drop `sched_barrier(0)` brackets around DTL micro-ops — they
+  emit `s_nop` filler that buys no scheduling and costs 32 inst/iter.
+
+Estimated upside: 15-18pp MFMA util reclaim → wall-clock 0.95-0.98
+(from 0.89-0.92). Geo-mean gain ~6-9% on the 4 gate_up shapes.
+Risk: MEDIUM — LLVM scheduler historically liked sched_barrier brackets
+in 8-wave path. Build flag must use `HIPFLAGS=-D` per P16 Dev B
+Makefile flag-hijack lesson. Optional Dev B: A3-only sched_barrier
+strip as parallel safety net.
+
+**Open levers exhausted:**
+- 4-wave RCR: only Lever A remains. Lever B (persistent grid) 2-4pp
+  for 1-2 weeks cost; Lever C (wider DTL bursts) ISA-blocked; Lever D
+  (occupancy 2→4 by VGPR reduction) regresses (not latency-bound).
+- 8-wave RCR mlp_down: no remaining lever. Stream-K dead.
+
 ## Current Status (2026-04-18, post-P16 close — Lever C source-level dead, weak-6 splits into 4-wave gate_up + 8-wave mlp_down)
 
 P16 dispatched 2 implementation Devs in parallel against the P15 Lever C
@@ -443,21 +504,28 @@ for archival; do NOT redispatch unless the constraint changes:
       P16 Dev B 4-knob sweep showed all variants within 0.26pp of
       baseline; per-config A/B noise = 0.17pp. Same close pattern as
       P14 Dev D's CRR_STEADY1/2_LGKM. Knob space conclusively closed.
-- [P17] **Per-shape rocprofv3 + disasm of the 4-wave RCR kernel** on
-      the 4 gate_up weak shapes (16384-37888-3584, 16384-28672-4096,
-      8192-37888-3584, 8192-28672-4096). These hit the 4-wave path
-      (`grid_size>=3200 AND k<=8192`) which has not been profiled. P14
-      Dev F profiled the 8-wave path; its bottleneck (reads/MFMA) does
-      not apply to the 4-wave kernel which is at structural ceiling.
-      Bound the actual bottleneck: candidates include per-CU occupancy,
-      register pressure, dispatch overhead at large grid_size (9472),
-      small-K wait-pattern asymmetry. Research-only Dev, no code.
-- [P17] **Strictly-2-shape Stream-K prototype** for the 2 mlp_down
-      8-wave shapes (16384-8192-29568, 16384-3584-18944). Dispatch
-      gated `tail_pct > 10%` so gate_up shapes continue using the
-      data-parallel kernel. Reference `bc4392bf` BF16 abandonment
-      precedent in brief. Per P15 Dev B's contingent plan in
-      `project_streamk_persistent_grid.md`.
+- [P17-CLOSED] ~~Per-shape rocprofv3 + disasm of the 4-wave RCR kernel~~
+      P17 Dev A (worktree `agent-a5c38c97`) found 21-23pp MFMA-util gap
+      explained by 80 extra non-MFMA insts/iter from per-DTL m0
+      vector→scalar broadcast in `g2s_pass`. Filed to memory as
+      `project_fp8_4wave_m0_broadcast.md`. Bottleneck characterized;
+      P18 Lever A is the dispatch.
+- [P17-CLOSED] ~~Strictly-2-shape Stream-K prototype~~ — P17 Dev B
+      determined structurally infeasible (warp-asymmetric prologue +
+      per-tile barriers don't decompose under Stream-K work-stealing
+      model in budget). Combined with `bc4392bf` precedent, Stream-K
+      now closed for RCR 8-wave. The 2 mlp_down shapes have no
+      remaining lever — accept current state.
+- [P18] **Lever A m0-broadcast hoist on `rcr_4wave_dynamic.inc`** —
+      hoist DTL m0 sequences out of inner loop in `g2s_pass`
+      (lines 78-85) and `prefill_s2r_offsets`/swizzle XOR (lines
+      96-99). Three sub-knobs: A1 (precomputed scalar m0 ramp), A2
+      (s_or_b32 / s_add_u32 instead of v_or + v_readfirstlane), A3
+      (drop sched_barrier(0) brackets around DTL micro-ops). Target
+      6-9pp geo-mean gain on 4 gate_up shapes (current 0.908 →
+      expected 0.95-0.98). Risk MEDIUM — LLVM scheduler historically
+      liked sched_barrier brackets. Build flag must use `HIPFLAGS=-D`.
+      Optional Dev B: A3-only strip as parallel safety net.
 - [P13-CLOSED] ~~Direct-To-LDS (DTLA1+DTLB1) implementation for RCR (TN).~~
       P13 Dev C disassembly grep proved TK ALREADY uses gfx950 wide-DTL
       for 100% of hot-path loads. P14 Decider re-verified after Dev F
@@ -513,6 +581,36 @@ for archival; do NOT redispatch unless the constraint changes:
 
 ## Closed / Completed
 
+- 2026-04-18 P17 — Fifth agent-team session (2 research Devs, both opus,
+  GPUs 2/4). Both returned definitive verdicts; no code committed.
+  - **Dev A (4-wave RCR rocprofv3 + disasm, GPU 2)** — definitive
+    bottleneck characterization. 21-23pp MFMA-util gap on 4 gate_up
+    shapes = 80 extra non-MFMA insts/iter from per-DTL m0
+    vector→scalar broadcast cluster (5 insts × 16 DTL/iter). Filed to
+    memory as `project_fp8_4wave_m0_broadcast.md` with full per-iter
+    disasm comparison (TK 132 vs BL 41 non-MFMA non-mem ops).
+    Dispatched as P18 Lever A target on `rcr_4wave_dynamic.inc:78-99`.
+  - **Dev B (2-shape Stream-K prototype, GPU 4)** — NO LAND,
+    structurally infeasible. Warp-asymmetric prologue + per-tile
+    barrier patterns in `rcr_exact_8wave_kernel` don't decompose under
+    Stream-K work-stealing in budget. Combined with `bc4392bf`
+    BF16 precedent, Stream-K conclusively closed for RCR 8-wave.
+  - **Lessons additive to P16:**
+    - rocprofv3 PMC + disasm slice (per-iter TK vs BL count tables) is
+      the right tool to characterize MFMA-util gaps — turns "9pp gap"
+      into "80 extra insts of pattern X". Always pair PMC with disasm.
+    - "MFMA_busy/GRBM" is the cleanest single counter for measuring
+      pipeline efficiency on gfx950 — 21pp gap there was the load-
+      bearing observation. Reads/MFMA stayed equal (0.50/0.51), which
+      is what told us the 8-wave ceiling lever doesn't apply.
+    - Worktree base inconsistency: P17 Dev B was at `origin/main`
+      which predated the FP8 kernel file added in HEAD. Dev couldn't
+      commit because the file didn't exist in the worktree. Future
+      `EnterWorktree` callers should check the worktree base matches
+      the current HEAD if the work depends on recent files.
+    - The 4-wave kernel has its OWN bottleneck class disjoint from the
+      8-wave kernel. Per-kernel rocprofv3 sweeps must verify dispatch
+      routing first (P16 lesson) and re-baseline counters per kernel.
 - 2026-04-18 P14 — Fourth agent-team session (3 Devs, all opus, GPUs 0/4/6).
   All three returned definitive verdicts; nothing landed.
   - **Dev D (FP8 CRR_STEADY 2D sweep, GPU 0)** — Full 16-config grid
