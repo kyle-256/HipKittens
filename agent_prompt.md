@@ -54,7 +54,39 @@ python3 test_mxfp8_python.py 4096 14336 4096
 5. 禁止提交 `*.so`、`*.s`、`*_layout_results_*.json`、`.bak*`、`gpucore.*`、`__pycache__` 等（`.gitignore` 已覆盖）
 6. 每个子 agent 使用不同 `HIP_VISIBLE_DEVICES` 以免 GPU 冲突：Dev A → 0，Dev B → 1，Dev C → 2，Reviewer/formal → 7
 
-## R28 cycle 进行中 (2026-04-18) ★ 1 SHIP so far (cachepolicy auto-select)
+## R28 cycle 完结 (2026-04-18) ★ 1 SHIP + 2 NO SHIP + 1 SCAFFOLDING + 2 paradigm corrections
+
+R28 派 4 dev parallel + R27 Reviewer baseline matrix on GPU4. Production state: feat/mxfp8-only commit `<head>` ahead of R26 by R27 macro infra (`12785d98`) + R28 auto-select gate (`88d5a7d5`).
+
+### R27 Reviewer baseline matrix (cherry-picked artifacts: `r27_reviewer_baseline_gpu4.json`, `r27_reviewer_verdicts.json`, `r27_reviewer_aggregate.py`)
+
+GPU4, 5x preheat, FP8 W/I=300/300, MXFP8 W/I=200/300. **0/10 LLaMA cells pass ≥0.95 perf gate.** Cross-machine drift vs R26 GPU7 = ±3% (acceptable).
+
+LLaMA shape ratios sorted worst→best:
+| Shape | Layout | V2 ratio |
+|---|---|---|
+| 70B Gate 4k×28672×8k | crr | 0.8351 → **0.8579 post-R28 Dev A** |
+| 70B Down 4k×28672×8k | crr | 0.8459 |
+| 70B KV   4k×1024×8k | crr | 0.8646 |
+| 8B Gate  4k×14336×4k | crr | 0.9216 |
+| 4096³ | rcr | 0.9229 |
+| 8192³ | crr | 0.9266 |
+| 8192³ | rrr | 0.9270 |
+| 8192³ | rcr | 0.9324 |
+| 70B Q/O  4k×8k×8k | rcr | 0.9373 |
+| 8B Down  4k×4k×14336 | crr | 0.9394 |
+
+Largest gaps remain in N-uneven shapes (Gate, Down, KV).
+
+### R29+ priority list (rebuilt from R28 root-causes)
+
+1. **【critical】Rectangular BLK_M=256/BLK_N=128**: build on Dev D r28-d scaffolding. Audit-corrected scope smaller than R27 thought (`offset:1024 = 8*BK` not HB-derived). Stage 3 fault root cause: V2 dispatch falls through to V1 layout w/ V2-preshuffled scales. Targets 70B KV V2-CRR 0.8646 → projected ≥0.92.
+2. **【medium】Per-shape autotune table**: extend Dev A gate to (M,N,K,layout) lookup. Possibly +0.5-1% on 8B Down (currently cp=0).
+3. **【medium】4096³ V2-RCR audit**: 0.9229, untouched by R28. RCR-side levers (cp catastrophic, but other levers?).
+4. **【low】8192³ V2-CRR -8.9%**: skip until rectangular BLK lands.
+5. **【closed】s_setprio**: fully exploited (R28 paradigm #1). Never re-prototype.
+
+### R28 SHIP #1 cherry-pick: `88d5a7d5` cachepolicy=2 auto-select gate (Dev A)
 
 ### R28 SHIP #1 cherry-pick: `88d5a7d5` cachepolicy=2 auto-select gate (Dev A)
 

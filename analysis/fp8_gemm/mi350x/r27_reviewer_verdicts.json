@@ -1,0 +1,61 @@
+{
+  "meta": {
+    "agent": "R27 Reviewer",
+    "branch": "r27-rev",
+    "commit_base": "7790b606",
+    "gpu": "GPU4",
+    "phase1_baseline": "r27_baseline_gpu4.json",
+    "ship_criteria": {
+      "correctness": "SNR >= 48 dB AND determinism 3/3 on EVERY cell",
+      "no_regression_8k": "no 8192^3 cell within >= 3 TFLOPS regression at p<0.05",
+      "llama_targets": "gain >= +30 TFLOPS OR ratio improvement >= 0.02 with Welch t > 3.0"
+    }
+  },
+  "candidates": [
+    {
+      "agent": "R27 Dev A",
+      "branch": "r27-a",
+      "commit": "5a35fb97",
+      "claim": "MXFP8_*_V2_SCALE_CACHEPOLICY build-time tunables — defaults 0 (no behavior change)",
+      "self_verdict": "shape-dependent; SLC=1 wins big only on K=8192 large-N CRR; no global SHIP",
+      "reviewer_verdict": "N_A",
+      "reason": "Dev A explicitly did NOT claim SHIP. Default behavior unchanged (CACHEPOLICY=0). Macros land as opt-in autotune knobs. No reverify required — production V2 path is the same code as Phase 1 baseline. Out-of-scope shapes (4k_rcr -25x, 70b_kv_crr -7%) confirm no global setting works."
+    },
+    {
+      "agent": "R27 Dev B",
+      "branch": "r27-b",
+      "commit": "59d32212",
+      "claim": "split-K Option A prototype for V2-CRR 4096x1024x8192",
+      "self_verdict": "DEAD-END",
+      "reviewer_verdict": "NULL",
+      "reason": "Dev B reports prototype is dead-end. No SHIP claim."
+    },
+    {
+      "agent": "R27 Dev C",
+      "branch": "r27-c",
+      "commit": "9b2e1384",
+      "claim": "scale LDS double-buffering for V2-CRR",
+      "self_verdict": "DEAD-END (V2 has no scale LDS — task premise invalid)",
+      "reviewer_verdict": "NULL",
+      "reason": "Dev C audit found V2 stages scales VMEM->VGPR with no LDS. The 'single-buffered scale LDS to ping-pong' premise does not exist in the kernel. No code change to verify."
+    },
+    {
+      "agent": "R27 Dev D",
+      "branch": "r27-d",
+      "commit": "c019bec8",
+      "claim": "BLK=256 audit + MXFP8_BLK128 proof-of-concept gate",
+      "self_verdict": "Pure BLK=128 = multi-day rewrite; ships an audit + opt-in gate macro only",
+      "reviewer_verdict": "N_A",
+      "reason": "Dev D ships a default-OFF #ifdef gate (MXFP8_BLK128 disables BLK=256 fastpaths for future BLK=128 work) plus an audit document. Default build unchanged; no SHIP claim. Recommendation for rectangular BLK_M=256/BLK_N=128 path is forward-looking R28+ work."
+    }
+  ],
+  "summary": {
+    "n_candidates": 4,
+    "confirm_ship": 0,
+    "reject": 0,
+    "null": 2,
+    "n_a": 2,
+    "shipping_to_main": 0
+  },
+  "conclusion": "R27 cycle: 0 SHIP-ready candidates. Devs A/D land opt-in tunables (default-OFF) for future autotune; Devs B/C confirmed dead-ends. Production V2 MXFP8 path is unchanged from R26 baseline. Phase 2 reverify did not need to run — Phase 1 baseline IS the production state for both pre- and post-R27. R27 cycle outcome: 0 production fixes, 1 useful audit (Dev D r27d_blk_audit.md), 1 negative result on cachepolicy (Dev A r27a_findings.md), 2 invalidated hypotheses (B/C). Drift vs R26 reverify is within ±2.8% on all 3 overlapping cells; baseline is internally consistent."
+}

@@ -54,9 +54,35 @@
 
 **baseline 建立**：首次需在每个 LLaMA shape 上跑 FP8 per-tensor + MXFP8 V2 baseline 各 5x，记录 median TFLOPS 作为后续对照。
 
-## R28 cycle 进行中 (2026-04-18, 2+ devs in parallel with R27 Reviewer)
+## R28 cycle 完结 (2026-04-18, 4 devs + R27 reviewer baseline)
 
-### R28 SHIP #1: cachepolicy=2 auto-select gate (Dev A, commit `88d5a7d5`)
+R28 派 4 dev (A GPU0, B GPU1, C GPU0, D GPU1) parallel + R27 Reviewer (GPU4 baseline matrix). **1 SHIP** (`88d5a7d5` cachepolicy auto-select gate, +2.7% on 70B Gate V2-CRR), **2 NO SHIP** (B + C), **1 SCAFFOLDING** (D, on r28-d for R29), **2 paradigm corrections**.
+
+### R27 Reviewer baseline matrix (commit `9f97feb6` cherry-pick of 31f2286b artifacts)
+
+GPU4, 5x preheat, FP8 W/I=300/300, MXFP8 W/I=200/300. 0/10 LLaMA cells pass ≥0.95 perf gate:
+| Cell | Layout | FP8 med | MXFP8 med | ratio |
+|---|---|---|---|---|
+| 8192³ | rcr | 3234 | 3016 | 0.9324 |
+| 8192³ | rrr | 3222 | 2987 | 0.9270 |
+| 8192³ | crr | 2992 | 2772 | 0.9266 |
+| 4096³ | rcr | 2550 | 2354 | 0.9229 |
+| 8B Gate 4k×14336×4k | crr | 2610 | 2406 | 0.9216 |
+| 8B Down 4k×4k×14336 | crr | 2959 | 2779 | 0.9394 |
+| 70B Q/O 4k×8k×8k | rcr | 3178 | 2979 | 0.9373 |
+| 70B KV 4k×1024×8k | crr | 911 | 788 | 0.8646 |
+| 70B Gate 4k×28672×8k | crr | 2759 | 2304 | 0.8351 → **0.8579** post-R28 Dev A |
+| 70B Down 4k×28672×8k | crr | 2956 | 2500 | 0.8459 |
+
+Worst → best: 70B Gate 0.8351, 70B KV 0.8646, 70B Down 0.8459, 8B Gate 0.9216, 4096³ 0.9229. Cross-machine drift vs R26 GPU7 = ±3% (acceptable).
+
+R28 Dev A's auto-select gate moves 70B Gate V2-CRR from 0.8351 → ~0.8579 (still below 0.95 gate but +2.28pp closer).
+
+## R28 SHIPS
+
+
+
+### SHIP #1: cachepolicy=2 auto-select gate (Dev A, commit `88d5a7d5`)
 
 **+2.7% direct on 70B Gate V2-CRR with NO build flag.** Compile-time gate `N_DIM>=28672 && K_DIM>=8192` triggers `MXFP8_CRR_V2_SCALE_CACHEPOLICY=2` automatically when shape is pinned. Outside region stays 0 = binary identical to R27 baseline. User -D override still wins.
 
@@ -72,7 +98,18 @@
 
 Welch B vs B0: Δ=+61.49 TFLOPS / +2.61%, t=+12.83. Matches R27 +2.7%/t≈+13 to within bench-to-bench noise.
 
-R28 in flight: Dev B s_setprio sweep on V2-CRR cp=2 baseline (GPU1), R27 Reviewer baseline matrix (GPU4).
+## R28 NULLs (no production change, recorded for posterity)
+
+## R29+ priority list (rebuilt from R28 root-causes)
+
+1. **【critical / 1-2 day】Rectangular BLK_M=256/BLK_N=128 V2 path completion**: build on Dev D's r28-d scaffolding (`ddfd2f80`). Audit-corrected scope is smaller than originally thought: B-side N-stride parametrization + V2 half-N scale preshuffle + dispatcher gate. Stage 3 fault root cause: V2 dispatch falls through to V1 layout w/ V2-preshuffled scales — need either (a) a true V2 rectangular layout or (b) a runtime gate that forces V1 fallback for rect mode. Targets 70B KV V2-CRR 0.8646 → projected ≥0.92 from 2× CU utilization (4 N-tile → 8 N-tile).
+2. **【medium】Per-shape autotune table**: extend Dev A gate beyond `N>=28672 && K>=8192`. R27/R28 data shows the actual win region is shape-class-dependent. Build a small lookup table indexed by (M,N,K,layout) → cp_value rather than a 2D hyperplane. Targets +0.5-1% additional on shapes that currently sit at cp=0 (e.g., 8B Down which is at 0.9394 might benefit from cp=2).
+3. **【medium】4096³ V2-RCR lever audit**: 0.9229 ratio, untouched by R28. Check if there's an analogous N/K gate for RCR (R27 said cp=2 catastrophic on 4096³, but is there a different cp/lever?).
+4. **【low】8192³ V2-CRR -8.9% gap**: still no production-impacting fix path. Skip until rectangular BLK lands.
+5. **【closed】s_setprio**: fully exploited per R28 paradigm #1. Do not re-prototype.
+
+
+
 
 ### R28 Dev B = NO SHIP + paradigm correction (`ffb10af5` r28-b only)
 
