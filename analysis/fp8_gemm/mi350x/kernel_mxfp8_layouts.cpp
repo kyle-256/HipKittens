@@ -5579,25 +5579,67 @@ void dispatch_pq_v2(layout_globals g) {
         g.m = static_cast<int>(g.c.rows());
         g.n = static_cast<int>(g.c.cols());
         g.k = static_cast<int>(g.b.rows());
-        // R33 Dev A — V2-RRR autotune pivot: shape (M=4096, N=8192, K=28672)
-        // (70B Down) is +12.14% faster on V2-RRR than V2-CRR (R32 Dev C C4,
-        // Welch t=+49.24, n=10, BABA-paired; cross-GPU triangulated by R32
-        // Reviewer at +12.21/+12.57/+12.14% on GPU2/4/6). The data layouts
-        // of CRR (A=(K,M)) and RRR (A=(M,K)) are not interchangeable in
-        // memory, so we cannot transparently reroute — emit a host-side
-        // one-time warning at the first matching call so the caller can
-        // switch their entry point to gemm_rrr_pq_v2 with A re-laid out as
-        // row-major (M,K). See analysis/fp8_gemm/mi350x/r32c_findings.md
-        // and r33a_findings.md.
-        if (g.m == 4096 && g.n == 8192 && g.k == 28672) {
-            static int warned = 0;
-            if (!warned) {
+        // R33 Dev A / R34 Dev A — V2-RRR autotune pivot fan-out: 4 effective
+        // host-side predicates cover 5 LLaMA cells where V2-RRR is faster
+        // than V2-CRR by +5% to +12% (BABA-paired, cross-GPU triangulated
+        // ≥4 GPUs each). The data layouts of CRR (A=(K,M)) and RRR
+        // (A=(M,K)) are not interchangeable in memory, so we cannot
+        // transparently reroute — emit a host-side one-time warning per
+        // matching shape so the caller can switch their entry point to
+        // gemm_rrr_pq_v2 with A re-laid out as row-major (M,K).
+        //
+        // Wire-in summary (per cell — see analysis/fp8_gemm/mi350x/):
+        //   R32 Dev C C4 (R33 Dev A wire-in):
+        //     M=4096 N= 8192 K=28672 — 70B Down — RRR vs CRR +12.14% (t≈49)
+        //   R33 Dev C STRICT SHIPs (R34 Dev A wire-in this commit):
+        //     M=4096 N=28672 K= 8192 — 70B Gate+Up — RRR vs CRR +7.18%-+7.99% min Δ +7.18% (4-GPU)
+        //     M=4096 N= 1024 K= 8192 — 70B KV     — RRR vs CRR min Δ +10.24% (4-GPU)
+        //     M=4096 N= 1024 K= 4096 — 8B  KV     — RRR vs CRR min Δ +8.13%  (4-GPU)
+        //
+        // Autotune is M/N/K-conditioned and does NOT fire on the default
+        // build (M=N=K=8192 — 70B Q/O which is V2-RCR-dominant). Cells
+        // where V2-RCR is the production baseline (70B Q/O 4096×8192×8192
+        // and 8B Q/O 4096×4096×4096) are deliberately NOT included — RCR
+        // beats RRR there (-0.8% to -2.0%) per R33 Dev C closure.
+        {
+            static int warned_70b_down = 0;
+            static int warned_70b_gateup = 0;
+            static int warned_70b_kv = 0;
+            static int warned_8b_kv = 0;
+            if (g.m == 4096 && g.n == 8192 && g.k == 28672 && !warned_70b_down) {
                 std::fprintf(stderr,
                     "[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=8192, "
                     "K=28672) is +12.14%% faster on V2-RRR (R32 Dev C SHIP, "
                     "cross-GPU triangulated). Prefer gemm_rrr_pq_v2 with A "
                     "row-major (M,K). See analysis/fp8_gemm/mi350x/r32c_findings.md.\n");
-                warned = 1;
+                warned_70b_down = 1;
+            }
+            if (g.m == 4096 && g.n == 28672 && g.k == 8192 && !warned_70b_gateup) {
+                std::fprintf(stderr,
+                    "[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=28672, "
+                    "K=8192) is +7.18%% to +7.99%% faster on V2-RRR (R33 Dev C "
+                    "70B Gate/Up SHIP, 4-GPU triangulated; min Δ%% +7.18). "
+                    "Prefer gemm_rrr_pq_v2 with A row-major (M,K). See "
+                    "analysis/fp8_gemm/mi350x/r33c_findings.md.\n");
+                warned_70b_gateup = 1;
+            }
+            if (g.m == 4096 && g.n == 1024 && g.k == 8192 && !warned_70b_kv) {
+                std::fprintf(stderr,
+                    "[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=1024, "
+                    "K=8192) is +10.24%% to +10.83%% faster on V2-RRR (R33 Dev C "
+                    "70B KV SHIP, 4-GPU triangulated; min Δ%% +10.24). "
+                    "Prefer gemm_rrr_pq_v2 with A row-major (M,K). See "
+                    "analysis/fp8_gemm/mi350x/r33c_findings.md.\n");
+                warned_70b_kv = 1;
+            }
+            if (g.m == 4096 && g.n == 1024 && g.k == 4096 && !warned_8b_kv) {
+                std::fprintf(stderr,
+                    "[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=1024, "
+                    "K=4096) is +8.13%% to +8.63%% faster on V2-RRR (R33 Dev C "
+                    "8B KV SHIP, 4-GPU triangulated; min Δ%% +8.13). "
+                    "Prefer gemm_rrr_pq_v2 with A row-major (M,K). See "
+                    "analysis/fp8_gemm/mi350x/r33c_findings.md.\n");
+                warned_8b_kv = 1;
             }
         }
         if (crr_can_use_exact_8wave_scaled(g)) {
