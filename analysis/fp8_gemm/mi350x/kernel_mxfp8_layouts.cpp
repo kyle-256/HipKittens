@@ -5590,11 +5590,11 @@ void dispatch_pq_v2(layout_globals g) {
         g.m = static_cast<int>(g.c.rows());
         g.n = static_cast<int>(g.c.cols());
         g.k = static_cast<int>(g.b.rows());
-        // R33 Dev A / R34 Dev A — V2-RRR autotune pivot fan-out: 4 effective
-        // host-side predicates cover 5 LLaMA cells where V2-RRR is faster
-        // than V2-CRR by +5% to +12% (BABA-paired, cross-GPU triangulated
-        // ≥4 GPUs each). The data layouts of CRR (A=(K,M)) and RRR
-        // (A=(M,K)) are not interchangeable in memory, so we cannot
+        // R33 Dev A / R34 Dev A / R35 Dev A — V2-RRR autotune pivot fan-out: 5
+        // effective host-side predicates cover 7 LLaMA cells where V2-RRR is
+        // faster than V2-CRR by +5% to +12% (BABA-paired, cross-GPU
+        // triangulated ≥4 GPUs each). The data layouts of CRR (A=(K,M)) and
+        // RRR (A=(M,K)) are not interchangeable in memory, so we cannot
         // transparently reroute — emit a host-side one-time warning per
         // matching shape so the caller can switch their entry point to
         // gemm_rrr_pq_v2 with A re-laid out as row-major (M,K).
@@ -5602,10 +5602,12 @@ void dispatch_pq_v2(layout_globals g) {
         // Wire-in summary (per cell — see analysis/fp8_gemm/mi350x/):
         //   R32 Dev C C4 (R33 Dev A wire-in):
         //     M=4096 N= 8192 K=28672 — 70B Down — RRR vs CRR +12.14% (t≈49)
-        //   R33 Dev C STRICT SHIPs (R34 Dev A wire-in this commit):
+        //   R33 Dev C STRICT SHIPs (R34 Dev A wire-in):
         //     M=4096 N=28672 K= 8192 — 70B Gate+Up — RRR vs CRR +7.18%-+7.99% min Δ +7.18% (4-GPU)
         //     M=4096 N= 1024 K= 8192 — 70B KV     — RRR vs CRR min Δ +10.24% (4-GPU)
         //     M=4096 N= 1024 K= 4096 — 8B  KV     — RRR vs CRR min Δ +8.13%  (4-GPU)
+        //   R34 Dev B STRICT SHIP (c5) + SHIP-LITE (c6) (R35 Dev A wire-in this commit):
+        //     M=4096 N=14336 K= 4096 — 8B Gate+Up — RRR vs CRR min Δ +5.025% (4-GPU triangulated)
         //
         // Autotune is M/N/K-conditioned and does NOT fire on the default
         // build (M=N=K=8192 — 70B Q/O which is V2-RCR-dominant). Cells
@@ -5617,6 +5619,7 @@ void dispatch_pq_v2(layout_globals g) {
             static int warned_70b_gateup = 0;
             static int warned_70b_kv = 0;
             static int warned_8b_kv = 0;
+            static int warned_8b_gateup = 0;
             if (g.m == 4096 && g.n == 8192 && g.k == 28672 && !warned_70b_down) {
                 std::fprintf(stderr,
                     "[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=8192, "
@@ -5651,6 +5654,15 @@ void dispatch_pq_v2(layout_globals g) {
                     "Prefer gemm_rrr_pq_v2 with A row-major (M,K). See "
                     "analysis/fp8_gemm/mi350x/r33c_findings.md.\n");
                 warned_8b_kv = 1;
+            }
+            if (g.m == 4096 && g.n == 14336 && g.k == 4096 && !warned_8b_gateup) {
+                std::fprintf(stderr,
+                    "[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=14336, "
+                    "K=4096) is +5.0%% to +6.5%% faster on V2-RRR (R34 Dev B "
+                    "8B Gate/Up SHIP, 4-GPU triangulated; min Δ%% +5.025, "
+                    "min Welch t +10.13). Prefer gemm_rrr_pq_v2 with A "
+                    "row-major (M,K). See analysis/fp8_gemm/mi350x/r34b_findings.md.\n");
+                warned_8b_gateup = 1;
             }
         }
         // R35 Dev B — Stage A1 wire-in: HB shrink (BLK_M=128) V2-CRR
