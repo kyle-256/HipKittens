@@ -54,6 +54,57 @@
 
 **baseline 建立**：首次需在每个 LLaMA shape 上跑 FP8 per-tensor + MXFP8 V2 baseline 各 5x，记录 median TFLOPS 作为后续对照。
 
+## R25 LLaMA baseline 结果 (2026-04-18, GPU5, sclk 2320 MHz, commit `6be73744`/`05bf4fef`) ★ paradigm 再修正：8192³ near-parity 不能推广到 production shape
+
+R25 LLaMA shape baseline 正式跑完（8 build shape，覆盖 10 logical shape；FP8 + V2 各 5x，60 measurement run）。**结论：8192³ "V2 ≈ FP8" 的判断只在 8192³ 成立。LLaMA production shape 上 V2 显著落后 FP8。**
+
+| Shape (M×N×K) | FP8-RCR | V2-RCR | ratio | FP8-RRR | V2-RRR | ratio | FP8-CRR | V2-CRR | ratio |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 8B Q/O 4096³ | 2450 | 2256 | 0.92 ❌ | 2456 | 2301 | 0.94 ❌ | 2341 | 2147 | 0.92 ❌ |
+| 8B KV 4096×1024×4096 | 865 | 730 | 0.84 ❌ | 874 | 711 | 0.81 ❌ | 792 | 659 | 0.83 ❌ |
+| 8B Gate/Up 4096×14336×4096 | 2703 | 2531 | 0.94 ❌ | 2672 | 2487 | 0.93 ❌ | 2514 | 2361 | 0.94 ❌ |
+| 8B Down 4096×4096×14336 | 3137 | 2911 | 0.93 ❌ | 2740 | 2886 | **1.05 ✅** | 2915 | 2728 | 0.94 ❌ |
+| 70B Q/O 4096×8192×8192 | 3117 | 2917 | 0.94 ❌ | 3094 | 2874 | 0.93 ❌ | 2911 | 2711 | 0.93 ❌ |
+| 70B KV 4096×1024×8192 | 1022 | 862 | 0.84 ❌ | 1027 | 845 | 0.82 ❌ | 915 | 632 | **0.69 ❌** |
+| 70B Gate/Up 4096×28672×8192 | 2959 | 2659 | 0.90 ❌ | 2878 | 2578 | 0.90 ❌ | 2816 | 2361 | 0.84 ❌ |
+| 70B Down 4096×8192×28672 | 3249 | 2835 | 0.87 ❌ | 2716 | 2851 | **1.05 ✅** | 3017 | 2542 | 0.84 ❌ |
+
+**Pass rate: 2/24** (gate = V2 ≥ FP8 × 0.95). 全 24 cell correctness PASS (SNR ≥48 dB, det 5/5)。
+
+**关键观察**：
+1. **唯一 V2 win 是 Down-RRR (1.05 ratio for both 8B & 70B)** — 共同特征：large K (14336/28672), RRR layout. K 越大 V2 scale-load 摊销越好；为什么 Down-RCR/CRR 没有同样收益是 R26 待探究
+2. **小 N (KV-attn N=1024) 是最差 regime**：FP8 自身已仅 ~1000 TFLOPS（vs 3200 在大 shape），V2 进一步降到 ~700-860 → 0.69-0.84 ratio. 256×256 block 在 N=1024 只有 4 个 N-tile，调度并行度严重不足
+3. **大 N (gate/up N=14336→28672)** V2 进一步退化：8B Gate/Up V2-CRR 0.94 → 70B Gate/Up V2-CRR 0.84 —— N 越大 V2 相对 FP8 越糟糕（CRR 尤甚 -10%）
+4. **8192³ "near-parity" misleading**：实际 production GEMM 全在 4096 M / 不同 N/K. 4096³ V2-RCR 已经只有 0.92 ratio (vs 8192³ 的 0.99). 8192³ 不代表 production
+
+**8192³ vs LLaMA Q/O 4096³ 对比**（同 RCR layout，不同 M=N=K）：
+- 8192³: FP8 3232, V2 3214, ratio 0.99 (near-parity)
+- 4096³: FP8 2450, V2 2256, ratio 0.92 (gap -8%)
+→ **V2 vs FP8 gap 与问题规模强相关**：M=N=K 减半，V2 ratio 从 0.99 跌到 0.92。可能原因：4096³ 总 tile 数减少 4x，V2 的 b128 scale load 摊销分母变小
+
+## R25 mainline (8192³ CRR optimization) — 跨会话 task lost，0 commit，0 verified result
+
+R25 8192³ CRR optimization 5 个 agent (Reviewer + Dev A/B/C/D) 在前一个会话 session 派出，session compaction 后 task 丢失，且 5 个 worktree (/tmp/wt-r25-{a,b,c,d,rev}) head 仍在 c285cb70 (R24 docs)，无任何新 commit。结合 R25 LLaMA findings，8192³ CRR -8.9% 不再是 #1 priority — 因为 LLaMA shapes 的 gap 全部更大。**R25 mainline 撤销，R26 优先级完全 rebuilt around LLaMA shapes**。
+
+## R26+ 新优先级（基于 LLaMA baseline gap，按 production impact 排序）
+
+1. **【critical】KV-attn 小 N=1024**：8B KV V2-RRR 0.81, 70B KV V2-CRR 0.69 — LLM inference 每层都跑，gap 最大
+   - 假说: 256×256 block tile 在 N=1024 仅 4 N-tile/grid，CU 利用率低. 试 128×256 block 或更小
+   - 假说: V2 scale b128 load 在小 N 下严重浪费带宽 (4 N-tile × 256 N-cols = 1024 cols, 但 b128 一次拉 16 scale)
+   - 试 dynamic dispatch: N < 2048 走 V1 fallback / 走专门小 N kernel
+2. **【high】大 N CRR (Gate/Up 70B 0.84)**：MLP 上下流瓶颈. 28672 N 比 14336 退化更多 → 与 V2 的 LDS budget 关联?
+   - 复测：8B Gate (N=14336, V2-CRR 0.94) vs 70B Gate (N=28672, V2-CRR 0.84) 用同一 PMC profile 对比 ds_read/buffer_load 比率
+3. **【medium】Down-RRR 1.05 win 推广**：唯一 V2 winning case. 找出其 mechanism (大 K + RRR 特定？) 试搬到 Down-RCR/CRR
+4. **【medium】4096³ Q/O proj** (V2 0.92): 真实"square" production. 与 8192³ near-parity 形成 reference. 找 V2 scale load 在小问题下的 amortization formula
+5. **【low】8192³ CRR -8.9%**: 原 R25 mainline. 仍然 real，但 production impact 远小于上面 4 项 — 因为 LLM 实际不跑 8192³
+
+## R26 派活 plan
+- **Reviewer (GPU0)**: 复测 LLaMA baseline 5 个最差 cell (KV V2-CRR 0.69-0.83, Gate-70B V2-CRR 0.84) 各 3x，确认非测量噪声
+- **Dev A (GPU1)**: 攻 70B KV V2-CRR 0.69. 实验 (a) 减小 block tile 256→128 N (b) N<2048 强制 V1 fallback (c) 探查 V2 scale b128 在 4-N-tile grid 下的实际 issue 数
+- **Dev B (GPU2)**: 攻 70B Gate V2-CRR 0.84 vs 8B Gate V2-CRR 0.94 差距. PMC ds_read/buffer_load/MFMA-busy 对比看 N=28672 触发哪个 resource cap
+- **Dev C (GPU3)**: 攻 Down-RRR 1.05 win mechanism. PMC profile + ASM diff Down-RRR vs Down-CRR 看 V2 advantage 来源；尝试 port 到 RCR/CRR
+- **Dev D (GPU4)**: 攻 4096³ Q/O 0.92. 用 8192³ 99.4% 做对照，PMC 找 amortization-curve breakpoint，测试 BLOCK_K 调整是否能 shift breakpoint 到 4096
+
 ## 当前 baseline（GPU0，per-iter sync，8192^3）— **R24 reverify (2026-04-18) ★ paradigm 大修正：V2 ≈ FP8 (RCR -0.5%, RRR -2.4%)，R23 SQC/TCC 大幅"瓶颈"全为 PMC-mode 测量伪影**
 
 | 版本 | TFLOPS | SNR | 相对 FP8 RCR |

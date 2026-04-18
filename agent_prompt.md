@@ -54,7 +54,40 @@ python3 test_mxfp8_python.py 4096 14336 4096
 5. 禁止提交 `*.so`、`*.s`、`*_layout_results_*.json`、`.bak*`、`gpucore.*`、`__pycache__` 等（`.gitignore` 已覆盖）
 6. 每个子 agent 使用不同 `HIP_VISIBLE_DEVICES` 以免 GPU 冲突：Dev A → 0，Dev B → 1，Dev C → 2，Reviewer/formal → 7
 
-## Baseline (R24 2026-04-18 GPU0 fresh reverify ★ paradigm correction：V2 实际 ≈ FP8 parity；R23 cycle-level 数字 invalidated as PMC-mode + cold-throttle artifacts)
+## R25 LLaMA baseline 结果 (2026-04-18, GPU5, sclk 2320 MHz, commit `6be73744`/`05bf4fef`) ★ paradigm 再修正：8192³ near-parity 不可推广
+
+R25 LLaMA shape baseline 跑完（8 build shape，10 logical shape，60 measurement run）。**Pass rate 2/24 cells**（gate = V2 ≥ FP8 × 0.95）。
+
+| Shape (M×N×K) | RCR ratio | RRR ratio | CRR ratio |
+|---|---:|---:|---:|
+| 8B Q/O 4096³ | 0.92 ❌ | 0.94 ❌ | 0.92 ❌ |
+| 8B KV 4096×1024×4096 | 0.84 ❌ | 0.81 ❌ | 0.83 ❌ |
+| 8B Gate/Up 4096×14336×4096 | 0.94 ❌ | 0.93 ❌ | 0.94 ❌ |
+| 8B Down 4096×4096×14336 | 0.93 ❌ | **1.05 ✅** | 0.94 ❌ |
+| 70B Q/O 4096×8192×8192 | 0.94 ❌ | 0.93 ❌ | 0.93 ❌ |
+| 70B KV 4096×1024×8192 | 0.84 ❌ | 0.82 ❌ | **0.69 ❌** |
+| 70B Gate/Up 4096×28672×8192 | 0.90 ❌ | 0.90 ❌ | 0.84 ❌ |
+| 70B Down 4096×8192×28672 | 0.87 ❌ | **1.05 ✅** | 0.84 ❌ |
+
+**结论**：
+1. 唯一 V2 winning regime 是 Down-RRR (1.05) — large-K + RRR 共同特征
+2. 小 N (KV-attn N=1024) 是最差 regime: V2-CRR @ 70B 跌到 0.69
+3. 8192³ "V2 ≈ FP8" 在 4096³ Q/O 退化到 0.92 → V2 vs FP8 gap 与问题规模强相关
+4. R25 8192³ CRR optimization 不再是 #1 priority — LLaMA gaps 全部更大
+
+**完整 baseline JSON**: `llama_baseline_r25.json` @ feat/mxfp8-only HEAD `6be73744`
+**Driver script**: `analysis/fp8_gemm/mi350x/run_llama_baseline.sh`
+
+## R25 mainline (8192³ CRR optim) 完结：跨会话 task lost，0 commit，priorities reshuffled
+
+R25 8192³ CRR optimization 5 个 agent (Reviewer + Dev A/B/C/D) 因 session compaction task lost；5 个 worktree (/tmp/wt-r25-{a,b,c,d,rev}) head 仍在 c285cb70。R25 LLaMA findings 让 8192³ CRR -8.9% 不再是 priority — LLaMA shape gap 远大。R26 priority list 完全 rebuild around production shape:
+
+1. **【critical】KV-attn N=1024**: 70B KV V2-CRR 0.69 (最差). 假说: 256×256 block tile 在 N=1024 仅 4 N-tile/grid，CU 利用率严重不足. 需考虑 dynamic dispatch (N<2048 fallback / 专用 small-N kernel) 或 tile shape 调整
+2. **【high】大 N CRR (70B Gate/Up V2-CRR 0.84)**: MLP gate/up. N=14336 (V2 0.94) → N=28672 (V2 0.84) 退化. 与 V2 LDS budget / scale b128 浪费 关联
+3. **【medium】Down-RRR 1.05 win 推广**: 唯一 V2 wins. mechanism: large K 让 V2 scale-load 摊销充分？ port 到 Down-RCR/CRR
+4. **【medium】4096³ Q/O 0.92**: real "square" production. 与 8192³ 0.99 形成 reference, 找 amortization breakpoint
+
+## Baseline (R24 2026-04-18 GPU0 fresh reverify ★ paradigm correction：V2 实际 ≈ FP8 parity；R23 cycle-level 数字 invalidated as PMC-mode + cold-throttle artifacts) **— 注意：仅适用 8192³，LLaMA shapes 见上**
 
 | 版本 | TFLOPS | SNR | 备注 |
 | --- | ---: | --- | --- |
