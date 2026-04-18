@@ -1,0 +1,15 @@
+=== R26-G BUILD: 13 variants ===
+Build dir: /shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42
+  [SD lgk2] OK (10.1s)
+  [DLA7 lgk2] OK (10.1s)
+  [DLA7 lgk3] OK (10.1s)
+  [SD lgk1] OK (10.1s)
+  [DLA7 lgk1] OK (10.2s)
+  [SC lgk1] OK (10.2s)
+  [SC lgk0] OK (10.2s)
+  [SD lgk3] OK (10.2s)
+  [SC lgk2] OK (7.0s)
+  [SE lgk1] OK (7.0s)
+  [SC lgk3] OK (7.0s)
+  [SE lgk2] OK (7.1s)
+  [SE lgk3] OK (7.1s)
