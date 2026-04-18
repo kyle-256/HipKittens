@@ -1,0 +1,80 @@
+R25-H WIRED VERIFY: 4 shapes × 2 variants × 5 reps
+warmup=200 iters=500 trim=0.1
+==============================================================================================================
+
+[SH1] starting on GPU 2 (M=16384,N=28672,K=2048)
+
+[SH2] starting on GPU 3 (M=4096,N=32768,K=6144)
+
+[SH4] starting on GPU 7 (M=32768,N=4096,K=7168)
+  SH4 PARENT rep0 gpu7                                      4648.03 TFLOPS (ms=0.414)
+  SH2 PARENT rep0 gpu3                                      4507.70 TFLOPS (ms=0.3659)
+  SH1 PARENT rep0 gpu2                                      3408.68 TFLOPS (ms=0.5645)
+  SH4 PARENT rep1 gpu7                                      4600.73 TFLOPS (ms=0.4182)
+  SH2 PARENT rep1 gpu3                                      4484.40 TFLOPS (ms=0.3678)
+  SH1 PARENT rep1 gpu2                                      3412.27 TFLOPS (ms=0.5639)
+  SH4 PARENT rep2 gpu7                                      4606.71 TFLOPS (ms=0.4177)
+  SH2 PARENT rep2 gpu3                                      4438.40 TFLOPS (ms=0.3716)
+  SH4 PARENT rep3 gpu7                                      4694.09 TFLOPS (ms=0.4099)
+  SH2 PARENT rep3 gpu3                                      4521.93 TFLOPS (ms=0.3647)
+  SH2 PARENT rep4 gpu3                                      4514.73 TFLOPS (ms=0.3653)
+  SH4 PARENT rep4 gpu7                                      4628.91 TFLOPS (ms=0.4157)
+  SH1 PARENT rep2 gpu2                                     ERR rc=-6
+  SH2 CHILD_R25H rep0 gpu3                                  5257.42 TFLOPS (ms=0.3137)
+  SH4 CHILD_R25H rep0 gpu7                                  5270.31 TFLOPS (ms=0.3651)
+  SH1 PARENT rep3 gpu2                                      3412.98 TFLOPS (ms=0.5638)
+  SH4 CHILD_R25H rep1 gpu7                                  5289.15 TFLOPS (ms=0.3638)
+  SH1 PARENT rep4 gpu2                                      3404.20 TFLOPS (ms=0.5652)
+  SH4 CHILD_R25H rep2 gpu7                                  5303.70 TFLOPS (ms=0.3628)
+  SH1 CHILD_R25H rep0 gpu2                                  3701.51 TFLOPS (ms=0.5198)
+  SH4 CHILD_R25H rep3 gpu7                                  5270.16 TFLOPS (ms=0.3651)
+  SH4 CHILD_R25H rep4 gpu7                                  5292.67 TFLOPS (ms=0.3635)
+
+[SH6] starting on GPU 7 (M=4096,N=14336,K=8192)
+  SH6 PARENT rep0 gpu7                                      4474.73 TFLOPS (ms=0.215)
+  SH2 CHILD_R25H rep1 gpu3                                 ERR rc=-6
+  SH6 PARENT rep1 gpu7                                      4385.77 TFLOPS (ms=0.2194)
+  SH2 CHILD_R25H rep2 gpu3                                  5345.72 TFLOPS (ms=0.3085)
+  SH6 PARENT rep2 gpu7                                      4420.00 TFLOPS (ms=0.2177)
+  SH2 CHILD_R25H rep3 gpu3                                  5313.08 TFLOPS (ms=0.3104)
+  SH6 PARENT rep3 gpu7                                      4470.80 TFLOPS (ms=0.2152)
+  SH2 CHILD_R25H rep4 gpu3                                  5306.42 TFLOPS (ms=0.3108)
+  SH6 PARENT rep4 gpu7                                      4436.36 TFLOPS (ms=0.2169)
+  SH6 CHILD_R25H rep0 gpu7                                  4883.83 TFLOPS (ms=0.197)
+  SH1 CHILD_R25H rep1 gpu2                                 ERR rc=-6
+  SH6 CHILD_R25H rep1 gpu7                                  4960.45 TFLOPS (ms=0.1939)
+  SH1 CHILD_R25H rep2 gpu2                                  3737.67 TFLOPS (ms=0.5148)
+  SH6 CHILD_R25H rep2 gpu7                                  4891.22 TFLOPS (ms=0.1967)
+  SH1 CHILD_R25H rep3 gpu2                                  3730.96 TFLOPS (ms=0.5157)
+  SH6 CHILD_R25H rep3 gpu7                                  4891.16 TFLOPS (ms=0.1967)
+  SH1 CHILD_R25H rep4 gpu2                                  3738.16 TFLOPS (ms=0.5147)
+  SH6 CHILD_R25H rep4 gpu7                                  4832.14 TFLOPS (ms=0.1991)
+
+Elapsed: 173.0s
+
+==============================================================================================================
+PER-SHAPE 5-REP VERIFY (warmup=200 iters=500 trim=10%):
+==============================================================================================================
+
+SH1 16384x28672x2048 (K_iters=8)  GPU2
+  PARENT  : mean=3409.53 std= 4.02 (4/5) suffix=_ts_gm2_v12_memc_btw_all
+  CHILD   : mean=3727.07 std=17.36 (4/5) suffix=_ts_v12_gm7_memc_pfoff4_kx2048_btw_all
+  Δ       : +9.31%   GATE(>=+5.0%) = PASS
+
+SH2 4096x32768x6144 (K_iters=24)  GPU3
+  PARENT  : mean=4493.43 std=33.84 (5/5) suffix=_ts_gm2_v12_memc_btw_all
+  CHILD   : mean=5305.66 std=36.46 (4/5) suffix=_ts_v12_gm7_memc_pfoff19_kx6144_btw_all
+  Δ       : +18.08%   GATE(>=+5.0%) = PASS
+
+SH4 32768x4096x7168 (K_iters=28)  GPU7
+  PARENT  : mean=4635.69 std=37.65 (5/5) suffix=_ts_v12_tv0_memc_btw_all
+  CHILD   : mean=5285.20 std=14.68 (5/5) suffix=_ts_v12_tv0_gm7_memc_pfoff24_kx7168_btw_all
+  Δ       : +14.01%   GATE(>=+5.0%) = PASS
+
+SH6 4096x14336x8192 (K_iters=32)  GPU7
+  PARENT  : mean=4437.53 std=37.01 (5/5) suffix=_ts_v12_tv0_memc_btw_all
+  CHILD   : mean=4891.76 std=45.65 (5/5) suffix=_ts_v12_tv0_gm7_memc_pfoff28_kx8192_btw_all
+  Δ       : +10.24%   GATE(>=+5.0%) = PASS
+
+==============================================================================================================
+OVERALL: ALL 4 PASS

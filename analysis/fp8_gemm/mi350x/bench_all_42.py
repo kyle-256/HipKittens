@@ -544,6 +544,36 @@ def main():
          "-DR25C_TAIL_PF_OFF_ITERS=56 -DR25C_K_LIMIT=32768 -DR25C_K_EXACT=16384 "
          "-mllvm -amdgpu-sched-strategy=max-memory-clause "
          "-DBARRIER_TO_WAITCNT_ALL=1"),  # R25G WIN: SE 28672x4096x16384 +16.89%, SF 4096x14336x16384 +13.68%
+        # R25-H PER-K WINS (small-K territory): extend the R25-F/G mechanism to
+        # K ∈ {2048, 6144, 7168, 8192} at pfoff = K_iters - {4..6}. K_iters=K/256.
+        # Each entry is gated by R25C_K_EXACT so the wrong-K pfoff cannot bleed
+        # into other shapes. Verified 3-rep (R25-H verify; warmup=200 iters=500 trim=10%):
+        #   SH1 16384x28672x2048: gm7+pfoff4  +10.47% (parent ts_gm2_v12_memc_btw_all)
+        #   SH2  4096x32768x6144: gm7+pfoff19 +16.24% (parent ts_gm2_v12_memc_btw_all)
+        #   SH4 32768x4096x7168:  gm7+pfoff24 +13.17% (parent ts_v12_tv0_memc_btw_all)
+        #   SH6  4096x14336x8192: gm7+pfoff28 +9.26%  (parent ts_v12_tv0_memc_btw_all)
+        # Parent stack: gm2-v12 family (SH1, SH2) → drop GROUP_SIZE_M=2, inject GM=7.
+        ("_ts_v12_gm7_memc_pfoff4_kx2048_btw_all",
+         "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=7 -DSTEP3_BARRIER_VMCNT=12 "
+         "-DR25C_TAIL_PF_OFF_ITERS=4 -DR25C_K_LIMIT=32768 -DR25C_K_EXACT=2048 "
+         "-mllvm -amdgpu-sched-strategy=max-memory-clause "
+         "-DBARRIER_TO_WAITCNT_ALL=1"),  # R25H WIN: SH1 16384x28672x2048 +10.47% vs parent
+        ("_ts_v12_gm7_memc_pfoff19_kx6144_btw_all",
+         "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=7 -DSTEP3_BARRIER_VMCNT=12 "
+         "-DR25C_TAIL_PF_OFF_ITERS=19 -DR25C_K_LIMIT=32768 -DR25C_K_EXACT=6144 "
+         "-mllvm -amdgpu-sched-strategy=max-memory-clause "
+         "-DBARRIER_TO_WAITCNT_ALL=1"),  # R25H WIN: SH2 4096x32768x6144 +16.24% vs parent
+        # Parent stack: tv0 family (SH4, SH6) — adds TAIL_BARRIER_VMCNT=0.
+        ("_ts_v12_tv0_gm7_memc_pfoff24_kx7168_btw_all",
+         "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=7 -DSTEP3_BARRIER_VMCNT=12 -DTAIL_BARRIER_VMCNT=0 "
+         "-DR25C_TAIL_PF_OFF_ITERS=24 -DR25C_K_LIMIT=32768 -DR25C_K_EXACT=7168 "
+         "-mllvm -amdgpu-sched-strategy=max-memory-clause "
+         "-DBARRIER_TO_WAITCNT_ALL=1"),  # R25H WIN: SH4 32768x4096x7168 +13.17% vs parent
+        ("_ts_v12_tv0_gm7_memc_pfoff28_kx8192_btw_all",
+         "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=7 -DSTEP3_BARRIER_VMCNT=12 -DTAIL_BARRIER_VMCNT=0 "
+         "-DR25C_TAIL_PF_OFF_ITERS=28 -DR25C_K_LIMIT=32768 -DR25C_K_EXACT=8192 "
+         "-mllvm -amdgpu-sched-strategy=max-memory-clause "
+         "-DBARRIER_TO_WAITCNT_ALL=1"),  # R25H WIN: SH6 4096x14336x8192 +9.26% vs parent
     ]
     for n_val, k_val in nk_pairs:
         for suffix, cppflags in variants:

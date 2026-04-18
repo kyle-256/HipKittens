@@ -1,0 +1,290 @@
+{
+  "shapes": {
+    "SH2": {
+      "PARENT": {
+        "suffix": "_ts_gm2_v12_memc_btw_all",
+        "runs": [
+          {
+            "tflops": 4507.7,
+            "ms": 0.3659,
+            "n_iters_kept": 400,
+            "nz": 0.9999988079071045
+          },
+          {
+            "tflops": 4484.4,
+            "ms": 0.3678,
+            "n_iters_kept": 400,
+            "nz": 0.9999985098838806
+          },
+          {
+            "tflops": 4438.4,
+            "ms": 0.3716,
+            "n_iters_kept": 400,
+            "nz": 0.9999989867210388
+          },
+          {
+            "tflops": 4521.93,
+            "ms": 0.3647,
+            "n_iters_kept": 400,
+            "nz": 0.9999986886978149
+          },
+          {
+            "tflops": 4514.73,
+            "ms": 0.3653,
+            "n_iters_kept": 400,
+            "nz": 0.999998927116394
+          }
+        ]
+      },
+      "CHILD_R25H": {
+        "suffix": "_ts_v12_gm7_memc_pfoff19_kx6144_btw_all",
+        "runs": [
+          {
+            "tflops": 5257.42,
+            "ms": 0.3137,
+            "n_iters_kept": 400,
+            "nz": 0.9999994039535522
+          },
+          {
+            "error": "rc=-6",
+            "stderr": ":0:rocdevice.cpp            :3580: 1179140855421 us:  Callback: Queue 0x7f86f0600000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29\n"
+          },
+          {
+            "tflops": 5345.72,
+            "ms": 0.3085,
+            "n_iters_kept": 400,
+            "nz": 0.9999995231628418
+          },
+          {
+            "tflops": 5313.08,
+            "ms": 0.3104,
+            "n_iters_kept": 400,
+            "nz": 0.999999463558197
+          },
+          {
+            "tflops": 5306.42,
+            "ms": 0.3108,
+            "n_iters_kept": 400,
+            "nz": 0.9999994039535522
+          }
+        ]
+      }
+    },
+    "SH1": {
+      "PARENT": {
+        "suffix": "_ts_gm2_v12_memc_btw_all",
+        "runs": [
+          {
+            "tflops": 3408.68,
+            "ms": 0.5645,
+            "n_iters_kept": 400,
+            "nz": 0.9999969005584717
+          },
+          {
+            "tflops": 3412.27,
+            "ms": 0.5639,
+            "n_iters_kept": 400,
+            "nz": 0.9999970197677612
+          },
+          {
+            "error": "rc=-6",
+            "stderr": ":0:rocdevice.cpp            :3580: 1179077742909 us:  Callback: Queue 0x7fa8c0400000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29\n"
+          },
+          {
+            "tflops": 3412.98,
+            "ms": 0.5638,
+            "n_iters_kept": 400,
+            "nz": 0.9999969601631165
+          },
+          {
+            "tflops": 3404.2,
+            "ms": 0.5652,
+            "n_iters_kept": 400,
+            "nz": 0.9999970197677612
+          }
+        ]
+      },
+      "CHILD_R25H": {
+        "suffix": "_ts_v12_gm7_memc_pfoff4_kx2048_btw_all",
+        "runs": [
+          {
+            "tflops": 3701.51,
+            "ms": 0.5198,
+            "n_iters_kept": 400,
+            "nz": 0.9999971985816956
+          },
+          {
+            "error": "rc=-6",
+            "stderr": ":0:rocdevice.cpp            :3580: 1179167451006 us:  Callback: Queue 0x7fd748200000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29\n"
+          },
+          {
+            "tflops": 3737.67,
+            "ms": 0.5148,
+            "n_iters_kept": 400,
+            "nz": 0.9999973177909851
+          },
+          {
+            "tflops": 3730.96,
+            "ms": 0.5157,
+            "n_iters_kept": 400,
+            "nz": 0.9999973177909851
+          },
+          {
+            "tflops": 3738.16,
+            "ms": 0.5147,
+            "n_iters_kept": 400,
+            "nz": 0.9999972581863403
+          }
+        ]
+      }
+    },
+    "SH4": {
+      "PARENT": {
+        "suffix": "_ts_v12_tv0_memc_btw_all",
+        "runs": [
+          {
+            "tflops": 4648.03,
+            "ms": 0.414,
+            "n_iters_kept": 400,
+            "nz": 0.9999974966049194
+          },
+          {
+            "tflops": 4600.73,
+            "ms": 0.4182,
+            "n_iters_kept": 400,
+            "nz": 0.999997615814209
+          },
+          {
+            "tflops": 4606.71,
+            "ms": 0.4177,
+            "n_iters_kept": 400,
+            "nz": 0.999997615814209
+          },
+          {
+            "tflops": 4694.09,
+            "ms": 0.4099,
+            "n_iters_kept": 400,
+            "nz": 0.9999972581863403
+          },
+          {
+            "tflops": 4628.91,
+            "ms": 0.4157,
+            "n_iters_kept": 400,
+            "nz": 0.9999974370002747
+          }
+        ]
+      },
+      "CHILD_R25H": {
+        "suffix": "_ts_v12_tv0_gm7_memc_pfoff24_kx7168_btw_all",
+        "runs": [
+          {
+            "tflops": 5270.31,
+            "ms": 0.3651,
+            "n_iters_kept": 400,
+            "nz": 0.9999994039535522
+          },
+          {
+            "tflops": 5289.15,
+            "ms": 0.3638,
+            "n_iters_kept": 400,
+            "nz": 0.9999992847442627
+          },
+          {
+            "tflops": 5303.7,
+            "ms": 0.3628,
+            "n_iters_kept": 400,
+            "nz": 0.9999994039535522
+          },
+          {
+            "tflops": 5270.16,
+            "ms": 0.3651,
+            "n_iters_kept": 400,
+            "nz": 0.9999994039535522
+          },
+          {
+            "tflops": 5292.67,
+            "ms": 0.3635,
+            "n_iters_kept": 400,
+            "nz": 0.9999994039535522
+          }
+        ]
+      }
+    },
+    "SH6": {
+      "PARENT": {
+        "suffix": "_ts_v12_tv0_memc_btw_all",
+        "runs": [
+          {
+            "tflops": 4474.73,
+            "ms": 0.215,
+            "n_iters_kept": 400,
+            "nz": 0.9999969005584717
+          },
+          {
+            "tflops": 4385.77,
+            "ms": 0.2194,
+            "n_iters_kept": 400,
+            "nz": 0.999996542930603
+          },
+          {
+            "tflops": 4420.0,
+            "ms": 0.2177,
+            "n_iters_kept": 400,
+            "nz": 0.9999967813491821
+          },
+          {
+            "tflops": 4470.8,
+            "ms": 0.2152,
+            "n_iters_kept": 400,
+            "nz": 0.9999967813491821
+          },
+          {
+            "tflops": 4436.36,
+            "ms": 0.2169,
+            "n_iters_kept": 400,
+            "nz": 0.9999967217445374
+          }
+        ]
+      },
+      "CHILD_R25H": {
+        "suffix": "_ts_v12_tv0_gm7_memc_pfoff28_kx8192_btw_all",
+        "runs": [
+          {
+            "tflops": 4883.83,
+            "ms": 0.197,
+            "n_iters_kept": 400,
+            "nz": 0.9999994039535522
+          },
+          {
+            "tflops": 4960.45,
+            "ms": 0.1939,
+            "n_iters_kept": 400,
+            "nz": 0.9999994039535522
+          },
+          {
+            "tflops": 4891.22,
+            "ms": 0.1967,
+            "n_iters_kept": 400,
+            "nz": 0.9999995231628418
+          },
+          {
+            "tflops": 4891.16,
+            "ms": 0.1967,
+            "n_iters_kept": 400,
+            "nz": 0.9999995231628418
+          },
+          {
+            "tflops": 4832.14,
+            "ms": 0.1991,
+            "n_iters_kept": 400,
+            "nz": 0.9999995231628418
+          }
+        ]
+      }
+    }
+  },
+  "warmup": 200,
+  "iters": 500,
+  "trim": 0.1,
+  "n_reps": 5
+}
