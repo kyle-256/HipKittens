@@ -1,0 +1,86 @@
+{
+  "2": {
+    "crr_mom": 2676.32,
+    "rrr_mom": 2874.92,
+    "crr_meds": [
+      2668.91,
+      2676.32,
+      2689.87
+    ],
+    "rrr_meds": [
+      2856.06,
+      2874.92,
+      2877.62
+    ],
+    "delta_pct": 7.421,
+    "welch_t": 19.891,
+    "crr_full_median": 2683.45,
+    "rrr_full_median": 2875.86,
+    "crr_stdev_mean": 0.93,
+    "rrr_stdev_mean": 1.587,
+    "n": 30
+  },
+  "3": {
+    "crr_mom": 2718.68,
+    "rrr_mom": 2952.15,
+    "crr_meds": [
+      2718.68,
+      2727.03,
+      2718.64
+    ],
+    "rrr_meds": [
+      2952.15,
+      2952.49,
+      2951.96
+    ],
+    "delta_pct": 8.588,
+    "welch_t": 19.859,
+    "crr_full_median": 2723.29,
+    "rrr_full_median": 2952.49,
+    "crr_stdev_mean": 1.301,
+    "rrr_stdev_mean": 1.657,
+    "n": 30
+  },
+  "6": {
+    "crr_mom": 2691.75,
+    "rrr_mom": 2893.65,
+    "crr_meds": [
+      2691.75,
+      2694.98,
+      2690.31
+    ],
+    "rrr_meds": [
+      2888.53,
+      2918.31,
+      2893.65
+    ],
+    "delta_pct": 7.5,
+    "welch_t": 22.169,
+    "crr_full_median": 2693.04,
+    "rrr_full_median": 2902.35,
+    "crr_stdev_mean": 0.823,
+    "rrr_stdev_mean": 1.587,
+    "n": 30
+  },
+  "7": {
+    "crr_mom": 2718.8,
+    "rrr_mom": 2932.14,
+    "crr_meds": [
+      2718.8,
+      2724.05,
+      2702.31
+    ],
+    "rrr_meds": [
+      2932.14,
+      2952.8,
+      2921.88
+    ],
+    "delta_pct": 7.847,
+    "welch_t": 18.564,
+    "crr_full_median": 2705.69,
+    "rrr_full_median": 2928.88,
+    "crr_stdev_mean": 1.391,
+    "rrr_stdev_mean": 1.651,
+    "n": 30
+  }
+}
