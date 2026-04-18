@@ -1,0 +1,16 @@
+===== R32 cell=2 rect build clean-compile + resource report =====
+rect build rc=0
+6a7fa4bb6d941e1ebd92d3476e527fa4  tk_mxfp8_layouts.cpython-310-x86_64-linux-gnu.so
+--- rect kernel resource report ---
+./crr_mxfp8_exact_8wave_rect_fastpath.inc:266:1: remark: Function Name: _Z34crr_exact_8wave_scaled_rect_kernelILb1EEv14layout_globals [-Rpass-analysis=kernel-resource-usage]
+  266 | {
+      | ^
+./crr_mxfp8_exact_8wave_rect_fastpath.inc:266:1: remark:     TotalSGPRs: 53 [-Rpass-analysis=kernel-resource-usage]
+./crr_mxfp8_exact_8wave_rect_fastpath.inc:266:1: remark:     VGPRs: 148 [-Rpass-analysis=kernel-resource-usage]
+./crr_mxfp8_exact_8wave_rect_fastpath.inc:266:1: remark:     AGPRs: 0 [-Rpass-analysis=kernel-resource-usage]
+./crr_mxfp8_exact_8wave_rect_fastpath.inc:266:1: remark:     ScratchSize [bytes/lane]: 0 [-Rpass-analysis=kernel-resource-usage]
+./crr_mxfp8_exact_8wave_rect_fastpath.inc:266:1: remark:     Dynamic Stack: False [-Rpass-analysis=kernel-resource-usage]
+./crr_mxfp8_exact_8wave_rect_fastpath.inc:266:1: remark:     Occupancy [waves/SIMD]: 2 [-Rpass-analysis=kernel-resource-usage]
+./crr_mxfp8_exact_8wave_rect_fastpath.inc:266:1: remark:     SGPRs Spill: 0 [-Rpass-analysis=kernel-resource-usage]
+./crr_mxfp8_exact_8wave_rect_fastpath.inc:266:1: remark:     VGPRs Spill: 0 [-Rpass-analysis=kernel-resource-usage]
+./crr_mxfp8_exact_8wave_rect_fastpath.inc:266:1: remark:     LDS Size [bytes/block]: 104448 [-Rpass-analysis=kernel-resource-usage]

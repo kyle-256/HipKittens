@@ -1,0 +1,18 @@
+===== R32 cell=3 Stage A2c: SNR + det at 70B KV (rect kernel still loaded) =====
+[sclk-pre-preheat] GPU[0]		: sclk clock level: 1: (164Mhz)
+[preheat] sustained 30s 16k matmul...
+[preheat] done 8188 iters
+[sclk-post-preheat] GPU[0]		: sclk clock level: 1: (2308Mhz)
+[r32a] As.shape=torch.Size([32, 32768]) Bs.shape=torch.Size([32, 16384])
+CORRECTNESS M=4096 N=1024 K=8192 snr_db=inf pass_rate_pct=33.53
+C[0, :8] = [-0.94921875, -0.52734375, -0.87890625, 1.2265625, 0.5703125, -0.050048828125, -0.059326171875, -0.125]
+C_ref[0, :8] = [-0.6951422691345215, -0.3869476318359375, -1.008007287979126, -0.8026106357574463, -1.0931396484375, 0.6643214225769043, 0.12281346321105957, 1.4651551246643066]
+DETERMINISM ok=False
+[sclk-pre-bench] GPU[0]		: sclk clock level: 1: (2372Mhz)
+RUN 0 avg_ms=0.0834 tflops=824.39
+RUN 1 avg_ms=0.0815 tflops=843.66
+RUN 2 avg_ms=0.0811 tflops=847.54
+[sclk-post-bench] GPU[0]		: sclk clock level: 1: (2388Mhz)
+SUMMARY median=843.66 mean=838.53 stdev=12.40 runs=3
+TFLOPS_LIST 824.3853,843.6597,847.5391
+stage_a2c rc=0
