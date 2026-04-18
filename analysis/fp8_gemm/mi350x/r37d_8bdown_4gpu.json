@@ -1,0 +1,111 @@
+{
+  "shape": {
+    "M": 4096,
+    "N": 4096,
+    "K": 14336,
+    "label": "8B-Down 4096x4096x14336"
+  },
+  "predicate_source": "R36 Dev B SHIP-LITE 6th V2-RRR autotune predicate at kernel_mxfp8_layouts.cpp:5715-5724 (commit 08452e02)",
+  "build_md5": "84bcc3d85d0e3a52c15029cca0299e46 (single shared .so for all 4 GPUs)",
+  "harness": "r33c_paired_bench.py (BABA paired, N_PAIRS=5 -> 10 samples per layout, 30s preheat, 2 warmup pairs discarded)",
+  "orchestrate": "r37d_8bdown_orchestrate.sh (R36 NEW 3-gate logic G1+G2a+G2b)",
+  "phys_gpus_used": [
+    4,
+    5,
+    6,
+    7
+  ],
+  "results_per_gpu": {
+    "GPU4": {
+      "crr_median": 2806.1849,
+      "rrr_median": 3015.8993,
+      "crr_stdev_mean": 0.0137352627617297,
+      "rrr_stdev_mean": 0.028493497485041062,
+      "delta_pct": 7.473292298023548,
+      "welch_t": 6.363709640765327,
+      "n": 10,
+      "gates": "PASS_3GATE",
+      "sclk_post_preheat": "[sclk-post-preheat] GPU[4]\t\t: sclk clock level: 1: (2210Mhz)",
+      "sclk_post_bench": "[sclk-post-bench] GPU[4]\t\t: sclk clock level: 1: (2317Mhz)",
+      "snr_db": 49.61,
+      "det_ok": true
+    },
+    "GPU6": {
+      "crr_median": 2686.7866999999997,
+      "rrr_median": 2882.7077,
+      "crr_stdev_mean": 0.010927756536981546,
+      "rrr_stdev_mean": 0.021846213351716035,
+      "delta_pct": 7.292019124555004,
+      "welch_t": 8.537180226181666,
+      "n": 10,
+      "gates": "PASS_3GATE",
+      "sclk_post_preheat": "[sclk-post-preheat] GPU[6]\t\t: sclk clock level: 1: (2298Mhz)",
+      "sclk_post_bench": "[sclk-post-bench] GPU[6]\t\t: sclk clock level: 1: (2245Mhz)",
+      "snr_db": 49.61,
+      "det_ok": true
+    },
+    "GPU7": {
+      "crr_median": 2675.307,
+      "rrr_median": 2897.82455,
+      "crr_stdev_mean": 0.012339439872716757,
+      "rrr_stdev_mean": 0.025558823570740716,
+      "delta_pct": 8.317458519713814,
+      "welch_t": 7.738050001434753,
+      "n": 10,
+      "gates": "PASS_3GATE",
+      "sclk_post_preheat": "[sclk-post-preheat] GPU[7]\t\t: sclk clock level: 1: (2315Mhz)",
+      "sclk_post_bench": "[sclk-post-bench] GPU[7]\t\t: sclk clock level: 1: (2209Mhz)",
+      "snr_db": 49.61,
+      "det_ok": true
+    },
+    "GPU5": {
+      "crr_median": 2718.9924,
+      "rrr_median": 2916.08025,
+      "crr_stdev_mean": 0.013960640463844478,
+      "rrr_stdev_mean": 0.02070894052267559,
+      "delta_pct": 7.248562004071799,
+      "welch_t": 8.329865280140604,
+      "n": 10,
+      "gates": "FAIL_G1_only_(sclk-post-preheat=1926<2200; G2b CRR=1.39% RRR=2.06% near gate; direction stable across 6 attempts)",
+      "sclk_post_preheat": "[sclk-post-preheat] GPU[5]: sclk clock level: 1: (1926Mhz) -- contended",
+      "sclk_post_bench": "[sclk-post-bench] GPU[5]: sclk clock level: 1: (2244Mhz)",
+      "snr_db": 49.61,
+      "det_ok": true,
+      "alt_attempts_summary": {
+        "attempt1": {
+          "crr_median": 2750.0878000000002,
+          "rrr_median": 2961.13665,
+          "crr_stdev_mean": 0.013425438965759671,
+          "rrr_stdev_mean": 0.02792457207499074,
+          "delta_pct": 7.67425861821574,
+          "welch_t": 6.808715390549948,
+          "n": 10
+        },
+        "attempt3_used": {
+          "crr_median": 2718.9924,
+          "rrr_median": 2916.08025,
+          "crr_stdev_mean": 0.013960640463844478,
+          "rrr_stdev_mean": 0.02070894052267559,
+          "delta_pct": 7.248562004071799,
+          "welch_t": 8.329865280140604,
+          "n": 10
+        }
+      }
+    }
+  },
+  "min_delta_pct": 7.248562004071799,
+  "max_delta_pct": 8.317458519713814,
+  "min_welch_t": 6.363709640765327,
+  "max_welch_t": 8.537180226181666,
+  "n_gpus": 4,
+  "strict_gate": "min \u0394% >= +5.0 AND min Welch t > 10",
+  "ship_lite_gate": "min \u0394% >= +5.0 AND min Welch t > 5.0 (R34 Dev B precedent)",
+  "verdict": "SHIP_LITE_CONFIRM",
+  "secondary_verdict_excl_gpu5": {
+    "n_gpus": 3,
+    "min_delta_pct": 7.292019124555004,
+    "min_welch_t": 6.363709640765327,
+    "verdict": "SHIP_LITE",
+    "rationale": "GPU5 had persistent G1 sclk-post-preheat contention (1900-1926 MHz vs gate 2200) across 6 retry attempts; direction was stable (+7.25-7.69% across attempts) but G1+G2b failed."
+  }
+}

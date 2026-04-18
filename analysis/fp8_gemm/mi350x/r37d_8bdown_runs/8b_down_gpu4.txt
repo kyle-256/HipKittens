@@ -1,0 +1,90 @@
+===== R37 Dev D 8B-Down 4-GPU triangulation cell=8b_down M=4096 N=4096 K=14336 phys_gpu=4 =====
+[orchestrate] N_PAIRS=5 WARMUP=30 ITERS=50 PREHEAT=30s WARMUP_PAIRS=2
+[orchestrate] R36 3-gate logic active: G1 sclk-post-preheat>=2200 G2a sclk-post-bench>=2200 G2b stdev/mean<=0.01, MAX_RETRIES=3
+Sat Apr 18 14:22:55 UTC 2026
+[pre-orchestrate sclk check]
+GPU[4]		: sclk clock level: 1: (234Mhz)
+[build 8b_down md5=84bcc3d85d0e3a52c15029cca0299e46 (cached)]
+[bench attempt 1/3]
+[bench rc=0]
+[sclk-pre-preheat] GPU[4]		: sclk clock level: 1: (162Mhz)
+[preheat 30.0s] done 8188 iters
+[sclk-post-preheat] GPU[4]		: sclk clock level: 1: (1740Mhz)
+CORRECTNESS_CRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[4]		: sclk clock level: 1: (1741Mhz)
+WARMUP 0 RRR=67.81 CRR=67.76 sclk=GPU[4]		: sclk clock level: 1: (1736Mhz)
+WARMUP 1 RRR=67.86 CRR=70.48 sclk=GPU[4]		: sclk clock level: 1: (1742Mhz)
+PAIR 0 RRR_1=72.04 CRR_1=70.30 RRR_2=65.82 CRR_2=67.69
+PAIR 1 RRR_1=67.94 CRR_1=67.69 RRR_2=67.77 CRR_2=67.36
+PAIR 2 RRR_1=67.86 CRR_1=67.85 RRR_2=70.68 CRR_2=67.78
+PAIR 3 RRR_1=66.09 CRR_1=68.73 RRR_2=67.87 CRR_2=67.76
+PAIR 4 RRR_1=67.91 CRR_1=67.42 RRR_2=67.77 CRR_2=67.77
+[sclk-post-bench] GPU[4]		: sclk clock level: 1: (1742Mhz)
+CRR  median=67.76 mean=68.03 stdev=0.88 n=10
+RRR  median=67.87 mean=68.17 stdev=1.88 n=10
+Welch t (CRR vs RRR) = 0.214  (positive = RRR faster)
+DELTA_MEDIAN_PCT RRR_vs_CRR = +0.156%
+CRR_TFLOPS_LIST 70.2981,67.6940,67.6881,67.3578,67.8512,67.7842,68.7267,67.7561,67.4182,67.7652
+RRR_TFLOPS_LIST 72.0383,65.8156,67.9406,67.7661,67.8613,70.6785,66.0891,67.8717,67.9098,67.7746
+--- stderr ---
+W20260418 14:23:00.136434 140054829887488 agent.cpp:461] Attempt to enable hip visiblity for agent-2 which is not visible to HSA (ROCR)
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=4096, K=14336) is ~+9.5% faster on V2-RRR (R35 Dev D LLaMA matrix re-bench identified largest uncovered RRR-vs-CRR gap; R36 Dev B 2-GPU triangulated). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r35d_findings.md and r36b_findings.md.
+[orchestrate] attempt=1 rc=0 G1 sclk-post-preheat=1740MHz (gate=2200) G2a sclk-post-bench=1742MHz (gate=2200) G2b stdev/mean CRR=0.012987 RRR=0.027700 (gate=0.01 pass=0)
+[orchestrate] attempt=1 FAILED gates; retry after 5s...
+[bench attempt 2/3]
+[bench rc=0]
+[sclk-pre-preheat] GPU[4]		: sclk clock level: 1: (2190Mhz)
+[preheat 30.0s] done 7164 iters
+[sclk-post-preheat] GPU[4]		: sclk clock level: 1: (1643Mhz)
+CORRECTNESS_CRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[4]		: sclk clock level: 1: (1735Mhz)
+WARMUP 0 RRR=67.73 CRR=67.91 sclk=GPU[4]		: sclk clock level: 1: (1739Mhz)
+WARMUP 1 RRR=73.79 CRR=67.10 sclk=GPU[4]		: sclk clock level: 1: (1733Mhz)
+PAIR 0 RRR_1=68.10 CRR_1=67.19 RRR_2=68.04 CRR_2=67.80
+PAIR 1 RRR_1=69.27 CRR_1=67.67 RRR_2=67.69 CRR_2=67.63
+PAIR 2 RRR_1=68.89 CRR_1=67.61 RRR_2=67.81 CRR_2=67.23
+PAIR 3 RRR_1=67.87 CRR_1=67.37 RRR_2=68.17 CRR_2=67.71
+PAIR 4 RRR_1=67.88 CRR_1=69.05 RRR_2=70.15 CRR_2=67.71
+[sclk-post-bench] GPU[4]		: sclk clock level: 1: (1732Mhz)
+CRR  median=67.65 mean=67.70 stdev=0.52 n=10
+RRR  median=68.07 mean=68.39 stdev=0.80 n=10
+Welch t (CRR vs RRR) = 2.292  (positive = RRR faster)
+DELTA_MEDIAN_PCT RRR_vs_CRR = +0.624%
+CRR_TFLOPS_LIST 67.1946,67.7972,67.6655,67.6251,67.6142,67.2332,67.3698,67.7066,69.0527,67.7137
+RRR_TFLOPS_LIST 68.0992,68.0357,69.2728,67.6948,68.8870,67.8148,67.8716,68.1668,67.8821,70.1499
+--- stderr ---
+W20260418 14:24:40.934134 140084919463936 agent.cpp:461] Attempt to enable hip visiblity for agent-2 which is not visible to HSA (ROCR)
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=4096, K=14336) is ~+9.5% faster on V2-RRR (R35 Dev D LLaMA matrix re-bench identified largest uncovered RRR-vs-CRR gap; R36 Dev B 2-GPU triangulated). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r35d_findings.md and r36b_findings.md.
+[orchestrate] attempt=2 rc=0 G1 sclk-post-preheat=1643MHz (gate=2200) G2a sclk-post-bench=1732MHz (gate=2200) G2b stdev/mean CRR=0.007687 RRR=0.011753 (gate=0.01 pass=0)
+[orchestrate] attempt=2 FAILED gates; retry after 5s...
+[bench attempt 3/3]
+[bench rc=0]
+[sclk-pre-preheat] GPU[4]		: sclk clock level: 1: (1734Mhz)
+[preheat 30.0s] done 7164 iters
+[sclk-post-preheat] GPU[4]		: sclk clock level: 1: (2210Mhz)
+CORRECTNESS_CRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[4]		: sclk clock level: 1: (2319Mhz)
+WARMUP 0 RRR=2745.45 CRR=2725.34 sclk=GPU[4]		: sclk clock level: 1: (2302Mhz)
+WARMUP 1 RRR=2688.66 CRR=2691.20 sclk=GPU[4]		: sclk clock level: 1: (2295Mhz)
+PAIR 0 RRR_1=2750.58 CRR_1=2690.45 RRR_2=2941.28 CRR_2=2782.26
+PAIR 1 RRR_1=2993.84 CRR_1=2816.33 RRR_2=3017.14 CRR_2=2808.94
+PAIR 2 RRR_1=3024.09 CRR_1=2800.80 RRR_2=3013.25 CRR_2=2792.50
+PAIR 3 RRR_1=3021.01 CRR_1=2810.59 RRR_2=3014.66 CRR_2=2825.10
+PAIR 4 RRR_1=3017.96 CRR_1=2803.43 RRR_2=3023.83 CRR_2=2811.17
+[sclk-post-bench] GPU[4]		: sclk clock level: 1: (2317Mhz)
+CRR  median=2806.18 mean=2794.16 stdev=38.38 n=10
+RRR  median=3015.90 mean=2981.76 stdev=84.96 n=10
+Welch t (CRR vs RRR) = 6.364  (positive = RRR faster)
+DELTA_MEDIAN_PCT RRR_vs_CRR = +7.473%
+CRR_TFLOPS_LIST 2690.4507,2782.2632,2816.3291,2808.9359,2800.7964,2792.4971,2810.5879,2825.1007,2803.4339,2811.1658
+RRR_TFLOPS_LIST 2750.5841,2941.2800,2993.8405,3017.1397,3024.0906,3013.2532,3021.0059,3014.6589,3017.9570,3023.8324
+--- stderr ---
+W20260418 14:26:07.453840 140319095103488 agent.cpp:461] Attempt to enable hip visiblity for agent-2 which is not visible to HSA (ROCR)
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=4096, K=14336) is ~+9.5% faster on V2-RRR (R35 Dev D LLaMA matrix re-bench identified largest uncovered RRR-vs-CRR gap; R36 Dev B 2-GPU triangulated). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r35d_findings.md and r36b_findings.md.
+[orchestrate] attempt=3 rc=0 G1 sclk-post-preheat=2210MHz (gate=2200) G2a sclk-post-bench=2317MHz (gate=2200) G2b stdev/mean CRR=0.013677 RRR=0.028171 (gate=0.01 pass=0)
+[orchestrate] PASS R36 3-gate logic at attempt=3; using as final.
+DONE gpu=4 attempts=3
+Sat Apr 18 14:27:29 UTC 2026
