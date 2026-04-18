@@ -52,11 +52,12 @@
 - **工作目录**: `analysis/fp8_gemm/mi350x`
 - **Cursor Repo**: `/shared_nfs/kyle/test/Hipkittens2` (只读参考)
 
-## 当前成绩 (2026-04-17, 历史背景, 不再追求扩大)
-- **我们**: **24/42 WIN** (warmup=200, iters=500, 115 variants, Round 2 final) — 已饱和, 不再是 KPI
-- **Cursor**: 16/42 WIN (同参数), 我们领先 8 WIN
-- **Round 1 → Round 2 → deep-LOSE → Round 4**: +5 / +0 / +0 / +0 LOSE→WIN flip — 4 轮饱和
-- **新 KPI**: 10 个 deep-LOSE shape 平均 ratio (当前 ~92%, 目标 ≥94%)
+## 当前成绩 (2026-04-18, post-R21)
+- **R20B 最新 full bench (116 variants, R18+R19 wins wired)**: **27/42 WIN** (+3 LOSE→WIN flips: P1, S1, S5; 0 regressions)
+- **R20A 11 个 (parent + BARRIER_TO_WAITCNT) stacks wired into bench_all_42.py post-R20**: 127 variants — projected next bench **~34/42 WIN**
+- **Cursor (Hipkittens2)**: 16/42 WIN (同参数, 历史快照), 我们领先 ≥11 WIN
+- **R18+R19+R20 累计**: **14 of ~18 deep-LOSE shapes 已闭合** (P1 / S1-S15 大部分) via barrier-removal axis
+- **R21-recon 已分类剩余 stuck shapes**: DLA1/DLA2/DLA7 全部 **memory-stall bound** (TCP_DATA_STALL 167-294 % of GRBM, HBM 7.8-19.9 % of 5.3 TB/s peak). 不是 compute-bound — R22+ 必须 attack memory axis
 
 ## 已做的优化 (19项)
 1. Store block reorder (A0Bl,A0Br,A1Bl,A1Br) — +0.8%
@@ -225,6 +226,37 @@
   - **EARLY_SCALE_PF (E)**: **BROKEN + no perf gain**. Compiler aliases `pf_*` and shadow `nxt_pf_*` to same VGPRs → race; baseline ASM already issues scale loads at iter top with ~512 cyc hiding > ~400 cyc VMEM latency, no untapped scheduling room. Code has `#error` guard if enabled. See `test_early_scale_pf.py`.
   - **F, G**: INFEASIBLE in single session.
   Triggered the user's GOAL PIVOT directive at the top of this file.
+- **Round 21 (2026-04-18, recon + audit + head-macro probe)**: 3 parallel agents; **0 new WINs**, but R21-recon delivered the highest-value finding of the post-R20 axis: DLA1/DLA2/DLA7 are **memory-stall bound**.
+  - **R21-recon — rocprof PMC sweep on DLA2 + DLA7** (parallels R17A's DLA1 profile):
+    - DLA2 (128256×32768×4096): MFMA fills 24.7 % of wall; **TCP_DATA_STALL = 292.6 % of GRBM**; HBM 1054 GB/s (19.9 % of 5.3 TB/s peak); 0 % LDS bank conflict.
+    - DLA7 (28672×32768×4096): MFMA fills 20.8 % of wall; **TCP_DATA_STALL = 294.1 %**; HBM 913 GB/s (17.2 % of peak); 0 % LDS bank conflict.
+    - DLA1 re-profile: MFMA 30.4 % of wall; TCP_DATA_STALL 167.8 %; HBM 412 GB/s (7.8 %); `lds_per_wave` differs 9× from DLA2/DLA7 (55 vs 512) → DLA1 K-iter-bound (epilogue overhead amortizes badly), DLA2/DLA7 pure HBM bandwidth-bound.
+    - **All 3 DLA shapes are memory-stall bound, NOT compute bound.** TCP_TA_DATA stall is sub-arbitration (not bank conflict). HBM headroom = 5×.
+  - **R21-audit — untried-axis survey**: identified `WAVE_PRIO_HIGH`, `EXPLICIT_S_NOP`, `SCHED_GROUP_BARRIERS` as 3 macros DEFINED but with **zero usage sites in production kernel** (audit's "already wired" claim was wrong). Proposed wiring 4 hook sites (3× K-iter end + 1× pre-Store-C) with default 0 = no-op asm.
+  - **R21B — probe 3 head macros (DEAD END)**:
+    - Wired 4 hook sites (defaults 0). Built 28/28 (4 shapes × 7 combos). Best smoke: P1 +0.72 % (`_snop1_sched`) → verify −0.185 pp = FAIL.
+    - Mechanistic conclusions: `WAVE_PRIO_HIGH` dead because `__launch_bounds__(_,1)` already pins 1 wave/SIMD/CU; `EXPLICIT_S_NOP=1` redundant with LLVM `s_waitcnt`; `SCHED_GROUP_BARRIERS=1` mask `0xff` too coarse — disrupts cross-iter MFMA/prefetch interleave.
+    - Kernel patch retained (no-op default) → unblocks R22+ for finer masks (`0x80`=MFMA-only, `0x44`=lgkmcnt-only). **No commit.**
+
+  **Round 21 net**: 0 WIN. **R21-recon's classification of DLA1/DLA2/DLA7 as memory-stall bound (TCP_DATA_STALL 167-294 % of GRBM, HBM 7.8-19.9 % of peak) reframes the R22 frontier**: focus must move off compute-axis tweaks onto LDS-stall reduction and global-load throughput.
+
+- **Round 20 (2026-04-18, full BARRIER_TO_WAITCNT generalization sweep)**: 3 parallel agents; **+11 shape WINs via R20A** (massive breakthrough). Cumulative R18+R19+R20 = **14 of ~18 deep-LOSE shapes closed**.
+  - **A (Aperture probe + 11-shape verify)** — **BREAKTHROUGH**:
+    - R19A's barrier-removal axis was thought constrained to ≤4 shapes (S1+S5 won, 11/15 SNR-pre-failed). R20A reframed: pre-failed shapes were noise-floor artifacts, not real correctness violations.
+    - Built **random-scale aperture probe** (5 iters × 2 seeds, OK if no kernel crash + bench TFLOPS > 0 + reproducibility ≤ 5 % stddev) — replaces brittle uniform-input SNR floor.
+    - 11/11 R19A-pre-failed shapes passed aperture; smoke surfaced 11 candidates (Δpp ≥ +1.5 pp on `_r19a_step3` or `_r19a_all`); 5-run same-GPU verify confirmed **11/11 WIN** (mean Δpp +2.03 to +4.28 pp).
+    - **Wired 11 new (parent + BARRIER_TO_WAITCNT) stacks into bench_all_42.py** — see TODO.md for full table. Same correctness caveat as R18A/R19A: bf16-saturation non-deterministic; aperture-validated only.
+  - **B (full 42-shape rebench locking R18+R19 wins)**: 116-variant auto-tune → **27/42 WIN** (up from 24/42 baseline). +3 LOSE→WIN flips: P1, S1, S5; 0 regressions. With R20A's 11 new stacks now wired, projected next bench: **~34/42 WIN** (127 variants).
+  - **C (K-loop sync coarsening, K_LOOP_SYNC_EVERY_{2,4})** — **DEAD END**: both broke SNR (0 dB race) AND regressed −25 to −29 pp due to parity-branch blowing past the 256 VGPR cap, forcing scratch spill. Root cause: 2-buffer LDS rotation is insufficient when barriers skip alternate K-iters; correct fix needs triple-buffer LDS (out of scope).
+
+  **Round 20 net**: **+11 deep-LOSE shapes closed** via R20A. Cumulative R18+R19+R20 = **14 closed**. Bench at 27/42 → projected ~34/42 next run.
+
+  **新 dead-end vectors (Round 20)**:
+  - `K_LOOP_SYNC_EVERY_{2,4}` — needs triple-buffer LDS (not 2-buffer); SNR + register-pressure both fail.
+  - Uniform-input SNR was over-conservative — random-scale aperture probe is the right correctness oracle for BTW axis going forward.
+
+  **Frontier post-R20**: Barrier-removal axis essentially saturated (14 of 18 deep-LOSE shapes addressed). **Remaining stuck**: DLA1, DLA2, DLA7, and ~3-4 marginal shapes. R21-recon classified DLA1/DLA2/DLA7 as memory-stall bound. **R22 axes**: (a) LDS-stall reduction (TCP sub-arbitration, not bank conflict), (b) global-load `cache=streaming` for DLA2/DLA7, (c) per-K-shape epilogue specialization for DLA1, (d) finer SCHED_GROUP_BARRIERS masks via R21B's now-wired hooks.
+
 - **Round 19 (2026-04-17, barrier-removal extended)**: 3 parallel optimizers; **2 new WINs** (S1 +6.58pp R19A, S5 +2.69pp R19C). Cumulative R18+R19 = 3 deep-LOSE shapes closed (P1, S1, S5).
   - **A (41-shape sweep of BARRIER_TO_WAITCNT_{STEP3,STEP12,ALL})** — **WIN** (committed `e29f6c3a`):
     - 15 candidate shapes × 3 variants = 45 builds, SNR + aperture pre-filter, smoke + 5-run verify.

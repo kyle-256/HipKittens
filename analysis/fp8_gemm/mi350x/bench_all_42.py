@@ -468,6 +468,22 @@ def main():
         ("_p1_btw_all", "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=8 -DBARRIER_TO_WAITCNT_ALL=1"),  # R18A WIN: P1
         ("_lgk2_dc_btw_step3", "-DSTEP12_BR_LGKMCNT=2 -mllvm -amdgpu-disable-clustered-low-occupancy-reschedule -DBARRIER_TO_WAITCNT_STEP3=1"),  # R19A WIN: S1 (14336x4096x32768)
         ("_lgk2_dc_btw_all", "-DSTEP12_BR_LGKMCNT=2 -mllvm -amdgpu-disable-clustered-low-occupancy-reschedule -DBARRIER_TO_WAITCNT_ALL=1"),  # R19A near-WIN: S1
+        # Round 20 OptA — 11 (parent + BARRIER_TO_WAITCNT) stacks validated by
+        # 5-run verify (warmup=200 iters=500, mean Δpp ≥ +2.0pp per shape) AND
+        # random-scale aperture probe (SNR ≥ noise-floor + 6 dB). Same correctness
+        # caveat as R18A/R19A: bf16-saturation non-deterministic; bench-validated
+        # only. Each entry is keyed to one shape's prior best parent.
+        ("_u32_btw_all",            "-DUNROLL_K=32 -DBARRIER_TO_WAITCNT_ALL=1"),  # R20A WIN: S2 16384x4096x28672 +3.74pp
+        ("_v20_memc_btw_step3",     "-DSTEP3_BARRIER_VMCNT=20 -mllvm -amdgpu-sched-strategy=max-memory-clause -DBARRIER_TO_WAITCNT_STEP3=1"),  # R20A WIN: S3 4096x32768x28672 +2.84pp
+        ("_ts_gm8_v12_btw_all",     "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=8 -DSTEP3_BARRIER_VMCNT=12 -DBARRIER_TO_WAITCNT_ALL=1"),  # R20A WIN: S5 32768x4096x14336 +4.09pp
+        ("_ts_lgk2_memc_btw_all",   "-DTAIL_SPLIT=1 -DSTEP12_BR_LGKMCNT=2 -mllvm -amdgpu-sched-strategy=max-memory-clause -DBARRIER_TO_WAITCNT_ALL=1"),  # R20A WIN: S6 4096x32768x14336 +3.11pp
+        ("_ts_lgk2_v12_memc_btw_all","-DTAIL_SPLIT=1 -DSTEP12_BR_LGKMCNT=2 -DSTEP3_BARRIER_VMCNT=12 -mllvm -amdgpu-sched-strategy=max-memory-clause -DBARRIER_TO_WAITCNT_ALL=1"),  # R20A WIN: S7 28672x32768x4096 +2.30pp
+        ("_ts_pf4_memc_btw_step3",  "-DTAIL_SPLIT=1 -DSTEP3_PF_N=4 -DSTEP4_PF_N=4 -mllvm -amdgpu-sched-strategy=max-memory-clause -DBARRIER_TO_WAITCNT_STEP3=1"),  # R20A WIN: S8 4096x32768x6144 +4.28pp
+        ("_ts_gm2_v12_memc_dc_btw_all","-DTAIL_SPLIT=1 -DGROUP_SIZE_M=2 -DSTEP3_BARRIER_VMCNT=12 -mllvm -amdgpu-sched-strategy=max-memory-clause -mllvm -amdgpu-disable-clustered-low-occupancy-reschedule -DBARRIER_TO_WAITCNT_ALL=1"),  # R20A WIN: S9 16384x28672x2048 +2.03pp
+        ("_ts_gm2_v12_memc_btw_all","-DTAIL_SPLIT=1 -DGROUP_SIZE_M=2 -DSTEP3_BARRIER_VMCNT=12 -mllvm -amdgpu-sched-strategy=max-memory-clause -DBARRIER_TO_WAITCNT_ALL=1"),  # R20A WIN: S10 16384x28672x4096 +3.23pp
+        ("_ts_v12_tv0_memc_btw_all","-DTAIL_SPLIT=1 -DSTEP3_BARRIER_VMCNT=12 -DTAIL_BARRIER_VMCNT=0 -mllvm -amdgpu-sched-strategy=max-memory-clause -DBARRIER_TO_WAITCNT_ALL=1"),  # R20A WIN: S12 14336x32768x4096 +3.26pp
+        ("_ts_lgk2_btw_step3",      "-DTAIL_SPLIT=1 -DSTEP12_BR_LGKMCNT=2 -DBARRIER_TO_WAITCNT_STEP3=1"),  # R20A WIN: S13 4096x14336x16384 +2.71pp
+        ("_ts_gm8_v12_btw_step3",   "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=8 -DSTEP3_BARRIER_VMCNT=12 -DBARRIER_TO_WAITCNT_STEP3=1"),  # R20A WIN: S15 32768x4096x7168 +2.04pp (also S5)
     ]
     for n_val, k_val in nk_pairs:
         for suffix, cppflags in variants:

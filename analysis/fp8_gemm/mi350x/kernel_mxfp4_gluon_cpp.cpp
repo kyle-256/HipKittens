@@ -161,6 +161,43 @@ using namespace kittens;
 #define EXPLICIT_S_NOP 0
 #endif
 
+// ───── R21B: macro hook helpers (no-op when defaults are 0) ─────
+// These expand to nothing in baseline so a default-built kernel is bit-for-bit
+// identical. Site-call macros are dropped at the 4 K-iter end points + tail +
+// pre-store-C for opt-in scheduling-hint experiments.
+#if EXPLICIT_S_NOP > 0
+  #if EXPLICIT_S_NOP >= 3
+    #define MXFP4_R21B_S_NOP_HOOK \
+      do { asm volatile("s_nop 0"); asm volatile("s_nop 0"); asm volatile("s_nop 0"); } while (0)
+  #elif EXPLICIT_S_NOP == 2
+    #define MXFP4_R21B_S_NOP_HOOK \
+      do { asm volatile("s_nop 0"); asm volatile("s_nop 0"); } while (0)
+  #else
+    #define MXFP4_R21B_S_NOP_HOOK do { asm volatile("s_nop 0"); } while (0)
+  #endif
+#else
+  #define MXFP4_R21B_S_NOP_HOOK do {} while (0)
+#endif
+
+#if SCHED_GROUP_BARRIERS
+  // mask=0xff matches all instruction classes; size=1 group; sync=0 (no cross-CU)
+  #define MXFP4_R21B_SCHED_GROUP_HOOK \
+    do { __builtin_amdgcn_sched_group_barrier(0xff, 1, 0); } while (0)
+#else
+  #define MXFP4_R21B_SCHED_GROUP_HOOK do {} while (0)
+#endif
+
+#if WAVE_PRIO_LOW_TAIL
+  #define MXFP4_R21B_PRIO_LOW_HOOK \
+    do { asm volatile("s_setprio 0" ::: "memory"); } while (0)
+#else
+  #define MXFP4_R21B_PRIO_LOW_HOOK do {} while (0)
+#endif
+
+// Convenience: call both s_nop and sched_group_barrier at the 4 iter-end sites.
+#define MXFP4_R21B_ITER_END_HOOK \
+  do { MXFP4_R21B_S_NOP_HOOK; MXFP4_R21B_SCHED_GROUP_HOOK; } while (0)
+
 #define MXFP4_STR_IMPL(x) #x
 #define MXFP4_STR(x) MXFP4_STR_IMPL(x)
 
@@ -182,6 +219,31 @@ using namespace kittens;
 #ifndef BARRIER_TO_WAITCNT_ALL
 #define BARRIER_TO_WAITCNT_ALL 0
 #endif
+
+// ───── R20C: K-loop sync coarsening ─────
+// Hypothesis (from R17A DLA1 profile): for very-large-K shapes, the per-iter
+// inner-loop sync (vmcnt+lgkmcnt[+s_barrier]) dominates the K-loop epilogue
+// overhead (2004 iters × per-iter sync ≈ 0.6-1.2 ms wasted on DLA1).
+//
+// K_LOOP_SYNC_EVERY_2: call the embedded-barrier (or waitcnt-only)
+// kpair_32mfma_with_lds_and_pf_swapped_sel on EVEN-bt iters, and call the
+// no-barrier variant on ODD-bt iters. Existing 2-buffer LDS rotation:
+// iter N writes A*_db[N&1], iter N reads A*_db[1-(N&1)] (i.e. what was
+// written in iter N-1). Skipping the barrier on ODD bt means iter N+1 may
+// start its ds_read of A*_db[N&1] before iter N's buffer_load_to_lds for
+// that slot has finished — UNLESS the natural lgkmcnt+vmcnt of step12+step3
+// + the s_waitcnt lgkmcnt(0) at line 2235/2283 + the inherent SIMD
+// scheduling of MFMAs covers the gap.
+//
+// SAFETY: this is a CORRECTNESS-RISKY rewrite. Validate via SNR (both
+// uniform and random-scale aperture probe per R18A's lesson).
+#ifndef K_LOOP_SYNC_EVERY_2
+#define K_LOOP_SYNC_EVERY_2 0
+#endif
+#ifndef K_LOOP_SYNC_EVERY_4
+#define K_LOOP_SYNC_EVERY_4 0
+#endif
+
 #if BARRIER_TO_WAITCNT_ALL
 #undef BARRIER_TO_WAITCNT_STEP3
 #define BARRIER_TO_WAITCNT_STEP3 1
@@ -2243,10 +2305,40 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 #endif
 
         float4 nxt_a0_d[8];
+#if K_LOOP_SYNC_EVERY_4
+        // R20C: barrier only every 4 iters (bt%4==0). Compiler unrolls and
+        // statically resolves the parity per unrolled copy.
+        if ((bt & 3) == 0) {
+            kpair_32mfma_with_lds_and_pf_swapped_sel<STEP3_PF_N, STEP3_EMBED_BARRIER>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
+                nxt_a0_d[0], nxt_a0_d[1], nxt_a0_d[2], nxt_a0_d[3],
+                nxt_a0_d[4], nxt_a0_d[5], nxt_a0_d[6], nxt_a0_d[7],
+                sel_a0_p0, sel_a0_p1, pf_a0_p, pf_a1_p);
+        } else {
+            kpair_32mfma_with_lds_and_pf_swapped_sel<STEP3_PF_N, false>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
+                nxt_a0_d[0], nxt_a0_d[1], nxt_a0_d[2], nxt_a0_d[3],
+                nxt_a0_d[4], nxt_a0_d[5], nxt_a0_d[6], nxt_a0_d[7],
+                sel_a0_p0, sel_a0_p1, pf_a0_p, pf_a1_p);
+        }
+#elif K_LOOP_SYNC_EVERY_2
+        // R20C: barrier only on EVEN bt iters (every 2 iters). Compiler unrolls
+        // and statically resolves the parity per unrolled copy.
+        if ((bt & 1) == 0) {
+            kpair_32mfma_with_lds_and_pf_swapped_sel<STEP3_PF_N, STEP3_EMBED_BARRIER>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
+                nxt_a0_d[0], nxt_a0_d[1], nxt_a0_d[2], nxt_a0_d[3],
+                nxt_a0_d[4], nxt_a0_d[5], nxt_a0_d[6], nxt_a0_d[7],
+                sel_a0_p0, sel_a0_p1, pf_a0_p, pf_a1_p);
+        } else {
+            kpair_32mfma_with_lds_and_pf_swapped_sel<STEP3_PF_N, false>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
+                nxt_a0_d[0], nxt_a0_d[1], nxt_a0_d[2], nxt_a0_d[3],
+                nxt_a0_d[4], nxt_a0_d[5], nxt_a0_d[6], nxt_a0_d[7],
+                sel_a0_p0, sel_a0_p1, pf_a0_p, pf_a1_p);
+        }
+#else
         kpair_32mfma_with_lds_and_pf_swapped_sel<STEP3_PF_N, STEP3_EMBED_BARRIER>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
             nxt_a0_d[0], nxt_a0_d[1], nxt_a0_d[2], nxt_a0_d[3],
             nxt_a0_d[4], nxt_a0_d[5], nxt_a0_d[6], nxt_a0_d[7],
             sel_a0_p0, sel_a0_p1, pf_a0_p, pf_a1_p);
+#endif
         emit_pf_tail<STEP3_PF_N>(pf_a0_p, pf_a1_p);
 
 #if DIRECT_BL && EARLY_BL_PF
@@ -2284,6 +2376,8 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 #endif
         extract_tile(nxt_a0_d, tA0);
         extract_tile(nxt_bl_d, tBl);
+        // R21B: opt-in scheduling hooks (no-op when EXPLICIT_S_NOP=0 && SCHED_GROUP_BARRIERS=0)
+        MXFP4_R21B_ITER_END_HOOK;
 
 #if EARLY_SCALE_PF
         // Writeback shadow scales → pf_* (compiler inserts vmcnt as needed before next-iter use)
@@ -2434,6 +2528,34 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         // Step 3: A1*Bl (32 MFMAs) + ds_read A0[nxt] + prefetch
         float4 nxt_a0_d[8];
         float4 nxt_bl_d[8];
+#if K_LOOP_SYNC_EVERY_4 || K_LOOP_SYNC_EVERY_2
+        // R20C: barrier coarsening — emit barrier only every 2 (or 4) iters.
+        // Compiler unrolls the K-loop and statically resolves the parity per copy.
+#if K_LOOP_SYNC_EVERY_4
+        const bool _r20c_emit_barrier = ((bt & 3) == 0);
+#else
+        const bool _r20c_emit_barrier = ((bt & 1) == 0);
+#endif
+        if (_r20c_emit_barrier) {
+#if SPREAD_LDS
+            kpair_32mfma_with_lds_rowspread_pf<STEP3_PF_N, STEP3_EMBED_BARRIER>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
+#else
+            kpair_32mfma_with_lds_and_pf<STEP3_PF_N, STEP3_EMBED_BARRIER>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
+#endif
+                nxt_a0_d[0], nxt_a0_d[1], nxt_a0_d[2], nxt_a0_d[3],
+                nxt_a0_d[4], nxt_a0_d[5], nxt_a0_d[6], nxt_a0_d[7],
+                sel_a0_p0, sel_a0_p1, pf_a0_p, pf_a1_p);
+        } else {
+#if SPREAD_LDS
+            kpair_32mfma_with_lds_rowspread_pf<STEP3_PF_N, false>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
+#else
+            kpair_32mfma_with_lds_and_pf<STEP3_PF_N, false>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
+#endif
+                nxt_a0_d[0], nxt_a0_d[1], nxt_a0_d[2], nxt_a0_d[3],
+                nxt_a0_d[4], nxt_a0_d[5], nxt_a0_d[6], nxt_a0_d[7],
+                sel_a0_p0, sel_a0_p1, pf_a0_p, pf_a1_p);
+        }
+#else
 #if SPREAD_LDS
         kpair_32mfma_with_lds_rowspread_pf<STEP3_PF_N, STEP3_EMBED_BARRIER>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
 #else
@@ -2442,6 +2564,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
             nxt_a0_d[0], nxt_a0_d[1], nxt_a0_d[2], nxt_a0_d[3],
             nxt_a0_d[4], nxt_a0_d[5], nxt_a0_d[6], nxt_a0_d[7],
             sel_a0_p0, sel_a0_p1, pf_a0_p, pf_a1_p);
+#endif // K_LOOP_SYNC_EVERY_*
         emit_pf_tail<STEP3_PF_N>(pf_a0_p, pf_a1_p);
 
         // Step 4: A1*Br (32 MFMAs) + load next Bl
@@ -2478,6 +2601,8 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 #endif
         extract_tile(nxt_a0_d, tA0);
         extract_tile(nxt_bl_d, tBl);
+        // R21B: opt-in scheduling hooks (no-op when EXPLICIT_S_NOP=0 && SCHED_GROUP_BARRIERS=0)
+        MXFP4_R21B_ITER_END_HOOK;
 
 #if EARLY_SCALE_PF
         #pragma unroll
@@ -2679,6 +2804,8 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 #endif
         extract_tile(nxt_a0_d, tA0);
         extract_tile(nxt_bl_d, tBl);
+        // R21B: opt-in scheduling hooks (no-op when EXPLICIT_S_NOP=0 && SCHED_GROUP_BARRIERS=0)
+        MXFP4_R21B_ITER_END_HOOK;
 
 #if EARLY_SCALE_PF
         #pragma unroll
@@ -2692,6 +2819,8 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 #endif // SWAP_STEP34_MAIN
 
     // ═══════════ Store C -- streamlined direct store ═══════════
+    // R21B: optionally drop wave priority before the store epilogue.
+    MXFP4_R21B_PRIO_LOW_HOOK;
     // Process base tiles directly from accumulators without materializing RT_C.
     auto store_block = [&](const fp4_floatx4_t acc[16], int mh, int nh) {
         const int lid = kittens::laneid();

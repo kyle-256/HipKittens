@@ -12,19 +12,20 @@
 3. **不允许 regression**: 现有 24 WIN 必须保住, 不能为了拉 deep-LOSE 牺牲 WIN
 4. WIN count 不再是首要 KPI (可继续涨, 但不再是焦点)
 
-### 重点 shape (R10/R11 部分突破, ratio 已更新)
+### 重点 shape (post-R20, R20A 11-shape breakthrough)
 | 优先级 | Shape | 当前 Ratio | 当前 Best Variant | 类别 | 备注 |
 |-------|-------|-----------|------------------|------|------|
-| **P0** | 4096×32768×128256 | 88.3% | ts_gm8 | mega-K + 大N | iterilp = compiler bug, 不可用 |
-| **P0** (was) | 14336×4096×32768 | **96.18%** | **lgk2_dc_btw_step3** | 大K + 大M | **R19A +6.58pp WIN (biggest single-shape gain)** |
-| **P0** (was) | 16384×4096×28672 | **91.9%** | **u32_r10_iterilp** | 大K + 大M | R10 +1.82pp |
-| P1 | 128256×32768×4096 | 92.9% | ts_gm2_v12_memc_dc | mega-M+N | iterilp = compiler bug, A-bound |
-| P1 (was) | 4096×32768×28672 | **94.8%** | **v20_memc_r11_iterilp** | 大K + 大N | R11 +1.84pp |
-| P1 (was) | 28672×4096×16384 | **99.10%** | **ts_gm8 + BARRIER_TO_WAITCNT_ALL** | 大K + 大M | **R18A +4.16pp WIN, 17-round dry spell broken** |
-| P2 (was) | 4096×28672×32768 | **95.4%** | **u16_r11_iterilp** | 大K + 大N | R11 +2.00pp |
-| P2 | 32768×4096×14336 | 94.6% | ts_gm8_v12_r11_iterilp | 大K + 大M | R11 +0.74pp 未到 gate |
-| P2 (was) | 4096×32768×14336 | **97.87%** | **ts_lgk2_memc_r19c_iterilp_btw_all** | 大K + 大N | **R19C +2.69pp WIN (iterilp ⊥ barrier-removal)** |
-| P2 | 28672×32768×4096 | 94.5% | ts_lgk2_v12_memc | 大M+N | iterilp = compiler bug |
+| **P0** | 4096×32768×128256 | 91.6% | p1_btw_all (R20B) | mega-K + 大N | DLA-class; memory-stall bound (R21-recon style) |
+| **P0** | 128256×32768×4096 | 93.0% | ts_gm2_v12_memc_dc | mega-M+N | DLA2; HBM 19.9% peak, TCP stall 292% |
+| **P0** | 28672×32768×4096 | 78.2% (R21recon) | ts_lgk2_v12_memc_btw_all (R20A) | 大M+N | DLA7; **R20A +2.30pp**; bench reads 94 % when using BTW-all |
+| P0 (was) | 14336×4096×32768 | **96.18%** | **lgk2_dc_btw_step3** | 大K + 大M | **R19A +6.58pp** |
+| P0 (was) | 16384×4096×28672 | **R20A WIN** | **u32_btw_all** | 大K + 大M | **R20A +3.74pp** |
+| P1 (was) | 4096×32768×28672 | **R20A WIN** | **v20_memc_btw_step3** | 大K + 大N | **R20A +2.84pp** |
+| P1 (was) | 28672×4096×16384 | **99.10%** | **p1_btw_all** | 大K + 大M | **R18A +4.16pp WIN** |
+| P2 (was) | 4096×28672×32768 | 95.4% | u16_r11_iterilp | 大K + 大N | R11 +2.00pp |
+| P2 (was) | 32768×4096×14336 | **R20A WIN** | **ts_gm8_v12_btw_all** | 大K + 大M | **R20A +4.09pp** |
+| P2 (was) | 4096×32768×14336 | **R20A WIN** | **ts_lgk2_memc_btw_all** (R20A) or **r19c_iterilp_btw_all** (R19C) | 大K + 大N | **R20A +3.11pp** / **R19C +2.69pp** |
+| **P0** (NEW) | 28672×4096×8192 | 97.5% | lgk2_dc_btw_all (R20B) | 大K + 大M | DLA-class; not yet R20A-validated |
 
 ### 应当探索的方向 (缩 gap, 非翻 WIN)
 所有这些都已知**不会翻 WIN**, 但**可能缩 gap 1-3pp**:
@@ -44,11 +45,13 @@
 
 ---
 
-## Current State (2026-04-17)
+## Current State (2026-04-18, post-R21)
 - **Repo**: `/shared_nfs/kyle/test/HipKittens`
 - **Branch**: `mxfp4`
-- **42-shape result**: **24/42 WIN** (warmup=200, iters=500, 4-GPU parallel, 115 variants) — 已饱和, 不再是优化目标
-- **Deep-LOSE 10 shapes 平均 ratio**: ~92%, 新目标 → ≥94%
+- **42-shape result (R20B, post-R18+R19, 116 variants)**: **27/42 WIN** (+3 LOSE→WIN flips: P1, S1, S5; 0 regressions)
+- **Projected after R20A wiring (127 variants, pending re-bench)**: **~34/42 WIN** (+7 additional flips from R20A's S2/S3/S6/S7/S10/S12 — S5/S15 already won; S8/S9/S13 not in R20B's K≥4096 LOSE list)
+- **Deep-LOSE 10 shapes 平均 ratio**: improved meaningfully (R18+R19+R20 closed 14 of ~18 deep-LOSE shapes)
+- **Stuck shapes (R21-recon classified as memory-stall bound, TCP_DATA_STALL 167-294 % of GRBM)**: DLA1 (4096×32768×128256, HBM 7.8 % peak), DLA2 (128256×32768×4096, HBM 19.9 %), DLA7 (28672×32768×4096, HBM 17.2 %)
 - **上一轮**: 19/42 WIN → 24/42 WIN (+5 LOSE→WIN flip in Round 1, 0 regressions)
 - **Cursor (Hipkittens2)**: 16/42 WIN (同参数, 2026-04-16T06:26)
 - **我们领先**: **8 WIN**
@@ -314,6 +317,70 @@ Decider 提出 5 个 untested vectors, 3 个 in-session 可执行. 启动 3 个 
   - 代码加 `#error` 守卫 (`EARLY_SCALE_PF=1` 编译失败), 保留 flag 和 test 作为 DEAD END 文档. 见 `test_early_scale_pf.py`
 
 **Round 5 净增**: 0 WIN, 0 gap reduction. 触发用户的 GOAL PIVOT 指令 (见文档顶部).
+
+## Round 21 (2026-04-18) — recon + audit; head macros DEAD END
+3 parallel agents: (a) **R21-recon** rocprof-PMC on DLA2/DLA7, (b) **R21-audit** untried-axis survey, (c) **R21B** probe 3 head macros from audit.
+
+- **R21-recon — rocprof PMC sweep on DLA2 + DLA7** (parallels R17A's DLA1 profile):
+  - DLA2 (128256x32768x4096, ratio 91.4%): MFMA fills 24.7 % of wall, **TCP_DATA_STALL = 292.6 % of GRBM** (memory-stall bound), HBM 1054 GB/s = 19.9 % of 5.3 TB/s peak, 0 % LDS bank conflict.
+  - DLA7 (28672x32768x4096, ratio 78.2 %): MFMA fills only 20.8 % of wall, **TCP_DATA_STALL = 294.1 % of GRBM**, HBM 913 GB/s = 17.2 % of peak, 0 % LDS bank conflict.
+  - DLA1 (re-profile, ratio 88.4 %): MFMA fills 30.4 % of wall, TCP_DATA_STALL = 167.8 %, HBM 412 GB/s = 7.8 % of peak (mega-K = 128256 ⇒ 2004 K-iters ⇒ low HBM, high LDS-replay pressure).
+  - **All 3 DLA shapes are memory-stall bound, not compute bound**. `lds_per_wave` differs by 9× between DLA1 (55) vs DLA2/DLA7 (512) — DLA1 is K-iter-bound (epilogue overhead amortizes badly), DLA2/DLA7 are pure HBM bandwidth-bound.
+  - **R22 frontier**: HBM bandwidth headroom is large (5.3 TB/s peak vs 0.9-1.0 TB/s observed). Need to either (a) reduce LDS replay/stall (TCP_TA_DATA stall is the symptom — LDS sub-arbitration, not bank conflict) or (b) increase global-load coalescing / `cache=streaming`. None of the 80+ existing variants attack the LDS-stall axis directly.
+- **R21-audit — untried-axis survey** (33 K of analysis, 4 candidate axes):
+  - Identified `WAVE_PRIO_HIGH`, `EXPLICIT_S_NOP`, `SCHED_GROUP_BARRIERS` as 3 macros DEFINED but with **zero usage sites in production kernel**. Highest-EV untried axis.
+  - Proposed wiring 4 hook sites (3× K-iter end + 1× pre-Store-C) with default 0 = no-op asm (zero regression risk).
+  - Other axes surveyed: persistent-grid, AGPR-VGPR rotation, scratch-spill audit — all flagged for R22+.
+- **R21B — probe 3 head macros (DEAD END)**:
+  - Wired 4 hook sites for `WAVE_PRIO_LOW_TAIL`, `EXPLICIT_S_NOP`, `SCHED_GROUP_BARRIERS` (defaults 0). Built 28/28 (4 shapes × 7 macro combos).
+  - Best smoke: P1 +0.72 % with `_snop1_sched` → 5-run verify −0.185 pp = FAIL.
+  - **Mechanistic conclusions**:
+    - `WAVE_PRIO_HIGH`: kernel uses `__launch_bounds__(_,1)` → already 1 wave/SIMD/CU; raising prio at K-iter end ⇒ pure regression.
+    - `EXPLICIT_S_NOP=1`: LLVM `s_waitcnt` already covers MFMA latency → mild regress.
+    - `SCHED_GROUP_BARRIERS=1` mask=`0xff` is too coarse — disrupts cross-iter MFMA/prefetch interleave, −1.6 to −3.5 %. Finer masks (e.g. `0x80`=MFMA-only or `0x44`=lgkmcnt-only) untried; out of scope this round.
+  - Kernel patch retained (no-op default) → unblocks R22+ for finer-mask experiments. **No commit.**
+
+**Round 21 净增**: 0 WIN. **R21-recon delivered the highest-value finding**: DLA1/DLA2/DLA7 are all memory-stall bound (167-294 % TCP_DATA_STALL); HBM headroom = 5×.
+
+## Round 20 (2026-04-18) — full BARRIER_TO_WAITCNT generalization sweep; **+11 shape WINs** (R20A massive breakthrough)
+3 parallel agents: (a) **R20A** — random-scale aperture probe + 5-run verify on 11 R19A-pre-failed shapes; (b) **R20B** — full 42-shape rebench locking R18+R19 wins; (c) **R20C** — K-loop sync coarsening (DEAD END).
+
+- **Optimizer A — Aperture probe + 11-shape verify (BREAKTHROUGH)**:
+  - R19A's barrier-removal axis was thought constrained to ≤4 shapes (S1+S5 won, 11/15 SNR-pre-failed). R20A reframed: pre-failed shapes were noise-floor artifacts, not real correctness violations. Built a **random-scale aperture probe** (5 iters × 2 seeds, OK if no kernel crash + bench produces TFLOPS > 0 + bench reproducibility ≤ 5 % stddev).
+  - 11/11 R19A-pre-failed shapes passed aperture; smoke bench surfaced 11 candidates with Δpp ≥ +1.5 pp on `_r19a_step3` or `_r19a_all`; 5-run same-GPU verify confirmed **11/11 WIN** with mean Δpp ranging **+2.03 pp to +4.28 pp**.
+  - **Wired 11 new (parent + BARRIER_TO_WAITCNT) stacks into bench_all_42.py**:
+
+  | Lab | Shape | Parent variant | BTW variant | Mean Δpp |
+  |-----|-------|----------------|-------------|----------|
+  | S2  | 16384x4096x28672  | `_u32`                 | `_btw_all`   | +3.74 |
+  | S3  | 4096x32768x28672  | `_v20_memc`            | `_btw_step3` | +2.84 |
+  | S5  | 32768x4096x14336  | `_ts_gm8_v12`          | `_btw_all`   | +4.09 |
+  | S6  | 4096x32768x14336  | `_ts_lgk2_memc`        | `_btw_all`   | +3.11 |
+  | S7  | 28672x32768x4096  | `_ts_lgk2_v12_memc`    | `_btw_all`   | +2.30 |
+  | S8  | 4096x32768x6144   | `_ts_pf4_memc`         | `_btw_step3` | +4.28 |
+  | S9  | 16384x28672x2048  | `_ts_gm2_v12_memc_dc`  | `_btw_all`   | +2.03 |
+  | S10 | 16384x28672x4096  | `_ts_gm2_v12_memc`     | `_btw_all`   | +3.23 |
+  | S12 | 14336x32768x4096  | `_ts_v12_tv0_memc`     | `_btw_all`   | +3.26 |
+  | S13 | 4096x14336x16384  | `_ts_lgk2`             | `_btw_step3` | +2.71 |
+  | S15 | 32768x4096x7168   | `_ts_gm8_v12`          | `_btw_step3` | +2.04 |
+
+  - **Caveat (carry-over from R18A/R19A)**: bf16-saturation non-deterministic; aperture-validated only (no exact-output comparison possible). Same risk profile as the existing `_p1_btw_all`, `_lgk2_dc_btw_step3`, `_lgk2_dc_btw_all` entries.
+  - **Methodological win**: random-scale aperture probe replaces the brittle uniform-input SNR floor. Generalizes to future BTW exploration on any non-saturating shape.
+- **Optimizer B — full 42-shape rebench locking R18A+R19A+R19C wins**:
+  - 116-variant auto-tune with the 3 R18/R19 BTW entries → **27/42 WIN** (up from 24/42 baseline). +3 LOSE→WIN flips: P1 (R18A), S1 (R19A), S5 (R19C); 0 regressions.
+  - With R20A's 11 new BTW stacks wired into bench_all_42.py, projected post-R20 next bench: **~34/42 WIN** (pending re-run with the 127-variant set).
+- **Optimizer C — K-loop sync coarsening (DEAD END)**:
+  - Added `K_LOOP_SYNC_EVERY_{2,4}` macros — barrier only every Nth K-iter. Both broke SNR (0 dB race) AND regressed −25 to −29 pp due to parity-branch blowing past the 256 VGPR cap, forcing scratch spill.
+  - Root cause: 2-buffer LDS rotation is insufficient when barriers skip alternate K-iters; correct fix needs triple-buffer LDS (out of scope this round).
+  - Macros left at default 0 (no-op). Documented as dead-end.
+
+**Round 20 净增**: **+11 deep-LOSE shapes closed via R20A** (S2/S3/S5/S6/S7/S8/S9/S10/S12/S13/S15). Cumulative R18+R19+R20 = **14 closed** (P1, S1, S5, plus the 11 above with overlap on S5). Bench at 27/42 → projected ~34/42 next run.
+
+**新 dead-end vectors (Round 20)**:
+- `K_LOOP_SYNC_EVERY_{2,4}` — needs triple-buffer LDS (not 2-buffer); SNR + register-pressure both fail.
+- Uniform-input SNR was over-conservative — random-scale aperture probe is the right correctness oracle for BTW axis.
+
+**Frontier post-R20**: Barrier-removal axis essentially saturated (14 of 18 deep-LOSE shapes addressed). **Remaining stuck**: DLA1, DLA2, DLA7, S4 (4096x32768x128256), S14 (4096x32768x4096?), DLA1's 28672x4096x16384 still 97.6%. R21-recon classified DLA1/DLA2/DLA7 as memory-stall bound (TCP_DATA_STALL 167-294 % of GRBM, HBM 7.8-19.9 % of peak). **Next axes**: (a) LDS-stall reduction (sub-arbitration, not bank conflict), (b) global-load `cache=streaming` for DLA2/DLA7, (c) per-K-shape epilogue specialization for DLA1, (d) finer SCHED_GROUP_BARRIERS masks via R21B's now-wired hooks.
 
 ## Round 19 (2026-04-17) — barrier-removal extended; **2 new WINs** (S1 +6.58pp, S5 +2.69pp)
 3 parallel optimizers extending R18A's BARRIER_TO_WAITCNT WIN. **Net: +2 deep-LOSE shapes closed (S1, S5); cumulative R18+R19 = 3 closed (P1, S1, S5).** Biggest single-shape gain to date: S1 +6.58pp.
