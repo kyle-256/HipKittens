@@ -1,0 +1,20 @@
+[sclk-pre-preheat] GPU[4]		: sclk clock level: 1: (158Mhz)
+[preheat 30.0s] done 8188 iters
+[sclk-post-preheat] GPU[4]		: sclk clock level: 1: (2191Mhz)
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=1024, K=4096) is +8.13% to +8.63% faster on V2-RRR (R33 Dev C 8B KV SHIP, 4-GPU triangulated; min Δ% +8.13). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r33c_findings.md.
+CORRECTNESS_default snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=1024, K=4096) is +8.13% to +8.63% faster on V2-RRR (R33 Dev C 8B KV SHIP, 4-GPU triangulated; min Δ% +8.13). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r33c_findings.md.
+CORRECTNESS_hbshrink_b1 snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[4]		: sclk clock level: 1: (2331Mhz)
+WARMUP 0 default=683.31 hbshrink_b1=882.53 sclk=GPU[4]		: sclk clock level: 1: (2369Mhz)
+WARMUP 1 default=685.32 hbshrink_b1=866.52 sclk=GPU[4]		: sclk clock level: 1: (2380Mhz)
+PAIR 0 default_1=692.43 hbshrink_b1_1=835.16 default_2=697.47 hbshrink_b1_2=889.02
+PAIR 1 default_1=702.26 hbshrink_b1_1=888.26 default_2=705.16 hbshrink_b1_2=876.71
+PAIR 2 default_1=698.53 hbshrink_b1_1=885.66 default_2=702.38 hbshrink_b1_2=880.27
+PAIR 3 default_1=702.19 hbshrink_b1_1=892.78 default_2=694.59 hbshrink_b1_2=888.59
+PAIR 4 default_1=698.99 hbshrink_b1_1=897.00 default_2=697.94 hbshrink_b1_2=875.14
+[sclk-post-bench] GPU[4]		: sclk clock level: 1: (2387Mhz)
+default median=698.76 mean=699.19 stdev=3.89 n=10
+hbshrink_b1 median=886.96 mean=880.86 stdev=17.46 n=10
+Welch t (default vs hbshrink_b1) = 32.108  (positive = hbshrink_b1 faster)
+DELTA_MEDIAN_PCT hbshrink_b1_vs_default = +26.934%

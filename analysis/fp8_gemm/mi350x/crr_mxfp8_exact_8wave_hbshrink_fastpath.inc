@@ -789,12 +789,26 @@ void crr_exact_8wave_scaled_hbshrink_kernel(const layout_globals g)
 
 // Host-side dispatch entry — wired into gemm_*_pq_v2 path in
 // kernel_mxfp8_layouts.cpp behind MXFP8_CRR_BLK_M=128.
+//
+// R37 Dev B — production shape gating: HB shrink Stage B1 wins on tall-thin
+// rect shapes (M=4096, N=1024, K∈{4096,8192}) but loses on wide-N rect
+// (8B Gate/Up 4096×14336×4096: -17.26%) and square 8192³ (-25.03%, R36
+// Dev A). Restrict the production predicate to the two confirmed-SHIP rect
+// shapes:
+//   70B-KV (M=4096, N=1024, K=8192) — R36 Dev A SHIP +28.02% (Welch t +96.4)
+//   8B-KV  (M=4096, N=1024, K=4096) — R37 Dev B SHIP +23.88-+26.93% (3-rep
+//                                       triangulated GPU1×2 + GPU4, min t +32.1)
+// All other shapes fall through to the default V2-CRR kernel.
 __host__ inline bool crr_can_use_exact_8wave_scaled_hbshrink(const layout_globals& g)
 {
-    return g.m == M_DIM && g.n == N_DIM && g.k == K_DIM
-        && (g.m % HBSHRINK_BLK_M == 0)
-        && (g.n % BLK == 0)
-        && (g.k % BK == 0);
+    if (!(g.m == M_DIM && g.n == N_DIM && g.k == K_DIM))
+        return false;
+    if (!((g.m % HBSHRINK_BLK_M == 0) && (g.n % BLK == 0) && (g.k % BK == 0)))
+        return false;
+    // R37 Dev B production shape allow-list — only fire on confirmed SHIP shapes.
+    const bool is_70b_kv = (g.m == 4096 && g.n == 1024 && g.k == 8192);
+    const bool is_8b_kv  = (g.m == 4096 && g.n == 1024 && g.k == 4096);
+    return is_70b_kv || is_8b_kv;
 }
 
 template<bool PRESHUFFLED_QUANT>

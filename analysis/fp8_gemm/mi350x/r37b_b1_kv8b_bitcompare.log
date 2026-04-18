@@ -1,0 +1,9 @@
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=1024, K=4096) is +8.13% to +8.63% faster on V2-RRR (R33 Dev C 8B KV SHIP, 4-GPU triangulated; min Δ% +8.13). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r33c_findings.md.
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=1024, K=4096) is +8.13% to +8.63% faster on V2-RRR (R33 Dev C 8B KV SHIP, 4-GPU triangulated; min Δ% +8.13). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r33c_findings.md.
+M=4096 N=1024 K=4096
+C_default[0,:8]   = [0.5234375, -0.3671875, -1.3828125, -0.69921875, 0.58203125, -1.0625, -0.3984375, 1.7578125]
+C_hbshrink[0,:8]  = [0.5234375, -0.3671875, -1.3828125, -0.69921875, 0.58203125, -1.0625, -0.3984375, 1.7578125]
+bit_equal_C[0,:8] = True
+bit_equal_full    = True
+max_abs_diff      = 0.0
+mean_abs_diff     = 0.0
