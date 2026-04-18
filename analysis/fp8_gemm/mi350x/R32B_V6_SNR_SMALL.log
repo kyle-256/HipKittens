@@ -1,0 +1,18 @@
+[random_fp4_pm2_scales] M=4096 N=4096 K=4096
+  base_finite=0.6972  split_finite=0.6681
+  SNR(split vs base) = nan dB
+  max|diff| = inf  |C_base|_mean = inf
+  |C0|_mean = inf  |C1|_mean = inf  (should sum ≈ |C_base|_mean for non-cancelling case)
+[random_fp4_zero_scales] M=4096 N=4096 K=4096
+  base_finite=0.6035  split_finite=0.6618
+  SNR(split vs base) = nan dB
+  max|diff| = inf  |C_base|_mean = inf
+  |C0|_mean = inf  |C1|_mean = inf  (should sum ≈ |C_base|_mean for non-cancelling case)
+[random_fp4_neg_scales] M=4096 N=4096 K=4096
+  base_finite=0.5928  split_finite=0.6666
+  SNR(split vs base) = nan dB
+  max|diff| = inf  |C_base|_mean = inf
+  |C0|_mean = inf  |C1|_mean = inf  (should sum ≈ |C_base|_mean for non-cancelling case)
+BENCH_JSON_START
+[{"label": "random_fp4_pm2_scales", "M": 4096, "N": 4096, "K": 4096, "snr_db": null, "max_abs": Infinity, "base_finite_frac": 0.6971608996391296, "split_finite_frac": 0.6680786609649658, "c0_mean": Infinity, "c1_mean": Infinity}, {"label": "random_fp4_zero_scales", "M": 4096, "N": 4096, "K": 4096, "snr_db": null, "max_abs": Infinity, "base_finite_frac": 0.6035187244415283, "split_finite_frac": 0.661820650100708, "c0_mean": Infinity, "c1_mean": Infinity}, {"label": "random_fp4_neg_scales", "M": 4096, "N": 4096, "K": 4096, "snr_db": null, "max_abs": Infinity, "base_finite_frac": 0.5927831530570984, "split_finite_frac": 0.6666479110717773, "c0_mean": Infinity, "c1_mean": Infinity}]
+BENCH_JSON_END

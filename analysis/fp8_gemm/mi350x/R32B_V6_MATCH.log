@@ -1,0 +1,19 @@
+[tiny_nn_zero_sc] M=4096 N=4096 K=4096
+  finite_overlap=0.9719  safe_overlap=0.9089
+  SNR(split2+epi vs split1) =     nan dB
+  max|diff|=9.953e+29  mean|diff|=7.395e+26
+  |sig|_mean=9.032e+25  match_ratio=0.515693
+[min_nn_zero_sc] M=4096 N=4096 K=4096
+  finite_overlap=0.9843  safe_overlap=0.9323
+  SNR(split2+epi vs split1) =     nan dB
+  max|diff|=9.904e+29  mean|diff|=3.716e+27
+  |sig|_mean=4.24e+25  match_ratio=0.450248
+[pos_AB_neg3_sc] M=4096 N=4096 K=4096
+  finite_overlap=0.9610  safe_overlap=0.8610
+  SNR(split2+epi vs split1) =     nan dB
+  max|diff|=9.953e+29  mean|diff|=4.084e+27
+  |sig|_mean=2.571e+27  match_ratio=0.549255
+
+BENCH_JSON_START
+[{"label": "tiny_nn_zero_sc", "snr_db": NaN, "match_ratio": 0.5156933665275574, "safe_overlap": 0.9088838696479797, "max_abs_diff": 9.953037915854457e+29}, {"label": "min_nn_zero_sc", "snr_db": NaN, "match_ratio": 0.4502476155757904, "safe_overlap": 0.9323436617851257, "max_abs_diff": 9.903520314283042e+29}, {"label": "pos_AB_neg3_sc", "snr_db": NaN, "match_ratio": 0.5492548942565918, "safe_overlap": 0.8609713912010193, "max_abs_diff": 9.953037915854457e+29}]
+BENCH_JSON_END
