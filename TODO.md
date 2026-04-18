@@ -36,13 +36,22 @@ in their worktrees and should be picked up next session.
   similar to halve ds_read count per MFMA), NOT adding DTL. Ranked
   P15 levers reduce to: **(B) StreamK persistent grid, (C) wider LDS
   reads / `ds_read_b128_tr_b16` if applicable.**
-- **Dev D (CRR_STEADY 2D sweep, GPU 0, in flight)** — running 16-config
-  grid (S1∈{0,2,4,6}, S2∈{0,2,4,6}) on Dev F P12 worktree
-  `agent-a5b15c06`. First 2 configs returned: S1=0,S2=0 → CRR geo-mean
-  vs BL 1.955× (TK avg 2627.9); S1=0,S2=2 → 1.962× (TK avg 2628.7).
-  Δ = +0.007×, well within DVFS noise. ~5 min/config × 14 remaining
-  ≈ 70 min more. Resume next session — read partial JSONs at
-  `.claude/worktrees/agent-a5b15c06/analysis/fp8_gemm/mi350x/bench_devD_S1*_S2*.json`.
+- **Dev D (FP8 CRR_STEADY1/2_LGKM 2D sweep, GPU 0, complete)** —
+  Definitive close on the knob space. Full 16-config grid
+  (S1∈{0,2,4,6}, S2∈{0,2,4,6}) ran in worktree `agent-a5b15c06`.
+  Cross-config CRR/BL spread = 0.93pp; per-config 3-run noise = 1.5pp.
+  **Per-config noise exceeds cross-config sweep spread**, so the knob
+  cannot produce a signal above DVFS noise. Best candidate (S1=6/S2=4)
+  is +0.19pp over baseline — well inside noise. Asm verification
+  confirms override reaches codegen (`s_waitcnt lgkmcnt(6)` and
+  `lgkmcnt(4)` present in CRR steady-state for S1=6/S2=4 vs all
+  `lgkmcnt(0)` for baseline). Either (a) the LDS ops have already
+  drained by MMA issue, or (b) the wait sites are not on the critical
+  path. **Recommendation: drop the knob entirely.** Dev F's P12 macro
+  infrastructure was never landed in main, so no revert needed —
+  just file as P12-CLOSED + P14-CONFIRMED. Resource usage (kernel_fp8_layouts.cpp:868)
+  identical between baseline and candidate: VGPRs=238, SGPRs=42,
+  Spills=0.
 - **Dev E (BF16 CRR `__launch_bounds__(_,1)` KI=296 only, GPU 4,
   complete)** — NO LAND. Restructured `gemm_kernel` into
   `gemm_kernel_body` + a thin `__global__` wrapper, added explicit
@@ -261,12 +270,15 @@ for archival; do NOT redispatch unless the constraint changes:
   attempted the restructure and could not converge.
 - [P12-CLOSED] CRR LDS A double-buffer. Dev C (P11) confirmed
   `__shared__ ST_crr_a As[2][2]` is already double-buffered.
-- [P12-CLOSED] CRR `lgkmcnt(0)→lgkmcnt(K)` per-operand restructure.
-  Dev F (P12) shipped the knob infrastructure (`CRR_STEADY1_LGKM`,
-  `CRR_STEADY2_LGKM`) but the one override they got to bench
-  (S1=2,S2=4) gave +0.27pp RRR / +0.43pp CRR — within DVFS noise band.
-  Diff lives in `agent-a5b15c06` worktree, defaults to identity, NOT
-  landed.
+- [P12-CLOSED + P14-CONFIRMED] CRR `lgkmcnt(0)→lgkmcnt(K)` per-operand
+  restructure. Dev F (P12) shipped the knob infrastructure
+  (`CRR_STEADY1_LGKM`, `CRR_STEADY2_LGKM`); Dev D (P14) ran the full
+  16-config sweep + 3-run noise validation. **Cross-config CRR/BL
+  spread (0.93pp) is smaller than per-config 3-run noise (1.5pp).**
+  Asm confirms override reaches codegen. Either LDS ops drain before
+  MMA issue, or the waits are off-critical-path. Diff lives in
+  `agent-a5b15c06` worktree, defaults to identity, NOT landed.
+  **Knob space conclusively closed.**
 - [P12-CLOSED] Alternate (M_TILE, N_TILE, K_TILE) for RRR-only.
   hipBLASLt's RRR uses MT256×208×128 (asymmetric) — Dev G concluded the
   large tile only helps because it pairs with DTLA1+DTLB1 (Direct-To-LDS),
@@ -341,14 +353,20 @@ for archival; do NOT redispatch unless the constraint changes:
 ## Closed / Completed
 
 - 2026-04-18 P14 — Fourth agent-team session (3 Devs, all opus, GPUs 0/4/6).
-  Dev D in flight at session end (CRR_STEADY 2D sweep, 2/16 configs both
-  within DVFS noise); Dev E NO LAND with definitive close on BF16 CRR
-  KI=296 launch_bounds; Dev F shipped per-shape PMC research memo for the
-  6 weakest TK_RCR shapes. **Decider disassembly recheck reconfirmed
-  P13 Dev C: TK uses DTL on both A and B operands (0× ds_write,
-  658× buffer_load_dwordx4 in the prebuilt .o).** Ranked P15 levers
-  reduce to: (B) StreamK persistent grid, (C) wider/fewer LDS reads
-  (e.g. `ds_read_b128_tr_b16` if compatible with FP8 swizzle).
+  All three returned definitive verdicts; nothing landed.
+  - **Dev D (FP8 CRR_STEADY 2D sweep, GPU 0)** — Full 16-config grid
+    + 3-run noise validation conclusively closes the
+    `CRR_STEADY1/2_LGKM` knob space. Cross-config spread 0.93pp <
+    per-config 3-run noise 1.5pp.
+  - **Dev E (BF16 CRR `__launch_bounds__(_,1)` KI=296, GPU 4)** — NO
+    LAND. SGPR-Spill=26 invariant under occupancy halving →
+    LLVM-scheduler artifact, not VGPR-budget contention.
+  - **Dev F (FP8 RCR weak-shape rocprofv3, GPU 6)** — per-shape PMC
+    research memo. **Decider disassembly recheck reconfirmed P13
+    Dev C: TK uses DTL on both A and B operands** (0× ds_write,
+    658× buffer_load_dwordx4 in the prebuilt .o). Ranked P15 levers
+    reduce to: (B) StreamK persistent grid, (C) wider/fewer LDS reads
+    (e.g. `ds_read_b128_tr_b16` if compatible with FP8 swizzle).
 - 2026-04-18 P13 — Third back-to-back agent-team session (3 Devs, all opus,
   GPUs 0/4/6). **Nothing landed.** Headline result: P13 Dev C disproved
   P12 Dev G's DTL hypothesis — TK already uses gfx950 wide-DTL.

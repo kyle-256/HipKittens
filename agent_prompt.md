@@ -185,16 +185,23 @@ BF16 work is paused unless a clean structural restructure is on the table
 
 ### 2026-04-18 — P14 (3 Devs, all opus; GPUs 0/4/6)
 
-**Outcome: Dev F memo + Decider disassembly recheck = the only research
-deliverables. Dev D in flight at session end; Dev E NO LAND with
-definitive close. Nothing landed.**
+**Outcome: All 3 Devs returned definitive verdicts; nothing landed.
+Dev D conclusively closes CRR_STEADY knob space; Dev E conclusively
+closes BF16 CRR KI=296 launch_bounds path; Dev F + Decider disassembly
+recheck close the FP8 RCR DTL lever.**
 
-- **Dev D (FP8 CRR_STEADY1/2_LGKM 2D sweep, GPU 0, in flight at session
-  end)** — running 16-config grid (S1∈{0,2,4,6}, S2∈{0,2,4,6}) on Dev F
-  P12 worktree `agent-a5b15c06` (the macro infrastructure that ships at
-  identity). First 2 configs returned: S1=0,S2=0 → CRR vs BL geo-mean
-  1.955×; S1=0,S2=2 → 1.962× — Δ +0.007× = noise. Estimated 70 min more
-  for the remaining 14 configs. Resume next session.
+- **Dev D (FP8 CRR_STEADY1/2_LGKM 2D sweep, GPU 0, complete)** — full
+  16-config grid + 3-run noise validation in worktree `agent-a5b15c06`.
+  **Cross-config CRR/BL spread = 0.93pp; per-config 3-run noise = 1.5pp.
+  Per-config noise EXCEEDS cross-config sweep spread.** Best candidate
+  S1=6/S2=4 is +0.19pp over S1=0/S2=0 baseline. Asm verification
+  confirms override reaches codegen (`s_waitcnt lgkmcnt(6)` and
+  `lgkmcnt(4)` present in CRR steady-state for S1=6/S2=4 vs all
+  `lgkmcnt(0)` for baseline). Either (a) LDS ops drain before MMA
+  issue, or (b) wait sites are off-critical-path. Knob space
+  conclusively closed. Recommendation: drop the macros entirely.
+  Dev F's macro infra was never landed in main, so no revert needed —
+  just don't redispatch this lever.
 - **Dev E (BF16 CRR `__launch_bounds__(_,1)` KI=296 only, GPU 4,
   complete)** — NO LAND. Restructured `gemm_kernel` into
   `gemm_kernel_body` + `__global__` wrapper, added explicit
@@ -259,6 +266,21 @@ definitive close. Nothing landed.**
    it as the user wrapping the conversation: write up partial state
    and commit docs immediately, rather than sleeping further on
    in-flight Devs.
+5. **Per-config 3-run noise vs cross-config sweep spread is the right
+   discriminator for knob spaces.** Dev D ran 16 configs once, then
+   re-ran the baseline + best-candidate 3× each. Cross-config spread
+   was 0.93pp (CRR/BL); per-config 3-run noise was 1.5pp. The
+   inequality `per-config noise > cross-config spread` is a clean
+   "this knob has no signal" verdict that beats arbitrary per-shape
+   wins. Add to research-Dev prompts: "After your sweep, characterize
+   the per-config noise floor with 3-run reruns of two distinct
+   configs, then compare to cross-config spread."
+6. **Asm verification is part of a definitive knob close.** Dev D
+   demonstrated the CRR_STEADY1/2_LGKM override reaches codegen
+   (`s_waitcnt lgkmcnt(6)` / `lgkmcnt(4)` present for S1=6/S2=4 vs
+   all-`lgkmcnt(0)` for baseline). This eliminates the "knob is dead
+   code" hypothesis and lets the verdict hold: the wait sites are
+   either off-critical-path or already drained at issue time.
 
 ### 2026-04-18 — P13 (3 Devs, all opus; GPUs 0/4/6)
 
