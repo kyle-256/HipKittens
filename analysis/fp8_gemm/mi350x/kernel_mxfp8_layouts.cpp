@@ -1,5 +1,7 @@
 #include "kittens.cuh"
 #include "pyutils/pyutils.cuh"
+#include <cstdio>   // R39 Dev C — explicit for std::fprintf
+#include <cstdlib>  // R39 Dev C — explicit for std::getenv (MXFP8_DISPATCH_TRACE)
 using namespace kittens;
 
 #ifndef M_DIM
@@ -5539,8 +5541,106 @@ void dispatch(layout_globals g) {
     }
 }
 
+// R39 Dev C — MXFP8_DISPATCH_TRACE=1 runtime tracepoint infrastructure.
+//
+// Rationale: R38 Reviewer caught a CRITICAL class of bug — a predicate's
+// kernel symbol was compiled into the .so (nm-gate PASS), but the dispatcher
+// never reached it at runtime due to a hard-coded shape check. R37 Dev C's
+// nm-based dead-code gate cannot catch this "compiled-in but unreached"
+// failure mode. This helper provides a one-shot stderr trace at every
+// dispatch branch, env-gated by MXFP8_DISPATCH_TRACE=1 so production .so
+// behavior is byte-identical to pre-R39 (modulo a single getenv() call on
+// first dispatch invocation).
+//
+// Usage in dispatcher:
+//   MXFP8_DISPATCH_TRACE_ONCE("crr_v2", "70B-KV-HBSHRINK-B1", g);
+// Output (only when env var is "1"):
+//   [mxfp8_dispatch] crr_v2: shape=(M=4096,N=1024,K=8192) -> 70B-KV-HBSHRINK-B1
+//
+// One-shot semantics: each (predicate_name, shape) tuple emits at most once
+// per process lifetime. Predicates that fire on many shapes still emit one
+// line per distinct shape — Reviewer can grep stderr to confirm exactly
+// which predicate fired for each benchmarked shape. Implementation uses a
+// fixed-size table (16 entries; bumped if exceeded with a one-shot WARN)
+// to keep dependencies minimal and avoid pulling in <unordered_set>.
+//
+// Recommended Reviewer Phase 2 protocol:
+//   MXFP8_DISPATCH_TRACE=1 python3 test_mxfp8_python.py M N K 2> trace.err
+//   grep '\[mxfp8_dispatch\]' trace.err | grep <expected_predicate_name>
+//   # Empty match => predicate did NOT fire => CRITICAL (production .so
+//   #   either compiled out the kernel or hard-coded around the predicate).
+namespace tk_mxfp8_dispatch_trace {
+
+inline bool trace_enabled() {
+    // Cache once per process; getenv is the only runtime cost when env unset.
+    static int cached = -1;
+    if (cached < 0) {
+        const char* v = std::getenv("MXFP8_DISPATCH_TRACE");
+        cached = (v && v[0] == '1' && v[1] == '\0') ? 1 : 0;
+    }
+    return cached == 1;
+}
+
+struct trace_key {
+    const char* name;  // pointer comparison (literal strings — same TU)
+    int M, N, K;
+};
+
+inline bool record_and_check(const char* name, int M, int N, int K) {
+    // Returns true iff this is the FIRST observation of (name, M, N, K).
+    // Capacity (32) sized for: 8 V2-CRR advisories + 4-6 routed predicates
+    // across 3 layouts + headroom. Overflow emits a one-shot WARN line.
+    constexpr int CAP = 32;
+    static trace_key table[CAP];
+    static int n_entries = 0;
+    static int overflow_warned = 0;
+    for (int i = 0; i < n_entries; i++) {
+        if (table[i].name == name && table[i].M == M &&
+            table[i].N == N && table[i].K == K) {
+            return false;
+        }
+    }
+    if (n_entries >= CAP) {
+        if (!overflow_warned) {
+            std::fprintf(stderr,
+                "[mxfp8_dispatch] WARN: trace table full (%d entries) — "
+                "subsequent (predicate, shape) tuples not de-duplicated. "
+                "Bump CAP in tk_mxfp8_dispatch_trace if this fires.\n", CAP);
+            overflow_warned = 1;
+        }
+        return true;  // emit anyway (over-emit is safer than under-emit)
+    }
+    table[n_entries].name = name;
+    table[n_entries].M = M;
+    table[n_entries].N = N;
+    table[n_entries].K = K;
+    n_entries++;
+    return true;
+}
+
+inline void emit(const char* layout, const char* name, int M, int N, int K) {
+    if (!trace_enabled()) return;
+    if (!record_and_check(name, M, N, K)) return;
+    std::fprintf(stderr,
+        "[mxfp8_dispatch] %s: shape=(M=%d,N=%d,K=%d) -> %s\n",
+        layout, M, N, K, name);
+}
+
+}  // namespace tk_mxfp8_dispatch_trace
+
+#define MXFP8_DISPATCH_TRACE_ONCE(LAYOUT, NAME, G) \
+    ::tk_mxfp8_dispatch_trace::emit((LAYOUT), (NAME), (G).m, (G).n, (G).k)
+
 template<Layout L>
 void dispatch_pq(layout_globals g) {
+    if (::tk_mxfp8_dispatch_trace::trace_enabled()) {
+        // dispatch_pq sets layout dims internally via dispatch<>; the g
+        // passed in already has m/n/k populated by py::bind_function from
+        // the tensor extents, so we can trace pre-dispatch.
+        const char* lname = (L == Layout::RCR) ? "rcr_pq" :
+                            (L == Layout::RRR) ? "rrr_pq" : "crr_pq";
+        MXFP8_DISPATCH_TRACE_ONCE(lname, "V1-PQ-DEFAULT", g);
+    }
     dispatch<L, true>(g);
 }
 
@@ -5570,11 +5670,13 @@ void dispatch_pq_v2(layout_globals g) {
         // only — preserving byte-identical behavior.
 #if defined(MXFP8_RECT_BLK_N) && (MXFP8_RECT_BLK_N == 64)
         if (rcr_can_use_exact_8wave_scaled_rect(g)) {
+            MXFP8_DISPATCH_TRACE_ONCE("rcr_v2", "RCR-V2-RECT-FAST", g);
             dispatch_rcr_exact_8wave_scaled_v2_rect<true>(g);
             return;
         }
 #endif
         if (rcr_can_use_exact_8wave_scaled(g)) {
+            MXFP8_DISPATCH_TRACE_ONCE("rcr_v2", "RCR-V2-EXACT-8WAVE", g);
             dispatch_rcr_exact_8wave_scaled_v2<true>(g);
             return;
         }
@@ -5586,6 +5688,7 @@ void dispatch_pq_v2(layout_globals g) {
         g.n = static_cast<int>(g.c.cols());
         g.k = static_cast<int>(g.a.cols());
         if (rrr_can_use_exact_8wave_scaled(g)) {
+            MXFP8_DISPATCH_TRACE_ONCE("rrr_v2", "RRR-V2-EXACT-8WAVE", g);
             dispatch_rrr_exact_8wave_scaled_v2<true>(g);
             return;
         }
@@ -5626,107 +5729,54 @@ void dispatch_pq_v2(layout_globals g) {
         // and 70B Q/O 4096×8192×8192) are now ALSO covered by R36 Dev C
         // V2-RCR fan-out predicates below — same advisory pattern, but
         // routes the caller to gemm_rcr_pq_v2 instead of gemm_rrr_pq_v2.
-        {
-            static int warned_70b_down = 0;
-            static int warned_70b_gateup = 0;
-            static int warned_70b_kv = 0;
-            static int warned_8b_kv = 0;
-            static int warned_8b_gateup = 0;
-            // R36 Dev C — V2-RCR autotune fan-out: 2 shape predicates cover 4
-            // square Q/O cells where V2-RCR is faster than V2-CRR by +5.8% to
-            // +8.3% (R35 Dev D matrix re-bench, GPU6 BABA-paired). Same advise
-            // pattern as the 5 V2-RRR predicates above; CRR (A=(K,M), B=(K,N))
-            // and RCR (A=(M,K), B=(N,K)) layouts are not interchangeable in
-            // memory, so emit a host-side one-time warning per matching shape
-            // so the caller can switch their entry point to gemm_rcr_pq_v2 with
-            // A re-laid out as row-major (M,K) and B as row-major (N,K).
-            //
-            // Wire-in summary (per cell — see analysis/fp8_gemm/mi350x/r35d_findings.md
-            // and analysis/fp8_gemm/mi350x/r36c_findings.md):
-            //   8B  Q + 8B  O — M=4096 N= 4096 K= 4096 — RCR vs CRR +5.83%-+7.05% (R35 Dev D GPU6;
-            //                                              R36 Dev C cross-GPU triangulated)
-            //   70B Q + 70B O — M=4096 N= 8192 K= 8192 — RCR vs CRR +8.20%-+8.32% (R35 Dev D GPU6;
-            //                                              R36 Dev C cross-GPU triangulated)
-            //
-            // Default build (M=N=K=8192) does NOT fire — that shape is the
-            // production V2-RCR baseline cell and is dispatched directly via
-            // gemm_rcr_pq_v2 by the caller.
-            static int warned_qo_8b_rcr = 0;
-            static int warned_qo_70b_rcr = 0;
-            static int warned_8b_down = 0;
-            if (g.m == 4096 && g.n == 4096 && g.k == 4096 && !warned_qo_8b_rcr) {
-                std::fprintf(stderr,
-                    "[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=4096, "
-                    "K=4096) is +5.83%% to +7.05%% faster on V2-RCR (R35 Dev D "
-                    "8B Q/O matrix; R36 Dev C autotune wire-in, cross-GPU "
-                    "triangulated). Prefer gemm_rcr_pq_v2 with A row-major (M,K) "
-                    "and B row-major (N,K). See "
-                    "analysis/fp8_gemm/mi350x/r36c_findings.md.\n");
-                warned_qo_8b_rcr = 1;
+        // R39 Dev C — V2-RCR/V2-RRR autotune fan-out advisories refactored to
+        // env-gated trace helper. Original implementation (R32-R36) emitted
+        // unconditional one-shot stderr warnings for each of 8 advisory shapes,
+        // recommending the caller switch entry points to gemm_rcr_pq_v2 /
+        // gemm_rrr_pq_v2. R39 Dev C makes these env-gated (MXFP8_DISPATCH_TRACE=1)
+        // so production builds are silent by default, while preserving the
+        // SHIP-origin info in the predicate name + a pointer to the in-tree
+        // findings for each cell. SHIP origin references (commit refs preserved
+        // here for forensic traceability):
+        //   R32 Dev C C4 / R33 Dev A wire-in: 70B Down 4096x8192x28672 V2-RRR +12.14%
+        //   R33 Dev C / R34 Dev A wire-in: 70B Gate+Up 4096x28672x8192 V2-RRR +7.18% min
+        //   R33 Dev C / R34 Dev A wire-in: 70B KV     4096x1024x8192   V2-RRR +10.24% min
+        //   R33 Dev C / R34 Dev A wire-in: 8B  KV     4096x1024x4096   V2-RRR +8.13%  min
+        //   R34 Dev B / R35 Dev A wire-in: 8B  Gate+Up 4096x14336x4096 V2-RRR +5.025% min
+        //   R35 Dev D / R36 Dev B wire-in: 8B  Down   4096x4096x14336  V2-RRR +9.51%
+        //   R35 Dev D / R36 Dev C wire-in: 8B  Q/O    4096x4096x4096   V2-RCR +5.83%-+7.05%
+        //   R35 Dev D / R36 Dev C wire-in: 70B Q/O   4096x8192x8192   V2-RCR +8.20%-+8.32%
+        //
+        // Default build (M=N=K=8192 — 70B Q/O V2-RCR-dominant) does not match
+        // any of these shapes, so even with MXFP8_DISPATCH_TRACE=1 the LLaMA
+        // baseline run sees no advisory output. Reviewer Phase 2 grepping for
+        // "ADVISE-V2-RRR" or "ADVISE-V2-RCR" confirms the dispatcher saw the
+        // shape and considered the alternate layout — independent of whether
+        // the caller actually switched entry points.
+        if (::tk_mxfp8_dispatch_trace::trace_enabled()) {
+            if (g.m == 4096 && g.n == 4096 && g.k == 4096) {
+                MXFP8_DISPATCH_TRACE_ONCE("crr_v2", "ADVISE-V2-RCR-8B-QO (R36C +5.83-7.05%)", g);
             }
-            if (g.m == 4096 && g.n == 8192 && g.k == 8192 && !warned_qo_70b_rcr) {
-                std::fprintf(stderr,
-                    "[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=8192, "
-                    "K=8192) is +8.20%% to +8.32%% faster on V2-RCR (R35 Dev D "
-                    "70B Q/O matrix; R36 Dev C autotune wire-in, cross-GPU "
-                    "triangulated). Prefer gemm_rcr_pq_v2 with A row-major (M,K) "
-                    "and B row-major (N,K). See "
-                    "analysis/fp8_gemm/mi350x/r36c_findings.md.\n");
-                warned_qo_70b_rcr = 1;
+            if (g.m == 4096 && g.n == 8192 && g.k == 8192) {
+                MXFP8_DISPATCH_TRACE_ONCE("crr_v2", "ADVISE-V2-RCR-70B-QO (R36C +8.20-8.32%)", g);
             }
-            if (g.m == 4096 && g.n == 8192 && g.k == 28672 && !warned_70b_down) {
-                std::fprintf(stderr,
-                    "[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=8192, "
-                    "K=28672) is +12.14%% faster on V2-RRR (R32 Dev C SHIP, "
-                    "cross-GPU triangulated). Prefer gemm_rrr_pq_v2 with A "
-                    "row-major (M,K). See analysis/fp8_gemm/mi350x/r32c_findings.md.\n");
-                warned_70b_down = 1;
+            if (g.m == 4096 && g.n == 8192 && g.k == 28672) {
+                MXFP8_DISPATCH_TRACE_ONCE("crr_v2", "ADVISE-V2-RRR-70B-DOWN (R32C +12.14%)", g);
             }
-            if (g.m == 4096 && g.n == 28672 && g.k == 8192 && !warned_70b_gateup) {
-                std::fprintf(stderr,
-                    "[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=28672, "
-                    "K=8192) is +7.18%% to +7.99%% faster on V2-RRR (R33 Dev C "
-                    "70B Gate/Up SHIP, 4-GPU triangulated; min Δ%% +7.18). "
-                    "Prefer gemm_rrr_pq_v2 with A row-major (M,K). See "
-                    "analysis/fp8_gemm/mi350x/r33c_findings.md.\n");
-                warned_70b_gateup = 1;
+            if (g.m == 4096 && g.n == 28672 && g.k == 8192) {
+                MXFP8_DISPATCH_TRACE_ONCE("crr_v2", "ADVISE-V2-RRR-70B-GATEUP (R33C +7.18% min)", g);
             }
-            if (g.m == 4096 && g.n == 1024 && g.k == 8192 && !warned_70b_kv) {
-                std::fprintf(stderr,
-                    "[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=1024, "
-                    "K=8192) is +10.24%% to +10.83%% faster on V2-RRR (R33 Dev C "
-                    "70B KV SHIP, 4-GPU triangulated; min Δ%% +10.24). "
-                    "Prefer gemm_rrr_pq_v2 with A row-major (M,K). See "
-                    "analysis/fp8_gemm/mi350x/r33c_findings.md.\n");
-                warned_70b_kv = 1;
+            if (g.m == 4096 && g.n == 1024 && g.k == 8192) {
+                MXFP8_DISPATCH_TRACE_ONCE("crr_v2", "ADVISE-V2-RRR-70B-KV (R33C +10.24% min)", g);
             }
-            if (g.m == 4096 && g.n == 1024 && g.k == 4096 && !warned_8b_kv) {
-                std::fprintf(stderr,
-                    "[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=1024, "
-                    "K=4096) is +8.13%% to +8.63%% faster on V2-RRR (R33 Dev C "
-                    "8B KV SHIP, 4-GPU triangulated; min Δ%% +8.13). "
-                    "Prefer gemm_rrr_pq_v2 with A row-major (M,K). See "
-                    "analysis/fp8_gemm/mi350x/r33c_findings.md.\n");
-                warned_8b_kv = 1;
+            if (g.m == 4096 && g.n == 1024 && g.k == 4096) {
+                MXFP8_DISPATCH_TRACE_ONCE("crr_v2", "ADVISE-V2-RRR-8B-KV (R33C +8.13% min)", g);
             }
-            if (g.m == 4096 && g.n == 14336 && g.k == 4096 && !warned_8b_gateup) {
-                std::fprintf(stderr,
-                    "[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=14336, "
-                    "K=4096) is +5.0%% to +6.5%% faster on V2-RRR (R34 Dev B "
-                    "8B Gate/Up SHIP, 4-GPU triangulated; min Δ%% +5.025, "
-                    "min Welch t +10.13). Prefer gemm_rrr_pq_v2 with A "
-                    "row-major (M,K). See analysis/fp8_gemm/mi350x/r34b_findings.md.\n");
-                warned_8b_gateup = 1;
+            if (g.m == 4096 && g.n == 14336 && g.k == 4096) {
+                MXFP8_DISPATCH_TRACE_ONCE("crr_v2", "ADVISE-V2-RRR-8B-GATEUP (R34B +5.025% min)", g);
             }
-            if (g.m == 4096 && g.n == 4096 && g.k == 14336 && !warned_8b_down) {
-                std::fprintf(stderr,
-                    "[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=4096, "
-                    "K=14336) is ~+9.5%% faster on V2-RRR (R35 Dev D LLaMA "
-                    "matrix re-bench identified largest uncovered RRR-vs-CRR "
-                    "gap; R36 Dev B 2-GPU triangulated). Prefer gemm_rrr_pq_v2 "
-                    "with A row-major (M,K). See analysis/fp8_gemm/mi350x/"
-                    "r35d_findings.md and r36b_findings.md.\n");
-                warned_8b_down = 1;
+            if (g.m == 4096 && g.n == 4096 && g.k == 14336) {
+                MXFP8_DISPATCH_TRACE_ONCE("crr_v2", "ADVISE-V2-RRR-8B-DOWN (R36B +9.51%)", g);
             }
         }
         // R35 Dev B — Stage A1 wire-in: HB shrink (BLK_M=128) V2-CRR
@@ -5748,16 +5798,14 @@ void dispatch_pq_v2(layout_globals g) {
 #if defined(MXFP8_CRR_BLK_M) && (MXFP8_CRR_BLK_M == 128)
         if (g.m == 4096 && g.n == 1024 && (g.k == 8192 || g.k == 4096) &&
             crr_can_use_exact_8wave_scaled_hbshrink(g)) {
-            static int warned_n1024_hbshrink = 0;
-            if (!warned_n1024_hbshrink) {
-                std::fprintf(stderr,
-                    "[tk_mxfp8_layouts] gemm_crr_pq_v2: HB shrink Stage B1 "
-                    "(BLK_M=128, PIPE=1) ACTIVE for N=1024 tall-thin (M=%d, "
-                    "N=%d, K=%d) — R37 Dev A/B SHIP, R38 wire-in fix. See "
-                    "analysis/fp8_gemm/mi350x/r38_reviewer_findings.md.\n",
-                    g.m, g.n, g.k);
-                warned_n1024_hbshrink = 1;
-            }
+            // R39 Dev C — replaced unconditional one-shot stderr with env-gated
+            // trace helper. Predicate name carries SHIP origin (R37 Dev A/B
+            // SHIP, R38 wire-in fix `66ef02d8`). Distinguish K=8192 (70B-KV)
+            // and K=4096 (8B-KV) via the shape captured in the trace tuple.
+            const char* name = (g.k == 8192) ?
+                "CRR-V2-HBSHRINK-B1-70B-KV (R37AB SHIP)" :
+                "CRR-V2-HBSHRINK-B1-8B-KV (R38 wrap fix 66ef02d8)";
+            MXFP8_DISPATCH_TRACE_ONCE("crr_v2", name, g);
             dispatch_crr_exact_8wave_scaled_v2_hbshrink<true>(g);
             return;
         }
@@ -5776,21 +5824,17 @@ void dispatch_pq_v2(layout_globals g) {
         // See analysis/fp8_gemm/mi350x/r38a_findings.md.
 #if defined(MXFP8_CRR_BLK_N) && (MXFP8_CRR_BLK_N == 128)
         if (crr_can_use_exact_8wave_scaled_hbnshrink(g)) {
-            static int warned_hbnshrink = 0;
-            if (!warned_hbnshrink) {
-                std::fprintf(stderr,
-                    "[tk_mxfp8_layouts] gemm_crr_pq_v2: HB-N shrink "
-                    "(BLK_N=128, PIPE=%d) ACTIVE for shape (M=%d, N=%d, "
-                    "K=%d) — R38 Dev A. See analysis/fp8_gemm/mi350x/"
-                    "r38a_findings.md.\n",
-                    MXFP8_CRR_HBNSHRINK_PIPELINE, g.m, g.n, g.k);
-                warned_hbnshrink = 1;
-            }
+            // R39 Dev C — env-gated trace (was unconditional one-shot).
+            // R38 Dev A NO-SHIP / NEGATIVE; predicate kept behind macro for
+            // R39+ V2-RRR HB-N exploration.
+            MXFP8_DISPATCH_TRACE_ONCE("crr_v2",
+                "CRR-V2-HBNSHRINK (R38A NO-SHIP, exploratory)", g);
             dispatch_crr_exact_8wave_scaled_v2_hbnshrink<true>(g);
             return;
         }
 #endif
         if (crr_can_use_exact_8wave_scaled(g)) {
+            MXFP8_DISPATCH_TRACE_ONCE("crr_v2", "CRR-V2-EXACT-8WAVE-DEFAULT", g);
             dispatch_crr_exact_8wave_scaled_v2<true>(g);
             return;
         }
@@ -5807,10 +5851,13 @@ void dispatch_pq_v2(layout_globals g) {
         g.n = static_cast<int>(g.c.cols());
         g.k = static_cast<int>(g.b.rows());
         if (crr_can_use_exact_8wave_scaled_rect(g)) {
+            MXFP8_DISPATCH_TRACE_ONCE("crr_v2", "CRR-V2-RECT-FAST", g);
             dispatch_crr_exact_8wave_scaled_v2_rect<true>(g);
             return;
         }
         // Fall-through to host-side error (no rect kernel applies for this shape).
+        // R39 Dev C: this fprintf is unconditional (it's an error path, not a
+        // tracepoint — leave behavior unchanged).
         std::fprintf(stderr,
             "[tk_mxfp8_layouts] gemm_crr_pq_v2 called with MXFP8_RECT_BLK_N=64 "
             "but shape m=%d n=%d k=%d does not match rect predicate. "
@@ -5819,6 +5866,12 @@ void dispatch_pq_v2(layout_globals g) {
         return;
     }
 #endif
+    // R39 Dev C — final fallback: legacy V1 dispatch (no V2 fastpath matched).
+    if (::tk_mxfp8_dispatch_trace::trace_enabled()) {
+        const char* lname = (L == Layout::RCR) ? "rcr_v2" :
+                            (L == Layout::RRR) ? "rrr_v2" : "crr_v2";
+        MXFP8_DISPATCH_TRACE_ONCE(lname, "V1-LEGACY-FALLBACK (no V2 predicate matched)", g);
+    }
     dispatch<L, true>(g);
 }
 
