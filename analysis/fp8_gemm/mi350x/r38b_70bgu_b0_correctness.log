@@ -1,0 +1,18 @@
+W20260418 15:14:45.086090 140264920420352 agent.cpp:461] Attempt to enable hip visiblity for agent-2 which is not visible to HSA (ROCR)
+[sclk-pre-preheat] GPU[1]		: sclk clock level: S: (94Mhz)
+[preheat 2.0s] done 4092 iters
+[sclk-post-preheat] GPU[1]		: sclk clock level: 1: (2046Mhz)
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=28672, K=8192) is +7.18% to +7.99% faster on V2-RRR (R33 Dev C 70B Gate/Up SHIP, 4-GPU triangulated; min Δ% +7.18). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r33c_findings.md.
+CORRECTNESS_default snr_db=49.59 pass_rate_pct=100.00 det_ok=True
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=28672, K=8192) is +7.18% to +7.99% faster on V2-RRR (R33 Dev C 70B Gate/Up SHIP, 4-GPU triangulated; min Δ% +7.18). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r33c_findings.md.
+[tk_mxfp8_layouts] gemm_crr_pq_v2: HB-N shrink (BLK_N=128) ACTIVE for shape m=4096 n=28672 k=8192 (R38 Dev B prototype).
+CORRECTNESS_hbnshrink_b0 snr_db=49.59 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[1]		: sclk clock level: 1: (2319Mhz)
+WARMUP 0 default=2262.40 hbnshrink_b0=1308.70 sclk=GPU[1]		: sclk clock level: 1: (2352Mhz)
+PAIR 0 default_1=2264.84 hbnshrink_b0_1=1308.75 default_2=2313.85 hbnshrink_b0_2=1310.58
+PAIR 1 default_1=2303.74 hbnshrink_b0_1=1310.15 default_2=2337.57 hbnshrink_b0_2=1309.38
+[sclk-post-bench] GPU[1]		: sclk clock level: 1: (2356Mhz)
+default median=2308.80 mean=2305.00 stdev=30.30 n=4
+hbnshrink_b0 median=1309.76 mean=1309.71 stdev=0.81 n=4
+Welch t (default vs hbnshrink_b0) = -65.678  (positive = hbnshrink_b0 faster)
+DELTA_MEDIAN_PCT hbnshrink_b0_vs_default = -43.271%
