@@ -1,0 +1,61 @@
+===== PREFLIGHT rocm-smi -d 6 =====
+
+
+============================ ROCm System Management Interface ============================
+WARNING: AMD GPU device(s) is/are in a low-power state. Check power control/runtime_status
+
+=============================== Current clock frequencies ================================
+GPU[6]		: fclk clock level: 0: (1250Mhz)
+GPU[6]		: mclk clock level: 0: (2000Mhz)
+GPU[6]		: sclk clock level: 1: (2385Mhz)
+GPU[6]		: socclk clock level: S: (63Mhz)
+==========================================================================================
+================================== End of ROCm SMI Log ===================================
+========================================
+===== BENCH cell=c5_8b_gate GPU=6 (HIP=6) 4096x14336x4096 crr vs rrr =====
+[sclk-pre-preheat] GPU[6]		: sclk clock level: 1: (238Mhz)
+[preheat 60.0s] done 8188 iters
+[sclk-post-preheat] GPU[6]		: sclk clock level: 1: (1782Mhz)
+CORRECTNESS_CRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[6]		: sclk clock level: 1: (1875Mhz)
+WARMUP 0 RRR=456.64 CRR=456.08 sclk=GPU[6]		: sclk clock level: 1: (1817Mhz)
+WARMUP 1 RRR=445.50 CRR=452.38 sclk=GPU[6]		: sclk clock level: 1: (1842Mhz)
+WARMUP 2 RRR=456.49 CRR=450.22 sclk=GPU[6]		: sclk clock level: 1: (1835Mhz)
+PAIR 0 RRR_1=455.19 CRR_1=451.62 RRR_2=455.72 CRR_2=452.11
+PAIR 1 RRR_1=456.55 CRR_1=448.96 RRR_2=453.90 CRR_2=450.44
+PAIR 2 RRR_1=459.26 CRR_1=437.67 RRR_2=455.08 CRR_2=440.36
+PAIR 3 RRR_1=453.53 CRR_1=450.34 RRR_2=459.31 CRR_2=449.62
+PAIR 4 RRR_1=461.12 CRR_1=453.45 RRR_2=462.40 CRR_2=452.12
+[sclk-post-bench] GPU[6]		: sclk clock level: 1: (1971Mhz)
+CRR  median=450.39 mean=448.67 stdev=5.29 n=10
+RRR  median=456.14 mean=457.21 stdev=3.10 n=10
+Welch t (CRR vs RRR) = 4.400  (positive = RRR faster)
+DELTA_MEDIAN_PCT RRR_vs_CRR = +1.277%
+CRR_TFLOPS_LIST 451.6202,452.1110,448.9618,450.4359,437.6713,440.3647,450.3422,449.6230,453.4503,452.1233
+RRR_TFLOPS_LIST 455.1907,455.7239,456.5535,453.9026,459.2565,455.0758,453.5272,459.3144,461.1173,462.3978
+Saved /tmp/wt-r34-b/analysis/fp8_gemm/mi350x/r34b_c5_8b_gate_crr_vs_rrr_gpu6_clean.txt
+===== BENCH cell=c6_8b_up GPU=6 (HIP=6) 4096x14336x4096 crr vs rrr =====
+[sclk-pre-preheat] GPU[6]		: sclk clock level: 1: (157Mhz)
+[preheat 60.0s] done 11260 iters
+[sclk-post-preheat] GPU[6]		: sclk clock level: 1: (1650Mhz)
+CORRECTNESS_CRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[6]		: sclk clock level: 1: (1654Mhz)
+WARMUP 0 RRR=45.87 CRR=44.22 sclk=GPU[6]		: sclk clock level: 1: (1668Mhz)
+WARMUP 1 RRR=175.81 CRR=319.51 sclk=GPU[6]		: sclk clock level: 1: (1859Mhz)
+WARMUP 2 RRR=321.30 CRR=396.04 sclk=GPU[6]		: sclk clock level: 1: (1836Mhz)
+PAIR 0 RRR_1=455.57 CRR_1=450.78 RRR_2=453.86 CRR_2=454.11
+PAIR 1 RRR_1=456.20 CRR_1=451.86 RRR_2=900.98 CRR_2=2394.67
+PAIR 2 RRR_1=2539.29 CRR_1=2403.54 RRR_2=2536.36 CRR_2=2406.79
+PAIR 3 RRR_1=2538.71 CRR_1=2415.55 RRR_2=2542.55 CRR_2=2421.35
+PAIR 4 RRR_1=2540.43 CRR_1=2199.16 RRR_2=2539.65 CRR_2=2315.14
+[sclk-post-bench] GPU[6]		: sclk clock level: 1: (2379Mhz)
+CRR  median=2354.90 mean=1791.29 stdev=926.42 n=10
+RRR  median=2537.54 mean=1750.36 stdev=1026.87 n=10
+Welch t (CRR vs RRR) = -0.094  (positive = RRR faster)
+DELTA_MEDIAN_PCT RRR_vs_CRR = +7.755%
+CRR_TFLOPS_LIST 450.7751,454.1076,451.8581,2394.6679,2403.5365,2406.7883,2415.5481,2421.3456,2199.1642,2315.1393
+RRR_TFLOPS_LIST 455.5673,453.8567,456.2019,900.9750,2539.2922,2536.3624,2538.7130,2542.5509,2540.4295,2539.6514
+Saved /tmp/wt-r34-b/analysis/fp8_gemm/mi350x/r34b_c6_8b_up_crr_vs_rrr_gpu6_clean.txt
+ALL CELLS DONE on PHYS_GPU=6 (clean run)
