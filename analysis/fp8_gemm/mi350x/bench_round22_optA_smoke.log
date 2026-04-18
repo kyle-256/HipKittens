@@ -1,0 +1,27 @@
+R22A smoke: 9 bench jobs (3 shapes x 3 variants), GPUs [6, 7]
+warmup=200 iters=500 trim=0.1
+==============================================================================================================
+  DLA2   _r22a_baseline                 gpu=6   4206.41 TFLOPS
+  DLA2   _r22a_nop1                     gpu=7   4206.77 TFLOPS
+  DLA7   _r22a_baseline                 gpu=7   4297.45 TFLOPS
+  DLA2   _r22a_nop2                     gpu=6   4126.97 TFLOPS
+  DLA7   _r22a_nop1                     gpu=6   4257.30 TFLOPS
+  DLA7   _r22a_nop2                     gpu=7   4249.52 TFLOPS
+  DLA1   _r22a_baseline                 gpu=6   4948.59 TFLOPS
+  DLA1   _r22a_nop1                     gpu=7   4947.86 TFLOPS
+  DLA1   _r22a_nop2                     gpu=6   4868.17 TFLOPS
+
+Elapsed: 42.1s
+
+==============================================================================================================
+SUMMARY (Δ vs _r22a_baseline)
+==============================================================================================================
+  DLA2 baseline = 4206.41 TFLOPS
+    _r22a_nop1                       4206.77  Δ=+0.36 (+0.01%)
+    _r22a_nop2                       4126.97  Δ=-79.44 (-1.89%)
+  DLA7 baseline = 4297.45 TFLOPS
+    _r22a_nop1                       4257.30  Δ=-40.15 (-0.93%)
+    _r22a_nop2                       4249.52  Δ=-47.93 (-1.12%)
+  DLA1 baseline = 4948.59 TFLOPS
+    _r22a_nop1                       4947.86  Δ=-0.73 (-0.01%)
+    _r22a_nop2                       4868.17  Δ=-80.42 (-1.63%)
