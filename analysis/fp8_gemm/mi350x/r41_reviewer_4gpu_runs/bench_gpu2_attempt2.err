@@ -1,0 +1,9 @@
+W20260418 17:31:01.961937 139795582455808 agent.cpp:461] Attempt to enable hip visiblity for agent-2 which is not visible to HSA (ROCR)
+[sclk-pre-preheat] phys_gpu=2 GPU[2]		: sclk clock level: 1: (158Mhz)
+[preheat] sustained 8s 16k matmul...
+[preheat] done 5116 iters
+[sclk-post-preheat] phys_gpu=2 GPU[2]		: sclk clock level: 1: (2325Mhz)
+Traceback (most recent call last):
+  File "/tmp/r41_stage_gpu2/r35_reviewer_bench5x.py", line 151, in <module>
+    import tk_mxfp8_layouts as tk
+ModuleNotFoundError: No module named 'tk_mxfp8_layouts'
