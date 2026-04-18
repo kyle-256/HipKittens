@@ -3726,6 +3726,12 @@ __host__ inline void dispatch_rcr_exact_8wave_scaled_v2(const layout_globals& g)
 // Internally guarded by MXFP8_CRR_BLK_M=128 so default build (BLK_M=256)
 // sees an empty translation unit and is byte-identical to pre-R35-B head.
 #include "crr_mxfp8_exact_8wave_hbshrink_fastpath.inc"
+// R38 Dev A — HB-N shrink (BLK_N=128, HB_N=64) V2-CRR fastpath. Symmetric
+// mirror of HB-M shrink targeting wide-N shapes (8B Gate/Up, 70B Gate/Up,
+// 8B-Down). Internally guarded by MXFP8_CRR_BLK_N=128 so default build
+// (BLK_N=256) sees an empty translation unit. Orthogonal to MXFP8_CRR_BLK_M
+// — both can be enabled independently in a single production .so.
+#include "crr_mxfp8_exact_8wave_hbnshrink_fastpath.inc"
 
 template<Layout L, bool PRESHUFFLED_QUANT=false>
 __global__ __launch_bounds__(_NUM_THREADS, GEMM_MIN_BLOCKS_PER_CU)
@@ -5750,6 +5756,34 @@ void dispatch_pq_v2(layout_globals g) {
                 warned_70b_kv_hbshrink = 1;
             }
             dispatch_crr_exact_8wave_scaled_v2_hbshrink<true>(g);
+            return;
+        }
+#endif
+        // R38 Dev A — HB-N shrink (BLK_N=128, HB_N=64) V2-CRR fastpath
+        // dispatch. Symmetric mirror of HB-M shrink for wide-N shapes.
+        // **NO-SHIP / NEGATIVE RESULT**: PIPE=0 measured -43% on 8B Gate/Up
+        // (M=4096 N=14336 K=4096) and -45% on 70B Gate/Up (4096×28672×8192)
+        // vs default V2-CRR. Default kernel is already well-tuned for wide-N
+        // (WARPS_N=4 + RBN=32), so HB-N shrink only adds WG-grid + barrier
+        // overhead. Predicate is kept behind MXFP8_CRR_BLK_N=128 macro
+        // (default builds compile to dead code; verified 0 hbnshrink symbols
+        // in default 8192³ build) so future cycles can iterate without
+        // re-deriving the kernel. **DO NOT define MXFP8_CRR_BLK_N=128 in
+        // production .so**. ORTHOGONAL to MXFP8_CRR_BLK_M (R37 Dev A SHIP).
+        // See analysis/fp8_gemm/mi350x/r38a_findings.md.
+#if defined(MXFP8_CRR_BLK_N) && (MXFP8_CRR_BLK_N == 128)
+        if (crr_can_use_exact_8wave_scaled_hbnshrink(g)) {
+            static int warned_hbnshrink = 0;
+            if (!warned_hbnshrink) {
+                std::fprintf(stderr,
+                    "[tk_mxfp8_layouts] gemm_crr_pq_v2: HB-N shrink "
+                    "(BLK_N=128, PIPE=%d) ACTIVE for shape (M=%d, N=%d, "
+                    "K=%d) — R38 Dev A. See analysis/fp8_gemm/mi350x/"
+                    "r38a_findings.md.\n",
+                    MXFP8_CRR_HBNSHRINK_PIPELINE, g.m, g.n, g.k);
+                warned_hbnshrink = 1;
+            }
+            dispatch_crr_exact_8wave_scaled_v2_hbnshrink<true>(g);
             return;
         }
 #endif
