@@ -1,0 +1,21 @@
+[sclk-pre-preheat] GPU[0]		: sclk clock level: 1: (166Mhz)
+[preheat 30.0s] done 8188 iters
+[sclk-post-preheat] GPU[0]		: sclk clock level: 1: (2158Mhz)
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=8192, K=28672) is +12.14% faster on V2-RRR (R32 Dev C SHIP, cross-GPU triangulated). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r32c_findings.md.
+CORRECTNESS_CRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RRR snr_db=49.60 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[0]		: sclk clock level: 1: (2352Mhz)
+WARMUP 0 CRR=2561.41 RRR=2879.87 sclk=GPU[0]		: sclk clock level: 1: (2349Mhz)
+WARMUP 1 CRR=2535.68 RRR=2875.38 sclk=GPU[0]		: sclk clock level: 1: (2354Mhz)
+PAIR 0 CRR_1=2557.92 RRR_1=2847.62 CRR_2=2560.76 RRR_2=2886.08
+PAIR 1 CRR_1=2544.80 RRR_1=2851.94 CRR_2=2563.72 RRR_2=2872.85
+PAIR 2 CRR_1=2549.80 RRR_1=2863.50 CRR_2=2573.11 RRR_2=2855.68
+PAIR 3 CRR_1=2548.08 RRR_1=2868.01 CRR_2=2562.59 RRR_2=2853.64
+PAIR 4 CRR_1=2564.57 RRR_1=2848.23 CRR_2=2536.42 RRR_2=2848.08
+[sclk-post-bench] GPU[0]		: sclk clock level: 1: (2310Mhz)
+CRR median=2559.34 mean=2556.18 stdev=11.08 n=10
+RRR median=2854.66 mean=2859.56 stdev=12.81 n=10
+Welch t (CRR vs RRR) = 56.630  (positive = RRR faster)
+DELTA_MEDIAN_PCT RRR_vs_CRR = +11.539%
+CRR_TFLOPS_LIST 2557.9154,2560.7637,2544.8002,2563.7176,2549.8017,2573.1084,2548.0784,2562.5867,2564.5703,2536.4215
+RRR_TFLOPS_LIST 2847.6226,2886.0812,2851.9382,2872.8507,2863.5030,2855.6834,2868.0136,2853.6367,2848.2264,2848.0781

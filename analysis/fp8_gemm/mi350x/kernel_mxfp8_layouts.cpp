@@ -5528,6 +5528,27 @@ void dispatch_pq_v2(layout_globals g) {
         g.m = static_cast<int>(g.c.rows());
         g.n = static_cast<int>(g.c.cols());
         g.k = static_cast<int>(g.b.rows());
+        // R33 Dev A — V2-RRR autotune pivot: shape (M=4096, N=8192, K=28672)
+        // (70B Down) is +12.14% faster on V2-RRR than V2-CRR (R32 Dev C C4,
+        // Welch t=+49.24, n=10, BABA-paired; cross-GPU triangulated by R32
+        // Reviewer at +12.21/+12.57/+12.14% on GPU2/4/6). The data layouts
+        // of CRR (A=(K,M)) and RRR (A=(M,K)) are not interchangeable in
+        // memory, so we cannot transparently reroute — emit a host-side
+        // one-time warning at the first matching call so the caller can
+        // switch their entry point to gemm_rrr_pq_v2 with A re-laid out as
+        // row-major (M,K). See analysis/fp8_gemm/mi350x/r32c_findings.md
+        // and r33a_findings.md.
+        if (g.m == 4096 && g.n == 8192 && g.k == 28672) {
+            static int warned = 0;
+            if (!warned) {
+                std::fprintf(stderr,
+                    "[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=8192, "
+                    "K=28672) is +12.14%% faster on V2-RRR (R32 Dev C SHIP, "
+                    "cross-GPU triangulated). Prefer gemm_rrr_pq_v2 with A "
+                    "row-major (M,K). See analysis/fp8_gemm/mi350x/r32c_findings.md.\n");
+                warned = 1;
+            }
+        }
         if (crr_can_use_exact_8wave_scaled(g)) {
             dispatch_crr_exact_8wave_scaled_v2<true>(g);
             return;
