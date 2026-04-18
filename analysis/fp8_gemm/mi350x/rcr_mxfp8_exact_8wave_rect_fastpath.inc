@@ -262,13 +262,17 @@ void rcr_exact_8wave_scaled_rect_kernel(const layout_globals g) {
         // V2-RCR rect: per-wave-tile slab SRDs.
         // A side: pack_count=2 (unchanged), slab_bytes_a = 128 * padded_k_blocks.
         //   slab_idx_a = br * WARPS_M + wm.
-        // B side: pack_count_rect=1, slab_bytes_b_rect = 32 * padded_k_blocks.
-        //   num_slabs_b_rect = (N/BLK_N) * WARPS_N (= 32*4 = 128 for N=4096).
+        // B side (R33 Dev B fix): pack_count=2 (b0+b1 packed in same slab,
+        //   matches SQUARE V2 layout). slab_bytes_b_rect = 64 * padded_k_blocks.
+        //   num_slabs_b_rect = (N/BLK_N) * WARPS_N (= 32*4 = 128 for N=4096,
+        //   BLK_N=128 — twice as many slabs as square's 64).
         //   slab_idx_b = bc * WARPS_N + wn.
+        // The b_voff/b_soff inside load_scale_packs_for_pair use the SAME
+        // PC=2 strides as the square V2-RCR kernel.
         const int padded_k_blocks =
             (g.k / 32 + 7) & ~7; // round up to multiple of 8
         const size_t slab_bytes_a = 128u * padded_k_blocks;
-        const size_t slab_bytes_b_rect = 32u * padded_k_blocks;
+        const size_t slab_bytes_b_rect = 64u * padded_k_blocks;
         const size_t slab_idx_a = static_cast<size_t>(br) * WARPS_M + wm;
         const size_t slab_idx_b = static_cast<size_t>(bc) * WARPS_N + wn;
         const uint8_t* a_v2_base =
@@ -295,10 +299,11 @@ void rcr_exact_8wave_scaled_rect_kernel(const layout_globals g) {
         b_v2_srsrc = make_v2_srd(b_v2_base, static_cast<uint32_t>(slab_bytes_b_rect));
     }
 
-    // V2-RCR rect: load A (b128, 4 packs interleaved {a0p0,a1p0,a0p1,a1p1}) and
-    // B (b32, 2 packs interleaved {b0p0,b1p0} as a single 4-byte word). Note
-    // the B b32 fetch (vs square b64): with pack_count_b_rect=1 the slab is
-    // half the size, so soff stride is k_pair*256 instead of k_pair*512.
+    // V2-RCR rect (R33 Dev B): load A (b128, 4 packs interleaved
+    // {a0p0,a1p0,a0p1,a1p1}) AND B (b64, 2 packs interleaved {b0p0,b1p0})
+    // using the SAME PC=2 layout as square V2-RCR. The only difference vs
+    // square is that there are 2x more B slabs (one per BLK_N=128 instead of
+    // BLK_N=256), with the per-slab byte layout identical to square.
     auto load_scale_packs_for_pair = [&](int k_pair) __attribute__((always_inline)) {
         if constexpr (PRESHUFFLED_QUANT) {
             const uint32_t a_voff =
@@ -314,10 +319,12 @@ void rcr_exact_8wave_scaled_rect_kernel(const layout_globals g) {
                 a0_scale_packs[1] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw >> 64));
                 a1_scale_packs[1] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw >> 96));
             }
+            // B-side: PC=2 (matches square V2-RCR). b_voff and b_soff use
+            // SAME shifts as square (<<7, <<3, <<9).
             const uint32_t b_voff =
-                (static_cast<uint32_t>(lane_kblk) << 6) |
-                (static_cast<uint32_t>(lane_nonk) << 2);
-            const uint32_t b_soff = static_cast<uint32_t>(k_pair) << 8;
+                (static_cast<uint32_t>(lane_kblk) << 7) |
+                (static_cast<uint32_t>(lane_nonk) << 3);
+            const uint32_t b_soff = static_cast<uint32_t>(k_pair) << 9;
             const uint64_t b_raw =
                 llvm_amdgcn_raw_buffer_load_b64(b_v2_srsrc, b_voff, b_soff,
                                                 MXFP8_RCR_V2_SCALE_CACHEPOLICY);

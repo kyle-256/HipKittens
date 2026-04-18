@@ -1,0 +1,9 @@
+[r33b-baba sclk-pre-preheat] GPU[1]		: sclk clock level: 1: (2219Mhz)
+[r33b-baba preheat] sustained 30s 16k matmul...
+[r33b-baba preheat] done 8115 iters
+[r33b-baba sclk-post-preheat] GPU[1]		: sclk clock level: 1: (2262Mhz)
+[sclk-pre-bench] GPU[1]		: sclk clock level: 1: (2360Mhz)
+RUN 0 mode=square avg_ms=0.0589 tflops=2333.89
+[sclk-post-bench] GPU[1]		: sclk clock level: 1: (2374Mhz)
+SUMMARY mode=square median=2333.89 mean=2333.89 stdev=0.00 runs=1
+TFLOPS_LIST 2333.8936
