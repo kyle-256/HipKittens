@@ -5590,8 +5590,8 @@ void dispatch_pq_v2(layout_globals g) {
         g.m = static_cast<int>(g.c.rows());
         g.n = static_cast<int>(g.c.cols());
         g.k = static_cast<int>(g.b.rows());
-        // R33 Dev A / R34 Dev A / R35 Dev A — V2-RRR autotune pivot fan-out: 5
-        // effective host-side predicates cover 7 LLaMA cells where V2-RRR is
+        // R33 Dev A / R34 Dev A / R35 Dev A / R36 Dev B — V2-RRR autotune pivot fan-out: 6
+        // effective host-side predicates cover 8 LLaMA cells where V2-RRR is
         // faster than V2-CRR by +5% to +12% (BABA-paired, cross-GPU
         // triangulated ≥4 GPUs each). The data layouts of CRR (A=(K,M)) and
         // RRR (A=(M,K)) are not interchangeable in memory, so we cannot
@@ -5606,8 +5606,13 @@ void dispatch_pq_v2(layout_globals g) {
         //     M=4096 N=28672 K= 8192 — 70B Gate+Up — RRR vs CRR +7.18%-+7.99% min Δ +7.18% (4-GPU)
         //     M=4096 N= 1024 K= 8192 — 70B KV     — RRR vs CRR min Δ +10.24% (4-GPU)
         //     M=4096 N= 1024 K= 4096 — 8B  KV     — RRR vs CRR min Δ +8.13%  (4-GPU)
-        //   R34 Dev B STRICT SHIP (c5) + SHIP-LITE (c6) (R35 Dev A wire-in this commit):
+        //   R34 Dev B STRICT SHIP (c5) + SHIP-LITE (c6) (R35 Dev A wire-in):
         //     M=4096 N=14336 K= 4096 — 8B Gate+Up — RRR vs CRR min Δ +5.025% (4-GPU triangulated)
+        //   R35 Dev D LLaMA matrix re-bench identified largest uncovered gap
+        //   (R36 Dev B wire-in this commit):
+        //     M=4096 N= 4096 K=14336 — 8B  Down — RRR vs CRR +9.51% (R35 Dev D
+        //     GPU6 Welch t=+2.77, R36 Dev B 2-GPU triangulated; see
+        //     analysis/fp8_gemm/mi350x/r35d_findings.md and r36b_findings.md).
         //
         // Autotune is M/N/K-conditioned and does NOT fire on the default
         // build (M=N=K=8192 — 70B Q/O which is V2-RCR-dominant). Cells
@@ -5642,6 +5647,7 @@ void dispatch_pq_v2(layout_globals g) {
             // gemm_rcr_pq_v2 by the caller.
             static int warned_qo_8b_rcr = 0;
             static int warned_qo_70b_rcr = 0;
+            static int warned_8b_down = 0;
             if (g.m == 4096 && g.n == 4096 && g.k == 4096 && !warned_qo_8b_rcr) {
                 std::fprintf(stderr,
                     "[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=4096, "
@@ -5705,6 +5711,16 @@ void dispatch_pq_v2(layout_globals g) {
                     "min Welch t +10.13). Prefer gemm_rrr_pq_v2 with A "
                     "row-major (M,K). See analysis/fp8_gemm/mi350x/r34b_findings.md.\n");
                 warned_8b_gateup = 1;
+            }
+            if (g.m == 4096 && g.n == 4096 && g.k == 14336 && !warned_8b_down) {
+                std::fprintf(stderr,
+                    "[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=4096, "
+                    "K=14336) is ~+9.5%% faster on V2-RRR (R35 Dev D LLaMA "
+                    "matrix re-bench identified largest uncovered RRR-vs-CRR "
+                    "gap; R36 Dev B 2-GPU triangulated). Prefer gemm_rrr_pq_v2 "
+                    "with A row-major (M,K). See analysis/fp8_gemm/mi350x/"
+                    "r35d_findings.md and r36b_findings.md.\n");
+                warned_8b_down = 1;
             }
         }
         // R35 Dev B — Stage A1 wire-in: HB shrink (BLK_M=128) V2-CRR
