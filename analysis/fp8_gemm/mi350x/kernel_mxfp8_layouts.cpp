@@ -5611,15 +5611,57 @@ void dispatch_pq_v2(layout_globals g) {
         //
         // Autotune is M/N/K-conditioned and does NOT fire on the default
         // build (M=N=K=8192 — 70B Q/O which is V2-RCR-dominant). Cells
-        // where V2-RCR is the production baseline (70B Q/O 4096×8192×8192
-        // and 8B Q/O 4096×4096×4096) are deliberately NOT included — RCR
-        // beats RRR there (-0.8% to -2.0%) per R33 Dev C closure.
+        // where V2-RCR beats both V2-CRR and V2-RRR (8B Q/O 4096×4096×4096
+        // and 70B Q/O 4096×8192×8192) are now ALSO covered by R36 Dev C
+        // V2-RCR fan-out predicates below — same advisory pattern, but
+        // routes the caller to gemm_rcr_pq_v2 instead of gemm_rrr_pq_v2.
         {
             static int warned_70b_down = 0;
             static int warned_70b_gateup = 0;
             static int warned_70b_kv = 0;
             static int warned_8b_kv = 0;
             static int warned_8b_gateup = 0;
+            // R36 Dev C — V2-RCR autotune fan-out: 2 shape predicates cover 4
+            // square Q/O cells where V2-RCR is faster than V2-CRR by +5.8% to
+            // +8.3% (R35 Dev D matrix re-bench, GPU6 BABA-paired). Same advise
+            // pattern as the 5 V2-RRR predicates above; CRR (A=(K,M), B=(K,N))
+            // and RCR (A=(M,K), B=(N,K)) layouts are not interchangeable in
+            // memory, so emit a host-side one-time warning per matching shape
+            // so the caller can switch their entry point to gemm_rcr_pq_v2 with
+            // A re-laid out as row-major (M,K) and B as row-major (N,K).
+            //
+            // Wire-in summary (per cell — see analysis/fp8_gemm/mi350x/r35d_findings.md
+            // and analysis/fp8_gemm/mi350x/r36c_findings.md):
+            //   8B  Q + 8B  O — M=4096 N= 4096 K= 4096 — RCR vs CRR +5.83%-+7.05% (R35 Dev D GPU6;
+            //                                              R36 Dev C cross-GPU triangulated)
+            //   70B Q + 70B O — M=4096 N= 8192 K= 8192 — RCR vs CRR +8.20%-+8.32% (R35 Dev D GPU6;
+            //                                              R36 Dev C cross-GPU triangulated)
+            //
+            // Default build (M=N=K=8192) does NOT fire — that shape is the
+            // production V2-RCR baseline cell and is dispatched directly via
+            // gemm_rcr_pq_v2 by the caller.
+            static int warned_qo_8b_rcr = 0;
+            static int warned_qo_70b_rcr = 0;
+            if (g.m == 4096 && g.n == 4096 && g.k == 4096 && !warned_qo_8b_rcr) {
+                std::fprintf(stderr,
+                    "[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=4096, "
+                    "K=4096) is +5.83%% to +7.05%% faster on V2-RCR (R35 Dev D "
+                    "8B Q/O matrix; R36 Dev C autotune wire-in, cross-GPU "
+                    "triangulated). Prefer gemm_rcr_pq_v2 with A row-major (M,K) "
+                    "and B row-major (N,K). See "
+                    "analysis/fp8_gemm/mi350x/r36c_findings.md.\n");
+                warned_qo_8b_rcr = 1;
+            }
+            if (g.m == 4096 && g.n == 8192 && g.k == 8192 && !warned_qo_70b_rcr) {
+                std::fprintf(stderr,
+                    "[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=8192, "
+                    "K=8192) is +8.20%% to +8.32%% faster on V2-RCR (R35 Dev D "
+                    "70B Q/O matrix; R36 Dev C autotune wire-in, cross-GPU "
+                    "triangulated). Prefer gemm_rcr_pq_v2 with A row-major (M,K) "
+                    "and B row-major (N,K). See "
+                    "analysis/fp8_gemm/mi350x/r36c_findings.md.\n");
+                warned_qo_70b_rcr = 1;
+            }
             if (g.m == 4096 && g.n == 8192 && g.k == 28672 && !warned_70b_down) {
                 std::fprintf(stderr,
                     "[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=8192, "

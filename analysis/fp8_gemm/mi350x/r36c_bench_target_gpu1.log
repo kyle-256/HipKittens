@@ -1,0 +1,48 @@
+########## BENCH PHASE — TARGET CELLS GPU1 ##########
+===== BENCH cell=c_qo_8b GPU=1 (HIP=1) 4096x4096x4096 crr vs rcr =====
+[sclk-pre-preheat] GPU[1]		: sclk clock level: S: (94Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[1]		: sclk clock level: 1: (2299Mhz)
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=4096, K=4096) is +5.83% to +7.05% faster on V2-RCR (R35 Dev D 8B Q/O matrix; R36 Dev C autotune wire-in, cross-GPU triangulated). Prefer gemm_rcr_pq_v2 with A row-major (M,K) and B row-major (N,K). See analysis/fp8_gemm/mi350x/r36c_findings.md.
+CORRECTNESS_CRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RCR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[1]		: sclk clock level: 1: (2335Mhz)
+WARMUP 0 RCR=2153.28 CRR=2183.47 sclk=GPU[1]		: sclk clock level: 1: (2343Mhz)
+WARMUP 1 RCR=2138.57 CRR=2178.75 sclk=GPU[1]		: sclk clock level: 1: (2346Mhz)
+PAIR 0 RCR_1=2221.21 CRR_1=2213.23 RCR_2=2453.71 CRR_2=2281.09
+PAIR 1 RCR_1=2486.42 CRR_1=2325.59 RCR_2=2504.87 CRR_2=2359.37
+PAIR 2 RCR_1=2565.09 CRR_1=2382.83 RCR_2=2543.22 CRR_2=2391.35
+PAIR 3 RCR_1=2543.56 CRR_1=2365.53 RCR_2=2538.15 CRR_2=2373.68
+PAIR 4 RCR_1=2537.28 CRR_1=2371.24 RCR_2=2546.39 CRR_2=2387.46
+[sclk-post-bench] GPU[1]		: sclk clock level: 1: (2326Mhz)
+CRR  median=2368.39 mean=2345.14 stdev=57.10 n=10
+RCR  median=2537.71 mean=2493.99 stdev=101.49 n=10
+Welch t (CRR vs RCR) = 4.042  (positive = RCR faster)
+DELTA_MEDIAN_PCT RCR_vs_CRR = +7.149%
+CRR_TFLOPS_LIST 2213.2311,2281.0915,2325.5873,2359.3714,2382.8298,2391.3531,2365.5301,2373.6814,2371.2422,2387.4599
+RCR_TFLOPS_LIST 2221.2105,2453.7123,2486.4200,2504.8717,2565.0890,2543.2169,2543.5558,2538.1473,2537.2796,2546.3871
+Saved /tmp/wt-r36-c/analysis/fp8_gemm/mi350x/r36c_c_qo_8b_crr_vs_rcr_gpu1.txt
+===== BENCH cell=c_qo_70b GPU=1 (HIP=1) 4096x8192x8192 crr vs rcr =====
+[sclk-pre-preheat] GPU[1]		: sclk clock level: 1: (204Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[1]		: sclk clock level: 1: (2325Mhz)
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=8192, K=8192) is +8.20% to +8.32% faster on V2-RCR (R35 Dev D 70B Q/O matrix; R36 Dev C autotune wire-in, cross-GPU triangulated). Prefer gemm_rcr_pq_v2 with A row-major (M,K) and B row-major (N,K). See analysis/fp8_gemm/mi350x/r36c_findings.md.
+CORRECTNESS_CRR snr_db=49.59 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RCR snr_db=49.60 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[1]		: sclk clock level: 1: (2355Mhz)
+WARMUP 0 RCR=2736.70 CRR=2663.62 sclk=GPU[1]		: sclk clock level: 1: (2344Mhz)
+WARMUP 1 RCR=2734.01 CRR=2606.70 sclk=GPU[1]		: sclk clock level: 1: (2326Mhz)
+PAIR 0 RCR_1=2738.02 CRR_1=2661.56 RCR_2=2904.99 CRR_2=2646.25
+PAIR 1 RCR_1=2879.06 CRR_1=2677.53 RCR_2=2889.70 CRR_2=2672.19
+PAIR 2 RCR_1=2871.63 CRR_1=2647.81 RCR_2=2884.29 CRR_2=2694.99
+PAIR 3 RCR_1=2920.09 CRR_1=2655.52 RCR_2=2928.19 CRR_2=2677.90
+PAIR 4 RCR_1=2936.96 CRR_1=2718.25 RCR_2=2913.40 CRR_2=2662.33
+[sclk-post-bench] GPU[1]		: sclk clock level: 1: (2295Mhz)
+CRR  median=2667.26 mean=2671.43 stdev=22.24 n=10
+RCR  median=2897.35 mean=2886.63 stdev=56.59 n=10
+Welch t (CRR vs RCR) = 11.193  (positive = RCR faster)
+DELTA_MEDIAN_PCT RCR_vs_CRR = +8.626%
+CRR_TFLOPS_LIST 2661.5569,2646.2550,2677.5284,2672.1857,2647.8050,2694.9913,2655.5209,2677.9038,2718.2526,2662.3313
+RCR_TFLOPS_LIST 2738.0157,2904.9924,2879.0561,2889.6978,2871.6333,2884.2881,2920.0893,2928.1895,2936.9623,2913.4039
+Saved /tmp/wt-r36-c/analysis/fp8_gemm/mi350x/r36c_c_qo_70b_crr_vs_rcr_gpu1.txt
+ALL R36C TASKS DONE FOR PHASE=bench-target GPU1
