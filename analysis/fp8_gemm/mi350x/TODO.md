@@ -441,6 +441,24 @@ Gating: R25C_K_LIMIT=32768 still excludes DLA1 (K=128256).
 
 **Projected post-R25-F**: DLA2 ~108.7%, DLA7 ~112.4% of aiter — both BIG WIN over LOSE. Final WIN count likely 31/42 (up from 29).
 
+## R25-G PER-K-BUCKET PFOFF WIN (2026-04-18, committed `7f200b76`)
+Generalizes R25-F's "only first 2 K-iters need prefetch" mechanism to mid-gap larger-K shapes that R25-F's pfoff∈{3..16} sweep could not reach. Per-K optimum is at `pfoff = K_iters - {4..8}` (slightly more prefetch ramp-up for larger K than for K=4096's 2-iter ramp).
+
+| Shape | K_iters | Best `pfoff` | TFLOPS | Δ% |
+|-------|---------|--------------|--------|-----|
+| SA 4096×28672×32768 | 128 | 120 | 6486.67 | **+19.60%** |
+| SB 4096×32768×14336 | 56  | 54  | 6097.59 | **+17.55%** |
+| SC 14336×4096×32768 | 128 | 124 | 5910.76 | **+17.55%** |
+| SD 16384×4096×28672 | 112 | 104 | 6369.26 | **+20.84%** |
+| SE 28672×4096×16384 | 64  | 56  | 6071.22 | **+16.89%** |
+| SF 4096×14336×16384 | 64  | 56  | 5613.97 | **+13.68%** |
+
+**Implementation**: added `R25C_K_EXACT` compile-time gate (kernel lines ~92-105) so each per-K pfoff variant only activates on its target K. 5 K-EXACT-gated variants wired into `bench_all_42.py`. R25-F K=4096 entries unchanged. DLA1 (K=128256, R25-E's domain) untouched.
+
+**Stability note**: SD (16384×4096×28672) showed bimodal stability on busy GPUs (5400 vs 4000 TFLOPS) but stable on isolated GPU 1. A full 42-shape regression run (after R25-D verify) is recommended to confirm no surprises.
+
+**Cumulative R25-F + R25-G**: 8 shapes likely flip LOSE → BIG WIN (DLA2, DLA7 + 6 mid-gap). Combined with R22-rebench's 29/42 baseline, projected total WIN ≥ 35/42 — biggest 1-day jump in any post-R20 round.
+
 ## Remaining vectors (high-cost / high-risk only — post-R25)
 - **R25-F (post-verify)**: extended `R25C_TAIL_PF_OFF_ITERS ∈ {5,6,7,8}` and `GROUP_SIZE_M ∈ {5,7}` cross-products on DLA2/DLA7 — possible additional +1-2pp.
 - **Tile-geometry axis** (BK depth) — pure structural rewrite, ~1-2d.

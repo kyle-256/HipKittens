@@ -52,9 +52,11 @@
 - **工作目录**: `analysis/fp8_gemm/mi350x`
 - **Cursor Repo**: `/shared_nfs/kyle/test/Hipkittens2` (只读参考)
 
-## 当前成绩 (2026-04-18, post-R25-F)
-- **R25-F EXTENDED-SWEEP MASSIVE WIN (committed `e5083bad`)**: extended pfoff/gm grid found `gm7 + pfoff14` dominates R25-D's `gm6 + pfoff4` by **+10.86% on DLA2, +13.51% on DLA7**. Vs original baseline: DLA2 ~+17%, DLA7 ~+21%. Wired into bench_all_42.py as `_ts_gm7_v12_memc_dc_pfoff14` and `_ts_lgk2_gm7_v12_memc_pfoff14`. Mechanism: only first 2 of 16 K-iters need prefetch; the rest are L2-resident and waste VMEM. R25C_K_LIMIT=32768 still gates DLA1 off.
-- **R25-D STACK WIN (committed `7ada8c70`, now superseded by R25-F)**: gm6 (R25-B) × R25C_TAIL_PF_OFF_ITERS=4 (R25-C) super-additive on DLA2/DLA7. Kept as fallback in bench_all_42.py.
+## 当前成绩 (2026-04-18, post-R25-G)
+- **R25-G PER-K-BUCKET WIN (committed `7f200b76`)**: extends R25-F insight to 6 mid-gap K=14336+ shapes. Per-K optimum `pfoff = K_iters - {4..8}`. **6/6 WIN, +13.68 to +20.84% per shape** (4096×28672×32768 +19.6%; 4096×32768×14336 +17.55%; 14336×4096×32768 +17.55%; 16384×4096×28672 +20.84%; 28672×4096×16384 +16.89%; 4096×14336×16384 +13.68%). Implementation: `R25C_K_EXACT` compile-time gate so each pfoff variant only activates on its target K.
+- **R25-F EXTENDED-SWEEP MASSIVE WIN (committed `e5083bad`)**: `gm7 + pfoff14` dominates K=4096 shapes — **+10.86% DLA2, +13.51% DLA7** vs R25-D. Vs original baseline: DLA2 ~+17%, DLA7 ~+21%.
+- **R25-D STACK WIN (committed `7ada8c70`, superseded by R25-F/G)**: gm6 × pfoff4 super-additive on DLA2/DLA7. Kept as fallback.
+- **Cumulative R25-F + R25-G**: 8 deep/mid-gap LOSE shapes flip → BIG WIN. Projected total WIN ≥ 35/42 (up from 29). The single biggest 1-day jump since R20A's +11 BARRIER_TO_WAITCNT shape closures.
 - **R22-rebench (full 42-shape baseline before R25-D wires)**: **29/42 WIN, 13/42 LOSE**, 0 ERR, avg ratio 105.3% (+5 vs R20B/24). Post-R25-D: regression check in flight; expected to flip DLA2/DLA7 to WIN (→ ~31/42).
 - 13 LOSE shapes (pre-R25):
   - DLA1 4096x32768x128256 = 91.9%, DLA2 128256x32768x4096 = 96.3%, DLA7 28672x32768x4096 = 96.9%
