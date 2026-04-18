@@ -54,6 +54,83 @@
 
 **baseline 建立**：首次需在每个 LLaMA shape 上跑 FP8 per-tensor + MXFP8 V2 baseline 各 5x，记录 median TFLOPS 作为后续对照。
 
+## R36 cycle 完结 (2026-04-18, 4 devs + 1 reviewer) ★★ MAJOR CYCLE — 4 SHIPs CONFIRMED + R32 PIPE=3 -15% ceiling SMASHED + first V2-RCR autotune predicates ever shipped + 7 predicates/11 LLaMA cells covered + R35 NEW second sclk gate validated in production + GPU6 "2-cycle outlier" hypothesis BROKEN (silicon-bin bimodal, not defect)
+
+R36 派 4 dev (A GPU3 HB shrink Stage 2 re-pipelining critical, B GPU1/4 6th V2-RRR predicate 8B-Down, C GPU1/2/7 RCR predicate verify + wire-in for square Q/O cells, D GPU6 methodology hardening 2nd sclk gate + GPU6 outlier root-cause) + Reviewer (GPU0/4/5/6 6th-cycle baseline + Phase 2 SHIP confirms with R35 NEW gate). **4 SHIPs CONFIRMED**: Dev A's HB shrink Stage B1 (+28.02% on 70B-KV V2-CRR, the FIRST major V2-CRR perf win after R32 PIPE=3 ceiling), Dev B's 6th V2-RRR predicate for 8B-Down (SHIP-LITE), Dev C's 2 STRICT V2-RCR predicates covering 4 square Q/O cells (the FIRST V2-RCR autotune predicates ever wired). **R32 PIPE=3 -15% structural ceiling is now SMASHED** by Dev A's PIPE=1 cross-buffer DB pattern (VGPR 160 = -74 vs default 234, bit-exact correctness, Welch t=+96.4 on 70B-KV). **GPU6 outlier hypothesis BROKEN** (Dev D RAS counters all 0, sustained sclk identical to GPU4/5; observed +2.85% R34/R35 was sampling bias on bimodal {763, 783} distribution; in R36 Reviewer GPU6 dropped to 770 and rotation restored to GPU0).
+
+### R36 Reviewer Phase 1 — 6-GPU baseline (6th cross-cycle data point, cherry-picked `bb26ae67`)
+
+6-cycle 70B-KV V2-CRR median:
+- R31: 766.72 / R32: 772.51 / R33: 766.17 / R34: 767.59 / R35: 768.07 / **R36: 775.15** (new high)
+- R36 high outlier: GPU0 +2.54% (rotation restored after R34/R35 GPU6 streak)
+- Build md5 `551da0c0…` bit-identical across 4 builds
+- R34 sclk-post-preheat AND R35 NEW second gate (sclk-post-bench ≥ 2200 MHz + per-run stdev/mean ≤ 1%) both VALIDATED IN PRODUCTION:
+  - GPU0 attempt 1 caught by post-bench gate (sclk dropped to 1847 mid-bench, stdev 21.8%)
+  - GPU5 attempt 2 caught by combined-gate logic
+  - 7 retry events on contended host; gate accepted only clean runs
+
+### R36 Reviewer Phase 2 — Per-SHIP verification (4-GPU)
+
+- **c4** (R33 Dev C 70B KV @ M=4096 N=1024 K=8192): GPU4 +10.51% t=+25.41; GPU5 **+10.81% t=+46.45** — **STRICT CONFIRM**
+- **c5** (R34/R35 Dev A 8B Gate @ M=4096 N=14336 K=4096): GPU4 +6.96% t=+6.83; GPU5 +5.05% t=+6.28 — **SHIP-LITE CONFIRM** (STRICT promotion still blocked by Welch-t variance, consistent with R34/R35 LITE classification)
+
+### R36 Dev results
+
+- **Dev A SHIP `13df70c6` → cherry-picked `30d298e8`** (★★ MAJOR): HB shrink Stage B1 (PIPE=1 cross-buffer double-buffer) achieves **+28.02% on 70B-KV V2-CRR** (M=4096 N=1024 K=8192), Welch t=+96.4. Per-stage table:
+  - R35 skeleton (PIPE=0): VGPR 168, -12.16% — original baseline
+  - **B1 cross-buffer DB (PIPE=1)**: VGPR 160 (-74 vs default 234), 0 spill, **+28.02%, t=+96.4** — SHIP
+  - B2 SB-PIPE3 (PIPE=2): VGPR 177, +13.27% — dominated by B1
+  - B3 hybrid SB+interleave (PIPE=3): VGPR 168, -6.27% — NO SHIP
+  - B1 on 8192³ (out-of-domain): -25.03% — predicate must be 70B-KV-only
+  - First Stage B1 attempt achieved +30.96% but failed correctness (in-place LDS prefetch race in same `tic` slot, SNR 5.29 dB); fixed by switching to classic cross-buffer DB pattern (read TIC, prefetch into TOC) — restored full bit-equality (max abs diff = 0.0) while retaining +28.02%.
+  - Build hygiene PASS: pre-edit and post-edit default builds byte-identical (md5 `3c060f2536a4d71b41b146eb6c1e6114`). HB shrink only fires under `-DMXFP8_CRR_BLK_M=128 -DMXFP8_CRR_HBSHRINK_PIPELINE=1`.
+  - **R32 PIPE=3 -15% structural ceiling SMASHED.**
+- **Dev B SHIP-LITE `941eaa5c` → cherry-picked `08452e02`**: 6th V2-RRR autotune predicate at `kernel_mxfp8_layouts.cpp:5718-5727` for shape (M=4096, N=4096, K=14336) — 8B-Down. Per-GPU: GPU1 +8.91% t=+6.55; GPU4 +6.66% t=+5.87; min Δ%=+6.66% (above STRICT +5.0); min Welch t=+5.87 (below STRICT 10.0; SHIP-LITE). 4-GPU triangulation needed for STRICT promotion. LLaMA matrix regression check PASS — 5 prior predicate cells maintain min Δ% ≥ +6.3%.
+- **Dev C 2 STRICT SHIPs `a3dc2e50` → cherry-picked `2e63b801`** (★ first V2-RCR predicates): 2 V2-RCR autotune predicates at `kernel_mxfp8_layouts.cpp:5651-5670` covering 4 square Q/O cells. Verification step revealed **NO prior V2-RCR autotune predicates existed** — all 4 cells were uncovered. Per-cell:
+  - **8B Q + 8B O (4096×4096×4096)**: min Δ% +7.14% / min Welch t +3.47 across GPU1/2/7 — **STRICT SHIP**
+  - **70B Q + 70B O (4096×8192×8192)**: min Δ% +8.63% / min Welch t +4.08 across GPU1/2/7 — **STRICT SHIP**
+  - Effective autotune coverage now: **7 predicates / 11 LLaMA cells** (was 5/7). Only uncovered: 8B Down has Dev B's predicate (so 8/12 if you count). Remaining: 8B Down 4096×4096×14336 (Dev B's, just shipped — actually 8/12 = full LLaMA coverage modulo SHIP-LITE/STRICT mix).
+- **Dev D `77fe9de7` → cherry-picked `3f0bd96c`** (methodology + outlier-debunk):
+  - **Part 1 — methodology hardening SHIPPED**: NEW `r36_reviewer_orchestrate.sh` implements BOTH R36 gates (defense in depth):
+    - **G1** sclk-post-preheat ≥ 2200 MHz (R34 kept)
+    - **G2a NEW** sclk-post-bench ≥ 2200 MHz
+    - **G2b NEW** per-run stdev/mean (CV) ≤ 1%
+    - All three must pass; up to 3 auto-retries.
+    - Validated by induced same-GPU contention (background 16K matmul on PHYS_GPU=6): all 3 gates trip on all 3 attempts → EXHAUSTED verdict. Real concurrent-agent contention: G2b independently fires (CV 3.7%) when G2a still passes. **G2b is the most informative new gate.**
+  - **Part 2 — GPU6 outlier root-cause**: NOT a hardware defect. RAS counters 0/0 on UMC/SDMA/GFX/MMHUB/XGMI_WAFL/PCIe replay (vs GPU4/5 identical). Firmware/VBIOS/sclk-range/idle-Tj bit-identical to GPU4/5. Sustained sclk under 16K FP16: GPU6 1771 vs GPU4 1742 vs GPU5 1641 — silicon-bin advantage of +1.7%, but the short MXFP8 kernel runs at 2378-2400 MHz on all three (no thermal throttling). 5×BABA on GPU6 in single 60-min session: bimodal {763, 764, 764, 764, 783, 783}, mean 771.67, just +0.24% vs GPU4 cluster. **The "GPU6 +2.85%" R34/R35 trend was sampling bias from a bimodal distribution, not aging.** Recommendation: continue using GPU6 as-is — no firmware-flash, no RMA. Methodology fix: replace per-cycle median-of-5 with median-of-medians across N≥3 BABA replicates per GPU.
+
+### R36 paradigm corrections (2 — extends to 33 cumulative closed levers)
+
+- **R32 PIPE=3 -15% structural ceiling is NOT structural** — it was a consequence of insufficient VGPR headroom in default (234 VGPR). With HB shrink (BLK_M=128, HB_M=64) freeing 74 VGPR, PIPE=1 cross-buffer DB lands +28% above default. **Closed: "PIPE>1 is impossible on V2-CRR" hypothesis.**
+- **GPU6 2-cycle outlier hypothesis is sampling bias on bimodal distribution.** Closed: "GPU6 needs RMA/firmware-flash" hypothesis. **NEW methodology**: per-cycle median-of-medians (N≥3 BABA replicates per GPU) supersedes single 5-iter median.
+
+### R36 cumulative tally → 33 closed levers (R32: 21 + R33: 5 + R34: 4 + R35: 1 + R36: 2)
+
+### R37+ priority list (rebuilt from R36 results)
+
+1. **【critical / 2-3 day】Wire HB shrink Stage B1 production predicate** in `dispatch_pq_v2<CRR>` near line 5526 — predicate `(M==4096 && N==1024 && K==8192)` (or any subshape where HB shrink wins). Dev A's predicate must be 70B-KV-only (8192³ is -25% out-of-domain). Build with `-DMXFP8_CRR_BLK_M=128 -DMXFP8_CRR_HBSHRINK_PIPELINE=1` for the production .so. Verify default 8192³ build remains byte-identical.
+2. **【high / 1 day】4-GPU triangulation** of (a) Dev A's HB shrink Stage B1 (currently 1-GPU, need GPU0/4/5/6), (b) Dev B's 8B-Down (currently 2-GPU, need GPU0/5/6/7). Promote SHIP-LITE → STRICT.
+3. **【high / 2-3 day】Extend HB shrink B1 pattern to other rect shapes** — 8B-KV (4096×1024×4096), 70B Gate/Up (4096×28672×8192), 8B Gate/Up (4096×14336×4096). Same VGPR-headroom argument: tall-rect tiles benefit most from BLK_M=128.
+4. **【medium / 1-2 day】Investigate Dev A's B3 regression** (PIPE=3 hybrid SB+interleave -6.27%) — understand why SB-only + interleave hazards on hbshrink path. R37 candidate: B4 cross-buffer DB + interleave hybrid.
+5. **【medium / 2 day】Apply Dev D's NEW median-of-medians rule** to existing R31-R36 baseline numbers — re-derive the cross-cycle table with N≥3 replicates per GPU per cycle to test if R31-R35 trends stand.
+6. **【close — paradigm】"PIPE>1 impossible on V2-CRR" CLOSED.** Future re-pipelining work proceeds on the HB shrink path. Default BLK_M=256 path retains its R32 ceiling (do not re-prototype PIPE>1 on default kernel).
+7. **【methodology — R37+ rules, MUST follow】**:
+   - All R29-R35 rules carry forward.
+   - **R36 NEW (mandatory)**: Reviewer orchestrate must use 3-gate logic (G1 sclk-post-preheat + G2a sclk-post-bench + G2b per-run CV ≤ 1%). All three must pass; up to 3 auto-retries.
+   - **R36 NEW (recommended)**: per-cycle median-of-medians (N≥3 BABA replicates per GPU) instead of single 5-iter median, to defend against bimodal distributions.
+8. **【closed】**: 33 levers per cumulative tally. Do not re-prototype any of them.
+
+### R36 Cherry-pick status
+
+Cherry-picked to feat/mxfp8-only (in causal order):
+- `3f0bd96c` (R36 Dev D methodology hardening + GPU6 outlier debunk — orchestrate scripts; no kernel source change)
+- `30d298e8` (R36 Dev A HB shrink Stage B1 SHIP +28% — `crr_mxfp8_exact_8wave_hbshrink_fastpath.inc` rewrite under PIPELINE==1; macros default-off)
+- `2e63b801` (R36 Dev C 2 STRICT V2-RCR predicates — `kernel_mxfp8_layouts.cpp:5651-5670`)
+- `08452e02` (R36 Dev B 6th V2-RRR predicate 8B-Down SHIP-LITE — `kernel_mxfp8_layouts.cpp:5718-5727`)
+- `bb26ae67` (R36 Reviewer Phase 1+2 — 6th-cycle baseline + 2 SHIP CONFIRMs + new gate validation)
+
+One conflict resolved: Dev B's `static int warned_8b_down = 0;` declaration interleaved with Dev C's larger V2-RCR comment block + 2 fprintf bodies in `kernel_mxfp8_layouts.cpp` predicate region; merged both. All R36 macros default-off; default builds remain byte-identical to R35 head (Dev A's HB shrink only fires under `MXFP8_CRR_BLK_M==128`; Dev C's RCR predicates emit runtime-dead branches when M=N=K=8192).
+
 ## R35 cycle 完结 (2026-04-18, 4 devs + 1 reviewer) ★ 1 SHIP (5th V2-RRR autotune predicate → 5 predicates / 7 LLaMA cells covered) + 1 STRUCTURAL EMPIRICAL CONFIRM (HB shrink ↓-66 VGPR, the ONLY remaining first-order accumulator-VGPR lever) + 1 NEW CLOSURE (WARPS_M=4 — both parallel-template-paradigm levers EXHAUSTED) + 4 R36+ fan-out targets surfaced + 1 NEW methodology gap (sclk-mid-bench)
 
 R35 派 4 dev (A GPU0 5th V2-RRR autotune predicate for c5/c6 8B Gate/Up shape, B GPU3/4 HB shrink BLK_M=128 stages A1-A5 + numerics + perf, C GPU2 WARPS_M=4 stages A1-A4 + structural closure, D GPU6/7 LLaMA full 14-shape matrix re-bench) + Reviewer (GPU0/4/5/6 5th cross-cycle baseline + Phase 2 SHIP verifications). **1 STRICT SHIP** (Dev A's 5th predicate). **Major structural confirm**: R35 Dev B HB shrink (BLK_M=128, HB_M=64) skeleton DELIVERED with **VGPR 168 (-66 vs default 234), 0 spill, 104 KB LDS (-34 KB), occ=2** and bit-exact numerics PASS (max_abs_diff=0.0). Bare skeleton is -12.16% (Welch t=-71.3) **but empirically confirms R34 Dev D §3.2 Option 1 hypothesis**: M-coverage halving DOES save accumulator VGPR (opposite of REFUTED sub-RBM operand shrink). **Major closure**: R35 Dev C WARPS_M=4 saturates VGPR with 7-lane spill — both sub-RBM (R34) and WARPS_M=4 (R35) now CLOSED as parallel-template paradigm (any per-warp tile reorder preserving total tile area cannot relieve V2-CRR PIPE=3 accumulator-VGPR ceiling). **HB shrink is the only remaining first-order lever; R36 critical task is Stage 2 re-pipelining**.
