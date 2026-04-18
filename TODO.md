@@ -54,6 +54,98 @@
 
 **baseline 建立**：首次需在每个 LLaMA shape 上跑 FP8 per-tensor + MXFP8 V2 baseline 各 5x，记录 median TFLOPS 作为后续对照。
 
+## R40 cycle 完结 (2026-04-18, 4 devs + 1 reviewer) ★★ STRICT-PROMOTE x2 CYCLE — 2 STRICT PROMOTEs (8B QO V2-RCR + 70B QO V2-RCR — both cleared without code changes, statistical-power hypothesis 4-in-a-row CONFIRMED) + 1 SHIP-LITE BOUNDARY-LOCK (8B Up V2-RRR sits structurally at +5.0 Δ% boundary; future lift requires kernel work) + 4/4 STRICT RECONFIRMs + 8/8 V2-RCR/V2-RRR advisories HEALTHY + 1 paradigm closure (HB-N+WARPS_N=2 V2-RRR REFUTED via doubly-pre-refuted compound — 3rd tile-area-conservation confirmation) + 10th-cycle baseline 789.48 TF (drift envelope 3.04% fractionally over 3% threshold but no source change since R39 — flagged not escalated)
+
+R40 派 4 dev (A HB-N+WARPS_N=2 V2-RRR compound bet, B 4-GPU STRICT promote 8B Up V2-RRR mirror of R39 Dev B, C V2-RCR/V2-RRR 8 advisories audit via MXFP8_DISPATCH_TRACE, D 4-GPU STRICT promote V2-RCR QO predicates 8B + 70B) + Reviewer (10th-cycle baseline + 4 STRICT RECONFIRMs + 3 methodology cross-checks). **2 STRICT PROMOTEs CONFIRMED** (Dev D 8B QO +6.85% min Welch t +11.81 + 70B QO +8.19% min Welch t +18.19 — both cleared comfortably on first attempt, no code changes); **1 SHIP-LITE BOUNDARY-LOCK** (Dev B 8B Up +4.910% min on GPU3 misses STRICT +5.0 by 0.090pp — silicon-binning perf cap not statistical-power, R40+ recommendation: stop re-benching, future lift requires kernel work); **4/4 STRICT RECONFIRMs** (Reviewer Phase 2 all PASS via dispatcher-path verification: R39 Dev B 8B Gate/Up R40 +6.21% / R38 Dev C 8B-Down +7.91% / R38 wrap fix 8B-KV +25.29% / R37 Dev A 70B-KV +28.96-29.18% — production gold-standards holding); **8/8 advisories HEALTHY** (Dev C all 8 V2-RCR/V2-RRR advisories fire correctly through dispatcher); **0 NEW SHIPs** from speculative HB-N+WARPS_N=2 work (REFUTED via doubly-pre-refuted compound — Leg A=R35 Dev C W4 + Leg B=R38 Dev A HB-N CRR; ~3-5 GPU-hr saved by recursive time-box).
+
+### R40 Reviewer Phase 1 — 10th-cycle baseline (cherry-picked `c11a168c`)
+
+10-cycle 70B-KV V2-CRR median (median-of-4 GPUs):
+- R31: 766.72 / R32: 772.51 / R33: 766.17 / R34: 767.59 / R35: 768.07 / R36: 775.15 / R37: 786.64 / R38: 777.62 / R39: 768.68 / **R40: 789.48** (highest in 10-cycle history)
+- 10-cycle min/max envelope: 766.17 → 789.48 = **3.04%** (fractionally above 3% threshold, **flagged not escalated**)
+- R40 GPU rotation GPU2/4/6/7 — different from R39 GPU2/3/6/7. Per-GPU: 787.34 / 794.28 / 791.62 / 767.53 TF (rotation skewed to fast-bin GPUs explains the high baseline)
+- No source change between R39 wrap and R40 baseline; default nm-gate identical to R39; GPU6 +3.27% vs R38 like-for-like is silicon-bin not regression
+- R41+ recommendation: formalize GPU rotation policy (lock to 4 specific GPUs across cycles for like-for-like) OR relax drift gate to 3.5%
+
+### R40 Reviewer Phase 2 — 4/4 STRICT RECONFIRMs (all dispatch-traced)
+
+All cells verified via `MXFP8_DISPATCH_TRACE=1` + grep on expected predicate (R39+ mandatory protocol; all dispatch traces fired correctly):
+- **R39 Dev B 8B Gate/Up V2-RRR STRICT** (commit `85fd9418`): GPU2 +6.215% t=+13.56 (within R36–R39 band; cross-cycle: R34 +5.025 / R36 +5.05 / R39 +5.13 / R40 +6.22 — Δ% straddles +5-6% band)
+- **R38 Dev C 8B-Down V2-RRR STRICT** (commit `e466e582`): GPU6 +7.909% t=+15.63 (5/5 cross-cycle monotonic +6.66 → +7.25 → +7.42 → +7.65 → +7.91)
+- **R38 wrap fix 8B-KV HB shrink B1** (commit `66ef02d8`): GPU7 +25.291% t=+159.6 — fix continues to deliver (6/6 cross-cycle in +24.5–27.7%)
+- **R37 Dev A HB shrink B1 70B-KV** (commit `ab8a80f7`): 3-GPU triangulation +28.96% / +29.14% / +29.18%, all t > 200 — production gold-standard, **9/9 cross-cycle in +28-31% band**
+
+### R40 Reviewer Phase 3 — 3/3 methodology PASS
+
+- **Defensive assert in r37_paired_bench_2so.py** (R39 wrap): synthetic MOD_A=MOD_B collision triggers expected `AssertionError` — guard works as designed
+- **MXFP8_DISPATCH_TRACE zero-overhead** (R39 Dev C): 0 `[mxfp8_dispatch]` lines in stderr when env unset; 1+ when set. (R39 wrap claim "0 stderr bytes" was imprecise — bench harness adds its own status lines — but the operational guarantee that the tracepoint adds nothing when env unset HOLDS)
+- **r38_nm_gate.sh on default 8192³**: OVERALL: PASS (0 hbshrink/hbn/4wave/subrbm/double_pump/warpsm4/rect symbols; v2 dispatchers present)
+
+### R40 Dev results
+
+- **Dev D `0d8ba8c6` → cherry-picked `e18a6afc`** (★★ STRICT PROMOTE x2 — both V2-RCR QO predicates cleared on first attempt, no code change):
+  - **8B QO V2-RCR** (M=4096 N=4096 K=4096), 4-GPU @ N_PAIRS=20, GPU0/1/4/5: GPU0 +6.85% t=+12.5; GPU1 +6.94% t=+16.5; GPU4 +7.79% t=+15.5 (PREHEAT=180); GPU5 +6.91% t=+11.8 → min Δ% +6.845% (STRICT PASS by +1.845); min Welch t +11.806 (STRICT PASS by +1.806); SNR PASS
+  - **70B QO V2-RCR** (M=4096 N=8192 K=8192), 4-GPU @ N_PAIRS=20, GPU0/1/4/5: GPU0 +8.19% t=+27.4 (PREHEAT=180); GPU1 +11.04% t=+25.7 (PREHEAT=120); GPU4 +8.47% t=+18.2 (PREHEAT=120); GPU5 +9.08% t=+38.6 (PREHEAT=180) → min Δ% +8.187% (STRICT PASS by +3.187); min Welch t +18.194 (STRICT PASS by +8.194); SNR PASS
+  - **MANDATORY MXFP8_DISPATCH_TRACE=1 verification**: all 8 `*_clean.err` files emit `ADVISE-V2-RCR-{8B,70B}-QO` advisory + `CRR-V2-EXACT-8WAVE-DEFAULT` (V2-CRR baseline) and `RCR-V2-EXACT-8WAVE` (V2-RCR candidate) — no silent-bypass risk
+  - **Cross-cycle stability**: 8B QO R35D prediction +5.83-7.05 → R36C +7.14-7.22 → R40D +6.85-7.79 (rock stable in +6-8% band); 70B QO R35D +8.20-8.32 → R36C +8.63-9.03 → R40D +8.19-11.04. Welch t scaled cleanly with sqrt(n): R36C t=3.5/4.1 (n=10) → R40D t=11.8/18.2 (n=40) per R36 Dev D's predicted scaling
+  - **R38 Dev D's statistical-power-cap hypothesis CONFIRMED 4-in-a-row**: 8B-Down V2-RRR (R38C) + 8B-Gate V2-RRR (R39B) + 8B QO V2-RCR (R40D) + 70B QO V2-RCR (R40D). All 4 promoted by N_PAIRS bump alone, no kernel work
+  - **NEW recommendation**: extend R39B's "N_PAIRS=20 + PREHEAT=120" to "PREHEAT=120-180 (escalate on G1 fail)" for V2-RCR/V2-RRR STRICT-promotion attempts on contended hosts
+- **Dev C `18694dbc` → cherry-picked `8418268d`** (★ V2-RCR/V2-RRR 8 advisories AUDIT — 8/8 HEALTHY):
+  - All 8 advisories fire correctly through production dispatcher under `test_mxfp8_python.py` autotune-default invocation:
+    - 8B QO RCR / 70B QO RCR / 70B-DOWN RRR / 70B-GATEUP RRR / 70B-KV RRR / 8B-KV RRR / 8B-GATEUP RRR / 8B-DOWN RRR
+  - nm-gate OVERALL: PASS for all 8 builds; SNR ≥ 49.59 dB on every shape
+  - **METHODOLOGY CLARIFICATION**: original "autotune may pick a different layout" hypothesis is N/A — this dispatcher has NO autotune layer. `test_mxfp8_python.py` invokes `gemm_{rcr,rrr,crr}_pq_v2` separately. Advisories are passive trace-only annotations that fire deterministically when CRR is dispatched for a matching shape. `OVERRIDDEN-BY-HARD-ROUTE` is not a real failure mode — when both apply, trace shows both lines (already verified by R39 Dev C smoke test)
+  - **Closes** R40+ priority list item #3 (V2-RCR advisory audit) — no R41+ critical actions; only LOW-priority methodology refactors (CI gate, advisory caller-side annotation)
+- **Dev B `ffd0facd` → cherry-picked `c5abd3a6`** (★ SHIP-LITE BOUNDARY-LOCK — 8B Up V2-RRR sits structurally at +5.0 Δ% boundary):
+  - 8B Up V2-RRR (M=4096 N=14336 K=4096), 4-GPU @ N_PAIRS=20, GPU2/3/6/7: GPU2 +5.131% t=+20.84 (PREHEAT=120); GPU3 **+4.910%** t=+18.52 (PREHEAT=180 still couldn't lift GPU3 above +5.0); GPU6 +5.599% t=+24.73; GPU7 +5.162% t=+24.59
+  - min Δ% +4.910% (GPU3) MISSES STRICT +5.0 by 0.090pp; min Welch t +18.52 PASS STRICT >+10 by +8.52
+  - **MXFP8_DISPATCH_TRACE verifies the predicate fires** — production .so emits `ADVISE-V2-RRR-8B-GATEUP` (the same single advisory at `kernel_mxfp8_layouts.cpp:5775-5777` covers both SwiGLU Gate AND Up; predicate is healthy, NOT a wire-in bug)
+  - **R38 Dev D's statistical-power-cap hypothesis DOES NOT APPLY** here: t=+18.52 deep into clearance — constraint is **silicon-binning performance-cap on GPU3** (5 GPU3 measurements all in [+4.609, +5.198], median +4.910). R39 Gate +5.131 was outlier-high; R40 Up +4.910 is a typical sample on the same predicate
+  - Cross-cycle: R34 +5.025 / R36 +5.05 / R39 Gate +5.131 / R40 Up +4.910 — all straddle +5.0 boundary
+  - **R40+ NEW RECOMMENDATION (mandatory): STOP re-benching this predicate for STRICT.** Δ% sits structurally on the boundary; future lift requires kernel optimization (HB-N shrink already REFUTED on V2-RRR R38/R39, HB-N+WARPS_N=2 REFUTED in R40 Dev A)
+- **Dev A `e614a007` → cherry-picked `6573b485`** (NO SHIP / NEGATIVE — REFUTED via doubly-pre-refuted compound, ~3-5 GPU-hr saved):
+  - **Both legs of the compound bet are already empirically closed:**
+    - **Leg A (WARPS_N=2 reorder)**: With NUM_WARPS=8 fixed, WARPS_N=2 implies WARPS_M=4 — **byte-equivalent to R35 Dev C's already-refuted W4 V2-CRR scaffold** (`crr_mxfp8_exact_8wave_warpsm4_fastpath.inc`). R35 Dev C measured: 234 → 256 VGPR (saturated) + 7-lane spill. Per-warp tile area (RBM·RBN·4) is structurally invariant under (WARPS_M, WARPS_N) rotation when product is fixed.
+    - **Leg B (HB-N shrink)**: R38 Dev A bandwidth-refuted on V2-CRR (-43% to -47% across 3 wide-N shapes). V2-RRR is *more* bandwidth-bound than V2-CRR per R34 Dev B
+  - V2-RRR baseline is already at the **VGPR ceiling** (R34 Dev B build log): 256 VGPR (saturated) + 1-lane spill + 8 bytes/lane scratch. V2-CRR has 234 VGPR + 0 spill. V2-RRR has 0 VGPR headroom vs CRR's 22 → W4 reorder forecast strictly worse on RRR than CRR (estimated 256 + 10-20 lane spill, compounded by +16 VGPR `B_row_reg tmp` tax in row-shared transpose bridge at RBN=64)
+  - Task step-4 abort condition satisfied: accumulator area exactly conserved (4×64×32 = 4×32×64 = 8192 elements/warp); operand pair widens +32, A shrinks -16, **net +16 pressure with no relief**
+  - **NEW closed-paradigm tag**: `tile-area-conservation` under (WARPS_M, WARPS_N) rotation — 3rd independent confirmation: R34 Dev D (sub-RBM) + R35 Dev C (W4-on-CRR) + R40 Dev A (W2-on-RRR)
+
+### R40 paradigm corrections (1 → cumulative 39 closed levers; R32:21 + R33:5 + R34:4 + R35:1 + R36:2 + R37:2 + R38:2 + R39:1 + R40:1)
+
+- **HB-N+WARPS_N=2 V2-RRR REFUTED (R40 NEW)**: Compound mechanism doubly pre-refuted — Leg A (WARPS_N=2 with NUM_WARPS=8 fixed = WARPS_M=4 = R35 Dev C W4 scaffold, already at VGPR ceiling) + Leg B (HB-N shrink R38 V2-CRR refute, V2-RRR more bandwidth-bound). V2-RRR has 0 VGPR headroom (256 saturated). **Closes: tile-area-conservation under (WARPS_M, WARPS_N) rotation when product fixed (3rd independent confirmation: R34 sub-RBM + R35 W4 + R40 W2).** Last remaining HB-N path is now CLOSED. No further HB-* exploration on existing tile geometry.
+
+### R40 cumulative tally → 39 closed levers (R32: 21 + R33: 5 + R34: 4 + R35: 1 + R36: 2 + R37: 2 + R38: 2 + R39: 1 + R40: 1)
+
+### R40 BOUNDARY-LOCK summary (8B Up V2-RRR — first cell to hit silicon-bin perf cap NOT statistical-power)
+
+This is a **NEW classification** distinct from prior SHIP-LITE: the predicate has Welch t deep clearance (>+18) so re-benching with more samples WILL NOT lift it. The structural Δ% sits at the boundary +4.9-5.1% across 4 cycles. Per R40+ rules: any future cell that fits this profile (high Welch t + Δ% on boundary across ≥3 cycles) should be marked BOUNDARY-LOCK and excluded from STRICT re-bench attempts. Only kernel optimization (which is paradigm-CLOSED for V2-RRR HB-N + tile-area-conservation) could unlock it.
+
+### R41+ priority list (rebuilt from R40 results)
+
+1. **【high / 1-2 day】Survey for NEW perf opportunities outside HB-* / tile-rotation paradigms** — both branches now CLOSED across 9 cycles. Candidates to evaluate (each must pass time-box pre-filter):
+   - V2-RCR HB shrink (mirror of HB shrink B1 success on V2-CRR — RCR layout has different bandwidth profile than CRR/RRR)
+   - K-direction blocking variation (BK=64 vs 128 on selected shapes; may relieve scale-fetch pressure that HB-N attempts couldn't)
+   - Shared-memory layout variation for B operand (V2-CRR's col-shared B vs V2-RRR's row-shared B+transpose — third option may exist)
+   - Inter-WG coordination via L2 (speculative — needs profiling first)
+2. **【medium / 1 day】Decode-shape coverage** — R28-R40 has focused on prefill (M=4096). Decode shapes (M=1, 32, 128) entirely unmapped. Survey current MXFP8 vs FP8 perf on decode shapes; identify any cells failing 95% rule
+3. **【methodology — R41+ rules, MUST follow】**:
+   - All R29-R39 rules carry forward (incl. MXFP8_DISPATCH_TRACE mandatory, defensive PY_MODULE_NAME assert, N_PAIRS=20+PREHEAT=120-180 for V2-RCR/V2-RRR STRICT-promote)
+   - **R40 NEW (mandatory)**: BOUNDARY-LOCK classification — cells with Welch t > +15 AND Δ% in [+4.5, +5.5] across ≥3 cycles are excluded from STRICT re-bench until kernel optimization
+   - **R40 NEW (recommended)**: Formalize GPU rotation policy — pick 4 specific GPUs once (e.g., GPU2/3/6/7) and lock for cross-cycle baseline like-for-like; OR relax drift gate to 3.5% with documented justification
+4. **【closed】**: 39 levers per cumulative tally. Do not re-prototype: HB-N (V2-CRR R38, V2-RRR R39, V2-RRR+WARPS_N=2 R40), HB-M (R37 Dev A wired), tile-area-conservation under (WARPS_M, WARPS_N) rotation (3-confirm). 8B Up V2-RRR is BOUNDARY-LOCK (no more re-benches)
+
+### R40 Cherry-pick status
+
+Cherry-picked to feat/mxfp8-only (in causal order):
+- `6573b485` (R40 Dev A — HB-N+WARPS_N=2 V2-RRR REFUTED early abort; no kernel change)
+- `c5abd3a6` (R40 Dev B — SHIP-LITE 8B Up V2-RRR; bench scripts + logs only, no kernel change)
+- `8418268d` (R40 Dev C — V2-RCR advisory audit 8/8 HEALTHY; audit-only, no kernel change)
+- `e18a6afc` (R40 Dev D — STRICT PROMOTE x2 V2-RCR QO; bench scripts + logs only, no kernel change)
+- `c11a168c` (R40 Reviewer — 10th-cycle baseline + 4/4 RECONFIRM + 3/3 methodology check)
+
+No conflicts. All 5 dev/reviewer commits applied cleanly. Default 8192³ build remains byte-identical (no source changes in R40 cycle).
+
 ## R39 cycle 完结 (2026-04-18, 4 devs + 1 reviewer) ★★ STRICT-PROMOTE + CRITICAL VALIDATION CYCLE — 1 STRICT PROMOTE (8B Gate/Up V2-RRR R36→R39 cleared after 3 cycles SHIP-LITE) + ★★ R38 wrap fix `66ef02d8` STRICT-VALIDATED in production (8B-KV +24.57% min Welch t +72.6 through dispatcher path) + MXFP8_DISPATCH_TRACE=1 runtime infra deployed (17 tracepoints, R39+ mandatory) + ALL 9 production predicates AUDITED (0 new wire-in bugs found) + 1 paradigm closure (HB-N shrink REFUTED on V2-RRR via tile-config inspection — early abort paid off, ~1 GPU-hr saved) + 1 NEW methodology gap CLOSED (PY_MODULE_NAME collision in r37_paired_bench_2so.py — defensive assert added)
 
 R39 派 4 dev (A HB-N shrink on V2-RRR wide-N — 8B GU + 70B GU + 8B-Down, B 4-GPU STRICT promote 8B Gate/Up V2-RRR with N_PAIRS=15 quiet-host, C MXFP8_DISPATCH_TRACE=1 runtime tracepoint infrastructure addressing R38 wire-in methodology gap, D audit ALL 9 existing production predicates for "compiled-in but unreached" bugs + R38 wrap fix `66ef02d8` independent revalidation) + Reviewer (9th-cycle baseline + ★★ CRITICAL revalidate R38 wrap fix `66ef02d8` through dispatcher path on 8B-KV + 2 STRICT RECONFIRMs: 70B-KV HB shrink B1 + 8B-Down V2-RRR R38 STRICT promote). **1 STRICT PROMOTE CONFIRMED** (Dev B 8B Gate/Up +5.13% min Welch t +12.07 — R36 Dev B 7th V2-RRR predicate finally clears STRICT after 3 cycles SHIP-LITE; statistical-power, N_PAIRS=20+PREHEAT=120 needed); **★★ CRITICAL R38 wrap fix DOUBLE-CONFIRMED** (Dev D production +27.15-27.71% / Reviewer dispatcher-path STRICT +24.57-26.00% — `66ef02d8` works as designed); **2 STRICT RECONFIRMs** (70B-KV HB shrink B1 6/6 cross-cycle measurements at +28-30%, 8B-Down V2-RRR Δ% rock-solid R36 +6.66 / R37 +7.25 / R38 +7.42 / R39 +7.65); **0 new wire-in bugs** (Dev D audit of all 9 predicates — R38 Reviewer's 8B-KV catch was the only one in R28-R38); **0 NEW SHIPs** from speculative HB-N shrink work (REFUTED on V2-RRR via tile-config inspection without burning benches).

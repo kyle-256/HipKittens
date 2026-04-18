@@ -54,6 +54,51 @@ python3 test_mxfp8_python.py 4096 14336 4096
 5. 禁止提交 `*.so`、`*.s`、`*_layout_results_*.json`、`.bak*`、`gpucore.*`、`__pycache__` 等（`.gitignore` 已覆盖）
 6. 每个子 agent 使用不同 `HIP_VISIBLE_DEVICES` 以免 GPU 冲突：Dev A → 0，Dev B → 1，Dev C → 2，Reviewer/formal → 7
 
+## R40 cycle 完结 (2026-04-18) ★★ STRICT-PROMOTE x2 — 2 STRICT PROMOTEs (8B QO V2-RCR + 70B QO V2-RCR; statistical-power hypothesis 4-in-a-row CONFIRMED, no code change) + 1 SHIP-LITE BOUNDARY-LOCK (8B Up V2-RRR sits structurally at +5.0 Δ% boundary across 4 cycles, silicon-bin perf cap not statistical-power) + 4/4 STRICT RECONFIRMs + 8/8 V2-RCR/V2-RRR advisories HEALTHY + 1 paradigm closure (HB-N+WARPS_N=2 V2-RRR REFUTED via doubly-pre-refuted compound — 3rd tile-area-conservation confirmation) + 10th-cycle baseline 789.48 TF (drift envelope 3.04% fractionally over 3% threshold, no source change since R39, flagged not escalated)
+
+R40 派 4 dev (A HB-N+WARPS_N=2 V2-RRR compound bet, B 4-GPU STRICT promote 8B Up V2-RRR mirror, C V2-RCR advisory audit via MXFP8_DISPATCH_TRACE, D 4-GPU STRICT promote V2-RCR QO 8B+70B) + Reviewer (10th-cycle baseline + 4 RECONFIRM + 3 methodology). **2 STRICT PROMOTEs + 1 SHIP-LITE BOUNDARY-LOCK + 4/4 RECONFIRM + 8/8 advisories HEALTHY + 0 NEW SHIPs from speculative HB-N+WARPSN compound.**
+
+### ★★ Headline result — Dev D STRICT PROMOTE x2 (V2-RCR QO predicates cleared on first attempt, no code change)
+- **8B QO V2-RCR** (4096×4096×4096) 4-GPU @ N_PAIRS=20: GPU0 +6.85% t=+12.5; GPU1 +6.94% t=+16.5; GPU4 +7.79% t=+15.5; GPU5 +6.91% t=+11.8 → min Δ% +6.845% / min Welch t +11.806 (STRICT PASS by +1.845 / +1.806)
+- **70B QO V2-RCR** (4096×8192×8192): GPU0 +8.19% t=+27.4; GPU1 +11.04% t=+25.7; GPU4 +8.47% t=+18.2; GPU5 +9.08% t=+38.6 → min Δ% +8.187% / min Welch t +18.194 (STRICT PASS by +3.187 / +8.194)
+- MXFP8_DISPATCH_TRACE verifies both predicates fire (`ADVISE-V2-RCR-{8B,70B}-QO` + `RCR-V2-EXACT-8WAVE`)
+- **R38 Dev D's statistical-power-cap hypothesis CONFIRMED 4-in-a-row** (8B-Down V2-RRR R38C + 8B-Gate V2-RRR R39B + 8B QO V2-RCR R40D + 70B QO V2-RCR R40D)
+- NEW recommendation: extend "N_PAIRS=20 + PREHEAT=120" to "PREHEAT=120-180 (escalate on G1 fail)" for V2-RCR/V2-RRR STRICT-promote on contended hosts
+
+### ★ Dev B SHIP-LITE BOUNDARY-LOCK (8B Up V2-RRR — first cell to hit silicon-bin perf cap NOT statistical-power)
+- 4-GPU @ N_PAIRS=20: GPU2 +5.131%; GPU3 **+4.910%** (PREHEAT=180 still couldn't lift); GPU6 +5.599%; GPU7 +5.162%
+- min Δ% +4.910% MISSES STRICT +5.0 by 0.090pp; min Welch t +18.52 deep clearance (NOT statistical-power capped)
+- Cross-cycle straddles +5.0 boundary: R34 +5.025 / R36 +5.05 / R39 Gate +5.131 / R40 Up +4.910
+- **R40+ MANDATORY**: STOP re-benching this predicate for STRICT. Future lift requires kernel work (HB-N V2-RRR + tile-area-conservation already paradigm-CLOSED)
+- New BOUNDARY-LOCK classification (R41+ rule): cells with Welch t > +15 AND Δ% in [+4.5, +5.5] across ≥3 cycles excluded from STRICT re-bench
+
+### ★ Dev C V2-RCR/V2-RRR 8 advisories AUDIT — 8/8 HEALTHY
+- All 8 advisories fire correctly through dispatcher under autotune-default invocation
+- METHODOLOGY CLARIFICATION: dispatcher has NO autotune layer; `test_mxfp8_python.py` invokes `gemm_{rcr,rrr,crr}_pq_v2` separately; advisories are passive trace annotations on CRR (not autotune redirects)
+- Closes R40+ priority list item #3; no R41+ critical actions
+
+### Dev A HB-N+WARPS_N=2 V2-RRR REFUTED early abort (~3-5 GPU-hr saved)
+- Both legs of compound bet doubly pre-refuted:
+  - Leg A: WARPS_N=2 with NUM_WARPS=8 fixed = WARPS_M=4 = R35 Dev C W4 scaffold (256 VGPR saturated + 7-lane spill)
+  - Leg B: HB-N shrink R38 V2-CRR refute (-43% to -47%); V2-RRR more bandwidth-bound per R34 Dev B
+- V2-RRR has 0 VGPR headroom (256 saturated vs CRR's 234); W4 reorder strictly worse on RRR
+- Tile-area-conservation under (WARPS_M, WARPS_N) rotation: **3rd independent confirmation** (R34 sub-RBM + R35 W4 + R40 W2)
+
+### Reviewer Phase 1 + 2 + 3 (`c11a168c`)
+- **R40 baseline 789.48 TF** (highest 10-cycle; rotation skewed to fast-bin GPUs); 10-cycle envelope 3.04% (fractionally over 3% threshold but no source change → flagged not escalated)
+- 4/4 STRICT RECONFIRM via dispatcher-path: R39B 8B Gate/Up +6.21%; R38C 8B-Down +7.91%; R38 wrap fix 8B-KV +25.29%; R37A 70B-KV +28.96-29.18% (9/9 cross-cycle gold-standard)
+- 3/3 methodology PASS: defensive PY_MODULE_NAME assert fires; tracepoint zero-overhead verified (operational); nm-gate default OVERALL: PASS
+
+### R40 paradigm corrections (1 → cumulative 39 closed levers; R32:21 + R33:5 + R34:4 + R35:1 + R36:2 + R37:2 + R38:2 + R39:1 + R40:1)
+- HB-N+WARPS_N=2 V2-RRR REFUTED via doubly-pre-refuted compound (Leg A + Leg B both empirically closed)
+- Last remaining HB-* path on existing tile geometry CLOSED. tile-area-conservation 3rd-confirmed
+- 8B Up V2-RRR BOUNDARY-LOCK (new R41+ classification)
+
+### R41+ priority (rebuilt from R40)
+1. 【high】Survey NEW perf opportunities outside HB-* / tile-rotation (paradigms now CLOSED across 9 cycles): V2-RCR HB shrink (mirror of HB shrink B1 success on V2-CRR); BK=64 vs 128 K-direction blocking; alternative shared-mem layout for B operand; inter-WG L2 coordination (speculative)
+2. 【medium】Decode-shape coverage (M=1, 32, 128 entirely unmapped — R28-R40 focused on prefill M=4096)
+3. 【methodology】All R29-R39 + R40 NEW: BOUNDARY-LOCK classification mandatory; formalize GPU rotation OR relax drift gate to 3.5%
+
 ## R39 cycle 完结 (2026-04-18) ★★ STRICT-PROMOTE + CRITICAL VALIDATION — 1 STRICT PROMOTE (8B Gate/Up V2-RRR R36→R39 cleared after 3 cycles SHIP-LITE) + ★★ R38 wrap fix `66ef02d8` STRICT-VALIDATED in production (8B-KV +24.57% min Welch t +72.6 through dispatcher path) + MXFP8_DISPATCH_TRACE=1 runtime infra deployed (R39+ mandatory) + ALL 9 production predicates AUDITED (0 new wire-in bugs) + 1 paradigm closure (HB-N shrink REFUTED on V2-RRR via tile-config inspection — early abort, ~1 GPU-hr saved) + 1 NEW methodology gap CLOSED (PY_MODULE_NAME collision in r37_paired_bench_2so.py — defensive assert added)
 
 R39 派 4 dev (A HB-N shrink V2-RRR wide-N, B 4-GPU STRICT promote 8B Gate/Up V2-RRR N_PAIRS=15, C MXFP8_DISPATCH_TRACE=1 runtime tracepoint, D audit ALL 9 production predicates + R38 wrap fix independent revalidate) + Reviewer (9th-cycle baseline + ★★ CRITICAL revalidate R38 wrap fix dispatcher-path + 2 STRICT RECONFIRMs). **1 STRICT PROMOTE + ★★ R38 fix DOUBLE-CONFIRMED + 2 STRICT RECONFIRM + 0 new wire-in bugs + 0 NEW SHIPs (HB-N V2-RRR REFUTED).**
