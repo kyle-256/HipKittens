@@ -41,6 +41,44 @@ enum class Layout { RCR, RRR, CRR };
 #define BF16_HOIST_M0 0
 #endif
 
+// P23 Session 2 Dev C — RCR Route 1 padded-b128 wiring (PREP).
+//
+// When `RCR_PADDED_B128_MODE` is 1, the RCR branch swaps ST_A/ST_B from
+//   st_bf<128, 64, st_16x32_s>     (subtile 16x32, 0-byte padding,
+//                                    underlying_subtile_stride_bytes=1024)
+// to
+//   st_bf<128, 64, st_64x32_padded_b128_s>
+//                                   (subtile 64x32, 32-byte padding,
+//                                    underlying_subtile_stride_bytes=4128).
+//
+// Goals: break the 128-B LDS-bank alias for stride-128 ds_read_b128 on
+// gfx950's 32-bank x 4-B banks (matches BL's RCR design). Within-subtile
+// swizzle is identity; the padding lives BETWEEN subtiles.
+//
+// LDS budget (per-block, both A and B allocated [2][2]):
+//   PADDED=0:  4 * sizeof(st_bf<128,64,st_16x32_s>)         * 2 (A+B)
+//             = 4 * 16,384 * 2 = 131,072 B   (~128 KiB, MAX=160,000)
+//   PADDED=1:  4 * sizeof(st_bf<128,64,st_64x32_padded_b128>) * 2 (A+B)
+//             = 4 * 16,512 * 2 = 132,096 B   (~129 KiB, MAX=160,000)
+// Per-tile size derived from st.cuh:83
+//   = underlying_subtiles_per_col * underlying_subtiles_per_row
+//     * (underlying_subtile_elements + subtile_padding/sizeof(T)) * sizeof(T)
+//   PADDED=1: 2 * 2 * (64*32 + 32/2) * 2 = 16,512 B  (matches design doc).
+//
+// The RCR_PADDED_B128_MODE=1 build is EXPECTED to compile-error at the
+// `load_a_subtile`/`load_b_subtile` calls until Dev A or Dev B lands the
+// b128 dispatch branch in `include/ops/warp/memory/tile/shared_to_register.cuh`.
+// Default 0 — flag=0 path must be byte-identical to the pre-Step-6 baseline.
+#ifndef RCR_PADDED_B128_MODE
+#define RCR_PADDED_B128_MODE 0
+#endif
+
+// Convenience: exposes the RCR ST_A/ST_B swap to all RCR-only callsites
+// (typedefs, allocations, prefill, subtile lambdas). Orthogonal to BF16_HOIST_M0.
+#if RCR_PADDED_B128_MODE
+using rcr_padded_st_shape = kittens::st_64x32_padded_b128_s;
+#endif
+
 #if BF16_HOIST_M0
 namespace bf16_dev_d {
 using as3_uint32_ptr = __attribute__((address_space(3))) unsigned int*;
@@ -139,11 +177,26 @@ void gemm_kernel(const layout_globals g) {
     // Shared memory tile types: "normal" = <128,64,st_16x32_s>, "transposed" = <64,128,st_32x16_s>
     // The swizzle must match: row_l registers use rt_16x32 -> st_16x32_s;
     //                         col_l registers use rt_32x16 -> st_32x16_s.
+    //
+    // P23 S2 Dev C: when RCR_PADDED_B128_MODE=1, the RCR-specific shape is
+    // `st_64x32_padded_b128_s` (Route 1). RRR/CRR are unchanged. The shape
+    // swap stays inside `if constexpr (L == Layout::RCR)` so RRR/CRR codegen
+    // is byte-identical regardless of the flag.
+#if RCR_PADDED_B128_MODE
+    using ST_A_RCR = st_bf<HALF_BLOCK_SIZE, K_STEP, rcr_padded_st_shape>;
+    using ST_B_RCR = st_bf<HALF_BLOCK_SIZE, K_STEP, rcr_padded_st_shape>;
+#else
+    using ST_A_RCR = st_bf<HALF_BLOCK_SIZE, K_STEP, st_16x32_s>;
+    using ST_B_RCR = st_bf<HALF_BLOCK_SIZE, K_STEP, st_16x32_s>;
+#endif
+
     using ST_A = std::conditional_t<L == Layout::CRR,
         st_bf<K_STEP, HALF_BLOCK_SIZE, st_32x16_s>,
-        st_bf<HALF_BLOCK_SIZE, K_STEP, st_16x32_s>>;
+        std::conditional_t<L == Layout::RCR,
+            ST_A_RCR,
+            st_bf<HALF_BLOCK_SIZE, K_STEP, st_16x32_s>>>;
     using ST_B = std::conditional_t<L == Layout::RCR,
-        st_bf<HALF_BLOCK_SIZE, K_STEP, st_16x32_s>,
+        ST_B_RCR,
         st_bf<K_STEP, HALF_BLOCK_SIZE, st_32x16_s>>;
 
     ST_A (&As)[2][2] = al.allocate<ST_A, 2, 2>();
@@ -282,19 +335,36 @@ void gemm_kernel(const layout_globals g) {
 #endif
     };
 
-    // Subtile extraction helpers
+    // Subtile extraction helpers.
+    //
+    // P23 S2 Dev C — when RCR_PADDED_B128_MODE=1, both `load(dst, sub)` calls
+    // in the RCR branch dispatch into `kittens::load(rt_bf<...,row_l,...>&,
+    // const st_subtile<st<bf16,128,64,st_64x32_padded_b128_s>,64,64>&)` at
+    //   include/ops/warp/memory/tile/shared_to_register.cuh:29 (load(row_l, ST)).
+    // Branch A (subtile >= register, line 50) is the live branch:
+    //   ST::underlying_subtile_rows = 64 >= RT::base_tile_rows = 16, AND
+    //   ST::underlying_subtile_cols = 32 >= RT::base_tile_cols = 32.
+    //   register_subtiles_per_shared_subtile_col = 64/16 = 4,
+    //   register_subtiles_per_shared_subtile_row = 32/32 = 1,
+    //   ST::subtiles_per_col = 64/64 = 1, ST::subtiles_per_row = 64/32 = 2.
+    //   underlying_subtile_stride_bytes = 4096 + 32 = 4128 (carries padding).
+    // Dev A (Path A) or Dev B (Path B) is expected to add a new dispatch branch
+    // here (or upgrade the existing Branch A) so the b128 LDS-write lane mapping
+    // produced by the padded shape is actually consumed without bank conflicts.
     auto load_a_subtile = [&](A_reg_t& dst, auto& smem_tile, int warp_idx) {
         if constexpr (L == Layout::CRR) {
             auto sub = subtile_inplace<K_STEP, HALF_REG_BLOCK_M>(smem_tile, {0, warp_idx});
             load(dst, sub);
         } else {
             auto sub = subtile_inplace<HALF_REG_BLOCK_M, K_STEP>(smem_tile, {warp_idx, 0});
+            // <<< Dev A/B b128 entry point will be needed HERE for RCR_PADDED_B128_MODE=1 >>>
             load(dst, sub);
         }
     };
     auto load_b_subtile = [&](B_reg_t& dst, auto& smem_tile, int warp_idx) {
         if constexpr (L == Layout::RCR) {
             auto sub = subtile_inplace<HALF_REG_BLOCK_N, K_STEP>(smem_tile, {warp_idx, 0});
+            // <<< Dev A/B b128 entry point will be needed HERE for RCR_PADDED_B128_MODE=1 >>>
             load(dst, sub);
         } else {
             auto sub = subtile_inplace<K_STEP, HALF_REG_BLOCK_N>(smem_tile, {0, warp_idx});
