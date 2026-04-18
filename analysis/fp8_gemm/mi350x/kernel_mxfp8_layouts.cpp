@@ -5727,8 +5727,28 @@ void dispatch_pq_v2(layout_globals g) {
         // fastpath. Internally guarded by MXFP8_CRR_BLK_M=128 so the default
         // build (BLK_M=256) sees an empty translation unit and the dispatch
         // chain falls through to the standard v2-CRR call below.
+        //
+        // R37 Dev A — production predicate: HB shrink Stage B1 (PIPE=1
+        // cross-buffer DB) is only positive on 70B-KV (M=4096, N=1024,
+        // K=8192) — R36 Dev A measured +28.02% on 70B-KV but -25.03% on
+        // 8192³ square. Add an explicit shape gate so the production .so
+        // (built with -DMXFP8_CRR_BLK_M=128 -DMXFP8_CRR_HBSHRINK_PIPELINE=1
+        // -DM_DIM=4096 -DN_DIM=1024 -DK_DIM=8192) restricts the HB shrink
+        // path to the 70B-KV cell only. Default 8192³ build (no HB shrink
+        // flags) is byte-identical because this branch compiles out under
+        // MXFP8_CRR_BLK_M != 128. See analysis/fp8_gemm/mi350x/r37a_findings.md.
 #if defined(MXFP8_CRR_BLK_M) && (MXFP8_CRR_BLK_M == 128)
-        if (crr_can_use_exact_8wave_scaled_hbshrink(g)) {
+        if (g.m == 4096 && g.n == 1024 && g.k == 8192 &&
+            crr_can_use_exact_8wave_scaled_hbshrink(g)) {
+            static int warned_70b_kv_hbshrink = 0;
+            if (!warned_70b_kv_hbshrink) {
+                std::fprintf(stderr,
+                    "[tk_mxfp8_layouts] gemm_crr_pq_v2: HB shrink Stage B1 "
+                    "(BLK_M=128, PIPE=1) ACTIVE for 70B-KV (M=4096, N=1024, "
+                    "K=8192) — R36 Dev A SHIP +28.02%% / R37 Dev A production "
+                    "wire-in. See analysis/fp8_gemm/mi350x/r37a_findings.md.\n");
+                warned_70b_kv_hbshrink = 1;
+            }
             dispatch_crr_exact_8wave_scaled_v2_hbshrink<true>(g);
             return;
         }
