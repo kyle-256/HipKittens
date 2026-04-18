@@ -7,7 +7,140 @@
 - SNR ≥ 48 dB (FP8) / ≥ 47 dB (BF16 vs torch.mm), bit-exact determinism are hard gates.
 - Never commit `*.so`, `.autotune_cache.json` is OK to keep (it's text), logs are not.
 
-## Current Status (2026-04-18, post-P20 close — H1 (b128+v_perm) DEFER pending probe kernel; H4 (setprio) CLOSED; H6 (barrier reduction) is new candidate; P21 = probe kernel + H6 research)
+## Current Status (2026-04-18, post-P21 close — ALL short-term BF16 RCR/RRR levers EXHAUSTED; only Route 1 LDS write-side swizzle remains, multi-session)
+
+P21 dispatched 9 Devs in parallel against the BF16 RCR/RRR weak-shape
+bottleneck (and Dev A on the cross-cutting probe kernel). **Net:
+zero commit-worthy perf wins; one architectural unblocker (Dev A);
+six definitive lever closures; the BF16 short-term optimization arc
+is now exhausted.**
+
+- **Dev A (probe kernel for ds_read_b64_tr_b16 lane semantics, GPU 5,
+  opus, worktree `p20-dev-a-lds-b128`, commit `514cc3da`)** — built a
+  standalone 32-lane probe (gfx950) that initialises LDS with `sm[i]=i`
+  and dumps per-lane register state for both `ds_read_b64_tr_b16` and
+  `ds_read_b128`. Verdict: **Route 2 (intra-lane v_perm fixup) is
+  infeasible** — 0/64 lanes can satisfy their b64_tr_b16 expected
+  payload from their own b128 payload. b64_tr_b16: lane L holds 4
+  bf16 = (col=L, rows base+0..3) [hardware 4-row transpose-on-read];
+  b128: lane L holds 8 bf16 = (row=L%16, cols 8·(L/16)..+7) [linear].
+  BL avoids this by **pre-shuffling on the LDS WRITE side** — its
+  main loop uses ONLY intra-lane `v_perm_b32` with selectors
+  `s83=0x05040100, s84=0x07060302`. Route 1 (LDS write swizzle to
+  match BL) is the ONLY remaining path forward; multi-session.
+
+- **Dev B (CRR_BARRIER_MODE research, opus, commit `fe46e941`)** —
+  gated dead-code `CRR_BARRIER_MODE` for relaxed barrier cadence.
+  V1 +0.10pp sub-noise (SNR=−8.89dB). Closed.
+
+- **Dev C (BF16 RCR + RRR weak-shape PMC characterization, GPU 4,
+  opus, worktree `p21-dev-c-rcr-rrr-weak`, commit `e2b2c9c9`)** —
+  rocprofv3 + per-iter disasm. RCR worst (4096,28672,4096) ratio
+  0.9634, bottleneck = 1.49× LDS reads/MFMA from TK's 8-wave 2M×4N
+  warp grid (2.67 MFMAs/b128) vs BL MIWT8_8's 4-wave 2M×2N (4.0).
+  RRR worst (8192,3584,18944) ratio 0.9398, bottleneck = same op-
+  reuse deficit PLUS 100% intra-subtile bank conflict on B-tile
+  (33.9M conf / 33.9M reads vs BL 1%; WAIT_INST_LDS 14.7× BL). L1
+  (launch overhead <0.4%) + L2 (KI=296 SGPR pseudo-spill not
+  present) closed. See `project_bf16_rcr_rrr_weak_shape.md`.
+
+- **Dev D (BF16 RCR/RRR m0-broadcast hoist port, GPU 4, opus,
+  worktree `p21-dev-d-bf16-m0-hoist`)** — ported FP8 P19 inline-asm
+  m0-hoist to BF16 RCR + RRR via `bf16_dev_d::load_hoist` helper
+  gated `BF16_HOIST_M0=0`. **Reviewer (paired-bench GPU 4, 4 runs
+  interleaved) verdict: NEUTRAL — sub-SNR on all layouts (RCR
+  +0.071pp / RRR +0.015pp / CRR -0.081pp).** Disasm proves the hoist
+  did nothing structurally: `s_mov m0` count 96→96 unchanged.
+  Mechanism: **BF16 baseline already calls `to_sgpr_u32 ==
+  __builtin_amdgcn_readfirstlane` inside the kittens warp `load(...)`
+  impl** (`warp/memory/tile/global_to_shared.cuh:286-306`), so LLVM
+  already pre-scalarizes the LDS-byte address. **The FP8 P19 CSE-
+  failure precondition does NOT apply to BF16.** Diff discarded in
+  worktree. NOT committed. Closed. See `project_bf16_rcr_rrr_weak_shape.md`.
+
+- **Dev E (BF16 RRR padded-LDS-swizzle, opus, commit `eef7a37d`)** —
+  sweep PAD ∈ {16, 32, 64, 128, 256}. PMC `LDS_BANK_CONFLICT` byte-
+  identical (33.9M each) across all pad sizes; PAD=64 paired-bench
+  REGRESSED +0.24-0.90% with SNR>5dB on every RRR shape. Mechanism:
+  bank conflicts are **intra-subtile** (paired loads at
+  `(0, 0x80), (0x400, 0x480)…` — conflict at the 0x80 4-row stride
+  within a 1024B subtile); padding only shifts the inter-subtile
+  0x400 stride. Real fix requires changing row stride INSIDE a
+  subtile, which breaks `ds_read_b64_tr_b16` lane-transpose semantics
+  (same blocker as Dev A). Closed.
+
+- **Dev F (warp-tile geometry analysis for BF16 RCR, opus, commit
+  `0b6458d3`)** — characterized: TK 8-wave 2M×4N (0.375 LDS/MFMA) vs
+  BL 4-wave 2M×2N (0.250 LDS/MFMA). Conservative projection: +1.1pp
+  geomean from operand-reuse. Top blocker: VGPR pressure
+  240 → ~380 logical for restructure.
+
+- **Dev G (4-wave 8×8 BF16 RCR VGPR feasibility, opus, commit
+  `1125d1f4`)** — Gate A: G1 variant fits clean at
+  `__launch_bounds__(256, 1)` (occupancy 1 = 4 wv/CU vs current
+  8 wv/CU). 256 VGPRs, 0 spills, correctness PASS. Asm-verified
+  LDS/MFMA = 0.250 matching BL.
+
+- **Dev H (4-wave 8×8 BF16 RCR perf gate B, opus, commit `04bc643b`)** —
+  Gate B: G1 **regresses 25-35pp catastrophically** (SNR 43 dB on
+  worst shape). Mechanism: the transplanted 8-wave `s_waitcnt`
+  watermarks (`vmcnt(4)`, `lgkmcnt(8)`) stall heavily on 4-wave
+  hardware where each MMA phase is 4× longer. The -33% LDS issue
+  rate materializes but the wave-count drop dominates by ~2 orders
+  of magnitude. **L5 verdict: CLOSED.** A from-scratch 4-wave
+  pipeline rewrite (mirroring BL's actual MIWT8_8 schedule, not the
+  transplanted 8-wave TK schedule) might recover the loss but is
+  multi-week work with no confidence. ROI poor vs other levers.
+
+- **Dev I (HBM fetch decomposition for BF16 RCR/RRR, opus, commit
+  `218fead9`)** — TK and BL issue identical L1→L2 read requests; the
+  +19/+36% HBM gap is L2 cache-line eviction driven by (group_m, xcd)
+  choice. Single fixable case identified for alt_rcr (8192,22016,4096)
+  via autotuner NREPEAT bump (3 → 8-10). Estimated +0.9pp single-
+  shape recovery. **Deferred to P22** (bench runtime grows ~3.3×).
+
+**P21 close-out summary table:**
+
+| Lever                              | Status | Notes                                              |
+|------------------------------------|:------:|----------------------------------------------------|
+| L1 launch overhead                 | CLOSED | <0.4% of GRBM cycles — Dev C                       |
+| L2 KI=296 SGPR pseudo-spill        | CLOSED | not present for RRR — Dev C                        |
+| L_BANK_RRR padded swizzle          | CLOSED | intra-subtile mechanism, padding doesn't fix — Dev E |
+| L5 4-wave 8×8 warp restructure     | CLOSED | Gate A pass, Gate B regress 25-35pp — Devs F/G/H   |
+| L_BARRIER CRR barrier reduction    | CLOSED | gated dead code, V1 sub-noise — Dev B              |
+| L_M0_HOIST BF16 RCR/RRR            | CLOSED | structurally inert (baseline pre-scalarizes) — Dev D + Reviewer |
+| L_HBM_FETCH (alt_rcr autotuner)    | DEFER  | +0.9pp single-shape, P22                          |
+| Probe kernel Route 2 (v_perm)      | CLOSED | 0/64 lanes feasible — Dev A                        |
+| Probe kernel Route 1 (LDS write swizzle) | OPEN | only path forward, multi-session — Dev A unblocked |
+
+**P22 dispatch (next session):**
+
+The BF16 short-term optimization arc is exhausted. The only remaining
+path is **multi-session Route 1 work**: pre-shuffle the LDS write
+pattern so subsequent `ds_read_b64_tr_b16` reads (a) avoid intra-
+subtile bank conflicts on B (RRR L_BANK_RRR), AND/OR (b) reduce LDS
+read pressure from 4×b64_tr_b16 to 1×b128 + intra-lane v_perm
+(CRR H1).
+
+Recommended P22 dispatch (3 sub-sessions, see
+`project_bf16_probe_kernel_dev_a.md` for details):
+1. **Session 1 — characterize TK's current LDS write pattern** for
+   `st_32x16_s` and `st_16x32_s`; map to BL's write pattern; identify
+   the swizzle delta. Output: design doc + analytical swizzle
+   selectors that recover BL's `s83=0x05040100, s84=0x07060302`
+   intra-lane post-load fixup.
+2. **Session 2 — prototype `st_32x16_swizzled` (new shared-tile
+   type, additive — does not change existing path)**; verify
+   `ds_read_b64_tr_b16` on this new type produces the same logical
+   operand. Probe-kernel validation only; no production wiring.
+3. **Session 3+ — thread through CRR/RRR layouts**; PMC validation;
+   cross-GPU paired bench. Estimated upside: 3-5pp CRR / 5pp RRR
+   if Route 1 succeeds.
+
+P22 may also opportunistically apply Dev I's NREPEAT 3→8 bump if
+bench-runtime tradeoff is acceptable for that session.
+
+## [P21 archive] Earlier Status (2026-04-18, post-P20 close — H1 (b128+v_perm) DEFER pending probe kernel; H4 (setprio) CLOSED; H6 (barrier reduction) is new candidate; P21 = probe kernel + H6 research)
 
 P20 dispatched 2 Devs in parallel against the P19 Dev B-identified
 bottleneck. **Both returned without commit-worthy effect, but Dev A
