@@ -1,10 +1,27 @@
 # MXFP4 GEMM Optimization TODO
 
-## Current State (2026-04-18, post-R32)
+## Current State (2026-04-18, post-R33)
 
 **Bench**: `bench_all42_results_R25_FINAL_v2.{json,log}` + R29 single-shape verifies
 **Result**: **41/42 WIN, 1/42 LOSE, 0 ERR, projected win rate 97.6%** — unchanged since R29.
-**Status**: **STRUCTURALLY SATURATED, RE-CONFIRMED ACROSS 4 ROUNDS (R29/R30/R31/R32).** R32 ran 1 deep-decider + 2 parallel optimizers; all DEAD:
+**Status**: **STRUCTURALLY SATURATED, RE-CONFIRMED ACROSS 5 ROUNDS (R29/R30/R31/R32/R33).** R33 was the first round to disassemble the aiter binary directly:
+
+### R33 NEW KNOWLEDGE (durable)
+- **Aiter binary IS on disk** at `/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/`. L6 dispatches to `f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co`. Disassemble via `llvm-objdump --disassemble --arch=amdgcn -mcpu=gfx950 <co>`.
+- **Aiter uses SAME MFMA shape** (`v_mfma_scale_f32_16x16x128_f8f6f4`, 512/iter). **V5 MFMA32 sprint DEPRIORITIZED** — aiter at 16×16 hits the 5781 ceiling, so V5 upper bound ≤ aiter.
+- **Aiter uses same 256×256 tile, 4 warps, WG=256** for L4/L6/L7/L8. Tile-size sweeps will not help.
+- **Aiter sustains vmcnt(15)/(25)** with mixed per-site fences {10,15,10,15} and 6 explicit `s_nop`/iter.
+- **The SRD config swap hypothesis (R33 Decider C Finding #1) is REFUTED** by R33 Opt D direct test: switching to aiter's `(num_records=-16, config=0x00020000, word1|=0x40000)` does NOT unlock safe vmcnt(15) — V2 still crashes at rep 4. The crash mechanism at vmcnt≥20 lives elsewhere (prefetch pipeline or R22B coherency interaction), NOT in SRD bounds.
+- **EXPLICIT_S_NOP=1 is +0.09% TIE** (R33 Opt A V4) — s_nop drainage doesn't materially help.
+
+### R33 attempts (all DEAD on L6)
+- **R33 Decider** (`R33_DECIDER_VERDICT.md`): identified aiter binary archaeology track + ranked V5 dropped + 3 sub-day axes
+- **R33 Decider C** (`R33_AITER_ARCHAEOLOGY.md`): 2050-word disassembly analysis. 3 findings: SRD swap, hand-placed s_nop, scale-load granularity. Finding #1 REFUTED by Opt D.
+- **R33 Opt A** (`R33_OPT_A_VERDICT.md`): vmcnt-mimic 6 variants on incumbent. RELAXED_VMCNT=15/25 CRASH HSA aperture viol. EXPLICIT_S_NOP=1 +0.09% TIE. RELAXED_VMCNT=10 -0.04% TIE.
+- **R33 Opt D** (`R33_OPT_D_VERDICT.md`): SRD config swap fork (`kernel_mxfp4_gluon_cpp_aiterSRD.cpp`) + vmcnt sweep. V1 SRD-swap-only NEUTRAL (-0.15% noise). V2 SRD+vmcnt15 STILL CRASHES at rep 4. V3 SRD+vmcnt25 crashes rep 1. Hypothesis REFUTED.
+
+R32 (prior round) summary: K_LOOP_SYNC_EVERY_2 corrupts output; NONTEMPORAL_LOAD HSA-faults; V6 split-K STRUCTURALLY DEAD on grid-saturated shapes (POC committed `52b8d54c`).
+R31 (prior round) summary: 3 parallel L6-targeted optimizers, all DEAD: R32 ran 1 deep-decider + 2 parallel optimizers; all DEAD:
 - **R32 decider** (`R32_DECIDER_VERDICT.md`): full preprocessor inventory of ~50 build-time toggles; ~20 never sampled at L6. Identified A1.d K_LOOP_SYNC_EVERY_2 (untested, 20% EV/0.4pp), A5 NONTEMPORAL_LOAD (10% EV/0.2pp), A3 V6 split-K min-scope (12 hr). HONEST STOP recommended.
 - **R32 Opt A** (`R32_OPT_A_VERDICT.md`): K_LOOP_SYNC_EVERY_2 builds but VGPR=256 / 32 spills / 132 B scratch (vs parent 212/0/0) AND corrupts output (n_diff=23M, max_abs_diff=bf16 max). NONTEMPORAL_LOAD (A+B) builds clean but **HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION rc=-6 after 191s** at K=128256. Combined V3 same as V1. **All 3 DEAD**.
 - **R32 Opt B** (`R32_OPT_B_VERDICT.md` + commit `52b8d54c`): V6 split-K POC fully implemented and bit-clean — `kernel_mxfp4_gluon_cpp_v6.cpp` builds, K_SPLIT=1 sanity matches incumbent ±0.2%, K_SPLIT=2 + epilogue **−11.53%**, K_SPLIT=4 + epilogue **−23.37%**. Mechanism: **L6 grid is already fully saturated** (2048 tiles ÷ 608 WGs = 3.4 iters/WG); intra-K splitting adds S kernel launches without adding parallelism, no FLOPs/VMEM gain. Per-flop speed in per-split kernels (2425-2648 TFLOPS) is LOWER than incumbent (2942) due to launch-startup amortization.
@@ -18,12 +35,12 @@ R31 (prior round) summary — 3 parallel L6-targeted optimizers, all DEAD:
 
 R30 (prior round) summary: Opt A cross-shape transplant DEAD (5/5 HSA aperture viol, BARRIER_TO_WAITCNT_* unsafe outside btw_all-already-stable shapes); Opt B K_EXACT parent-stack audit AUDIT-CLEAN.
 
-Only L6/DLA1 remains (4096×32768×128256, 92.6%). **All sub-2hr levers AND V6 split-K exhausted across R29+R30+R31+R32.** Path forward = **V5 MFMA32×32×64 rewrite (≥1 week)** OR **V7 stream-K dynamic K-partitioning (≥2 weeks)** — both multi-week. V6 split-K is now confirmed structurally dead on grid-saturated shapes (R32 Opt B). See `R30_DECIDER_VERDICT.md`, `R31_DECIDER_VERDICT.md`, `R31_OPT_{A,B,C}_VERDICT.md`, `R32_DECIDER_VERDICT.md`, `R32_OPT_{A,B}_VERDICT.md`.
+Only L6/DLA1 remains (4096×32768×128256, 92.6%). **All sub-2hr levers AND V6 split-K AND aiter-mimic axes exhausted across R29+R30+R31+R32+R33.** Path forward = **V7 Stream-K dynamic K-partitioning (≥2 weeks)** is the single remaining structural lever. V5 MFMA32 is also DEPRIORITIZED post-R33 — aiter at 16×16×128 hits the 5781 ceiling so V5 upper bound ≤ aiter. V6 split-K is structurally dead on grid-saturated shapes (R32 Opt B). See `R30_DECIDER_VERDICT.md`, `R31_DECIDER_VERDICT.md`, `R31_OPT_{A,B,C}_VERDICT.md`, `R32_DECIDER_VERDICT.md`, `R32_OPT_{A,B}_VERDICT.md`, `R33_DECIDER_VERDICT.md`, `R33_AITER_ARCHAEOLOGY.md`, `R33_OPT_{A,D}_VERDICT.md`.
 
 ### 1 residual LOSE shape (post-R29)
 | #  | Shape (M×N×K)         | Ours    | Comp    | Ratio  | Best Tag                              | Class                                |
 |----|-----------------------|---------|---------|--------|---------------------------------------|--------------------------------------|
-| L6 | 4096×32768×128256     | 5353.9  | 5781.1  | 92.6%  | ts_lgk2_v12_memc_btw_all (DLA1)       | STRUCTURAL — V5/V6/V8 all dead; only remaining path is V5 MFMA32 (≥1 week) or V7 stream-K (≥2 weeks). 7.4pp gap is VMEM-issue-bound at vmcnt(8) per R32 A5 ISA analysis. |
+| L6 | 4096×32768×128256     | 5353.9  | 5781.1  | 92.6%  | ts_lgk2_v12_memc_btw_all (DLA1)       | STRUCTURAL — V5/V6/V8 + aiter-mimic axes all dead; only remaining path is V7 Stream-K (≥2 weeks). aiter binary disassembly (R33) confirms aiter uses same MFMA shape + same tile + sustains vmcnt(15) which we cannot replicate (mechanism in prefetch/R22B coherency, NOT SRD bound per R33 Opt D refutation). |
 
 ### R29 wins (this round)
 | Shape | Old → New | Variant | Notes |
@@ -79,6 +96,12 @@ The original "don't chase WIN, only gap-reduce" pivot from 2026-04-17 is **fully
 - **WAVES_PER_EU=3** — `__launch_bounds__(_NUM_THREADS, 1)` already clamps to 1 wave/SIMD on K-bound shapes; wpeu axis is theoretically inert
 - **Cache hints / NT stores / persistent-XCD / EARLY_SCALE_PF / EARLY_BL_PF / DIRECT_BL** — all confirmed DEAD pre-R26
 - **outer-K pull-forward / extra L2 pf** — R24B/C: VMEM-issue-bound, not VMEM-latency-bound
+
+### R33 axes confirmed DEAD (DO NOT REVISIT)
+- **BARRIER_TO_WAITCNT_RELAXED_VMCNT≥15 on L6** (`R33_OPT_A_VERDICT.md`, `R33_OPT_D_VERDICT.md`) — kernel:469. RELAXED_VMCNT=15/25 hit `HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION` (≥50% crash rate at 15, 100% at 25), with or without SRD config swap. The crash mechanism is in prefetch pipeline / R22B coherency, NOT SRD bounds. Aiter sustains vmcnt(15) via a different scheduling mechanism we cannot replicate without rewriting the prefetch state machine.
+- **SRD config swap to aiter pattern** (`R33_OPT_D_VERDICT.md` + fork `kernel_mxfp4_gluon_cpp_aiterSRD.cpp`) — switching `make_srd`/`make_scale_srd` from `(num_records=0xFFFFFFFFu, config=0x00110000u)` to aiter's `(num_records=-16, config=0x00020000, word1|=0x40000)` does NOT unlock vmcnt>12 safety. V1 SRD-swap-only is correctness-clean but perf-NEUTRAL (-0.15% noise). Hypothesis from R33_AITER_ARCHAEOLOGY.md Finding #1 is REFUTED.
+- **EXPLICIT_S_NOP=1 (kernel:193)** — R33 Opt A V4: +0.09% TIE on L6. s_nop drainage at MFMA→ds_read boundaries is irrelevant to our incumbent's compiler schedule (we already have implicit nops via `sched_barrier`).
+- **V5 MFMA32×32×64 sprint** — DEPRIORITIZED post-R33 (was P0 multi-week). Aiter at 16×16×128 hits the 5781 ceiling, so MFMA-issue-rate is provably NOT the bottleneck. V5 upper bound ≤ aiter. Only V7 Stream-K remains.
 
 ### R32 axes confirmed DEAD (DO NOT REVISIT)
 - **K_LOOP_SYNC_EVERY_2 on L6** (`R32_OPT_A_VERDICT.md`) — kernel:391-395, 2826-2862. Halves 16 per-iter `s_barrier`s. Builds with VGPR=256 / 32 spills / 132 B scratch (vs parent 212/0/0) and **corrupts output** at K=128256 (n_diff=23M, max_abs_diff=bf16 max). Cross-wave LDS ordering is load-bearing per K-iter; cannot statically halve.

@@ -1,0 +1,54 @@
+{
+  "incumbent_small_frac": 0.537411093711853,
+  "small_thresh": 1000000.0,
+  "variants": {
+    "V0_legacy_fork": {
+      "status": "OK",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k128256_R33D_v12_memc_btw_all_legacyfork",
+      "small_frac_self": 0.5602344274520874,
+      "both_small_frac": 0.5003686249256134,
+      "coverage_of_inc_small": 0.9310723133466845,
+      "snr_db_vs_incumbent": -1.7673121943512238,
+      "n_diff_small": 15591983,
+      "diff_frac_of_both": 0.23216748656979908,
+      "max_abs_diff_small": 1259520.0,
+      "mean_abs_diff_small": 496.7106018066406
+    },
+    "V1_aitersrd": {
+      "status": "OK",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k128256_R33D_v12_memc_btw_all_aitersrd",
+      "small_frac_self": 0.5305721759796143,
+      "both_small_frac": 0.4863436371088028,
+      "coverage_of_inc_small": 0.9049749978861114,
+      "snr_db_vs_incumbent": -2.558305892547952,
+      "n_diff_small": 17496501,
+      "diff_frac_of_both": 0.26803905904806763,
+      "max_abs_diff_small": 1585152.0,
+      "mean_abs_diff_small": 546.2141723632812
+    },
+    "V2_aitersrd_vm15": {
+      "status": "OK",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k128256_R33D_v12_memc_btw_all_aitersrd_vm15",
+      "small_frac_self": 0.5316651463508606,
+      "both_small_frac": 0.4869607761502266,
+      "coverage_of_inc_small": 0.9061233534110814,
+      "snr_db_vs_incumbent": -2.8715842061859598,
+      "n_diff_small": 17035552,
+      "diff_frac_of_both": 0.2606467695252951,
+      "max_abs_diff_small": 1822720.0,
+      "mean_abs_diff_small": 545.3880615234375
+    },
+    "V3_aitersrd_vm25": {
+      "status": "OK",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k128256_R33D_v12_memc_btw_all_aitersrd_vm25",
+      "small_frac_self": 0.5440319776535034,
+      "both_small_frac": 0.4930814653635025,
+      "coverage_of_inc_small": 0.917512565246512,
+      "snr_db_vs_incumbent": -2.5192360491490677,
+      "n_diff_small": 17766668,
+      "diff_frac_of_both": 0.2684586648885739,
+      "max_abs_diff_small": 1912832.0,
+      "mean_abs_diff_small": 571.2236938476562
+    }
+  }
+}

@@ -2,12 +2,18 @@
 
 你在继续推进 `HipKittens` 的 MXFP4 GEMM 优化工作，跟 Cursor (Hipkittens2) 竞赛。
 
-## ⚠️ 当前优化目标 (2026-04-18, post-R32)
-> 41/42 WIN (97.6%) = **structurally saturated, RE-CONFIRMED 4 rounds**.
-> R29 (V8 peel DEAD), R30 (transplant + K_EXACT audit DEAD), R31 (UNROLL_K + Persistent-XCD + STEP3_BARRIER_VMCNT 全 DEAD), R32 (K_LOOP_SYNC + NT_LOAD + V6 split-K 全 DEAD).
-> R32 新发现: **V6 split-K 在 grid-saturated shapes 上 STRUCTURALLY DEAD** — L6 grid 已 saturated (2048 tiles ÷ 608 WGs = 3.4 iters/WG), 切 K 只增加 launch overhead 不增加并行度. Per-flop in per-split kernels (2425-2648) < incumbent (2942). split=2 −11.53%, split=4 −23.37%. **POC 干净实现 (`kernel_mxfp4_gluon_cpp_v6.cpp`, commit 52b8d54c) 但 mechanically dead on this shape.**
-> R31 累计发现: v12 (STEP3_BARRIER_VMCNT=12) 在 K=128256 是唯一稳定值 — high VMCNT (≥20) 让 prefetch 越过 SRD bounds; low VMCNT (≤4) race. K_iters=501 放大了 prefetch-vs-SRD timing window.
-> 唯一剩余目标: **L6 / DLA1 (4096×32768×128256, 92.6%)** — 仅剩 V5 MFMA32 (≥1周) / V7 stream-K (≥2周) 多日重写. **V6 split-K 已确认死. 所有 sub-2hr levers 已在 R29+R30+R31+R32 全部耗尽.**
+## ⚠️ 当前优化目标 (2026-04-18, post-R33)
+> 41/42 WIN (97.6%) = **structurally saturated, RE-CONFIRMED 5 rounds**.
+> R29 (V8 peel DEAD), R30 (transplant + K_EXACT audit DEAD), R31 (UNROLL_K + Persistent-XCD + STEP3_BARRIER_VMCNT 全 DEAD), R32 (K_LOOP_SYNC + NT_LOAD + V6 split-K 全 DEAD), R33 (aiter binary archaeology + SRD swap + vmcnt-mimic 全 DEAD).
+>
+> **R33 NEW KNOWLEDGE (durable)**:
+> - **aiter 二进制可反汇编** at `/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/`. L6 dispatch → `f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co`. 用 `llvm-objdump --disassemble --arch=amdgcn -mcpu=gfx950`.
+> - **aiter 用相同 MFMA shape** (`v_mfma_scale_f32_16x16x128_f8f6f4`). **V5 MFMA32 sprint 取消** — aiter 在 16×16 已撞到 5781 ceiling, V5 upper bound ≤ aiter.
+> - **aiter 用相同 256×256 tile + WG=256** for L4/L6/L7/L8.
+> - **aiter sustains vmcnt(15)/(25)** with mixed per-site fences {10,15,10,15} + 6 `s_nop`/iter. **我们无法复制** — RELAXED_VMCNT=15/25 在我们 kernel 上 50-100% crash HSA aperture viol, 即使 swap SRD config 到 aiter 模式 (R33 Opt D 实证) 也 不解锁. Crash 机制在 prefetch pipeline / R22B coherency, 不在 SRD bounds.
+> - **EXPLICIT_S_NOP=1** TIE +0.09% (R33 Opt A) — 不 material.
+>
+> 唯一剩余目标: **L6 / DLA1 (4096×32768×128256, 92.6%)** — 仅剩 **V7 Stream-K (≥2周)** 一条结构性路径. **V5 已 deprioritize, V6 split-K 已确认死, 所有 sub-2hr levers + aiter-mimic axes 已在 R29-R33 全部耗尽.**
 
 **历史指令** (2026-04-17, 已过时):
 > "24win 已经卡了好久了，现在把优化目标改成优化剩下那几个差的比较多的。"
@@ -64,12 +70,19 @@ R25-G 之前各类已知 dead (history): `iterative-ilp` 编译器 bug, BK=256 L
 - **大 K (≥14336) shapes** 是主战场: 该类的 gap 主要来自 LDS broadcast bandwidth 不足 + B tile reuse 效率低.
 - **mega-M shape 128256×32768×4096** 已被验证为 **register-pressure / MFMA-pipeline bound** (Round 4 PERSISTENT_XCD_QUEUE 实证), **不是 launch-bound**. 不要再尝试 dispatch 优化.
 
-### 推荐探索方向 (post-R32 — 只剩 V5 / V7 多周路径; V6 已确认死)
+### 推荐探索方向 (post-R33 — 只剩 V7 一条多周结构性路径; V5/V6 已死)
 | 方向 | 风险 | 预期 | 备注 |
 |------|------|------|------|
-| **V5 — MFMA_32X32X64_TILING 重构** (R29+) | 高 | 0-5pp on L6/DLA1 | ≥1 周 asm 重写. 32×32 MFMAs 允许 4× concurrent in-flight @ same acc footprint, 可能松开 R24B/C/R32-A5 确认的 VMEM-issue saturation at vmcnt(8). 高不确定性. 见 `R27_V5_MFMA32_SCOUT.md` |
-| **V7 — Stream-K 动态 K-partitioning** | 高 | 0-5pp on L6 | ≥2 周. 动态在 grid-saturated 和 grid-starved 之间 rebalance. 比 V5 更通用但 implementation 更重. |
+| **V7 — Stream-K 动态 K-partitioning** | 高 | 0-5pp on L6 | ≥2 周. 动态在 grid-saturated 和 grid-starved 之间 rebalance. **现在是唯一剩余结构性 axis.** |
+| **prefetch state-machine 重写 (use aiter as ref)** | 高 | 0-5pp | aiter sustains vmcnt(15) 我们不行, 根因在 prefetch/R22B coherency interaction. 重写 prefetch 状态机才能解锁. ≥3-5 天. 见 `R33_AITER_ARCHAEOLOGY.md` 找 aiter 的 prefetch ordering. |
+| ~~V5 — MFMA_32X32X64_TILING 重构~~ | — | 死 | R33 archaeology 证实 aiter 用相同 16×16 MFMA shape 撞到 5781 ceiling. V5 upper bound ≤ aiter. 不要再考虑. |
 | ~~V6 — split-K~~ | — | 死 | R32 Opt B (`52b8d54c`): POC 干净实现但 grid-saturated shape 上 mechanically dead. K_SPLIT=2 −11.53%, K_SPLIT=4 −23.37%. 不要重试. |
+
+DEAD post-R33 (不要再尝试 — 已 reproduce 过):
+- ~~BARRIER_TO_WAITCNT_RELAXED_VMCNT≥15 on L6~~ — `R33_OPT_A_VERDICT.md` + `R33_OPT_D_VERDICT.md`. RELAXED_VMCNT=15/25 全 HSA aperture viol (50-100% crash), with OR without aiter SRD swap. Crash 机制在 prefetch pipeline / R22B coherency, 不在 SRD bounds.
+- ~~SRD config swap 到 aiter pattern~~ — `R33_OPT_D_VERDICT.md` + fork `kernel_mxfp4_gluon_cpp_aiterSRD.cpp`. swap `(0xFFFFFFFFu, 0x00110000u)` → `(-16, 0x00020000, word1|=0x40000)` 干净 build (212 VGPR/0 spill) 但 perf NEUTRAL (-0.15% noise) 且不解锁 vmcnt(15). R33_AITER_ARCHAEOLOGY.md Finding #1 REFUTED.
+- ~~EXPLICIT_S_NOP=1 (kernel:193)~~ — R33 Opt A V4: +0.09% TIE on L6. 我们 incumbent compiler 已通过 `sched_barrier` implicit nops, hand-placed s_nop 不 material.
+- ~~V5 MFMA_32X32X64 sprint~~ — DEPRIORITIZED. aiter 在 16×16×128 撞到 5781 ceiling, 所以 MFMA-issue rate 不是瓶颈, V5 upper bound ≤ aiter. 见 `R33_AITER_ARCHAEOLOGY.md` §5.
 
 DEAD post-R32 (不要再尝试 — 已 reproduce 过):
 - ~~K_LOOP_SYNC_EVERY_2 on L6~~ — `R32_OPT_A_VERDICT.md`. kernel:391-395, 2826-2862. 静态 halve 16 per-iter `s_barrier`s. Build 出 VGPR=256 / 32 spills / 132B scratch (vs parent 212/0/0) 并且 **corrupts output** at K=128256 (n_diff=23M, max_abs_diff=bf16 max). Cross-wave LDS ordering 在 K-iter 间 load-bearing, 不能静态 halve.

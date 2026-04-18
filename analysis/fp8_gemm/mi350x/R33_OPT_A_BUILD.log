@@ -1,0 +1,10 @@
+R33-A builds: 6 (parallel)
+  V4_snop1                 PASS       compile=5.2s VGPR=212 spills=None scratch=0 occ=None
+  V5_relax15_snop1         PASS       compile=5.2s VGPR=212 spills=None scratch=0 occ=None
+  V3_relax10               PASS       compile=5.3s VGPR=212 spills=None scratch=0 occ=None
+  V1_relax15               PASS       compile=5.3s VGPR=212 spills=None scratch=0 occ=None
+  V2_relax25               PASS       compile=5.4s VGPR=212 spills=None scratch=0 occ=None
+  V6_relax25_snop1         PASS       compile=5.4s VGPR=212 spills=None scratch=0 occ=None
+
+Wall clock: 5.4s
+Results: /shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/R33_OPT_A_BUILD_RESULTS.json

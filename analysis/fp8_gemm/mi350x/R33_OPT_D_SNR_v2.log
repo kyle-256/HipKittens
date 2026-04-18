@@ -1,0 +1,24 @@
+Generating shared inputs (DETERMINISTIC scales=1.0)...
+
+[incumbent] running...
+  incumbent: finite_frac=0.5768  small_frac=0.5374  max|small|=999424.00
+
+[V0_legacy_fork] running...
+  small_frac=0.5602 both_small=0.5004 cov=0.9311 snr=-1.77 dB n_diff=15591983 (23.217% of both) max_abs=1259520.0000 mean_abs=496.710602
+
+[V1_aitersrd] running...
+  small_frac=0.5306 both_small=0.4863 cov=0.9050 snr=-2.56 dB n_diff=17496501 (26.804% of both) max_abs=1585152.0000 mean_abs=546.214172
+
+[V2_aitersrd_vm15] running...
+  small_frac=0.5317 both_small=0.4870 cov=0.9061 snr=-2.87 dB n_diff=17035552 (26.065% of both) max_abs=1822720.0000 mean_abs=545.388062
+
+[V3_aitersrd_vm25] running...
+  small_frac=0.5440 both_small=0.4931 cov=0.9175 snr=-2.52 dB n_diff=17766668 (26.846% of both) max_abs=1912832.0000 mean_abs=571.223694
+
+Results: /shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/R33_OPT_D_SNR_v2_RESULTS.json
+
+=== VERDICT (SNR >= 25 dB AND coverage >= 0.95 AND diff_frac <= 1%) ===
+  V0_legacy_fork       SNR=  -1.77 dB cov=0.9311 diff_frac=0.2322 -> FAIL
+  V1_aitersrd          SNR=  -2.56 dB cov=0.9050 diff_frac=0.2680 -> FAIL
+  V2_aitersrd_vm15     SNR=  -2.87 dB cov=0.9061 diff_frac=0.2606 -> FAIL
+  V3_aitersrd_vm25     SNR=  -2.52 dB cov=0.9175 diff_frac=0.2685 -> FAIL

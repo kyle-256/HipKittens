@@ -1,0 +1,180 @@
+{
+  "WIN_BAR": 5386.124,
+  "INCUMBENT_TFLOPS": 5354.0,
+  "COMP_TFLOPS": 5781.1,
+  "results": {
+    "incumbent": {
+      "reps": [
+        {
+          "status": "OK",
+          "avg_ms": 6.3182,
+          "tflops": 5449.07,
+          "wall_s": 9.1
+        },
+        {
+          "status": "OK",
+          "avg_ms": 6.3439,
+          "tflops": 5427.0,
+          "wall_s": 8.4
+        },
+        {
+          "status": "OK",
+          "avg_ms": 6.3328,
+          "tflops": 5436.5,
+          "wall_s": 8.4
+        },
+        {
+          "status": "OK",
+          "avg_ms": 6.3339,
+          "tflops": 5435.56,
+          "wall_s": 8.5
+        },
+        {
+          "status": "OK",
+          "avg_ms": 6.345,
+          "tflops": 5426.08,
+          "wall_s": 8.5
+        }
+      ],
+      "mean": 5434.842,
+      "best": 5449.07,
+      "p10": 5426.08,
+      "p50": 5435.56,
+      "p90": 5449.07,
+      "ratio_vs_incumbent": 101.50993649607769,
+      "verdict": "WIN"
+    },
+    "V1_relax15": {
+      "reps": [
+        {
+          "status": "NO_JSON",
+          "wall_s": 186.7,
+          "stdout": "GPU core dump created: gpucore.1159051\nVGPU(0x55ff04137e50) Queue(0x7f3068018000) is idle"
+        }
+      ],
+      "verdict": "DEAD-BY-CRASH"
+    },
+    "V3_relax10": {
+      "reps": [
+        {
+          "status": "OK",
+          "avg_ms": 6.3149,
+          "tflops": 5451.96,
+          "wall_s": 8.5
+        },
+        {
+          "status": "OK",
+          "avg_ms": 6.34,
+          "tflops": 5430.39,
+          "wall_s": 8.5
+        },
+        {
+          "status": "OK",
+          "avg_ms": 6.3211,
+          "tflops": 5446.63,
+          "wall_s": 8.3
+        },
+        {
+          "status": "OK",
+          "avg_ms": 6.3684,
+          "tflops": 5406.17,
+          "wall_s": 8.5
+        },
+        {
+          "status": "OK",
+          "avg_ms": 6.3422,
+          "tflops": 5428.45,
+          "wall_s": 8.5
+        }
+      ],
+      "mean": 5432.719999999999,
+      "best": 5451.96,
+      "p10": 5406.17,
+      "p50": 5430.39,
+      "p90": 5451.96,
+      "ratio_vs_incumbent": 101.47030257751213,
+      "verdict": "WIN"
+    },
+    "V4_snop1": {
+      "reps": [
+        {
+          "status": "OK",
+          "avg_ms": 6.3402,
+          "tflops": 5430.14,
+          "wall_s": 8.6
+        },
+        {
+          "status": "OK",
+          "avg_ms": 6.3039,
+          "tflops": 5461.42,
+          "wall_s": 8.6
+        },
+        {
+          "status": "OK",
+          "avg_ms": 6.3124,
+          "tflops": 5454.07,
+          "wall_s": 8.5
+        },
+        {
+          "status": "OK",
+          "avg_ms": 6.3294,
+          "tflops": 5439.49,
+          "wall_s": 8.5
+        },
+        {
+          "status": "OK",
+          "avg_ms": 6.3596,
+          "tflops": 5413.62,
+          "wall_s": 8.5
+        }
+      ],
+      "mean": 5439.748,
+      "best": 5461.42,
+      "p10": 5413.62,
+      "p50": 5439.49,
+      "p90": 5461.42,
+      "ratio_vs_incumbent": 101.60156892043331,
+      "verdict": "WIN"
+    },
+    "V5_relax15_snop1": {
+      "reps": [
+        {
+          "status": "OK",
+          "avg_ms": 6.3318,
+          "tflops": 5437.36,
+          "wall_s": 8.6
+        },
+        {
+          "status": "OK",
+          "avg_ms": 6.3242,
+          "tflops": 5443.89,
+          "wall_s": 8.6
+        },
+        {
+          "status": "OK",
+          "avg_ms": 6.3159,
+          "tflops": 5451.1,
+          "wall_s": 8.6
+        },
+        {
+          "status": "OK",
+          "avg_ms": 6.3535,
+          "tflops": 5418.82,
+          "wall_s": 8.6
+        },
+        {
+          "status": "NO_JSON",
+          "wall_s": 186.9,
+          "stdout": "GPU core dump created: gpucore.1161668\nVGPU(0x56024c2bafe0) Queue(0x7f1714014000) is idle"
+        }
+      ],
+      "mean": 5437.7925,
+      "best": 5451.1,
+      "p10": 5418.82,
+      "p50": 5443.89,
+      "p90": 5451.1,
+      "ratio_vs_incumbent": 101.56504482629809,
+      "verdict": "WIN"
+    }
+  }
+}
