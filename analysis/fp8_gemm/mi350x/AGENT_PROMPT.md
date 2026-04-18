@@ -52,9 +52,10 @@
 - **工作目录**: `analysis/fp8_gemm/mi350x`
 - **Cursor Repo**: `/shared_nfs/kyle/test/Hipkittens2` (只读参考)
 
-## 当前成绩 (2026-04-18, post-R24)
-- **R22-rebench (full 42-shape, COMPLETE)**: **29/42 WIN, 13/42 LOSE**, 0 ERR, avg ratio 105.3% (+5 vs R20B/24)
-- 13 LOSE shapes:
+## 当前成绩 (2026-04-18, post-R25)
+- **R25-D STACK WIN (DLA2 +6.69%, DLA7 +6.92%)**: gm6 (R25-B) × R25C_TAIL_PF_OFF_ITERS=4 (R25-C) super-additive on DLA2/DLA7. Wired into `bench_all_42.py` as `_ts_gm6_v12_memc_dc_pfoff4` (DLA2) and `_ts_lgk2_gm6_v12_memc_pfoff4` (DLA7). Gap to aiter: DLA2 96.3% → ~98.9% (gap 6.7%→1.1%); DLA7 96.9% → ~99.8% (gap 6.9%→0.2%). DLA1 (K=128256) gated off by R25C_K_LIMIT — no regression risk.
+- **R22-rebench (full 42-shape baseline before R25-D wires)**: **29/42 WIN, 13/42 LOSE**, 0 ERR, avg ratio 105.3% (+5 vs R20B/24). Post-R25-D: regression check in flight; expected to flip DLA2/DLA7 to WIN (→ ~31/42).
+- 13 LOSE shapes (pre-R25):
   - DLA1 4096x32768x128256 = 91.9%, DLA2 128256x32768x4096 = 96.3%, DLA7 28672x32768x4096 = 96.9%
   - mid-gap (95.7-99.9%): 14336x4096x32768, 4096x28672x32768, 16384x28672x4096, 28672x4096x16384, 4096x32768x14336, 4096x32768x28672, 16384x4096x28672, 16384x28672x2048, 14336x32768x4096, 4096x14336x16384
 - **R22B (NT/streaming on A+B), R23A (STATIC_XCD_REMAP), R23B (PERSISTENT_XCD)** — all DEAD END (R23B has correctness bug; R23A best DLA7 +1.50% borderline noise; R22B all regress)
@@ -261,11 +262,48 @@
     - DLA1 ERR rc=−6 on both _pxcd_b1 and _pxcd_b4 (correctness assert).
     - VERDICT: Kernel-side bug in PERSISTENT_GRID dispatcher — atomic tile claim either races, deadlocks, or terminates after fewer iterations than there are tiles.
 
-- **Round 24 (2026-04-18, NEXT)** — kernel-side fixes + new producer-side angles:
-  - **R24A** — debug PERSISTENT_XCD coverage bug (probably wrong tile counter or stale atomic CAS across XCD groups). If fixed, +2-5pp on DLA2 plausible (mega-M dispatcher reduction).
-  - **R24B** — L2 prefetch hints (R23C, deferred): emit `s_load_dword` for next K-tile's A/B addresses inside current K-tile MFMA window.
-  - **R24C** — outer-K pull-forward (R23D, deferred): prefetch K+2/K+3 inside K+0/K+1 MFMA window.
-  - **R24D** — A-only NT bit (since R22B established B-NT thrashes L2 reuse; A is M-streamed with no temporal reuse).
+- **Round 24 (2026-04-18, COMPLETE — all 4 vectors DEAD END)** — kernel-side fixes + new producer-side angles:
+  - **R24A** — debug PERSISTENT_XCD coverage bug (Fix A+B+C). DEAD END: host-side fixes do not move the kernel-side persistent-loop bug; coverage stays at 6.4%/28.6%. Risky rewrite needed; out of scope.
+  - **R24B** — L2 prefetch hints via `buffer_load_dwordx4`. DEAD END: 0.4-12% regression, monotone with intensity.
+  - **R24C** — outer-K pull-forward (K+2/K+3 prefetch inside K+0/K+1 MFMA window). DEAD END: 14-24% regression on all 3 DLA shapes; saturation flat.
+  - **R24D** — A-only NT cache hint. DEAD END: 4-8% regression on DLA1/2/7.
+  - **Mechanistic conclusion**: DLA shapes are **VMEM-issue-bound**, NOT VMEM-latency-bound. Single VMEM lane saturated by existing prefetch path. HBM-bandwidth axis exhausted.
+
+- **Round 25 (2026-04-18, BREAKTHROUGH — R25-C WIN + R25-D STACK WIN)** — pivot off HBM-bandwidth axis onto K-loop epilogue + L2-locality:
+  - **R25-A — scratch-spill reduction via per-K-iter scale reload (`R25A_SCALE_RELOAD_PER_K_ITER`)** — DEAD END.
+    - Pre-flight read of compile remarks: **0 spills** in production kernel (256V/256A clean). The premise (scratch-spill recovery) is empty.
+    - Variant builds; runtime hangs/aperture-violates on all 3 DLA shapes (`rc=-6`). Same VGPR-aliasing pattern as the R5 EARLY_SCALE_PF dead end (compiler aliases live `pf_*` and reload-shadow VGPRs).
+    - Code preserved behind `R25A_SCALE_RELOAD_PER_K_ITER=1` flag (default 0). NOT TO BE ENABLED.
+  - **R25-B — `GROUP_SIZE_M` sweep (gm3/gm6/gm12/gm16)** — PARTIAL WIN (committed via R25-D stack):
+    - **gm6** beats baseline (gm2 / kernel-default gm4) on DLA2 +2.97% and DLA7 +0.91%.
+    - **gm12 / gm16 CRASH** with `HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION` on M=4096 shapes when stacked with `STEP3_PF_N=6` (reproduced 3x). Excluded from recommendation.
+    - **gm3 unstable** (3.3% std across reps; some reps positive, some negative). Excluded.
+    - Net: gm6 stays only via the R25-D stack (alone it's marginal vs R25-C alone).
+  - **R25-C — K-loop tail prefetch-off (`R25C_TAIL_PF_OFF_ITERS=4`, gated by `R25C_K_LIMIT=32768`)** — **WIN** (committed `09d58029`):
+    - Branches the last N iters of the TAIL_SPLIT main loop to `kpair_32mfma_with_lds_and_pf<PF_N=0>` to free VMEM slots from already-cached redundant tail prefetches.
+    - Mechanism: `pf_bt = (bt+2 < k_byte_iters) ? (bt+2) : (k_byte_iters-1)` clamps in the last 2-4 iters and reissues stale lines.
+    - **DLA2 +5.96%, DLA7 +3.14%** (3-rep tight verify, mean Δ).
+    - DLA1 (K=128256) gated off by `R25C_K_LIMIT=32768` because `k_byte_iters=501` partial-unroll prevents the `bt` branch from folding (would regress 10-20%).
+    - Preserved behind macros default 0 / 32768 — full backward compat.
+  - **R25-D — STACK TEST: gm6 × pfoff4** — **SUPER-ADDITIVE STACK WIN**:
+    - DLA2: baseline 4203.75 → gm6 4302.09 (+2.34%) → pfoff4 4342.04 (+3.29%) → **gm6+pfoff4 4484.95 (+6.69%)** — stack beats best-singleton (pfoff4) by +3.29%.
+    - DLA7: baseline 4167.70 → gm6 4289.57 (+2.92%) → pfoff4 4358.45 (+4.58%) → **gm6+pfoff4 4456.16 (+6.92%)** — stack beats best-singleton by +2.24%.
+    - Mechanism: `gm6` reorders L2 B-tile reuse (lower steady-state HBM pressure); `pfoff4` removes redundant tail VMEM (frees scale-load + epilogue VMEM). Orthogonal HBM-bound stalls, so stacking compounds.
+    - Bonus: stack variant is the **most stable** of all 4 DLA7 variants (zero crashes, zero outliers across both parallel runs).
+    - Wired into `bench_all_42.py`:
+      - `("_ts_gm6_v12_memc_dc_pfoff4", "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=6 -DSTEP3_BARRIER_VMCNT=12 -DR25C_TAIL_PF_OFF_ITERS=4 -DR25C_K_LIMIT=32768 -mllvm -amdgpu-sched-strategy=max-memory-clause -mllvm -amdgpu-disable-clustered-low-occupancy-reschedule")`  # DLA2 stack
+      - `("_ts_lgk2_gm6_v12_memc_pfoff4", "-DTAIL_SPLIT=1 -DSTEP12_BR_LGKMCNT=2 -DGROUP_SIZE_M=6 -DSTEP3_BARRIER_VMCNT=12 -DR25C_TAIL_PF_OFF_ITERS=4 -DR25C_K_LIMIT=32768 -mllvm -amdgpu-sched-strategy=max-memory-clause")`  # DLA7 stack
+    - Gap-to-aiter reduction: DLA2 96.3% → ~98.9% (gap 6.7% → 1.1%); DLA7 96.9% → ~99.8% (gap 6.9% → 0.2%). Both shapes likely flip LOSE → WIN once R25 reviewer's 42-shape regression run completes.
+  - **Round 25 net**: +1 WIN axis re-opened (K-loop epilogue specialization), 2 deep-LOSE shapes nearly closed (DLA2 + DLA7). HBM-bandwidth ceiling broken via L2-locality stacking, NOT via raw HBM throughput.
+
+  **新 dead-end vectors (Round 25)**:
+  - `R25A_SCALE_RELOAD_PER_K_ITER` — premise empty (0 spills exist); reload variant aliases scale VGPRs and hangs GPU.
+  - `GROUP_SIZE_M ∈ {12, 16}` — APERTURE_VIOLATION on M=4096 shapes when combined with `STEP3_PF_N=6`.
+  - `GROUP_SIZE_M=3` — too unstable (3.3% std); not commit-quality.
+
+  **Frontier post-R25**: HBM-bandwidth saturation broken on K=4096 short-K shapes via tail-pf-off + gm6 stack. **Remaining vectors**:
+  - **R25-E — DLA1 K-loop peel (K=128256)**: split main loop into head (K-1-N iters fully prefetched) + peeled tail (N iters no-pf). Requires duplicating ~200-line main-loop body. Could close the largest remaining gap (DLA1 91.9%).
+  - **Other 11 mid-gap shapes (95.7-99.9%)**: re-bench with R25-D wires; many may flip WIN automatically.
 
 - **Round 21 (2026-04-18, recon + audit + head-macro probe)**: 3 parallel agents; **0 new WINs**, but R21-recon delivered the highest-value finding of the post-R20 axis: DLA1/DLA2/DLA7 are **memory-stall bound**.
   - **R21-recon — rocprof PMC sweep on DLA2 + DLA7** (parallels R17A's DLA1 profile):

@@ -484,6 +484,19 @@ def main():
         ("_ts_v12_tv0_memc_btw_all","-DTAIL_SPLIT=1 -DSTEP3_BARRIER_VMCNT=12 -DTAIL_BARRIER_VMCNT=0 -mllvm -amdgpu-sched-strategy=max-memory-clause -DBARRIER_TO_WAITCNT_ALL=1"),  # R20A WIN: S12 14336x32768x4096 +3.26pp
         ("_ts_lgk2_btw_step3",      "-DTAIL_SPLIT=1 -DSTEP12_BR_LGKMCNT=2 -DBARRIER_TO_WAITCNT_STEP3=1"),  # R20A WIN: S13 4096x14336x16384 +2.71pp
         ("_ts_gm8_v12_btw_step3",   "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=8 -DSTEP3_BARRIER_VMCNT=12 -DBARRIER_TO_WAITCNT_STEP3=1"),  # R20A WIN: S15 32768x4096x7168 +2.04pp (also S5)
+        # R25-D STACK WIN: GROUP_SIZE_M=6 (R25-B) × R25C_TAIL_PF_OFF_ITERS=4 (R25-C)
+        # super-additive on DLA2 (+6.69%) and DLA7 (+6.92%) vs prior production.
+        # Reduces DLA2 gap to aiter from 6.7%→1.1% and DLA7 from 6.9%→0.2%.
+        # R25C_K_LIMIT=32768 ensures DLA1 (K=128256) is gated off (no regression).
+        ("_ts_gm6_v12_memc_dc_pfoff4",
+         "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=6 -DSTEP3_BARRIER_VMCNT=12 "
+         "-DR25C_TAIL_PF_OFF_ITERS=4 -DR25C_K_LIMIT=32768 "
+         "-mllvm -amdgpu-sched-strategy=max-memory-clause "
+         "-mllvm -amdgpu-disable-clustered-low-occupancy-reschedule"),  # R25D STACK: DLA2 +6.69%
+        ("_ts_lgk2_gm6_v12_memc_pfoff4",
+         "-DTAIL_SPLIT=1 -DSTEP12_BR_LGKMCNT=2 -DGROUP_SIZE_M=6 -DSTEP3_BARRIER_VMCNT=12 "
+         "-DR25C_TAIL_PF_OFF_ITERS=4 -DR25C_K_LIMIT=32768 "
+         "-mllvm -amdgpu-sched-strategy=max-memory-clause"),  # R25D STACK: DLA7 +6.92%
     ]
     for n_val, k_val in nk_pairs:
         for suffix, cppflags in variants:

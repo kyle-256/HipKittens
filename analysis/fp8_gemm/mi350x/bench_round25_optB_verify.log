@@ -1,0 +1,67 @@
+R25B VERIFY: 3 reps each on GPU 3
+warmup=200 iters=500 trim=0.1
+========================================================================================================================
+
+--- DLA1  M=4096 N=32768 K=128256 ---
+  _r25b_baseline        runs=[5112.5, 3716.37, 5097.5]  max=5112.5  med=5097.5  std=801.76
+  _r25b_gm3             runs=[3167.66, 4750.32, 3640.27]  max=4750.3  med=3640.3  std=812.44
+  _r25b_gm6             runs=[3736.0, 5004.23, 3286.72]  max=5004.2  med=3736.0  std=890.70
+  _r25b_gm12            SKIPPED (known crash)
+  _r25b_gm16            SKIPPED (known crash)
+
+--- DLA2  M=128256 N=32768 K=4096 ---
+  _r25b_baseline        runs=[4131.77, 4125.05, 4141.79]  max=4141.8  med=4131.8  std=8.42
+  _r25b_gm3             runs=[4273.17, 4269.88, 4267.28]  max=4273.2  med=4269.9  std=2.95
+  _r25b_gm6             runs=[4304.16, 4304.7, 4299.28]  max=4304.7  med=4304.2  std=2.99
+  _r25b_gm12            runs=[4088.39, 4076.92, 4080.55]  max=4088.4  med=4080.6  std=5.86
+  _r25b_gm16            SKIPPED (known crash)
+
+--- DLA7  M=28672 N=32768 K=4096 ---
+  _r25b_baseline        runs=[4175.73, 4161.55, 4175.62]  max=4175.7  med=4175.6  std=8.16
+  _r25b_gm3             runs=[4269.1, 4273.23, 4281.54]  max=4281.5  med=4273.2  std=6.34
+  _r25b_gm6             runs=[4277.97, 4287.64, 4279.73]  max=4287.6  med=4279.7  std=5.15
+  _r25b_gm12            runs=[4075.32, 4078.58, 4064.15]  max=4078.6  med=4075.3  std=7.57
+  _r25b_gm16            runs=[2022.69, 3598.88]  max=3598.9  med=2810.8  std=1114.53
+
+--- MID1  M=14336 N=4096 K=32768 ---
+  _r25b_baseline        runs=[4606.25, 2347.14, 2217.85]  max=4606.2  med=2347.1  std=1343.18
+  _r25b_gm3             runs=[2960.64, 4694.51, 4655.99]  max=4694.5  med=4656.0  std=990.12
+  _r25b_gm6             runs=[4524.84, 4542.54, 4503.83]  max=4542.5  med=4524.8  std=19.38
+  _r25b_gm12            runs=[4382.86, 4382.58, 4396.46]  max=4396.5  med=4382.9  std=7.93
+  _r25b_gm16            runs=[4393.41, 4389.4, 3676.11]  max=4393.4  med=4389.4  std=412.98
+
+--- MID2  M=4096 N=28672 K=32768 ---
+  _r25b_baseline        runs=[2701.29, 2657.33, 2920.05]  max=2920.1  med=2701.3  std=140.72
+  _r25b_gm3             runs=[3022.98, 3599.28, 4893.17]  max=4893.2  med=3599.3  std=957.77
+  _r25b_gm6             runs=[5141.39, 5132.93, 5120.4]  max=5141.4  med=5132.9  std=10.56
+  _r25b_gm12            runs=[5073.48, 5098.16, 5094.41]  max=5098.2  med=5094.4  std=13.30
+  _r25b_gm16            runs=[5074.53, 5068.93, 5065.4]  max=5074.5  med=5068.9  std=4.60
+
+Elapsed: 559.3s
+Saved -> /shared_nfs/kyle/test/HipKittens/.claude/worktrees/agent-a363cd83/analysis/fp8_gemm/mi350x/bench_round25_optB_verify.json
+
+========================================================================================================================
+VERIFY SUMMARY (max-of-N TFLOPS, Δ vs baseline_max)
+========================================================================================================================
+  DLA1 baseline_max = 5112.5 TFLOPS (med=5097.5 std=801.76)
+    _r25b_gm3             max=4750.3 med=3640.3 std=812.44  Δ=-7.08%  LOSE
+    _r25b_gm6             max=5004.2 med=3736.0 std=890.70  Δ=-2.12%  LOSE
+  DLA2 baseline_max = 4141.8 TFLOPS (med=4131.8 std=8.42)
+    _r25b_gm3             max=4273.2 med=4269.9 std=2.95  Δ=+3.17%  WIN
+    _r25b_gm6             max=4304.7 med=4304.2 std=2.99  Δ=+3.93%  WIN
+    _r25b_gm12            max=4088.4 med=4080.6 std=5.86  Δ=-1.29%  LOSE
+  DLA7 baseline_max = 4175.7 TFLOPS (med=4175.6 std=8.16)
+    _r25b_gm3             max=4281.5 med=4273.2 std=6.34  Δ=+2.53%  WIN
+    _r25b_gm6             max=4287.6 med=4279.7 std=5.15  Δ=+2.68%  WIN
+    _r25b_gm12            max=4078.6 med=4075.3 std=7.57  Δ=-2.33%  LOSE
+    _r25b_gm16            max=3598.9 med=2810.8 std=1114.53  Δ=-13.81%  LOSE
+  MID1 baseline_max = 4606.2 TFLOPS (med=2347.1 std=1343.18)
+    _r25b_gm3             max=4694.5 med=4656.0 std=990.12  Δ=+1.92%  WIN
+    _r25b_gm6             max=4542.5 med=4524.8 std=19.38  Δ=-1.38%  LOSE
+    _r25b_gm12            max=4396.5 med=4382.9 std=7.93  Δ=-4.55%  LOSE
+    _r25b_gm16            max=4393.4 med=4389.4 std=412.98  Δ=-4.62%  LOSE
+  MID2 baseline_max = 2920.1 TFLOPS (med=2701.3 std=140.72)
+    _r25b_gm3             max=4893.2 med=3599.3 std=957.77  Δ=+67.57%  WIN
+    _r25b_gm6             max=5141.4 med=5132.9 std=10.56  Δ=+76.07%  WIN
+    _r25b_gm12            max=5098.2 med=5094.4 std=13.30  Δ=+74.59%  WIN
+    _r25b_gm16            max=5074.5 med=5068.9 std=4.60  Δ=+73.78%  WIN

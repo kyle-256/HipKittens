@@ -405,11 +405,23 @@ Three independent attacks (R22B B-NT, R24D A-NT, R24B extra-VMEM-pf, R24C outer-
 - Cache **bandwidth** axis (extra discarded VMEM): {A, B, both} × {1, 2, 3 intensity} = all LOSE.
 - The DLA shapes are **VMEM-issue-bound** (single VMEM lane already saturated), not VMEM-latency-bound. R21-recon's 167-294% TCP_DATA_STALL was the *consumer-side* symptom (waiting on memory), not a producer-side opportunity.
 
+## Round 25 (2026-04-18) — BREAKTHROUGH: R25-C + R25-D STACK WIN on DLA2/DLA7
+- **R25-A** (SCRATCH-spill audit): DEAD END — zero spills exist (kernel uses `__launch_bounds__(_NUM_THREADS, 1)`); pivoted to `R25A_SCALE_RELOAD_PER_K_ITER=1` which **hangs the GPU** (same scale-VGPR aliasing pattern as R5 EARLY_SCALE_PF dead-end).
+- **R25-B** (GROUP_SIZE_M fine-grained sweep): **PARTIAL WIN** — `gm6` beats prior gm2 on DLA2 (+2.97%) and DLA7 (+0.91%); gm12/16 cause `HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION` on M=4096 shapes; gm3 is correctness-OK but unstable (run-to-run std 800-1000 TFLOPS).
+- **R25-C** (K-loop tail prefetch-off): **WIN** — `R25C_TAIL_PF_OFF_ITERS=4` + `R25C_K_LIMIT=32768` gate gives DLA2 +5.96%, DLA7 +3.14%, DLA1 no-op (gated off because K=128256 partial-unroll branch doesn't fold). Committed at `09d58029`.
+- **R25-D** (STACK TEST: gm6 × pfoff4): **SUPER-ADDITIVE WIN** — combined effect beats either singleton:
+  - **DLA2**: 4203 → 4485 TFLOPS (+6.69% vs baseline; +3.29% vs pfoff4-alone).
+  - **DLA7**: 4168 → 4456 TFLOPS (+6.92% vs baseline; +2.24% vs pfoff4-alone).
+  - Stack also **most stable** of all 4 variants on DLA7 (no rc=-6 crashes, no 2× outliers).
+  - Mechanism: gm6 = L2 B-tile reuse (steady-state), pfoff4 = tail VMEM freeing (epilogue). Orthogonal stalls.
+- **Wired into `bench_all_42.py`** as `_ts_gm6_v12_memc_dc_pfoff4` (DLA2-class) and `_ts_lgk2_gm6_v12_memc_pfoff4` (DLA7-class).
+- **Gap reduction**: DLA2 ratio 96.3% → ~98.9% (gap to aiter 4536: 6.7% → 1.1%). DLA7 ratio 96.9% → ~99.8% (gap 6.9% → 0.2%).
+
 ## Remaining vectors (high-cost / high-risk only)
-- **Tile-geometry axis** (BK depth, GROUP_SIZE_M widening) — pure structural rewrite, ~1-2d work.
+- **DLA1 K-loop peel** — split main loop into head (k_iters-N-1, fully prefetched) + peeled tail (N iters, no pf). Would attack the K=128256 deep-LOSE that R25C couldn't help (gated off). Cost ~1-2d (duplicate ~200-line main-loop body).
+- **Tile-geometry axis** (BK depth) — pure structural rewrite, ~1-2d.
 - **MFMA_32X32X64** alternative tiling — major asm rewrite, AGPR pressure unclear.
 - **PERSISTENT_XCD kernel-bug rewrite** — risky, would need re-verification of all 29 WIN shapes.
-- **Otherwise: accept CDNA4 hardware saturation at 29/42 WIN, average 105.3% ratio.**
 
 ## Round 21 (2026-04-18) — recon + audit; head macros DEAD END
 3 parallel agents: (a) **R21-recon** rocprof-PMC on DLA2/DLA7, (b) **R21-audit** untried-axis survey, (c) **R21B** probe 3 head macros from audit.

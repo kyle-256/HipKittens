@@ -1,0 +1,168 @@
+{
+  "shapes": {
+    "DLA2": {
+      "_r25d_baseline": [
+        {
+          "tflops": 4207.49,
+          "ms": 8.1827,
+          "n_iters_kept": 400,
+          "nz": 0.9999969005584717
+        },
+        {
+          "tflops": 4202.56,
+          "ms": 8.1923,
+          "n_iters_kept": 400,
+          "nz": 0.9999967813491821
+        },
+        {
+          "tflops": 4198.39,
+          "ms": 8.2004,
+          "n_iters_kept": 400,
+          "nz": 0.999997079372406
+        }
+      ],
+      "_r25d_gm6": [
+        {
+          "tflops": 4310.35,
+          "ms": 7.9874,
+          "n_iters_kept": 400,
+          "nz": 0.9999964833259583
+        },
+        {
+          "tflops": 4305.91,
+          "ms": 7.9956,
+          "n_iters_kept": 400,
+          "nz": 0.9999963641166687
+        },
+        {
+          "tflops": 4293.23,
+          "ms": 8.0192,
+          "n_iters_kept": 400,
+          "nz": 0.9999963641166687
+        }
+      ],
+      "_r25d_pfoff4": [
+        {
+          "tflops": 4322.64,
+          "ms": 7.9647,
+          "n_iters_kept": 400,
+          "nz": 0.9999985694885254
+        },
+        {
+          "tflops": 4332.92,
+          "ms": 7.9458,
+          "n_iters_kept": 400,
+          "nz": 0.9999987483024597
+        },
+        {
+          "tflops": 4335.42,
+          "ms": 7.9412,
+          "n_iters_kept": 400,
+          "nz": 0.9999987483024597
+        }
+      ],
+      "_r25d_gm6_pfoff4": [
+        {
+          "tflops": 4484.08,
+          "ms": 7.6779,
+          "n_iters_kept": 400,
+          "nz": 0.9999986290931702
+        },
+        {
+          "tflops": 4456.12,
+          "ms": 7.7261,
+          "n_iters_kept": 400,
+          "nz": 0.9999985098838806
+        },
+        {
+          "tflops": 4410.11,
+          "ms": 7.8067,
+          "n_iters_kept": 400,
+          "nz": 0.9999985098838806
+        }
+      ]
+    },
+    "DLA7": {
+      "_r25d_baseline": [
+        {
+          "tflops": 4184.7,
+          "ms": 1.8392,
+          "n_iters_kept": 400,
+          "nz": 0.9999974370002747
+        },
+        {
+          "tflops": 4170.12,
+          "ms": 1.8456,
+          "n_iters_kept": 400,
+          "nz": 0.9999974370002747
+        },
+        {
+          "tflops": 4159.81,
+          "ms": 1.8502,
+          "n_iters_kept": 400,
+          "nz": 0.9999971985816956
+        }
+      ],
+      "_r25d_gm6": [
+        {
+          "tflops": 4168.94,
+          "ms": 1.8462,
+          "n_iters_kept": 400,
+          "nz": 0.9999959468841553
+        },
+        {
+          "error": "rc=-6",
+          "stderr": ":0:rocdevice.cpp            :3580: 1166159709501 us:  Callback: Queue 0x7f718ce00000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29\n"
+        },
+        {
+          "tflops": 2014.27,
+          "ms": 3.821,
+          "n_iters_kept": 400,
+          "nz": 0.9999962449073792
+        }
+      ],
+      "_r25d_pfoff4": [
+        {
+          "tflops": 2094.43,
+          "ms": 3.6748,
+          "n_iters_kept": 400,
+          "nz": 0.9999994039535522
+        },
+        {
+          "tflops": 4351.31,
+          "ms": 1.7688,
+          "n_iters_kept": 400,
+          "nz": 0.9999994039535522
+        },
+        {
+          "tflops": 2065.97,
+          "ms": 3.7254,
+          "n_iters_kept": 400,
+          "nz": 0.999998927116394
+        }
+      ],
+      "_r25d_gm6_pfoff4": [
+        {
+          "tflops": 4444.98,
+          "ms": 1.7315,
+          "n_iters_kept": 400,
+          "nz": 0.999998927116394
+        },
+        {
+          "error": "rc=-6",
+          "stderr": ":0:rocdevice.cpp            :3580: 1166488786870 us:  Callback: Queue 0x7fbb40c00000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29\n"
+        },
+        {
+          "tflops": 2074.33,
+          "ms": 3.7104,
+          "n_iters_kept": 400,
+          "nz": 0.9999987483024597
+        }
+      ]
+    }
+  },
+  "warmup": 200,
+  "iters": 500,
+  "trim": 0.1,
+  "n_reps": 3
+}

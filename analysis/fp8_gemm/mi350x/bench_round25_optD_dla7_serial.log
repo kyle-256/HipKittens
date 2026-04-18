@@ -1,0 +1,6 @@
+DLA7 serial bench, GPU 7, warmup=200 iters=500 trim=0.1 reps=3
+  _r25d_baseline rep0                   4181.44 TFLOPS (ms=1.8407)
+  _r25d_baseline rep1                   2046.65 TFLOPS (ms=3.7606)
+  _r25d_baseline rep2                   4176.27 TFLOPS (ms=1.8429)
+  _r25d_gm6 rep0                       ERR rc=-6
+  _r25d_gm6 rep1                        2015.02 TFLOPS (ms=3.8196)
