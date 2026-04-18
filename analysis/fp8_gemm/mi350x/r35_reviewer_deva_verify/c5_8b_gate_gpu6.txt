@@ -1,0 +1,22 @@
+W20260418 12:22:49.898334 140480832192512 agent.cpp:461] Attempt to enable hip visiblity for agent-2 which is not visible to HSA (ROCR)
+[sclk-pre-preheat] GPU[6]		: sclk clock level: 1: (213Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[6]		: sclk clock level: 1: (2089Mhz)
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=14336, K=4096) is +5.0% to +6.5% faster on V2-RRR (R34 Dev B 8B Gate/Up SHIP, 4-GPU triangulated; min Δ% +5.025, min Welch t +10.13). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r34b_findings.md.
+CORRECTNESS_CRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[6]		: sclk clock level: 1: (2340Mhz)
+WARMUP 0 RRR=2352.46 CRR=2366.94 sclk=GPU[6]		: sclk clock level: 1: (2335Mhz)
+WARMUP 1 RRR=2342.20 CRR=2363.51 sclk=GPU[6]		: sclk clock level: 1: (2328Mhz)
+PAIR 0 RRR_1=2368.38 CRR_1=2294.32 RRR_2=2482.69 CRR_2=2359.94
+PAIR 1 RRR_1=2483.40 CRR_1=2343.93 RRR_2=2484.63 CRR_2=2295.41
+PAIR 2 RRR_1=2457.99 CRR_1=2347.00 RRR_2=2478.61 CRR_2=2353.48
+PAIR 3 RRR_1=2494.79 CRR_1=2329.83 RRR_2=2509.15 CRR_2=2359.17
+PAIR 4 RRR_1=2473.84 CRR_1=2335.98 RRR_2=2466.70 CRR_2=2356.34
+[sclk-post-bench] GPU[6]		: sclk clock level: 1: (2320Mhz)
+CRR  median=2345.47 mean=2337.54 stdev=24.52 n=10
+RRR  median=2480.65 mean=2470.02 stdev=38.40 n=10
+Welch t (CRR vs RRR) = 9.194  (positive = RRR faster)
+DELTA_MEDIAN_PCT RRR_vs_CRR = +5.763%
+CRR_TFLOPS_LIST 2294.3155,2359.9421,2343.9349,2295.4106,2346.9998,2353.4765,2329.8308,2359.1729,2335.9763,2356.3448
+RRR_TFLOPS_LIST 2368.3827,2482.6870,2483.3957,2484.6261,2457.9856,2478.6054,2494.7921,2509.1472,2473.8427,2466.6979
