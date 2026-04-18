@@ -1,0 +1,9 @@
+W20260418 16:35:07.790138 139846889672704 agent.cpp:461] Attempt to enable hip visiblity for agent-2 which is not visible to HSA (ROCR)
+[sclk-pre-preheat] phys_gpu=2 GPU[2]		: sclk clock level: 1: (1699Mhz)
+[preheat] sustained 8s 16k matmul...
+[preheat] done 4092 iters
+[sclk-post-preheat] phys_gpu=2 GPU[2]		: sclk clock level: 1: (1707Mhz)
+Traceback (most recent call last):
+  File "/tmp/wt-r40-rev/analysis/fp8_gemm/mi350x/r35_reviewer_bench5x.py", line 151, in <module>
+    import tk_mxfp8_layouts as tk
+ImportError: dynamic module does not define module export function (PyInit_tk_mxfp8_layouts)
