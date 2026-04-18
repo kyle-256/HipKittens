@@ -54,6 +54,88 @@
 
 **baseline 建立**：首次需在每个 LLaMA shape 上跑 FP8 per-tensor + MXFP8 V2 baseline 各 5x，记录 median TFLOPS 作为后续对照。
 
+## R32 cycle 完结 (2026-04-18, 4 devs + 1 reviewer) ★ 2 SHIPs CONFIRMED (V2-RRR @ 70B Down +12.14% + rect-V2 RCR Stage A1) + 7+ closures + R31 GPU0-discount rule DEPRECATED
+
+R32 派 4 dev (A GPU0 rect-V2 CRR Stage A2, B GPU1 V2-CRR LDS SB pipelining recovery, C GPU2 K-large MLP shapes, D GPU3 rect-V2 RCR Stage A1) + Reviewer (GPU0/4/5/6 4-GPU baseline reverify with sclk fix + Phase 2 SHIP verification). **2 SHIPs CONFIRMED by 3-GPU triangulation** + 7+ structural closures + critical methodology correction (R31 GPU0 high-outlier hypothesis FALSIFIED — high regime rotates per-cycle, not per-GPU; deprecate the 2.6% discount rule, replace with cross-GPU triangulation on ≥2 GPUs).
+
+### R32 Reviewer Phase 1 — 4-GPU baseline reverify (sclk-fix applied, commit `390c7b54` r32-rev → cherry-picked `78400cb6`)
+
+GPUs 4/5/6/0 sequentially with `r32_reviewer_bench5x.py` patched to use `rocm-smi -d $PHYS_GPU` (R31 paradigm correction now applied):
+
+| GPU | R31 median | R32 median | drift |
+|---|---:|---:|---:|
+| GPU0 | 786.38 | **768.43** | -17.95 (-2.28%) |
+| GPU4 | 767.31 | **768.37** | +1.06 (+0.14%) |
+| GPU5 | 764.28 | **786.59** | +22.31 (+2.92%) |
+| GPU6 | 766.14 | **776.60** | +10.46 (+1.37%) |
+| **median-of-4** | **766.72** | **772.51** | +5.79 (+0.76%) |
+
+**KEY FINDING (paradigm correction)**: R31's "GPU0 is the high-regime outlier" hypothesis is **FALSIFIED**. GPU0 dropped to mid-regime; **GPU5 became the new high outlier**. The high regime rotates per (GPU × cycle), not per-GPU. **Action: deprecate R31's GPU0 2.6% discount rule.** Replace with cross-GPU triangulation on ≥2 GPUs for any SHIP claim.
+
+### R32 Reviewer Phase 2 — Per-SHIP independent verification
+
+| Dev | Claim | R32 Reviewer triangulation | Verdict |
+|---|---|---|---|
+| Dev D (rect-V2 RCR Stage A1) | scaffolded + GPU-fault-clean | Default md5 unchanged. Rect build clean (VGPR=137 / 0 spills / occ=2 — exact match to dev). GPU-fault test PASS on GPU4 AND GPU5. | **CONFIRM SHIP** |
+| Dev C (V2-RRR @ 70B Down 4096×8192×28672) | +12.14% / Welch t=+49.24 | Dev GPU2: +12.14% / t=+49.24. R32rev GPU6: +12.57% / t=+76.22. R32rev GPU4: +12.21% / t=+28.16. | **CONFIRM SHIP** (3-GPU triangulation, all t > 28) |
+| Dev A (rect-V2 CRR Stage A2c) | NO SHIP — numerics blocked | n/a (no SHIP to verify) | n/a |
+| Dev B (V2-CRR LDS SB pipelining) | NO SHIP — best -15-18% vs DB | n/a (no SHIP to verify) | n/a |
+
+### R32 Dev results
+
+- **Dev A (rect-V2 CRR Stage A2 host preshuffle + helper rewrite) NO SHIP** (cherry-picked `935fddcb`): Stage A2a (preshuffle_v2_b_rect host fn) DONE. Stage A2c (correct numerics) FAILED — pass_rate 33.53%, DETERMINISM=False at 70B KV. **Architectural blocker found**: `load_col_from_v2_st_half<RT, K_HALF>` helper's `k_row` variable indexes LDS rows = N-direction (since `ST_v2 = st_fp8e4m3<HB, BK>` has `rows=HB=N`). With K_HALF=1, `k_row` ∈ [64, 127] → out-of-bounds for the rect HB_N=64 LDS tile. R31 Stage A1 stub (duplicate K_HALF=0 data) prevents GPU fault but produces wrong numerics by construction. **Two recovery paths for R33+**: (1) Square LDS tile (HB=128) + halve kernel N-work — drop b1/cB/cD, ~3-4h, RECOMMENDED; (2) Rewrite helper sharding to make K_HALF index K-direction, ~6-8h. Kernel files reverted to R31 baseline (md5 `8432a2a9de6ca1246e69a5c98790c154` matches R31 cell1).
+- **Dev B (V2-CRR LDS SB pipelining recovery) NO SHIP — 3 NEW STRUCTURAL CLOSURES** (cherry-picked `6a483549`): Added `MXFP8_CRR_SB_PIPELINE` macro selector (0/1/2/3) layered on R31's `MXFP8_CRR_LDS_SINGLE_BUFFER`. Default-off bit-identical. Three approaches all NO SHIP: PIPE=1 (early-issue + late-wait): -56.7% w/ 26-lane VGPR spill. PIPE=2 (split VMEM across MMA pairs): -58.1% w/ 26-lane spill. PIPE=3 (inner-K interleave, single `a` reg): -14.9% to -17.7% on 8192³, -18.5% on 70B Gate (best variant, no spill). **PIPE=3 recovers about half the R31 SB naive loss but still -ve vs DB.** Root cause: `A_col_reg = rt_fp8e4m3<BK=128, RBM=64>` = 32 VGPR/wave. Adding concurrent `a_next` triggers 26-lane spill. PIPE=3 avoids spill via single `a` reuse but cannot fully overlap VMEM with MMA chain (second LDS read of `As[0][1]` must drain before next-iter VMEM writes). **PIPE=3 is the structural ceiling for SB form on V2-CRR's current accumulator/operand-tile shape.** To recover further requires smaller-RBM tile geometry (3-5 day rewrite breaking 8 static_asserts) or per-wave LDS partition.
+- **Dev C (K-large MLP shapes investigation) ★ SHIP + 3 NEW CLOSURES** (cherry-picked `cc274c0d`): 4 cells + 1 bonus.
+
+  | Cell | Lever | Δ | Welch t | Verdict |
+  |---|---|---:|---:|---|
+  | C1 | V2-CRR cp=1/2/3 @ 70B Down (4096×8192×28672) | -0.19% to +0.31% | -2.06 to -0.05 | NO SHIP — neutral |
+  | C2 | V2-CRR resource report K=8192 vs K=28672 | identical 234 VGPR / 139264 LDS | n/a | K-iter pressure hypothesis falsified at source |
+  | C3 | V2-RCR cp=2/3 @ 8B Down (4096×4096×14336) | -4.67% / -3.49% | -6.16 / -2.65 | NO SHIP — REGRESSION |
+  | **C4** | **V2-RRR vs V2-CRR @ 70B Down 4096×8192×28672** | **+12.14% (2511.66 → 2816.55 TFLOPS)** | **+49.24** | **★ SHIP CANDIDATE** |
+  | Bonus | V2-RRR vs V2-RCR @ 8B Down | -0.88% | -2.01 | NO SHIP — RRR advantage shape-specific |
+
+  **SHIP recommendation**: Add a single per-shape autotune entry selecting V2-RRR for `(M=4096, N=8192, K=28672)` only. Do NOT broaden to other K-large shapes (Bonus shows 8B Down K=14336 is neutral). Triangulated by R32 Reviewer on 3 GPUs (+12.21/+12.57/+12.14%), all Welch t > 28.
+
+- **Dev D (rect-V2 RCR Stage A1) ★ INCREMENTAL SHIP** (cherry-picked `ba255e74`): New 610-line `rcr_mxfp8_exact_8wave_rect_fastpath.inc` mirrors Dev A's R31 CRR scaffolding for the V2-RCR side. **Stage A1a PASS**: default build byte-identical (md5 `7d6c1ae78ee0001b45930835237673e6` unchanged). **Stage A1b PASS**: rect build rc=0 (md5 `830dbf96b29b9e1d5c241a82cfc7fabd`); GPU3 4096³ V2-RCR test completes ~4ms with `STAGE_A1b_RESULT: NO_FAULT`. **Resource report**: VGPR 137 vs 246 (-44%), LDS 98304 vs 131072 (-25%), occ=2 unchanged, 0 spills. **Note**: RCR rect did NOT need K_HALF stub since RCR shared tiles use `st_16x128_s` (not `v2_s`); generic `rcr_exact_load_st_to_rt` handles K=0..127 in one load — **smaller blast radius than CRR side**, better Stage A2 outlook for R33+. Stage A1c (correct numerics) deferred to R33+.
+
+### R32 paradigm corrections (4 — extends R27/R28/R29/R30/R31 closure list to 25 total)
+
+1. **R31 GPU0 2.6% discount rule DEPRECATED** (Reviewer Phase 1): R31 hypothesis "GPU0 is high-regime outlier" falsified — GPU0 dropped 2.28% R31→R32 while GPU5 jumped +2.92% to become new high outlier. **High regime rotates per-cycle, not per-GPU.** R32+ rule: cross-GPU triangulation on ≥2 GPUs for any SHIP claim; do NOT apply per-GPU discount.
+2. **V2-CRR LDS SB pipelining structural ceiling at PIPE=3 / -15% gap** (Dev B): A_col_reg=32 VGPR/wave makes any concurrent prefetch trigger 26-lane spill. PIPE=3 (single `a` reuse) avoids spill but loses 15% to LDS-drain serialization. **NEVER prototype "concurrent prefetch in V2-CRR SB form" again** without first restructuring the operand-tile geometry (multi-day rewrite breaking 8 static_asserts).
+3. **K-iter LDS/VGPR pressure hypothesis falsified at source for V2-CRR** (Dev C C2): K=28672 (224 K-iters) vs K=8192 (64 K-iters) produces IDENTICAL kernel resource report (234 VGPR / 139264 LDS / 0 spills). K-loop is runtime-dimensional, not template-dimensional. **NEVER hypothesize "K-loop length affects kernel resources" again.**
+4. **rect-V2 CRR Stage A2 architectural blocker — `k_row` indexes N-direction not K** (Dev A): R31 Stage A1 stub looked safe but is wrong-by-construction. R33+ Stage A2 must take Path 1 (square LDS HB=128 + halve N-work) OR Path 2 (rewrite helper sharding to make K_HALF index K). **NEVER ship Stage A1 stub as production** — it's GPU-fault-safe but numerics-wrong.
+
+### R32 corollaries (consolidated lever-closure tally → 25 total)
+
+R27-R32 cumulative paradigm-correction count: **25 closed levers**. Adding R32: V2-CRR SB PIPE=1 (concurrent prefetch w/ early-issue), V2-CRR SB PIPE=2 (split VMEM across MMA pairs), V2-CRR SB PIPE=3 (inner-K interleave, structural ceiling), V2-CRR cp=1/2/3 @ 70B Down (closed at all values), V2-RCR cp=2/3 @ 8B Down (regression), K-iter resource hypothesis (falsified), rect-V2 CRR Stage A1 stub (numerics-wrong), R31 GPU0 discount rule (deprecated).
+
+### R33+ priority list (rebuilt from R32 results)
+
+1. **【critical / 1-2 day】Wire V2-RRR autotune dispatch for 70B Down (M=4096, N=8192, K=28672)**: Dev C SHIP triangulated by Reviewer on 3 GPUs at +12% (Welch t > 28). Add per-shape `#if M_DIM==4096 && N_DIM==8192 && K_DIM==28672` selector in dispatcher to route this shape to V2-RRR layout. Quick win.
+2. **【critical / 3-4 day】rect-V2 CRR Stage A2 Path 1 (square LDS tile + halve N-work)**: Dev A's RECOMMENDED recovery from architectural blocker. Drop b1/cB/cD, keep HB=128 LDS tile geometry, reuse existing `load_col_from_v2_st_half` helper without rewrite. Targets 70B KV V2-CRR ratio 0.84 → ≥0.92 (need >840 TFLOPS per R31 Reviewer baseline ~913 × 0.92).
+3. **【critical / 3-4 day】rect-V2 RCR Stage A2 (correct numerics)**: Dev D Stage A1 SHIPPED. RCR side has SMALLER blast radius than CRR (no K_HALF stub needed; generic helper handles K=0..127 in one load). Targets 4096³ V2-RCR ratio 0.92 → ≥0.95 via 4× tile count (256 → 1024 tiles → 100% wave-fill).
+4. **【medium / 2-3 day】Sub-RBM operand-tile rewrite for V2-CRR SB**: only path past the PIPE=3 -15% ceiling. RBM=64 → RBM=32 halves A_col_reg from 32 → 16 VGPR/wave, removing the spill barrier for concurrent prefetch. Multi-day, breaks 8 static_asserts. Defer until rect-V2 lands.
+5. **【medium / 1-2 day】Per-shape RRR exploration on remaining cells**: Dev C confirmed RRR is shape-specific (8B Down RRR vs RCR = -0.88%). Sweep RRR vs CRR/RCR on remaining 70B cells (Q/O, Gate, Up) and 8B Gate to find any other RRR wins.
+6. **【methodology — R33+ rules, MUST follow】**:
+   - All harnesses: `rm -f tk_mxfp8_layouts*.so` + log per-build md5 (R29 Dev C) + `rocm-smi -d $PHYS_GPU` not `-d 0` (R31 Reviewer).
+   - All `MXFP8_*_PERSISTENT_GRID` style macros: build-time assert grid >= total_tiles (R31 Dev D).
+   - All in-process A/B benches: BABA pattern + 30s preheat (R31 Dev D).
+   - **R32 update**: SHIP claim normalization is now cross-GPU triangulation on ≥2 GPUs; the per-GPU discount rule is DEPRECATED.
+   - **R32 update**: Absolute md5 comparisons are reproducer-environment-dependent (LLVM `-Rpass-analysis` remarks include `__FILE__` paths). Intra-environment pre↔post comparison still valid; cross-environment absolute-md5 not.
+7. **【closed】**: 25 levers per cumulative tally above. Do not re-prototype any of them.
+
+### R32 Cherry-pick status
+
+Cherry-picked to feat/mxfp8-only:
+- `ba255e74` (R32 Dev D rect-V2 RCR Stage A1 SHIP — 8 files / 1778 insertions; macros default-off so default build byte-identical)
+- `cc274c0d` (R32 Dev C K-large MLP findings + V2-RRR SHIP candidate data — 33 files / 5127 insertions; no kernel source change, recommends per-shape RRR dispatch)
+- `935fddcb` (R32 Dev A rect-V2 CRR Stage A2 NO SHIP — 8 files / 994 insertions; kernel files reverted to R31 baseline)
+- `6a483549` (R32 Dev B V2-CRR LDS SB pipelining recovery NO SHIP — 17 files / 2291 insertions; macros default-off)
+- `78400cb6` (R32 Reviewer 4-GPU + Phase 2 verifications — 26 files / 3034 insertions)
+
+All R32 macros default-off; default builds remain byte-identical to head. Side-branch commits preserved on r32-{a,b,c,d,rev} for R33+ continuation.
+
 ## R31 cycle 完结 (2026-04-18, 4 devs + 1 reviewer) ★ 1 INCREMENTAL SHIP (Stage A1 scaffolding) + 4 STRUCTURAL CLOSURES + 4-GPU live baseline rebased
 
 R31 派 4 dev (A GPU0 rect-V2 fastpath Stage A1, B GPU1 V2-CRR LDS single-buffer, C GPU2 V2-RCR PIPELINE_SCALE second-buffer, D GPU3 V2-RCR persistent-CU dispatch) + Reviewer (GPU0/4/5/6 4-GPU triangulation for 70B KV). **1 incremental SHIP (Dev A Stage A1a+A1b — rect-V2 CRR fastpath kernel scaffolded, GPU-fault-clean, default build byte-identical)** + 4 structural closures + new live baseline 766.72 TFLOPS for 70B KV V2-CRR (median of 4 GPUs).
