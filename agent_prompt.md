@@ -183,6 +183,118 @@ BF16 work is paused unless a clean structural restructure is on the table
 
 ## Session Log
 
+### 2026-04-18 — P15 (3 research-only Devs, all opus; GPUs 0/3/5; CLOSE)
+
+**Outcome: All 3 Devs returned definitive findings. Dev A + Dev C
+silent-timed-out before final memo (P11/P12/P13/P14 pattern continues)
+but produced complete research, recovered from streamed assistant
+text. No code changes. P16 dispatch decision: operand-reuse restructure
+on TK RCR 8-wave inner loop.**
+
+- **Dev A (BL Cijk_ disassembly, GPU 0, complete via partial)** —
+  Per-iter slice of one BL `Custom_..._F8F8_..._gfx950` Cijk_ kernel
+  for an MT256x256x128 weak shape:
+
+  | Mnemonic                         | TK | BL | TK/BL |
+  |----------------------------------|---:|---:|------:|
+  | `v_mfma_f32_16x16x128_f8f6f4`    | 64 | 64 | 1.00  |
+  | `ds_read_b128`                   | 48 | 32 | 1.50  |
+  | `ds_read_b64_tr_b8`/`b128_tr_b16`|  0 |  0 | n/a   |
+  | `buffer_load_dwordx4` (DTL)      | 16 | 16 | 1.00  |
+  | `s_waitcnt`                      | 10 |  4 | 2.50  |
+
+  **The 1.50× ds_read gap is a count gap, not a width gap.** Both
+  use pure `ds_read_b128`; BL fuses more MFMAs per ds_read pair.
+  Disasm at `/tmp/p15_dev_a/{bl_kernel.s,bl_main_loop.s,REPORT.md}`.
+
+- **Dev B (Stream-K survey + impl spec, GPU 3, complete)** — **DEFER**.
+  Tail-effect analysis on the 6 weak shapes:
+  | shape (M,N,K)        | TK/BL today | tail_pct | StreamK helps? |
+  |----------------------|-------------|----------|----------------|
+  | 16384,37888,3584     | 0.890       |  2.70%   | NO             |
+  | 16384,8192,29568     | 0.932       | 18.75%   | YES            |
+  | 16384,28672,4096     | 0.910       |  1.79%   | NO             |
+  |  8192,37888,3584     | 0.914       |  2.70%   | NO             |
+  | 16384,3584,18944     | 0.946       | 35.71%   | YES            |
+  |  8192,28672,4096     | 0.917       |  1.79%   | NO             |
+  Best-case ≤ 1.5pp on weak-6 geo-mean for ~2-3 P-sessions and
+  ~400-600 LOC. Historical precedent: commit `bc4392bf` "Ref is now
+  persistent grid matmul and best is non persist" — TK already tried
+  + abandoned BF16 persistent grid. CK-Tile reference at
+  `/opt/rocm/include/ck_tile/ops/gemm/kernel/universal_gemm_kernel.hpp:247-267,1083-1167`.
+  Memo filed to memory: `project_streamk_persistent_grid.md`.
+
+- **Dev C (TK ds_read source survey + gfx950 ISA inventory + ST_v2a
+  compatibility, GPU 5, complete via partial)** — Per-template TK
+  kernel breakdown of `rcr_exact_8wave_kernel`:
+
+  | Kernel | b128 | tr_b8 | tr_b16 | b96_tr_b6 | mfma | reads/MFMA |
+  |--------|-----:|------:|-------:|----------:|-----:|-----------:|
+  | RCR    |  168 |    0  |    0   |    0      |  224 | 0.75       |
+  | RRR    |   48 |   48  |    0   |    0      |   96 | 1.00       |
+  | CRR    |    0 |  144  |    0   |    0      |   96 | 1.50       |
+
+  (Aggregate 1336 b128 + 1360 tr_b8 in P14 Decider table summed all
+  3 templates × multiple KI specializations.) **gfx950 has NO
+  `ds_read_b128_tr_b8` or `ds_read_b128_tr_b16` instruction** —
+  validated via `llvm-objdump --mcpu=gfx950` dictionary on the
+  prebuilt `.o`. Source call sites (RCR critical path):
+  `include/ops/warp/memory/tile/shared_to_register.cuh:99-104` and
+  `:177-186` (both emit `ds_read_b128` for row_l + fp8 + stride==16).
+
+**Combined Lever C verdict:** GO with revised framing. Not a wider
+instruction swap (NO-GO), but operand-reuse restructure of TK's RCR
+8-wave inner loop to amortize each `ds_read_b128` across more MFMAs.
+Closing 48→32 ds_reads/iter matches BL's 0.50 reads/MFMA exactly.
+
+**P16 dispatch (next session):** 1 Dev, 1 day, prototype operand-reuse
+restructure on TK `rcr_exact_8wave_kernel`'s K-loop in
+`analysis/fp8_gemm/mi350x/kernel_fp8_layouts.cpp`. Risk gates:
+(1) VGPR pressure (256-cap → occupancy 2→1; cf. P14 Dev E BF16
+    CRR/296 launch_bounds story);
+(2) SGPR spill from address-arith hoisting (cf. CRR/296 26-spill in
+    `project_bf16_crr_ki296_spill.md`);
+(3) FP8 ST_v2a swizzle preservation (must not require preshuffle).
+**Gate on rocprofv3 reads/MFMA → 0.50 BEFORE running 6-shape benchmark.**
+
+**Lessons additive to P14:**
+1. **Tail-effect calculator is a 30-second lever-killer** for any
+   "persistent grid will help shape X" hypothesis. Compute
+   `(num_tiles % grid_size) / grid_size` and
+   `1 / (num_tiles / grid_size)` per shape; if both are <5% on the
+   target shapes, persistent grid cannot close the gap and the
+   investigation ends without a Dev sweep.
+2. **Always grep git log for past attempts** before scoping a new
+   restructure. P15 Dev B's `git log --all --oneline | grep -i
+   'stream\|persistent\|sk[0-9]'` surfaced the abandoned BF16 attempt
+   in <1 minute and reframed the entire feasibility memo. Add to
+   research-Dev prompts.
+3. **Per-template disassembly counts beat aggregate counts** when
+   reasoning about a single-template kernel's bottleneck. P14 Decider
+   reported 1336 b128 + 1360 tr_b8 across all 3 layouts × multiple KI
+   specializations; that aggregate looked like 1.0 reads/MFMA but the
+   per-RCR-template count is 168/224 = 0.75. Always slice by template
+   when the lever is template-specific.
+4. **ISA validation costs 1 minute and saves a session.** Dev C ran
+   `llvm-objdump --mcpu=gfx950 -d` and grep on the prebuilt `.o` to
+   confirm gfx950 has no `ds_read_b128_tr_*`. Reframing Lever C from
+   "swap instruction" (dead) to "restructure schedule" (alive) saved
+   a P16 implementation Dev from chasing a non-existent intrinsic.
+5. **Silent-timeout pattern persists across P11-P15.** Long-running
+   research Devs (Dev A, Dev C this session) silent-time-out at
+   ~15-25 min wall-time AFTER producing complete findings via
+   streaming text. Recovery via `python -c "import json; ..."` on the
+   `.jsonl` transcript still works. For P16+, add a "checkpoint to
+   `/tmp/<dev>/REPORT.md` every 5 min" instruction so Decider can
+   ingest mid-stream rather than relying on final return.
+6. **Sibling-repo `git worktree add` blocks parent-repo `git status`.**
+   This session, a 9+ min `git worktree add` from `HipKittens3`
+   (PID 599501) caused all `git status`/`git diff`/`git commit` in
+   `HipKittens2` to hang on shared NFS index/HEAD reads. Treat
+   sibling-repo worktree-create as a global serializer; if blocked,
+   defer commits to the next session rather than burning Decider time
+   debugging git.
+
 ### 2026-04-18 — P14 (3 Devs, all opus; GPUs 0/4/6)
 
 **Outcome: All 3 Devs returned definitive verdicts; nothing landed.

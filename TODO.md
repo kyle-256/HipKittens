@@ -7,6 +7,71 @@
 - SNR ≥ 48 dB (FP8) / ≥ 47 dB (BF16 vs torch.mm), bit-exact determinism are hard gates.
 - Never commit `*.so`, `.autotune_cache.json` is OK to keep (it's text), logs are not.
 
+## Current Status (2026-04-18, post-P15 close — Lever C reframed: count gap, not width gap; P16 = operand-reuse restructure)
+
+P15 launched 3 research-only Devs to bound the surviving FP8 RCR weak-shape
+levers from P14 Dev F's ranked list. **All three returned definitive
+findings.** Both Dev A and Dev C silent-timed-out before final memo
+(silent-timeout pattern from P11/P12/P13/P14 continues), but produced
+complete research outputs that were recovered from streamed assistant
+text. Combined verdict reconciles cleanly:
+
+- **Dev A (BL Cijk_ disassembly, GPU 0, complete via partial)** —
+  Per-iter slice of one BL `Custom_..._F8F8_..._gfx950` Cijk_ kernel
+  for an MT256x256x128 weak shape:
+
+  | Mnemonic                         | TK | BL | TK/BL |
+  |----------------------------------|---:|---:|------:|
+  | `v_mfma_f32_16x16x128_f8f6f4`    | 64 | 64 | 1.00  |
+  | `ds_read_b128`                   | 48 | 32 | 1.50  |
+  | `ds_read_b64_tr_b8`/`b128_tr_b16`|  0 |  0 | n/a   |
+  | `buffer_load_dwordx4` (DTL)      | 16 | 16 | 1.00  |
+  | `s_waitcnt`                      | 10 |  4 | 2.50  |
+
+  **The 1.50× ds_read gap is a count gap, not a width gap.** Both use
+  pure `ds_read_b128`; BL fuses more MFMAs per ds_read pair. Disasm
+  artifacts: `/tmp/p15_dev_a/{bl_kernel.s,bl_main_loop.s,REPORT.md}`.
+
+- **Dev B (Stream-K survey + impl spec, GPU 3, complete)** — **DEFER
+  Stream-K**. Best-case ≤ 1.5pp on weak-6 geo-mean for ~2-3 P-sessions.
+  4 worst weak shapes (gate_up, ratio 0.89-0.92) have <3% tail —
+  Stream-K cannot close their gap. Critical historical finding: commit
+  `bc4392bf` shows TK BF16 persistent-grid attempt was already tried
+  and abandoned. Filed to memory as `project_streamk_persistent_grid.md`.
+
+- **Dev C (TK ds_read source survey + gfx950 ISA inventory, GPU 5,
+  complete via partial)** — Per-template TK kernel breakdown of
+  `rcr_exact_8wave_kernel`:
+
+  | Kernel | b128 | tr_b8 | tr_b16 | b96_tr_b6 | mfma | reads/MFMA |
+  |--------|-----:|------:|-------:|----------:|-----:|-----------:|
+  | RCR    |  168 |    0  |    0   |    0      |  224 | 0.75       |
+  | RRR    |   48 |   48  |    0   |    0      |   96 | 1.00       |
+  | CRR    |    0 |  144  |    0   |    0      |   96 | 1.50       |
+
+  (Aggregate 1336 b128 + 1360 tr_b8 in P14 Decider table summed all 3
+  templates × multiple KI specializations.) **gfx950 has NO
+  `ds_read_b128_tr_b8` or `ds_read_b128_tr_b16` instruction** —
+  validated against the prebuilt .o + objdump dictionary. The "wider
+  instruction swap" reframing of Lever C is **NO-GO**. Source call
+  sites identified: `include/ops/warp/memory/tile/shared_to_register.cuh`
+  lines 99-104 + 177-186 (RCR critical path: `ds_read_b128`).
+
+**Combined Lever C verdict:** Lever C is **GO with revised framing** —
+not a wider instruction swap (NO-GO per Dev C ISA), but an
+**operand-reuse restructure** of TK's RCR 8-wave inner loop to amortize
+each `ds_read_b128` across more MFMAs. Closing 48→32 ds_reads/iter
+matches BL's 0.50 reads/MFMA exactly.
+
+**P16 dispatch (next session):** 1 Dev, 1 day, prototype operand-reuse
+restructure on TK `rcr_exact_8wave_kernel`'s K-loop in
+`analysis/fp8_gemm/mi350x/kernel_fp8_layouts.cpp`. Risk gates:
+(1) VGPR pressure may push past 256 and drop occupancy 2→1
+(cf. P14 Dev E BF16 CRR/296 launch_bounds story);
+(2) SGPR spill from address-arith hoisting (cf. CRR/296 26-spill);
+(3) FP8 ST_v2a swizzle preservation (must not require preshuffle).
+**Gate on rocprofv3 reads/MFMA → 0.50 BEFORE running 6-shape benchmark.**
+
 ## Current Status (2026-04-18, post-P14 partial — Dev F memo landed as research; D/E in flight)
 
 P14 launched 3 Devs (D: FP8 CRR_STEADY 2D sweep on GPU 0; E: BF16 CRR
@@ -285,18 +350,30 @@ for archival; do NOT redispatch unless the constraint changes:
   which TK doesn't have an implementation for.
 
 ### FP8 RCR — only remaining headroom (~3% to BL_RCR custom kernel; ~8% on weak shapes)
-- [P14] **Stream-K persistent grid** (Dev F P14 lever B) — hipBLASLt
-      uses `SK3` (StreamK) on all 6 weak FP8 RCR shapes. Persistent-grid
-      kernel that re-issues tiles inside one workgroup eliminates tail
-      effect on small-K large-N shapes. Multi-session implementation;
-      no clean TK precedent.
-- [P14] **Wider / fewer LDS reads** (Dev F P14 lever C) — TK does
-      1.47-1.50× more `ds_read*` per MFMA than BL on every weak shape.
-      Investigate `ds_read_b128_tr_b16` if compatible with the FP8 ST_v2a
-      swizzle layout (BL ds_read mix unknown — would need disassembly
-      sample of one Cijk_ kernel to compare). Net effect bounded by the
-      0.75→0.50 LDS/MFMA gap (one of two factors in the 8% weak-shape
-      gap; the other is StreamK).
+- [P15-DEFER] ~~Stream-K persistent grid~~ — DEFER per Dev B. Best-case
+      ≤ 1.5pp on weak-6 geo-mean for ~2-3 P-sessions. 4/6 weak shapes
+      (gate_up, ratio 0.89-0.92) have <3% tail; only 2 mlp_down shapes
+      have ≥10% tail. Commit `bc4392bf` shows TK BF16 persistent-grid
+      attempt was already tried and abandoned. Filed as
+      `project_streamk_persistent_grid.md` in memory. Revisit only if
+      operand-reuse restructure (P16) lands and 2 mlp_down shapes still
+      under 0.95.
+- [P15-NO-GO] ~~Wider LDS read instruction swap (`ds_read_b128_tr_*`)~~ —
+      Dev C ISA validation: gfx950 has NO `ds_read_b128_tr_b8` or
+      `ds_read_b128_tr_b16` instruction. Both TK and BL use pure
+      `ds_read_b128` for RCR. The "wider instruction swap" framing of
+      Lever C is dead.
+- [P16] **Operand-reuse restructure of TK RCR 8-wave inner loop** —
+      Dev A per-iter disasm shows TK does 48 `ds_read_b128` per 64-MFMA
+      iter; BL does 32 (1.50× count gap at same MT/MIWT/MFMA/DTL). BL
+      fuses more MFMAs per ds_read pair. Target: collapse 16 redundant
+      ds_read_b128 from `rcr_exact_8wave_kernel` K-loop in
+      `analysis/fp8_gemm/mi350x/kernel_fp8_layouts.cpp`. Source call
+      sites: `include/ops/warp/memory/tile/shared_to_register.cuh:99-104`
+      and `:177-186`. Risk gates: VGPR pressure (256-cap, occupancy
+      2→1), SGPR spill (cf. CRR/296 26-spill), ST_v2a swizzle
+      preservation (no preshuffle). 1-Dev 1-day prototype; gate on
+      rocprofv3 reads/MFMA → 0.50 BEFORE 6-shape benchmark.
 - [P13-CLOSED] ~~Direct-To-LDS (DTLA1+DTLB1) implementation for RCR (TN).~~
       P13 Dev C disassembly grep proved TK ALREADY uses gfx950 wide-DTL
       for 100% of hot-path loads. P14 Decider re-verified after Dev F
