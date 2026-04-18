@@ -1,0 +1,21 @@
+  pair 1/10: base=0.8859 smallm=1.1353 fp8=1.1475
+  pair 2/10: base=0.8861 smallm=1.1346 fp8=1.1466
+  pair 3/10: base=0.8857 smallm=1.1353 fp8=1.1471
+  pair 4/10: base=0.8861 smallm=1.1378 fp8=1.1489
+  pair 5/10: base=0.8869 smallm=1.1382 fp8=1.1484
+  pair 6/10: base=0.8868 smallm=1.1393 fp8=1.1476
+  pair 7/10: base=0.8859 smallm=1.1365 fp8=1.1485
+  pair 8/10: base=0.8865 smallm=1.1361 fp8=1.1472
+  pair 9/10: base=0.8857 smallm=1.1350 fp8=1.1477
+  pair 10/10: base=0.8859 smallm=1.1363 fp8=1.1484
+
+R42B_PAIRED M=128 N=8192 K=8192 n_pairs=10
+  base_med = 0.8860 TF
+  smallm_med = 1.1362 TF
+  fp8_med = 1.1477 TF
+  delta_pct (smallm vs base) = +28.23%
+  welch_t (smallm vs base) = +496.65
+  ratio smallm/fp8 = 99.00%
+  ratio base/fp8 = 77.20%
+R42B_VERDICT PASS_95 (smallm/fp8 = 99.00% >= 95%)
+R42B_VERDICT PASS_DELTA (delta = +28.23% >= +25%)

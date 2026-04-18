@@ -5427,6 +5427,14 @@ template __global__ void gemm_tail_kernel<Layout::RRR, true>(const layout_global
 template __global__ void gemm_tail_kernel<Layout::CRR, false>(const layout_globals);
 template __global__ void gemm_tail_kernel<Layout::CRR, true>(const layout_globals);
 
+// R42 Dev B — small-M MXFP8 fastpath (M=32..128 decode shapes). Optional
+// build-time gate MXFP8_SMALLM_B32_FASTPATH=1 enables an optimized tail
+// kernel that hoists the per-k_block scale load out of the inner K loop
+// (closes the 23% gap MXFP8/FP8 caused by per-iter scalar scale-load
+// redundancy). Default builds (macro unset / 0) are byte-identical.
+// See mxfp8_smallm_b32_fastpath.inc and r42b_smallm_b32_findings.md.
+#include "mxfp8_smallm_b32_fastpath.inc"
+
 template<Layout L, bool PRESHUFFLED_QUANT=false>
 void dispatch(layout_globals g) {
     g.m = static_cast<int>(g.c.rows());
@@ -5537,7 +5545,33 @@ void dispatch(layout_globals g) {
             kittens::ceil_div(g.n, TAIL_BLOCK_N),
             kittens::ceil_div(g.m, TAIL_BLOCK_M)
         );
+#if MXFP8_SMALLM_B32_FASTPATH
+        // R42 Dev B — route MXFP8 PRESHUFFLED_QUANT tail through optimized
+        // smallm_b32 kernel (per-k_block scale-load hoisted). Only PRESHUFFLED
+        // path is wired (production decode uses preshuffle); non-PQ path
+        // retains the original tail kernel (correctness reference).
+        // (Tracepoint inlined — MXFP8_DISPATCH_TRACE_ONCE macro is defined
+        // later in this TU, so we emit the trace string directly via the
+        // env-gated helper.)
+        if constexpr (PRESHUFFLED_QUANT) {
+            if (const char* dt = std::getenv("MXFP8_DISPATCH_TRACE"); dt && dt[0] == '1' && dt[1] == '\0') {
+                static int once = 0;
+                if (!once) {
+                    once = 1;
+                    const char* lname = (L == Layout::RCR) ? "rcr_v2"
+                                       : (L == Layout::RRR) ? "rrr_v2" : "crr_v2";
+                    std::fprintf(stderr,
+                        "[mxfp8_dispatch] %s: shape=(M=%d,N=%d,K=%d) -> SMALLM-B32-TAIL (R42B)\n",
+                        lname, g.m, g.n, g.k);
+                }
+            }
+            gemm_tail_kernel_smallm_b32<L, PRESHUFFLED_QUANT><<<tail_grid, tail_block, 0, g.stream>>>(g);
+        } else {
+            gemm_tail_kernel<L, PRESHUFFLED_QUANT><<<tail_grid, tail_block, 0, g.stream>>>(g);
+        }
+#else
         gemm_tail_kernel<L, PRESHUFFLED_QUANT><<<tail_grid, tail_block, 0, g.stream>>>(g);
+#endif
     }
 }
 
