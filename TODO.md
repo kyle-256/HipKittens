@@ -7,7 +7,75 @@
 - SNR ≥ 48 dB (FP8) / ≥ 47 dB (BF16 vs torch.mm), bit-exact determinism are hard gates.
 - Never commit `*.so`, `.autotune_cache.json` is OK to keep (it's text), logs are not.
 
-## Current Status (2026-04-18, post-P23 Session 2 close — **PADDED-B128 LEVER DEAD**; row_l half-height fix lands as gated infrastructure; Reviewer's bank-conflict-zero claim was wrong by ∞; project memory's "67.6M baseline RCR conflicts" was misread of P21 RRR data — actual baseline RCR has 0 conflicts)
+## Current Status (2026-04-18, post-P24 scout — **H6 BARRIER-REDUCTION CLOSED**; absolute wait-budget ceiling 3pp, realistic 0.3-1.0pp; barriers are CONSEQUENCE of LDS-issue rate, not independent lever; H1 (b64_tr_b16 → b128+v_perm) implicitly closes H6 "for free"; only OPEN BF16 lever is H1 probe-kernel pre-work)
+
+P24 dispatched a single feasibility scout (GPU 4) before launching any
+Devs — applying the `feedback_feasibility_check.md` lesson from P23.
+Scout produced `/tmp/p24_scout/SCOUT_REPORT.md` (273 lines) with PMC
+counters, source barrier inventory, and ceiling estimate.
+
+### Why H6 closed
+
+| Bound                                     | Value     | Source                                       |
+|-------------------------------------------|----------:|----------------------------------------------|
+| `SQ_WAIT_ANY` per-CU as % of `GRBM`       | **4.2%**  | rocprofv3 single-launch CRR worst shape     |
+| Absolute wait-budget ceiling (100% removable, all waits = barrier) | **3.16pp** | Model B upper bound |
+| Realistic ceiling (barriers ≈ 30% WAIT_ANY)| **0.94pp** | Model B realistic |
+| Realistic ceiling (barriers 10-20% WAIT_ANY)| **0.31-0.63pp** | Model B realistic |
+| Removable barriers / MFMA (TK→BL parity)  | 0.094     | 8/16 main-loop barriers eligible             |
+| Verification surface (gated harness)      | 176 sites | 8 candidates × 22 unrolled bodies            |
+
+Static disasm (`/tmp/p24_scout/crr_ki128.s`): 352 `s_barrier` / 2816
+`v_mfma` = 0.125 barriers/MFMA, exact P19 memo reproduction. Of the
+16 barriers per `main_loop_iter`, 8 are HARD (LDS↔reg / HBM→LDS
+handoffs — race risk if removed) and 8 are CANDIDATE (post-MFMA,
+paired with `s_setprio(0)` so removal couples to wave-scheduling
+glue — same failure-mode pattern that bit P9 unroll-1, P14
+launch_bounds, P23 padded-b128).
+
+### Why H1 subsumes H6
+
+Barriers are a CONSEQUENCE of the LDS-issue rate (3 LDS/MFMA × 2
+loads/iter → 6 events to fence per `main_loop_iter`), not an
+independent lever. H1 reduces LDS-issues 0.75 → 0.25 per MFMA → the
+barrier ratio drops to ~0.031 (BL parity) automatically without
+source surgery. Pursuing H6 separately would burn ~1 Dev session
+on harness scaffolding + smoke gates for a 0.3-1.0pp lift that H1
+delivers as a side-effect of its 3-5pp main lift.
+
+### What's still open in BF16
+
+- **H1 (CRR b64_tr_b16 → b128 + v_perm)** — DEFERRED at P20 by
+  cross-lane vs intra-lane semantics; needs probe-kernel pre-work
+  (1 Dev session) before the multi-session restructure. Per the
+  P23 lesson (`feedback_lds_probe_validates_write_only.md`), the
+  probe MUST measure `SQ_LDS_BANK_CONFLICT` on a real production
+  kernel BEFORE writing the design doc — analytical "0 conflicts"
+  proofs missed the read-side composition under MFMA lane mapping.
+- **RCR/RRR weak shapes** — all short-term levers closed; remaining
+  work is the multi-session 4-wave 2M×2N restructure (see
+  `project_bf16_rcr_rrr_weak_shape.md`).
+
+### What's open in FP8 (already winning, lower priority)
+
+- TK FP8 RCR/CRR already 1.49×/1.93× vs BL per `project_fp8_ceiling.md`.
+- Open levers (StreamK persistent grid + wider/fewer LDS reads) per
+  `project_fp8_rcr_weak_shape_levers.md` are speculative; only 2/6
+  weak FP8 RCR shapes have meaningful tail upside.
+
+### P25 direction (decided)
+
+**Dispatch H1 probe-kernel pre-work.** Single Dev session, 1 GPU,
+explicit guard rail: "verify the bank-conflict math empirically with
+rocprofv3 BEFORE writing the design doc" per the P23 feedback
+memory. Probe must also derive the cross-lane mapping needed for
+either Route 1 (LDS write swizzle, BL's approach) or Route 2
+(in-kernel `v_permlane16_b32`/`ds_swizzle_b32` since `v_perm` alone
+is intra-lane only). Deliverable: lane-mapping table + recommended
+route + smoke-buildable variant of `kernel_bf16_dynamic.cpp` with
+the chosen path gated for measurement.
+
+## [P23 Session 2 archive] Earlier Status (2026-04-18, post-P23 Session 2 close — **PADDED-B128 LEVER DEAD**; row_l half-height fix lands as gated infrastructure; Reviewer's bank-conflict-zero claim was wrong by ∞; project memory's "67.6M baseline RCR conflicts" was misread of P21 RRR data — actual baseline RCR has 0 conflicts)
 
 P23 Session 2 dispatched 5 Devs (A col_l Path A, B col_l Path B, C
 kernel wiring, D PMC measurement, E row_l diagnosis) on GPUs 2/3/4/5/6.

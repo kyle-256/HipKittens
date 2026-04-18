@@ -183,6 +183,77 @@ BF16 work is paused unless a clean structural restructure is on the table
 
 ## Session Log
 
+### 2026-04-18 — P24 Scout (1 Dev; GPU 4; CLOSE — **H6 BARRIER-REDUCTION CLOSED**; absolute wait-budget ceiling 3pp, realistic 0.3-1.0pp; barriers are CONSEQUENCE of LDS-issue rate, not independent lever; H1 (b64_tr_b16 → b128 + v_perm) implicitly closes H6 "for free")
+
+**Outcome: P24 dispatched a single feasibility scout BEFORE launching
+restructure Devs (applying the `feedback_feasibility_check.md` lesson
+from P23). Scout closes H6 as MARGINAL → CLOSED. Recommendation:
+pursue H1 probe-kernel pre-work as P25, NOT H6 barrier removal.**
+
+**Why dispatched as scout, not Dev team:** P23 just spent 2 sessions
+implementing a lever (padded-b128) that PMC-validated as a +88M
+SQ_LDS_BANK_CONFLICT regression. The pattern: probe-kernel analytics
+proved "0 conflicts" but read-side MFMA lane-folding produced a
+completely different bank pattern. To avoid repeating that, P24
+gates restructure work behind a single-session ceiling estimate.
+
+**The scout's PMC + source analysis (`/tmp/p24_scout/SCOUT_REPORT.md`):**
+- `SQ_WAIT_ANY` per-CU = 4.2% of `GRBM_GUI_ACTIVE` → absolute wait
+  budget ceiling for ANY synchronization-related lever is ~4pp.
+- Static disasm: 352 `s_barrier` / 2816 `v_mfma` = 0.125 barriers/MFMA
+  (exact P19 memo reproduction). 16 barriers per `main_loop_iter`:
+  8 HARD (LDS↔reg / HBM→LDS handoffs), 8 CANDIDATE (post-MFMA, paired
+  with `s_setprio(0)`).
+- Removable_per_MFMA = 0.094 (8/16 of main-loop barriers, taking
+  TK 0.125 → 0.031 BL-parity).
+- Realistic ceiling: 0.3-1.0pp. Wildly optimistic upper bound: 3.16pp.
+  Memo's prior +0.5-1.5pp estimate sits at the upper edge of the
+  realistic band and assumes zero risk of regression.
+- Risk: same `s_setprio` coupling failure mode that bit P9 unroll-1,
+  P14 launch_bounds, P23 padded-b128 (synchronization removal
+  destabilizes wave scheduling).
+
+**Why H1 subsumes H6:** Barriers are a CONSEQUENCE of the LDS issue
+rate (3 LDS/MFMA × 2 loads/iter → 6 events to fence per
+main_loop_iter), not an independent lever. H1 reduces LDS issues
+0.75 → 0.25/MFMA → barrier ratio drops to ~0.031 (BL parity)
+automatically. Pursuing H6 separately would burn ~1 Dev session on
+176-site harness scaffolding for a 0.3-1.0pp lift that H1 delivers
+as a side-effect of its 3-5pp main lift.
+
+**The scout (1 GPU):**
+
+- **Dev (GPU 4, P24 H6 ceiling scout, opus)** — captured rocprofv3
+  PMC counters across 4 PMC sets on a single-launch CRR worst shape
+  (M=4096, N=10240, K=8192, KI=128, autotune gm=24/xcd=32). Counter
+  reproduction matches P19 memo to 3 decimal places (LDS=0.750,
+  BANK_CONFL=1.500, WAIT_LDS=1.849, VALU=1.049). Static disasm via
+  `llvm-objdump --offloading` extracted 8480-line CRR KI=128 kernel.
+  Source inventory of `kernel_bf16_dynamic.cpp` lines 421-507
+  classified all 16 main-loop barriers HARD vs CANDIDATE with line
+  numbers. NO source edits, NO commits, all artifacts in
+  `/tmp/p24_scout/`. Verdict: MARGINAL → CLOSED.
+
+**P25 direction (decided post-scout):**
+
+- **DO NOT** dispatch P25 Devs against H6.
+- **DISPATCH** H1 probe-kernel pre-work as a single Dev session
+  (worktree `p20-dev-a-lds-b128` is preserved on branch
+  `p20-dev-a-lds-b128`, baseline `.so` md5
+  `fca3634b289e61c7642312e7f1f70a6d`).
+- **HARD GUARD RAIL** (per `feedback_lds_probe_validates_write_only.md`):
+  the probe MUST measure `SQ_LDS_BANK_CONFLICT` on a real production
+  kernel BEFORE writing the design doc. Analytical "0 conflicts"
+  proofs from probe kernels alone are NOT a design gate.
+- Probe deliverables: per-laneid byte mapping for both
+  `ds_read_b64_tr_b16` and `ds_read_b128`; a derived v_perm /
+  cross-lane shuffle table; recommendation Route 1 (LDS write
+  swizzle, BL's approach — but with the P23 caveat that BL's
+  approach is treacherous to transfer) vs Route 2 (in-kernel
+  `v_permlane16_b32`/`ds_swizzle_b32` to recover the cross-lane
+  mapping); smoke-buildable gated variant of
+  `kernel_bf16_dynamic.cpp` for measurement.
+
 ### 2026-04-18 — P23 Session 2 (5 Devs; GPUs 2/3/4/5/6; CLOSE — **PADDED-B128 LEVER DEAD**; row_l half-height fix lands as gated infrastructure (commit `0f57bd8e`); Reviewer's bank-conflict-zero claim was wrong by ∞; project memory's "67.6M baseline RCR conflicts" was misread of P21 RRR data — actual baseline RCR = 0 conflicts)
 
 **Outcome: P23 Session 2 closes the BF16 RCR Route 1 padded-b128 lever
