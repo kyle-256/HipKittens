@@ -1,0 +1,16 @@
+===== R38 Dev D orchestrate cell=g1p_demo gpu=4 layout=crr M=4096 N=1024 K=8192 =====
+[r38_orchestrate] G1+G2a+G2b primary; G1' fallback (bench_mhz>=2350 AND median>500)
+[r38_orchestrate] N_PAIRS=1 BASE_SO=/tmp/r37a_baseline_70bkv.so PROD_SO=/tmp/r37a_prod_70bkv.so
+Sat Apr 18 15:29:04 UTC 2026
+[pre-orchestrate sclk check]
+GPU[4]		: sclk clock level: S: (94Mhz)
+[prod rep=0 att=1 md5=ac1b12be rc=0 med=988.10 cv=0.007695 G1=0 G2A=1 G2B=1 G1P=1 preMhz=2302 benchMhz=2382]
+[prod rep=0 att=2 md5=ac1b12be rc=0 med=985.91 cv=0.009652 G1=0 G2A=1 G2B=1 G1P=1 preMhz=2298 benchMhz=2388]
+[prod rep=0 att=3 md5=ac1b12be rc=0 med=991.53 cv=0.012691 G1=0 G2A=1 G2B=0 G1P=1 preMhz=2312 benchMhz=2379]
+  -> ACCEPT G1' FALLBACK (gate_path=G1'_fallback, attempt=2) — G1 over-rejected, G2a+G2b+median-sane all pass
+[base rep=1 att=1 md5=b912c51d rc=0 med=769.01 cv=0.002328 G1=0 G2A=1 G2B=1 G1P=1 preMhz=2215 benchMhz=2387]
+[base rep=1 att=2 md5=b912c51d rc=0 med=782.41 cv=0.047861 G1=0 G2A=1 G2B=0 G1P=1 preMhz=2105 benchMhz=2361]
+[base rep=1 att=3 md5=b912c51d rc=0 med=768.18 cv=0.004044 G1=0 G2A=1 G2B=1 G1P=1 preMhz=2165 benchMhz=2385]
+  -> ACCEPT G1' FALLBACK (gate_path=G1'_fallback, attempt=3) — G1 over-rejected, G2a+G2b+median-sane all pass
+[done gpu=4] G1+G2a+G2b=0  G1'_fallback=0  EXHAUSTED=0
+Sat Apr 18 15:33:41 UTC 2026

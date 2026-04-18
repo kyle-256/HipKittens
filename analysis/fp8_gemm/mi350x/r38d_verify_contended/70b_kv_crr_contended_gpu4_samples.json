@@ -1,0 +1,6 @@
+{"cell":"70b_kv_crr_contended","gpu":4,"M":4096,"N":1024,"K":8192,"samples":[
+{"tag":"prod","rep":0,"gate_path":"EXHAUSTED","attempt":3,"md5":"ac1b12be9c499444ebbe988ca0bb1676","median":689.91,"mean":633.17,"stdev":125.68,"cv":0.198493,"preMhz":1731,"benchMhz":1729},
+{"tag":"base","rep":1,"gate_path":"EXHAUSTED","attempt":3,"md5":"b912c51d878e7621d0d92f5de239db29","median":532.19,"mean":495.51,"stdev":82.47,"cv":0.166435,"preMhz":1725,"benchMhz":1731},
+{"tag":"prod","rep":2,"gate_path":"EXHAUSTED","attempt":3,"md5":"ac1b12be9c499444ebbe988ca0bb1676","median":987.80,"mean":984.07,"stdev":11.22,"cv":0.011402,"preMhz":2142,"benchMhz":2385},
+{"tag":"base","rep":3,"gate_path":"G1+G2a+G2b","attempt":1,"md5":"b912c51d878e7621d0d92f5de239db29","median":793.50,"mean":792.92,"stdev":3.27,"cv":0.004124,"preMhz":2356,"benchMhz":2385}
+]}
