@@ -3660,6 +3660,10 @@ __host__ inline void dispatch_rcr_exact_8wave_scaled_v2(const layout_globals& g)
 // rect-V2 CRR scaffolding for the V2-RCR codepath. Same internal guard
 // (MXFP8_RECT_BLK_N=64) so default build sees an empty translation unit.
 #include "rcr_mxfp8_exact_8wave_rect_fastpath.inc"
+// R33 Dev D — Stage 1b: sub-RBM (RBM=32) V2-CRR fastpath scaffolding.
+// Internally guarded by MXFP8_CRR_RBM=32 so default build (RBM=64) sees
+// an empty translation unit and is byte-identical to pre-R33-D head.
+#include "crr_mxfp8_exact_8wave_subrbm_fastpath.inc"
 
 template<Layout L, bool PRESHUFFLED_QUANT=false>
 __global__ __launch_bounds__(_NUM_THREADS, GEMM_MIN_BLOCKS_PER_CU)

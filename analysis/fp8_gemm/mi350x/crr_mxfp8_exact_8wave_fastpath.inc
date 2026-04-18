@@ -17,6 +17,34 @@
 #define MXFP8_CRR_EXACT_8WAVE_FAST_ENABLE 0
 #endif
 
+// R33 Dev D — sub-RBM operand-tile scaffolding gate.
+// Default 64 (no change). When set to 32, the existing CRR exact 8-wave
+// fastpath is force-disabled because it hardcodes RBM=64 across:
+//   * 8 static_asserts (4 in this file, 4+ in kernel_mxfp8_layouts.cpp)
+//   * register tile types A_col_reg = rt_fp8e4m3<BK, RBM, col_l, rt_128x16_s>
+//   * the cA/cB/cC/cD accumulator shape rt_fl<RBM, RBN, col_l, rt_16x16_s>
+//   * the scale-base offset math (wm * RBM)
+//   * crr_a_pack_count = RBM/32 (becomes 1 instead of 2 → loop count change)
+//   * the LDS subtile geometry (subtile_inplace<RBM, BK>)
+// A parallel sub-RBM kernel template lives in crr_mxfp8_exact_8wave_subrbm_fastpath.inc
+// (mirrors R31 Dev A's rect-V2 CRR scaffolding). See r33d_findings.md
+// Stage 1a static_assert audit for the full list.
+//
+// Motivation (per R32 Dev B closure r32b_findings.md §8): A_col_reg = 32
+// VGPR/wave at RBM=64; halving to RBM=32 halves it to 16 VGPR/wave,
+// removing the 26-lane spill barrier that gates LDS single-buffer
+// pipelining. R34+ correctness/perf work.
+#ifndef MXFP8_CRR_RBM
+#define MXFP8_CRR_RBM 64
+#endif
+#if (MXFP8_CRR_RBM != 32) && (MXFP8_CRR_RBM != 64)
+#error "MXFP8_CRR_RBM must be 32 or 64 (R33 Dev D scaffolding)"
+#endif
+#if (MXFP8_CRR_RBM == 32)
+#undef  MXFP8_CRR_EXACT_8WAVE_FAST_ENABLE
+#define MXFP8_CRR_EXACT_8WAVE_FAST_ENABLE 0
+#endif
+
 #ifndef MXFP8_CRR_EXACT_8WAVE_FAST_ENABLE
 #define MXFP8_CRR_EXACT_8WAVE_FAST_ENABLE 1
 #endif
