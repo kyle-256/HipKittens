@@ -1,9 +1,63 @@
 # MXFP4 GEMM Optimization TODO
 
-## ⚠️ GOAL PIVOT (2026-04-17, 用户最新指令)
+## Current State (2026-04-18, post-R26 FINAL v1)
+
+**Bench**: `bench_all42_results_R25_FINAL.{json,log}` (warmup=200 iters=500 trim=10%, 8-GPU parallel, 182.5 min wall)
+**Result**: **33/42 WIN, 9/42 LOSE, 0 ERR, avg ratio 109.5%** — up from 24/42 baseline (+9 net flips)
+**Projection**: R26-F coverage audit + FINAL v2 re-run still in flight; expected 35-38/42 once K-EXACT wiring gaps closed.
+
+### 9 residual LOSE shapes (post-R26 FINAL v1)
+| #  | Shape (M×N×K)         | Ours    | Comp    | Ratio  | Best Tag                                |
+|----|-----------------------|---------|---------|--------|------------------------------------------|
+| L1 | 4096×14336×16384      | 4870.3  | 5013.0  | 97.2%  | ts_lgk2_memc_btw_all                     |
+| L2 | 4096×28672×32768      | 5450.9  | 5649.9  | 96.5%  | ts_pf4_memc_btw_step3                    |
+| L3 | 4096×32768×6144       | 4532.9  | 4548.6  | 99.7%  | ts_gm2_v12_memc_btw_all                  |
+| L4 | 4096×32768×14336      | 5240.0  | 5296.1  | 98.9%  | ts_lgk2_memc_btw_all                     |
+| L5 | 4096×32768×28672      | 5272.0  | 5568.2  | 94.7%  | ts_gm8_v12_btw_step3                     |
+| L6 | 4096×32768×128256     | 5362.7  | 5781.1  | 92.8%  | ts_gm8_v12_btw_step3 (DLA1 — V1 target)  |
+| L7 | 14336×4096×32768      | 4965.3  | 5245.4  | 94.7%  | ts_pf4_memc_btw_step3                    |
+| L8 | 16384×4096×14336      | 5032.7  | 5142.1  | 97.9%  | ts_u16                                   |
+| L9 | 16384×4096×28672      | 5249.9  | 5525.3  | 95.0%  | v20_memc_btw_step3                       |
+
+### GOAL PIVOT status: 24/42 ceiling BROKEN (now 33/42)
+The original "don't chase WIN, only gap-reduce" pivot from 2026-04-17 is **outdated**. R20A (+11 BARRIER_TO_WAITCNT shape closures) and R25-F/G/H (+8 K-bound flips via tail-pf-off + per-K K_EXACT gating) both paid off. **Both axes pay**: WIN flips and gap reduction work in tandem now. Continue both.
+
+### R25 + R26 commit summary
+| Commit     | Round  | Effect                                                                 |
+|------------|--------|------------------------------------------------------------------------|
+| 5d0b5fd2   | R26-G  | STEP12_BR_LGKMCNT axis DEAD on R25 stack                               |
+| 1454235e   | R26-D  | V2 audit WIN — fixed bench wiring bug, flipped 5+ shapes via K_EXACT   |
+| a2c85d86   | R25-H  | SMALL-K WIN — 4 K-EXACT flips at K∈{2048,6144,7168,8192}               |
+| feeefa88   | R25-G  | docs — PER-K WIN +13.68→+20.84% on 6 mid-gap shapes                   |
+| 7f200b76   | R25-G  | gm7 + pfoff(K_iters−{4..8}) on 6 mid-K LOSE shapes                    |
+| e5083bad   | R25-F  | gm7 + pfoff14 dominates K=4096 — DLA2 +10.86%, DLA7 +13.51%            |
+| 7ada8c70   | R25-D  | TAIL_PF_OFF_ITERS={4,14} × {gm6,gm7} — superseded by R25-F/G/H         |
+| f43ea34b   | R26    | Round docs — 4 axes DEAD (R26-B/C/E + plan)                            |
+
+### R26 axes confirmed DEAD (DO NOT REVISIT)
+- **V3 STEP3_PF_N / STEP4_PF_N × R25-G stack** — R26B_PF_N_dead.md (DLA2 monotone worse, DLA7 +31 TFLOPS within noise)
+- **V4 TAIL_BARRIER_VMCNT × R25-best stacks** — R26C_tail_vmcnt_dead.md (flat across {0,4,8,12,16}; R25-F/G/H drained tail VMEM)
+- **gm5 / gm9 sweep** — R26E_gm_axis_dead.md (gm7 already at flat-basin local optimum, ±0.3pp)
+- **STEP12_BR_LGKMCNT** — R26-G commit `5d0b5fd2`
+- **B-tile `__builtin_prefetch`** — R26_PLAN.md §4 (`emit_tile_pf` already does `buffer_load_lds`; R25-G specifically *removes* the tail of these)
+- **Scale-load `buffer_load_dwordx2` SGPR-SRD** — already implemented (kernel L695, ISA L186; NONVOLATILE_SCALE_X2_POC=1)
+- **WAVES_PER_EU=3** — `__launch_bounds__(_NUM_THREADS, 1)` already clamps to 1 wave/SIMD on K-bound shapes; wpeu axis is theoretically inert
+- **Cache hints / NT stores / persistent-XCD / EARLY_SCALE_PF / EARLY_BL_PF / DIRECT_BL** — all confirmed DEAD pre-R26
+- **outer-K pull-forward / extra L2 pf** — R24B/C: VMEM-issue-bound, not VMEM-latency-bound
+
+### R27 vector candidates (only 1 remaining structural axis)
+- **V5 — MFMA_32X32X64 tiling rewrite** (LOW priority for R26 timescale, HIGH ceiling). Per R26_PLAN.md §3.V5: 32×32 MFMAs allow 4× more concurrent MFMAs in flight at the same total acc footprint, may relieve VMEM-issue saturation that R24B/C confirmed. ≥1 week of work; 0-5pp on K-bound deep-LOSE; high uncertainty. Only remaining structural lever.
+- **R26-A DLA1 K-loop peel (V1)** — still in flight via worktree `r25e-kpeel`. If it lands, will close DLA1 (L6) which is the largest remaining gap (92.8%).
+- **R26-F coverage audit + FINAL re-run v2** — still in flight; will close any remaining K_EXACT wiring gaps.
+
+---
+
+## ⚠️ GOAL PIVOT (2026-04-17, 用户最新指令) — SUPERSEDED
 > "24win 已经卡了好久了，现在把优化目标改成优化剩下那几个差的比较多的。"
 
-**新目标**: **不再追求翻 LOSE→WIN**. 24/42 WIN 已被 4 轮饱和验证, 是当前架构天花板.
+**Status (2026-04-18)**: pivot text is now historical. 24/42 ceiling has been **broken to 33/42** (+9 flips). Both WIN-flipping and gap-reduction axes are paying off; do not artificially deprioritize WIN flips.
+
+**原文** (kept for context): 不再追求翻 LOSE→WIN. 24/42 WIN 已被 4 轮饱和验证, 是当前架构天花板.
 **改为**: **缩小 deep-LOSE shape 的 gap**. 即使无法 flip 到 WIN, 把 88% → 92% 也是真实进步.
 
 ### 新成功度量 (按优先级)

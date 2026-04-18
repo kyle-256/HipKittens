@@ -9,25 +9,42 @@
 
 **改为**: 缩小 deep-LOSE shape 的 gap. 即使 88% → 92% 也算真实进步, **+1pp 即可 commit**.
 
-### 重点 shape (R10/R11 部分突破, R12 generalization 失败)
-**关键发现 (R10-R12)**: un-prefixed `iterative-ilp` LLVM sched-strategy 在 5 个 deep-LOSE shapes 上验证有效 (+1.78~+2.00pp, 5-run mean ≥ baseline.max gate), 但**有 LLVM 编译器 bug**: deterministic SGPR clobber 在 ≥10 个 shape categories 上触发 HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION. **不可作为 default flag**. 仅 whitelist 已验证 5 个 shape parents.
+### 重点 shape (post-R26 FINAL v1, 2026-04-18)
+9 残留 LOSE shapes — 全部为大 K / 大 N 型, 大多数最佳 tag 是 BTW-all 系列, 表明 BARRIER_TO_WAITCNT axis 已 saturate; 真正还有空间的是 V1 (R25-E K-loop peel for DLA1) 和 V5 (MFMA_32X32X64 重写).
 
-| 优先级 | Shape | 当前 Ratio | 当前 Best | 类别 | iterative-ilp |
-|-------|-------|-----------|-----------|------|----------------|
-| **P0** | 4096×32768×128256 | 88.3% | _ts_pf6_6_v12_memc | mega-K + 大N | **BROKEN (compiler bug)** |
-| **P0 → P2** | 14336×4096×32768 | **91.4%** | **_lgk2_dc_r10_iterilp** ✓ | 大K + 大M | R10 +1.78pp WIN |
-| **P0 → P2** | 16384×4096×28672 | **91.9%** | **_u32_r10_iterilp** ✓ | 大K + 大M | R10 +1.82pp WIN |
-| P1 | 128256×32768×4096 | 92.9% | ts_gm2_v12_memc_dc | mega-M+N | **BROKEN (compiler bug)** |
-| P1 → P2 | 4096×32768×28672 | **94.8%** | **_v20_memc_r11_iterilp** ✓ | 大K + 大N | R11 +1.84pp WIN |
-| P1 | 28672×4096×16384 | 93.7% | ts_gm8 | 大K + 大M | UNTESTED (R13 候选) |
-| P2 → P2+ | 4096×28672×32768 | **95.4%** | **_u16_r11_iterilp** ✓ | 大K + 大N | R11 +2.00pp WIN |
-| P2 | 32768×4096×14336 | 94.6% | _ts_gm8_v12_r11_iterilp (UNVERIFIED) | 大K + 大M | R11 +0.74pp 未到 gate |
-| P2 → P2+ | 4096×32768×14336 | **95.3%** | **_ts_lgk2_memc_r11_iterilp** ✓ | 大K + 大N | R11 +1.80pp WIN |
-| P2 | 28672×32768×4096 | 94.5% | ts_lgk2_v12_memc | 大M+N | **BROKEN (compiler bug)** |
+| 优先级 | Shape (M×N×K)         | Ratio | Best Tag (current)                  | 类别              | 备注 |
+|-------|----------------------|-------|-------------------------------------|------------------|------|
+| **P0** | 4096×32768×128256    | 92.8% | ts_gm8_v12_btw_step3                | DLA1 mega-K + 大N | R26-A V1 (R25-E peel) in flight |
+| **P0** | 14336×4096×32768     | 94.7% | ts_pf4_memc_btw_step3               | 大K + 大M         | R25-G/H 已尝试; 残留 |
+| **P0** | 4096×32768×28672     | 94.7% | ts_gm8_v12_btw_step3                | 大K + 大N         | 同上 |
+| **P0** | 16384×4096×28672     | 95.0% | v20_memc_btw_step3                  | 大K + 大M         | 同上 |
+| P1     | 4096×28672×32768     | 96.5% | ts_pf4_memc_btw_step3               | 大K + 大N         |  |
+| P1     | 4096×14336×16384     | 97.2% | ts_lgk2_memc_btw_all                | 大K + 大N         |  |
+| P1     | 16384×4096×14336     | 97.9% | ts_u16                              | 大K + 大M         |  |
+| P2     | 4096×32768×14336     | 98.9% | ts_lgk2_memc_btw_all                | 大K + 大N         | 临界, 噪声边缘 |
+| P2     | 4096×32768×6144      | 99.7% | ts_gm2_v12_memc_btw_all             | 大N + 中K         | 临界, 0.3pp |
 
-**Cumulative R10+R11 deep-LOSE gap reduction**: 5/10 shapes, 平均 +1.85pp (toward GOAL PIVOT goal). 10-shape deep-LOSE 平均从 ~92% → ~93.4%.
+**已 WIN (post-R26)**: DLA2 (128256×32768×4096) 108.6%, DLA7 (28672×32768×4096) 113.3%, 32768×4096×14336 118.0% — 全部由 R25-F/G/H × R26-D 翻 LOSE→WIN.
 
-**仍未试**: 28672×4096×16384 — 唯一 untested-not-broken shape. R13 候选.
+### R26 死路 (DO NOT REVISIT — 本轮+累计)
+本轮 R26 死路 (4 axes):
+- **V3 STEP3_PF_N / STEP4_PF_N × R25-G stack** — `R26B_PF_N_dead.md`. DLA2 monotone 退化, DLA7 +31 TFLOPS within noise.
+- **V4 TAIL_BARRIER_VMCNT × R25-best stacks** — `R26C_tail_vmcnt_dead.md`. 4 shapes × {0,4,8,12,16} 全 flat. R25-F/G/H 已 drain tail VMEM 使 vmcnt 阈值无意义.
+- **gm5 / gm9 sweep** — `R26E_gm_axis_dead.md`. 4 shapes ±0.3pp; gm7 已 local optimum.
+- **STEP12_BR_LGKMCNT 第二轮** — `5d0b5fd2`. 已 saturate.
+
+R25 累计死路 (per `R26_PLAN.md` §4):
+- **B-tile `__builtin_prefetch`** ≡ `emit_one_pf` (已 buffer_load_lds, R25-G 是去掉 tail).
+- **scale-load `buffer_load_dwordx2` + SGPR SRD** — 已实现 (kernel L695, NONVOLATILE_SCALE_X2_POC=1, ISA L186 SGPR SRD `s[0:3]`...).
+- **SCALE_REG_CACHE round-trip removal** — duplicate.
+- **WAVES_PER_EU=3** — `__launch_bounds__(_NUM_THREADS, 1)` 已 clamp 到 1 wave/SIMD on K-bound, wpeu axis 理论 inert.
+- **per-shape async-prefetch coalescing (`s_waitcnt vmcnt(N)` group)** — `emit_pf_tail` 已 tight `#pragma unroll`, ISA L186-228 已 clustered.
+- **early-iter-only prefetch (R25-G inverse)** — 强 negative prior (B 在 iter 2 后 L2-resident, 拿掉 early pf 会 force HBM re-fetch).
+- **outer-K pull-forward / extra L2 pf** — R24B/C: VMEM-issue-bound 不是 latency-bound.
+- **cache hints / NT stores / persistent-XCD / EARLY_SCALE_PF / EARLY_BL_PF / DIRECT_BL** — 全 dead.
+- **iterative-ilp LLVM sched-strategy** — LLVM compiler bug (HSA aperture violation on ≥10 shape categories), 不能 default; 已废弃.
+
+R25-G 之前各类已知 dead (history): `iterative-ilp` 编译器 bug, BK=256 LDS 不够, Direct-B 慢 28%, ds_bpermute 退化, GROUP_SIZE_M=32/64 大N 退化, UNROLL_K=1/2/4 比默认差, FUSED_STEP34 退化 7%, ASM rewriter (s_nop removal) 破坏正确性, PF_N=1/2 退化 2-6%, asymmetric PF 无效.
 
 ### 工作准则
 - **每轮锁定 1-3 个 P0/P1 shape** 专项优化, 不再全 42 跑.
@@ -36,15 +53,22 @@
 - **大 K (≥14336) shapes** 是主战场: 该类的 gap 主要来自 LDS broadcast bandwidth 不足 + B tile reuse 效率低.
 - **mega-M shape 128256×32768×4096** 已被验证为 **register-pressure / MFMA-pipeline bound** (Round 4 PERSISTENT_XCD_QUEUE 实证), **不是 launch-bound**. 不要再尝试 dispatch 优化.
 
-### 推荐探索方向 (按可行性, Round 7 后更新)
+### 推荐探索方向 (post-R26 — 只剩 1 个 R27 候选)
 | 方向 | 风险 | 预期 | 备注 |
 |------|------|------|------|
-| **per-shape compiler flag** (LLVM 调度策略 per-K-bucket) | 低 | +0.5-2pp | 之前 ±0.4% 是 average, 单 deep-LOSE shape 可能更大 |
-| **per-shape K-loop unrolling** (UNROLL=8/16 仅 K≥14336) | 低 | +0.3-1.2pp | Round 6 B 在单 GPU 5-run 下证伪了 14336×4096×32768 上 UNROLL_K knob (within ±0.16pp). 仅可能在 K=128256 上还有 untested space |
-| ~~**B-tile L2 software prefetch**~~ | — | DEAD END | Round 7 C: `emit_one_pf` 已经是 `__builtin_amdgcn_global_load_lds`, B 已 bt+2 prefetch 进 LDS. 不是新 vector |
-| **K-loop epilogue 专项调优** (尾部 K 迭代 PF/barrier) | 中 | +0.5-1pp | 大 K shape 最后一组 K iter 的 barrier/VMCNT — 仅 STEP12_BR_LGKMCNT 测过, 还有 TAIL_BARRIER_VMCNT × shape 维度未覆盖 |
-| ~~**static XCD-aware block_id remap**~~ | — | DEAD END | Round 7 B: -0.37pp. mega-M 是 A-bound 不是 B-bound. 任何 dispatch/L2-locality 改动都不会有用 |
-| **MFMA_32X32X64_TILING** (大重构, ~1天 asm 重写) | 高 | +2-5pp on deep-LOSE | 唯一未试的内核级重构, AGPR 256→256 (per-warp 输出仍 128×128, 不省 AGPR), 但 K loop 调度自由度可能更高 |
+| **R26-A V1 — DLA1 K-loop peel (R25-E)** | 中 | +5-10pp on DLA1 | In flight via worktree `r25e-kpeel`. 静态 loop split (R25-C 的 runtime-if 在 K_iters>32 不 fold), DLA1 K=128256 → K_iters=501, 最大潜力. 见 `R26_PLAN.md` §3.V1 |
+| **R26-F coverage audit + FINAL re-run v2** | 低 | +1-3 flips | In flight. 修补 K_EXACT 路由漏掉的 shape |
+| **V5 — MFMA_32X32X64_TILING 重构** (R27+) | 高 | 0-5pp on deep-LOSE | **唯一剩余结构性 axis**. ≥1 周 asm 重写. 32×32 MFMAs 允许 4× concurrent in-flight @ same acc footprint, 可能松开 R24B/C 确认的 VMEM-issue saturation. 高不确定性 |
+
+DEAD (不要再尝试 — 已 reproduce 过):
+- ~~per-shape compiler flag (LLVM sched-strategy per-K-bucket)~~ — `iterative-ilp` LLVM bug (aperture violation), 其它 strategy ±0.4% noise
+- ~~per-shape K-loop unrolling (UNROLL=8/16)~~ — Round 6 B 证伪 ±0.16pp
+- ~~B-tile L2 software prefetch~~ — `emit_one_pf` 已 `buffer_load_lds`
+- ~~K-loop epilogue (TAIL_BARRIER_VMCNT × shape)~~ — R26-C dead, flat across {0,4,8,12,16}
+- ~~K-loop epilogue (STEP12_BR_LGKMCNT)~~ — R26-G dead
+- ~~static XCD-aware block_id remap~~ — Round 7 B: -0.37pp
+- ~~steady-state PF_N (STEP3/STEP4)~~ — R26-B dead, monotone worse on DLA2
+- ~~GROUP_SIZE_M ∈ {5,9}~~ — R26-E dead, gm7 已 local optimum
 
 ## 项目位置
 - **我们的 Repo**: `/shared_nfs/kyle/test/HipKittens`
@@ -52,8 +76,12 @@
 - **工作目录**: `analysis/fp8_gemm/mi350x`
 - **Cursor Repo**: `/shared_nfs/kyle/test/Hipkittens2` (只读参考)
 
-## 当前成绩 (2026-04-18, post-R25-G)
-- **R25-G PER-K-BUCKET WIN (committed `7f200b76`)**: extends R25-F insight to 6 mid-gap K=14336+ shapes. Per-K optimum `pfoff = K_iters - {4..8}`. **6/6 WIN, +13.68 to +20.84% per shape** (4096×28672×32768 +19.6%; 4096×32768×14336 +17.55%; 14336×4096×32768 +17.55%; 16384×4096×28672 +20.84%; 28672×4096×16384 +16.89%; 4096×14336×16384 +13.68%). Implementation: `R25C_K_EXACT` compile-time gate so each pfoff variant only activates on its target K.
+## 当前成绩 (2026-04-18, post-R26 FINAL v1)
+- **FINAL v1 bench**: `bench_all42_results_R25_FINAL.{json,log}` — **33/42 WIN, 9/42 LOSE, 0 ERR, avg ratio 109.5%** (warmup=200 iters=500 trim=10%, 8-GPU parallel, 182.5 min wall). Up from 24/42 baseline (+9 net flips since R20).
+- **R26-D V2 audit WIN (`1454235e`)**: found `bench_all42_parallel_R25_FINAL.py` wiring bug, re-wired R25-G/H K_EXACT .so files for 5+ shapes. Bulk of the 24→33 jump.
+- **R26 dead axes (`f43ea34b` + `5d0b5fd2`)**: V3 PF_N, V4 TAIL_VMCNT, gm5/gm9, STEP12_BR_LGKMCNT — all flat or within noise.
+- **In flight**: R26-A V1 (DLA1 K-loop peel via `r25e-kpeel` worktree), R26-F coverage audit + FINAL v2 re-run. Projection 35-38/42 once K_EXACT wiring gaps close.
+- **R25-G PER-K-BUCKET WIN (committed `7f200b76`)**: extends R25-F insight to 6 mid-gap K=14336+ shapes. Per-K optimum `pfoff = K_iters - {4..8}`. **6/6 WIN, +13.68 to +20.84% per shape**. Implementation: `R25C_K_EXACT` compile-time gate so each pfoff variant only activates on its target K.
 - **R25-F EXTENDED-SWEEP MASSIVE WIN (committed `e5083bad`)**: `gm7 + pfoff14` dominates K=4096 shapes — **+10.86% DLA2, +13.51% DLA7** vs R25-D. Vs original baseline: DLA2 ~+17%, DLA7 ~+21%.
 - **R25-D STACK WIN (committed `7ada8c70`, superseded by R25-F/G)**: gm6 × pfoff4 super-additive on DLA2/DLA7. Kept as fallback.
 - **Cumulative R25-F + R25-G**: 8 deep/mid-gap LOSE shapes flip → BIG WIN. Projected total WIN ≥ 35/42 (up from 29). The single biggest 1-day jump since R20A's +11 BARRIER_TO_WAITCNT shape closures.
