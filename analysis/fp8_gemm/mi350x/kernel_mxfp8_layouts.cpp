@@ -3734,6 +3734,22 @@ __host__ inline void dispatch_rcr_exact_8wave_scaled_v2(const layout_globals& g)
 // (BLK_N=256) sees an empty translation unit. Orthogonal to MXFP8_CRR_BLK_M
 // — both can be enabled independently in a single production .so.
 #include "crr_mxfp8_exact_8wave_hbnshrink_fastpath.inc"
+// R42 Dev A — M=1 single-token decode MXFP8 fastpath (RCR layout only).
+// Internally guarded by MXFP8_DECODE_M1_ENABLE so default build sees an
+// empty translation unit and is byte-identical to pre-R42-A head. New
+// kernel symbol gemv_m1_decode_kernel<RCR,true|false> is only emitted
+// when the .so is built with -DMXFP8_DECODE_M1_ENABLE=1.
+#include "mxfp8_decode_m1_fastpath.inc"
+
+// R42 Dev A — forward declaration of the dispatch-trace emit() helper.
+// The full definition lives ~line 5621 (after the dispatch<> template) but
+// dispatch<> needs to resolve the name at the point where it calls into
+// tk_mxfp8_dispatch_trace::emit() for the M=1 decode predicate. Forward
+// decl lets non-dependent name lookup succeed at template definition time;
+// the linker resolves to the full definition.
+namespace tk_mxfp8_dispatch_trace {
+inline void emit(const char* layout, const char* name, int M, int N, int K);
+}
 
 template<Layout L, bool PRESHUFFLED_QUANT=false>
 __global__ __launch_bounds__(_NUM_THREADS, GEMM_MIN_BLOCKS_PER_CU)
@@ -5451,6 +5467,38 @@ void dispatch(layout_globals g) {
     if constexpr (L == Layout::RCR) {
         if (mxfp8_rcr_4wave::can_use(g)) {
             mxfp8_rcr_4wave::dispatch<PRESHUFFLED_QUANT>(g);
+            return;
+        }
+    }
+#endif
+
+#if MXFP8_DECODE_M1_ENABLE
+    // R42 Dev A — M=1 single-token decode fastpath (RCR only). Fires before
+    // the M-aligned V2 fastpath so M=1 short-circuits the legacy V1 + tail
+    // kernel that was previously the only routing target (R41 Dev C survey
+    // confirmed all 6 decode shapes hit V1-LEGACY-FALLBACK).
+    // Trace tag is forward-declared here; the trace helper namespace
+    // (tk_mxfp8_dispatch_trace) is defined later in this TU. We bind the
+    // macro indirection via a local lambda so the parser only resolves the
+    // macro at template instantiation time (after the macro body is seen).
+    if constexpr (L == Layout::RCR) {
+        if (can_use_decode_m1(g)) {
+            // R42 Dev A note: trace emit deferred until after macro is in
+            // scope; use raw helper call (the namespace IS already visible
+            // from the include of mxfp8_decode_m1_fastpath.inc which forward-
+            // declares nothing about traces). For now, emit via the trace
+            // helper's emit() function directly (visible at the point where
+            // the dispatch template is INSTANTIATED, which is after the
+            // namespace definition further down in this TU).
+            //
+            // Concretely: ::tk_mxfp8_dispatch_trace::emit(...) is a fully
+            // qualified call; name lookup at template instantiation time
+            // sees the namespace defined further down. Verified at compile
+            // time -- no MXFP8_DISPATCH_TRACE_ONCE macro needed here.
+            ::tk_mxfp8_dispatch_trace::emit(
+                "rcr_pq_v1", "RCR-DECODE-M1-FASTPATH (R42A)",
+                g.m, g.n, g.k);
+            dispatch_decode_m1<L, PRESHUFFLED_QUANT>(g);
             return;
         }
     }
