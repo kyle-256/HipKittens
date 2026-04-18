@@ -1,0 +1,19 @@
+===== R30 cell=1 stage=v2 4096 1024 8192 build=default =====
+md5(.so) = 2c0be83075eed50b8ff08f08b751649c (494,920 B)
+build flags: -DM_DIM=4096 -DN_DIM=1024 -DK_DIM=8192
+HIP_VISIBLE_DEVICES=0
+[sclk-pre-preheat] GPU[0]		: sclk clock level: S: (94Mhz)
+[preheat] sustained 8s 16k matmul...
+[preheat] done 5116 iters
+[sclk-post-preheat] GPU[0]		: sclk clock level: 1: (2229Mhz)
+CORRECTNESS stage=v2 layout=crr M=4096 N=1024 K=8192 snr_db=49.60 pass_rate_pct=100.00
+DETERMINISM ok=True
+[sclk-pre-bench] GPU[0]		: sclk clock level: 1: (2355Mhz)
+RUN 0 avg_ms=0.0886 tflops=775.50
+RUN 1 avg_ms=0.0887 tflops=774.99
+RUN 2 avg_ms=0.0866 tflops=793.79
+RUN 3 avg_ms=0.0868 tflops=791.25
+RUN 4 avg_ms=0.0868 tflops=791.59
+[sclk-post-bench] GPU[0]		: sclk clock level: 1: (2390Mhz)
+SUMMARY median=791.25 mean=785.42 stdev=9.34 runs=5
+TFLOPS_LIST 775.5030,774.9884,793.7882,791.2473,791.5934
