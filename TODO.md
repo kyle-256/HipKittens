@@ -7,13 +7,31 @@
 - SNR ≥ 48 dB (FP8) / ≥ 47 dB (BF16 vs torch.mm), bit-exact determinism are hard gates.
 - Never commit `*.so`, `.autotune_cache.json` is OK to keep (it's text), logs are not.
 
-## Current Status (2026-04-18, post-P12 — no code change landed; ceiling proven)
+## Current Status (2026-04-18, post-P13 — no code change landed; key correction filed)
 
-P11 + P12 ran 7 Dev agents + 1 Reviewer + 1 ceiling-research agent across
-GPUs 0/3/4/5/6/7. **Nothing landed.** Critical outcome: **Dev G proved the
-new "RRR/RCR ≥ 1.000, CRR/RCR ≥ 0.950" targets are architecturally
-infeasible on gfx950 within the no-preshuffle constraint** — see the P12
-ceiling analysis below. The numbers below remain unchanged from post-P8.
+P11 + P12 + P13 ran 10 Dev agents + 1 Reviewer + 2 research agents across
+GPUs 0/3/4/5/6/7. **Nothing has landed since P8.** P13 outcomes:
+
+- **P13 Dev A (FP8 RRR drain restructure, GPU 0)**: shipped clean knob
+  infrastructure (`RRR_DRAIN1/2/3/4_LGKM` macros, defaults to identity)
+  in worktree `agent-a784d2cb`. Found the 4× `lgkmcnt(0)` barriers are
+  **load-bearing for correctness** on at least RRR(4096,2048,4096):
+  D1=2 hangs that shape's SNR test. Agent silent before completing the
+  4-D sweep. NO LAND.
+- **P13 Dev B (BF16 CRR `__launch_bounds__(_,1)`, GPU 4)**: silent
+  timeout with zero tracked-file changes. NO LAND.
+- **P13 Dev C (FP8 RCR DTL feasibility, research-only)**: **disproved
+  P12 Dev G's headline DTL hypothesis** — TK FP8 RCR already uses
+  gfx950 wide-DTL (`buffer_load_dwordx4 ... lds`, 16B/lane) for 100% of
+  hot-path loads. 658 DTL instructions, 0 non-DTL global loads on the
+  GEMM hot path. Both A and B operands are DTL, composed cleanly with
+  the XOR-based ST_v2a swizzle. The 3% TK_RCR vs BL_RCR gap therefore
+  cannot be closed by adding DTL — the lever doesn't exist. The actual
+  remaining gap lives in consumer-side `ds_read` interleave / outer-loop
+  pipelining / tile-shape combinations (see updated CEILING ANALYSIS
+  section below).
+
+The numbers below remain unchanged from post-P8.
 
 ## CEILING ANALYSIS (2026-04-18, P12 Dev G — definitive)
 
@@ -61,11 +79,31 @@ success as:
 - TK_CRR / BL_CRR ≥ 1.80 → **achieved 1.93** ✅
 - TK_RCR / BL_RCR ≥ 0.97 → **achieved 0.97** ✅
 
+**P13 Dev C correction (2026-04-18):** Dev G's claim that "TK lacks DTL
+and that explains the 3% TK_RCR vs BL_RCR gap" is empirically wrong.
+Disassembly of the prebuilt `.o` shows TK already issues 658
+`buffer_load_dwordx4 ... lds` (gfx950 wide-DTL, 16B/lane) instructions
+for 100% of hot-path loads, with 0 non-DTL global loads on the GEMM hot
+path. Both A and B operands are DTL. ST_v2a XOR swizzle composes
+cleanly via the swizzled-global-offset trick (no second LDS pass).
+
+The actual remaining levers for TK_RCR catching the last 3% to BL_RCR
+must therefore live in:
+1. Consumer-side `ds_read_b128` / `ds_read_b64_tr_b8` interleave and
+   issue rate (currently 1336+1360 reads / 2688 MFMAs).
+2. Outer-loop pipelining depth + prefetch distance (already
+   extensively swept in P7/P8).
+3. Per-tile-shape choice (BL_RCR uses MT256×256×128; TK uses smaller).
+4. Hand-scheduled `s_setprio` + `sched_barrier(0)` discipline (already
+   in extensive use; P9 BF16 attempts to extend further didn't land).
+5. NOT bank conflicts (Dev E P12 measured `SQ_LDS_BANK_CONFLICT = 0`).
+6. NOT MFMA shape (all kernels use the same 16×16×128 f8f6f4).
+
 If a 1.000 RRR/RCR is required, the only path is one of:
 - Relax no-preshuffle for B in RRR (reorder to TN-equivalent stride
   offline) — explicitly forbidden by current rules.
-- Build a dedicated DTL+CMS+MT256² RRR/CRR variant — multi-session
-  effort with downside risk on RCR.
+- Build a dedicated CMS+MT256² RRR/CRR variant — multi-session effort
+  with downside risk on RCR.
 - Accept the structural ceiling (current state).
 
 ## NEW PRIMARY TARGETS (2026-04-18, P11+) — STATUS: CEILING REACHED
@@ -182,10 +220,19 @@ for archival; do NOT redispatch unless the constraint changes:
   which TK doesn't have an implementation for.
 
 ### FP8 RCR — only remaining headroom (~3% to BL_RCR custom kernel)
-- [ ] Direct-To-LDS (DTLA1+DTLB1) implementation for RCR (TN). Dev G P12
-      identifies this as the single lever that explains the BL_RCR
-      advantage. Estimated ≥ 3 P-sessions of work to re-architect the
-      load → LDS path; would drop our LDS/MFMA from 0.75 to 0.50.
+- [P13-CLOSED] ~~Direct-To-LDS (DTLA1+DTLB1) implementation for RCR (TN).~~
+      P13 Dev C disassembly grep proved TK ALREADY uses gfx950 wide-DTL
+      for 100% of hot-path loads. Lever does not exist; do not redispatch.
+- [ ] Per-tile-shape exploration: BL_RCR uses MT256×256×128 with
+      256-VGPR/1-wave. TK uses smaller MT with 2-wave. A dedicated
+      large-MT RCR variant could close the LDS/MFMA gap (0.75→0.50)
+      but requires occupancy trade and per-shape autotune routing.
+      ≥ 2 P-sessions estimated.
+- [ ] Consumer-side `ds_read_b128`/`ds_read_b64_tr_b8` interleave +
+      issue-rate sweep. Current 1336+1360 reads / 2688 MFMAs. Hand
+      schedule with `__builtin_amdgcn_sched_barrier(0)` + `s_setprio()`
+      already in extensive use (kernel_fp8_layouts.cpp:14-91 macros);
+      possible micro-gains in per-shape SCHED_BARRIER placement.
 - [ ] Hand-scheduled MFMA pipeline (`__builtin_amdgcn_sched_barrier` +
       `s_setprio` discipline) for RCR. Reduces SQ_WAIT_INST_LDS from
       1.36×LDS to ~0.73×LDS. Risk is high — BF16 P9 attempts didn't land.
@@ -225,6 +272,50 @@ for archival; do NOT redispatch unless the constraint changes:
 
 ## Closed / Completed
 
+- 2026-04-18 P13 — Third back-to-back agent-team session (3 Devs, all opus,
+  GPUs 0/4/6). **Nothing landed.** Headline result: P13 Dev C disproved
+  P12 Dev G's DTL hypothesis — TK already uses gfx950 wide-DTL.
+  - **Dev A (FP8 RRR `lgkmcnt(0)` drain restructure, GPU 0)** — added
+    knob infrastructure `RRR_DRAIN1/2/3/4_LGKM` macros (defaults to
+    identity = current `lgkmcnt(0)` behavior) at lines 41-57 of
+    `kernel_fp8_layouts.cpp`, replaced 4 raw `asm volatile("s_waitcnt
+    lgkmcnt(0)")` calls (lines 1633/1651/1668/1678) with
+    `TK_WAIT_LGKM(RRR_DRAINn_LGKM)`. Smoke test with D1=2 caused HANG
+    on RRR(4096,2048,4096) SNR test — confirms barrier is **load-bearing
+    for correctness**, not just a scheduling hint, on at least one shape.
+    Agent silent before completing 4-D sweep. Diff in worktree
+    `agent-a784d2cb`. NO LAND.
+  - **Dev B (BF16 CRR `__launch_bounds__(_,1)` for KI=128/296, GPU 4)**
+    — silent timeout. Zero tracked-file changes. NO LAND.
+  - **Dev C (FP8 RCR DTL feasibility scoping, no kernel edits)** —
+    disassembled prebuilt `kernel_fp8_layouts-hip-amdgcn-amd-amdhsa-gfx950.o`
+    via `llvm-objdump --mcpu=gfx950`. Counted: 658 `buffer_load_dwordx4
+    ... lds` (gfx950 wide-DTL, 16B/lane), 0 non-DTL global loads on the
+    GEMM hot path, 1336 `ds_read_b128`, 1360 `ds_read_b64_tr_b8`, 2688
+    `v_mfma_f32_16x16x128_f8f6f4`. Verified TK source path:
+    `include/ops/warp/memory/tile/global_to_shared.cuh:215-222` calls
+    `llvm_amdgcn_raw_buffer_load_lds()` from CK-Tile. Both A and B
+    operands DTL. ST_v2a XOR swizzle composes via swizzled global offset
+    (`prefill_swizzled_offsets` at `:147-152`). **The DTL "missing
+    lever" hypothesis from P12 Dev G is empirically false.** The actual
+    3% TK_RCR vs BL_RCR gap lives in consumer-side ds_read interleave
+    or tile-shape selection, not the global→LDS path. Memo committed to
+    project memory (`project_fp8_ceiling.md` updated).
+  - **Lessons additive to P12:**
+    - Before scoping a "missing instruction X" lever, **grep the
+      compiled disassembly to confirm we don't already use it**. P12
+      Dev G missed that the 658 `buffer_load_*x4 ... lds` instructions
+      ARE the DTL path. P13 Dev C caught it in a 60-min research budget.
+    - **Knob-infrastructure-only diffs (no override values benched) are
+      not landable.** P12 Dev F and P13 Dev A both shipped clean macro
+      infrastructure but neither found an override value that beat
+      baseline within the noise band. The infrastructure has zero
+      shipping value if it preserves the current behavior at default.
+    - The pattern from P11/P12 holds at P13: agents that get into
+      multi-hour benchmarking loops with shared kernel sources tend to
+      go silent. Cap concurrent same-source Devs at 1 (not 2 as P12
+      lesson suggested) when the work involves hipcc rebuild + bench
+      iterations.
 - 2026-04-18 P11 + P12 — Two back-to-back agent-team sessions (7 Devs +
   1 Reviewer + 1 ceiling-research agent across GPUs 0/3/4/5/6/7).
   **Nothing landed.** Net outcome: **the new RRR/RCR ≥ 1.000 and

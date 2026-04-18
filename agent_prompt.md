@@ -141,10 +141,11 @@ Every Decider session should append a one-line dated entry to `TODO.md`
 Every skill update should reflect only what was verified in the current
 session, not aspirational targets.
 
-## Current Primary Targets (P11+, set 2026-04-18) — CEILING REACHED P12
+## Current Primary Targets (P11+, set 2026-04-18) — CEILING REACHED P12, refined P13
 
 The user's targets remain on record but **P12 Dev G proved them
-architecturally infeasible under the no-preshuffle constraint** on gfx950:
+architecturally infeasible under the no-preshuffle constraint** on gfx950
+(P13 Dev C corrected the *mechanism* — DTL is already in use):
 
 - ~~FP8 RRR / RCR ≥ 1.000~~ — at 0.95; hipBLASLt's own RRR/RCR is 0.66
 - ~~FP8 CRR / RCR ≥ 0.950~~ — at 0.92; hipBLASLt's own CRR/RCR is 0.50
@@ -160,20 +161,75 @@ in force. hipBLASLt also operates under this constraint, which is why even
 their RRR/CRR run at 0.66/0.50 of their RCR.
 
 **Decision rule going forward:** before dispatching any new "close X gap"
-session, run a single-launch rocprofv3 comparison (TK vs BL same shape,
-same GPU) to confirm a real software lever exists, not a hardware ceiling.
-If hipBLASLt itself is no better at the same layout, the gap is structural
-and not addressable by tuning. (See P12 Dev G memo in TODO.md.)
+session, two checks:
+1. Run a single-launch rocprofv3 comparison (TK vs BL same shape, same
+   GPU) to confirm a real software lever exists.
+2. **`llvm-objdump --mcpu=gfx950` of the prebuilt `.o` and grep for the
+   instruction the lever names.** P12 Dev G missed that TK already
+   issues 658× `buffer_load_dwordx4 ... lds` (gfx950 wide-DTL); P13 Dev C
+   caught it in a single research session. Don't dispatch implementation
+   Devs on a "missing instruction" hypothesis without disassembly proof.
 
 The only remaining viable optimization target is **TK_RCR catching the
-last 3% to BL_RCR**, which would require either Direct-To-LDS support
-(≥3 P-sessions, re-architects the load → LDS path) or a hand-scheduled
-MFMA pipeline (CMS+WGM6, high-risk per BF16 P9 history).
+last 3% to BL_RCR**. Per P13 Dev C, the lever is NOT DTL (already in use)
+— it is some combination of:
+- per-tile-shape (BL uses MT256×256×128, 1 wave/SIMD; TK smaller, 2-wave)
+- consumer-side `ds_read` interleave / issue-rate sweep
+- per-shape `sched_barrier(0)` placement
+All multi-session efforts; expected gain bounded by the 3% gap.
 
 BF16 work is paused unless a clean structural restructure is on the table
 (per P10 lessons, local-tweak space is exhausted for CRR).
 
 ## Session Log
+
+### 2026-04-18 — P13 (3 Devs, all opus; GPUs 0/4/6)
+
+**Outcome: nothing landed; P12 Dev G's DTL premise refuted.**
+
+- **Dev A (FP8 RRR `lgkmcnt(0)` drain restructure, GPU 0)** — added
+  `RRR_DRAIN1/2/3/4_LGKM` macros (defaults to identity = `lgkmcnt(0)`),
+  replaced 4 raw `asm volatile("s_waitcnt lgkmcnt(0)")` calls in
+  `kernel_fp8_layouts.cpp:1633/1651/1668/1678` with `TK_WAIT_LGKM(...)`.
+  Smoke test with D1=2 *hung* SNR test on RRR(4096,2048,4096): the
+  barrier is **load-bearing for correctness** on at least one shape,
+  not just a scheduling hint. Agent silent before completing the
+  4-D sweep across non-hanging values. Diff in worktree
+  `agent-a784d2cb`. NO LAND.
+- **Dev B (BF16 CRR `__launch_bounds__(_,1)` for KI=128/296, GPU 4)** —
+  silent timeout. Zero tracked-file changes. NO LAND.
+- **Dev C (FP8 RCR DTL feasibility, no kernel edits)** — disassembled
+  the prebuilt FP8 `.o` and counted: 658 `buffer_load_dwordx4 ... lds`
+  (gfx950 wide-DTL, 16B/lane), 0 non-DTL global loads on the GEMM hot
+  path. Confirmed source path:
+  `include/ops/warp/memory/tile/global_to_shared.cuh:215-222` calls
+  `llvm_amdgcn_raw_buffer_load_lds()`. Both A and B operands DTL.
+  ST_v2a XOR swizzle composes via swizzled-global-offset trick.
+  **The DTL hypothesis from P12 Dev G is empirically wrong.** Project
+  memory (`project_fp8_ceiling.md`) updated with the correction.
+
+**Lessons additive to P12:**
+1. **Disassembly grep before lever scoping.** When proposing "we lack
+   instruction X, that's why we're slow", ALWAYS first run
+   `llvm-objdump --mcpu=gfx950` and grep for X. P12 Dev G's DTL claim
+   would have died in 30 seconds of disassembly inspection.
+2. **Knob infrastructure with no override values benched is not
+   landable.** P12 Dev F shipped `CRR_STEADY1/2_LGKM` macros, P13 Dev A
+   shipped `RRR_DRAIN1-4_LGKM` macros — neither found a benched
+   override that beat baseline. Default-preserving infra has zero
+   shipping value if no override is shown to win.
+3. **Cap concurrent same-source Devs at 1**, not 2. The P11/P12/P13
+   pattern: agents that get into multi-hour rebuild+bench loops on
+   shared kernel sources (4+ Devs in P12) silently hang at high rate.
+   Dev A (P13, alone on FP8) and Dev B (P13, alone on BF16) both
+   timed out anyway — likely a model-runtime issue, not just file
+   contention. Until root cause is found, prefer 1 Dev per source file
+   per session.
+4. **Research-only Devs return more reliably than implementation Devs.**
+   Dev C, Dev G (P12), Dev E (P12) all completed cleanly with
+   definitive memos. Dev A/B/D/F (P11/P12/P13) all hung mid-iteration.
+   Use research Devs to bound the search space before launching
+   implementation Devs.
 
 ### 2026-04-18 — P11 + P12 (7 Devs + 1 Reviewer + 1 ceiling research, all opus)
 
