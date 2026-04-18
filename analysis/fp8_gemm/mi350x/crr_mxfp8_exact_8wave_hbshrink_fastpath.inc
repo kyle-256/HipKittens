@@ -71,8 +71,8 @@
 #ifndef MXFP8_CRR_HBSHRINK_PIPELINE
 #define MXFP8_CRR_HBSHRINK_PIPELINE 0
 #endif
-#if (MXFP8_CRR_HBSHRINK_PIPELINE < 0) || (MXFP8_CRR_HBSHRINK_PIPELINE > 3)
-#error "MXFP8_CRR_HBSHRINK_PIPELINE must be 0..3 (R36 Dev A)"
+#if (MXFP8_CRR_HBSHRINK_PIPELINE < 0) || (MXFP8_CRR_HBSHRINK_PIPELINE > 4)
+#error "MXFP8_CRR_HBSHRINK_PIPELINE must be 0..4 (R36 Dev A; R37 Dev C added 4=B3v2)"
 #endif
 
 // Stage B1/B3 selector: insert-after position for the B1 LDS-interleave inside
@@ -628,6 +628,113 @@ void crr_exact_8wave_scaled_hbshrink_kernel(const layout_globals g)
         __builtin_amdgcn_s_setprio(0);
         CRR_SCHED_BARRIER();
         // Drain VMEM at end-of-iter.
+        asm volatile("s_waitcnt vmcnt(0)");
+        __builtin_amdgcn_s_barrier();
+    }
+    // Final iter (k = k_iters - 1): no more VMEM to issue.
+    {
+        const int k = k_iters - 1;
+        if ((k & 1) == 0) {
+            load_raw_scales(k >> 1);
+        } else {
+            #pragma unroll
+            for (int gp = 0; gp < crr_a_pack_count; gp++) {
+                a0_scale_packs[gp] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(a0_scale_packs[gp]) >> 16);
+                a1_scale_packs[gp] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(a1_scale_packs[gp]) >> 16);
+            }
+            #pragma unroll
+            for (int gp = 0; gp < crr_b_pack_count; gp++) {
+                b0_scale_packs[gp] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(b0_scale_packs[gp]) >> 16);
+                b1_scale_packs[gp] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(b1_scale_packs[gp]) >> 16);
+            }
+        }
+        fp8e8m0_4 a_sel_packs[crr_a_pack_count];
+        #pragma unroll
+        for (int p = 0; p < crr_a_pack_count; p++) {
+            a_sel_packs[p] = (mhalf == 0) ? a0_scale_packs[p] : a1_scale_packs[p];
+        }
+        load_b(b0, Bs[0][0], wn);
+        load_b(b1, Bs[0][1], wn);
+        load_a(a, As[0], wm);
+        asm volatile("s_waitcnt lgkmcnt(0)");
+        crr_mma_scaled_from_packs_fixed_phase(cA, a, b0, a_sel_packs, b0_scale_packs);
+        crr_mma_scaled_from_packs_fixed_phase(cB, a, b1, a_sel_packs, b1_scale_packs);
+        __builtin_amdgcn_s_barrier();
+    }
+
+#elif (MXFP8_CRR_HBSHRINK_PIPELINE == 4)
+    // -----------------------------------------------------------------------
+    // R37 Dev C — Stage B3v2: reordered B3 hybrid testing the "sequencing
+    // bug, not structural" hypothesis for the R36 Dev A B3 -6.27% regression.
+    //
+    // R36 Dev A B3 (PIPE=3) had:
+    //   load b0,a → wait → BARRIER → cA(b1 interleave) → wait → BARRIER →
+    //   issue VMEM → cB → wait vmcnt → BARRIER
+    //
+    // The hypothesis: B3 issues the next-iter VMEM write into Bs[0][1]
+    // BETWEEN cA (which contains the b1 LDS read) and cB (which consumes b1).
+    // The b1 LDS read inside cA may still be in flight (no lgkmcnt drain on
+    // it specifically before VMEM issue) when the VMEM write into the same
+    // slot starts, causing a same-slot LDS write/read hazard. Also there are
+    // TWO redundant barriers (between cA and VMEM, after lgkmcnt waits)
+    // serializing MMA execution.
+    //
+    // R37 Dev C B3v2 fix: ISSUE VMEM AFTER cB (not between cA and cB), AND
+    // remove the redundant intermediate barrier. Schedule:
+    //   load b0,a from slot 0 → wait lgkm → BARRIER →
+    //   cA(with b1 LDS interleave from slot 0) → wait lgkm →
+    //   cB(consumes b1) → BARRIER (sync MMA-side LDS reads) →
+    //   issue VMEM next-iter into slot 0 → wait vmcnt → BARRIER
+    // -----------------------------------------------------------------------
+    global_load_b(Bs[0][0], bc * 2,     0);
+    global_load_a(As[0],    a_tile_row(), 0);
+    global_load_b(Bs[0][1], bc * 2 + 1, 0);
+    asm volatile("s_waitcnt vmcnt(0)");
+    __builtin_amdgcn_s_barrier();
+
+    for (int k = 0; k < k_iters - 1; k++) {
+        if ((k & 1) == 0) {
+            load_raw_scales(k >> 1);
+        } else {
+            #pragma unroll
+            for (int gp = 0; gp < crr_a_pack_count; gp++) {
+                a0_scale_packs[gp] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(a0_scale_packs[gp]) >> 16);
+                a1_scale_packs[gp] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(a1_scale_packs[gp]) >> 16);
+            }
+            #pragma unroll
+            for (int gp = 0; gp < crr_b_pack_count; gp++) {
+                b0_scale_packs[gp] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(b0_scale_packs[gp]) >> 16);
+                b1_scale_packs[gp] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(b1_scale_packs[gp]) >> 16);
+            }
+        }
+        fp8e8m0_4 a_sel_packs[crr_a_pack_count];
+        #pragma unroll
+        for (int p = 0; p < crr_a_pack_count; p++) {
+            a_sel_packs[p] = (mhalf == 0) ? a0_scale_packs[p] : a1_scale_packs[p];
+        }
+        // Issue b0, a LDS reads (defer b1 into cA chain).
+        load_b(b0, Bs[0][0], wn);
+        load_a(a, As[0], wm);
+        asm volatile("s_waitcnt lgkmcnt(0)");
+        __builtin_amdgcn_s_barrier();
+        // cA MMA chain with b1 LDS interleave (b1 LDS read happens inside).
+        crr_hbshrink_cA_with_b1_interleave_fixed_phase<MXFP8_CRR_HBSHRINK_B1_INSERT_AFTER, crr_a_pack_count, crr_b_pack_count>(
+            cA, a, b0, b1, Bs[0][1], wn, a_sel_packs, b0_scale_packs);
+        asm volatile("s_waitcnt lgkmcnt(0)");
+        // cB MMA — uses b1 just loaded by interleave. NO intermediate
+        // barrier between cA and cB (vs B3): both read from same slot/regs.
+        __builtin_amdgcn_s_setprio(1);
+        crr_mma_scaled_from_packs_fixed_phase(cB, a, b1, a_sel_packs, b1_scale_packs);
+        __builtin_amdgcn_s_setprio(0);
+        CRR_SCHED_BARRIER();
+        // Sync ALL MMA-side LDS reads complete before issuing VMEM writes
+        // into the same slot — this is the key fix vs B3 which had VMEM
+        // issued WHILE cA's b1 read was still in flight.
+        __builtin_amdgcn_s_barrier();
+        // Now safe to issue next-iter VMEM→LDS writes into slot 0.
+        global_load_b(Bs[0][0], bc * 2,     k + 1);
+        global_load_a(As[0],    a_tile_row(), k + 1);
+        global_load_b(Bs[0][1], bc * 2 + 1, k + 1);
         asm volatile("s_waitcnt vmcnt(0)");
         __builtin_amdgcn_s_barrier();
     }
