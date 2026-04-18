@@ -1,0 +1,21 @@
+===== R45D variance label=p31_70bkv_b1 gpu=4 N_REPS=5 BENCH_KIND=two_so PREHEAT=60 MAX_RETRIES=3 =====
+Sat Apr 18 21:27:08 UTC 2026
+----- rep 1 / 5 -----
+[gate rep=1 att=1 rc=0 G1=1 G2A=1 preMhz=2278 benchMhz=2387]
+[clean rep=1] DELTA_MEDIAN_PCT HBSHRINK_vs_DEFAULT = +28.449%
+----- rep 2 / 5 -----
+[gate rep=2 att=1 rc=0 G1=0 G2A=1 preMhz=1431 benchMhz=2390]
+[gate rep=2 att=2 rc=0 G1=1 G2A=1 preMhz=2379 benchMhz=2391]
+[clean rep=2] DELTA_MEDIAN_PCT HBSHRINK_vs_DEFAULT = +28.128%
+----- rep 3 / 5 -----
+[gate rep=3 att=1 rc=0 G1=0 G2A=1 preMhz=2163 benchMhz=2388]
+[gate rep=3 att=2 rc=0 G1=1 G2A=1 preMhz=2344 benchMhz=2388]
+[clean rep=3] DELTA_MEDIAN_PCT HBSHRINK_vs_DEFAULT = +28.663%
+----- rep 4 / 5 -----
+[gate rep=4 att=1 rc=0 G1=0 G2A=1 preMhz=2158 benchMhz=2387]
+[gate rep=4 att=2 rc=0 G1=1 G2A=1 preMhz=2313 benchMhz=2388]
+[clean rep=4] DELTA_MEDIAN_PCT HBSHRINK_vs_DEFAULT = +29.183%
+----- rep 5 / 5 -----
+[gate rep=5 att=1 rc=0 G1=1 G2A=1 preMhz=2200 benchMhz=2387]
+[clean rep=5] DELTA_MEDIAN_PCT HBSHRINK_vs_DEFAULT = +28.118%
+Sat Apr 18 21:40:07 UTC 2026

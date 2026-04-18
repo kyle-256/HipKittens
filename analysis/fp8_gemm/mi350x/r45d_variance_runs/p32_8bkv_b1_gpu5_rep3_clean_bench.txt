@@ -1,0 +1,25 @@
+[sclk-pre-preheat] GPU[5]		: sclk clock level: S: (95Mhz)
+[preheat 60.0s] done 12284 iters
+[sclk-post-preheat] GPU[5]		: sclk clock level: 1: (2308Mhz)
+CORRECTNESS_A_default snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_B_b1 snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[5]		: sclk clock level: 1: (2359Mhz)
+WARMUP 0 B_b1=849.39 A_default=696.33
+WARMUP 1 B_b1=875.27 A_default=692.04
+PAIR 0 B_b1_1=855.60 A_default_1=694.04 B_b1_2=880.18 A_default_2=702.93
+PAIR 1 B_b1_1=868.93 A_default_1=704.13 B_b1_2=870.95 A_default_2=701.20
+PAIR 2 B_b1_1=868.99 A_default_1=700.05 B_b1_2=877.11 A_default_2=703.58
+PAIR 3 B_b1_1=883.62 A_default_1=700.89 B_b1_2=886.52 A_default_2=704.94
+PAIR 4 B_b1_1=878.97 A_default_1=704.55 B_b1_2=868.75 A_default_2=703.29
+PAIR 5 B_b1_1=872.86 A_default_1=702.61 B_b1_2=879.57 A_default_2=703.08
+PAIR 6 B_b1_1=873.31 A_default_1=700.94 B_b1_2=883.04 A_default_2=700.72
+PAIR 7 B_b1_1=875.85 A_default_1=701.28 B_b1_2=868.56 A_default_2=694.65
+PAIR 8 B_b1_1=875.50 A_default_1=707.20 B_b1_2=877.30 A_default_2=703.81
+PAIR 9 B_b1_1=880.32 A_default_1=708.41 B_b1_2=879.33 A_default_2=699.98
+[sclk-post-bench] GPU[5]		: sclk clock level: 1: (2391Mhz)
+CRR_DEFAULT  median=702.77 mean=702.11 stdev=3.46 n=20
+CRR_HBSHRINK median=876.48 mean=875.26 stdev=7.05 n=20
+Welch t (DEFAULT vs HBSHRINK) = 98.540  (positive = HBSHRINK faster)
+DELTA_MEDIAN_PCT HBSHRINK_vs_DEFAULT = +24.718%
+CRR_DEFAULT_TFLOPS_LIST 694.0388,702.9334,704.1325,701.2008,700.0465,703.5783,700.8913,704.9410,704.5478,703.2903,702.6123,703.0836,700.9373,700.7198,701.2804,694.6455,707.2041,703.8092,708.4061,699.9772
+CRR_HBSHRINK_TFLOPS_LIST 855.5972,880.1798,868.9253,870.9521,868.9947,877.1088,883.6195,886.5181,878.9716,868.7508,872.8619,879.5656,873.3065,883.0395,875.8528,868.5563,875.4970,877.3014,880.3242,879.3324

@@ -1,0 +1,18 @@
+===== R45D variance label=p33_8bdown gpu=5 N_REPS=5 BENCH_KIND=one_so_layout PREHEAT=60 MAX_RETRIES=3 =====
+Sat Apr 18 21:38:07 UTC 2026
+----- rep 1 / 5 -----
+[gate rep=1 att=1 rc=0 G1=1 G2A=1 preMhz=2220 benchMhz=2305]
+[clean rep=1] DELTA_MEDIAN_PCT RRR_vs_CRR = +7.452%
+----- rep 2 / 5 -----
+[gate rep=2 att=1 rc=0 G1=1 G2A=1 preMhz=2247 benchMhz=2311]
+[clean rep=2] DELTA_MEDIAN_PCT RRR_vs_CRR = +8.032%
+----- rep 3 / 5 -----
+[gate rep=3 att=1 rc=0 G1=1 G2A=1 preMhz=2350 benchMhz=2266]
+[clean rep=3] DELTA_MEDIAN_PCT RRR_vs_CRR = +7.499%
+----- rep 4 / 5 -----
+[gate rep=4 att=1 rc=0 G1=1 G2A=1 preMhz=2303 benchMhz=2202]
+[clean rep=4] DELTA_MEDIAN_PCT RRR_vs_CRR = +7.379%
+----- rep 5 / 5 -----
+[gate rep=5 att=1 rc=0 G1=1 G2A=1 preMhz=2233 benchMhz=2271]
+[clean rep=5] DELTA_MEDIAN_PCT RRR_vs_CRR = +8.348%
+Sat Apr 18 21:46:00 UTC 2026
