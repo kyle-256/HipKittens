@@ -486,17 +486,30 @@ def main():
         ("_ts_gm8_v12_btw_step3",   "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=8 -DSTEP3_BARRIER_VMCNT=12 -DBARRIER_TO_WAITCNT_STEP3=1"),  # R20A WIN: S15 32768x4096x7168 +2.04pp (also S5)
         # R25-D STACK WIN: GROUP_SIZE_M=6 (R25-B) × R25C_TAIL_PF_OFF_ITERS=4 (R25-C)
         # super-additive on DLA2 (+6.69%) and DLA7 (+6.92%) vs prior production.
-        # Reduces DLA2 gap to aiter from 6.7%→1.1% and DLA7 from 6.9%→0.2%.
         # R25C_K_LIMIT=32768 ensures DLA1 (K=128256) is gated off (no regression).
         ("_ts_gm6_v12_memc_dc_pfoff4",
          "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=6 -DSTEP3_BARRIER_VMCNT=12 "
          "-DR25C_TAIL_PF_OFF_ITERS=4 -DR25C_K_LIMIT=32768 "
          "-mllvm -amdgpu-sched-strategy=max-memory-clause "
-         "-mllvm -amdgpu-disable-clustered-low-occupancy-reschedule"),  # R25D STACK: DLA2 +6.69%
+         "-mllvm -amdgpu-disable-clustered-low-occupancy-reschedule"),  # R25D STACK: DLA2 +6.69% (kept as fallback)
         ("_ts_lgk2_gm6_v12_memc_pfoff4",
          "-DTAIL_SPLIT=1 -DSTEP12_BR_LGKMCNT=2 -DGROUP_SIZE_M=6 -DSTEP3_BARRIER_VMCNT=12 "
          "-DR25C_TAIL_PF_OFF_ITERS=4 -DR25C_K_LIMIT=32768 "
-         "-mllvm -amdgpu-sched-strategy=max-memory-clause"),  # R25D STACK: DLA7 +6.92%
+         "-mllvm -amdgpu-sched-strategy=max-memory-clause"),  # R25D STACK: DLA7 +6.92% (kept as fallback)
+        # R25-F EXTENDED-SWEEP WIN: gm7 × pfoff14 dominates the (gm × pfoff) plane on K=4096 shapes.
+        # +10.86% (DLA2 4933 TFLOPS) and +13.51% (DLA7 5043 TFLOPS) vs R25-D — replaces R25-D
+        # as the per-shape best for DLA2/DLA7. With k_byte_iters=K/256=16, pfoff=14 means
+        # only the first 2 K-iters prefetch — i.e. the K-loop is bandwidth-limited and
+        # tail prefetches were causing live VMEM contention with scale-load + epilogue traffic.
+        ("_ts_gm7_v12_memc_dc_pfoff14",
+         "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=7 -DSTEP3_BARRIER_VMCNT=12 "
+         "-DR25C_TAIL_PF_OFF_ITERS=14 -DR25C_K_LIMIT=32768 "
+         "-mllvm -amdgpu-sched-strategy=max-memory-clause "
+         "-mllvm -amdgpu-disable-clustered-low-occupancy-reschedule"),  # R25F WIN: DLA2 +10.86% vs R25D
+        ("_ts_lgk2_gm7_v12_memc_pfoff14",
+         "-DTAIL_SPLIT=1 -DSTEP12_BR_LGKMCNT=2 -DGROUP_SIZE_M=7 -DSTEP3_BARRIER_VMCNT=12 "
+         "-DR25C_TAIL_PF_OFF_ITERS=14 -DR25C_K_LIMIT=32768 "
+         "-mllvm -amdgpu-sched-strategy=max-memory-clause"),  # R25F WIN: DLA7 +13.51% vs R25D
     ]
     for n_val, k_val in nk_pairs:
         for suffix, cppflags in variants:

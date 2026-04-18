@@ -1,0 +1,119 @@
+==============================================================================================================
+PHASE 1 — SMOKE EXTENDED SWEEP (1 rep each)
+==============================================================================================================
+
+[P1-SMOKE DLA2] starting on GPU 1, 13 variants × 1 reps
+
+[P1-SMOKE DLA7] starting on GPU 2, 13 variants × 1 reps
+  P1-SMOKE DLA7 R25D_gm6_pfoff4_REF rep0 gpu2                         4450.55 TFLOPS
+  P1-SMOKE DLA2 R25D_gm6_pfoff4_REF rep0 gpu1                         4453.19 TFLOPS
+  P1-SMOKE DLA7 gm5_pfoff9 rep0 gpu2                                  4725.61 TFLOPS
+  P1-SMOKE DLA7 gm5_pfoff10 rep0 gpu2                                 4748.32 TFLOPS
+  P1-SMOKE DLA2 gm5_pfoff9 rep0 gpu1                                  4663.15 TFLOPS
+  P1-SMOKE DLA7 gm5_pfoff12 rep0 gpu2                                 4830.00 TFLOPS
+  P1-SMOKE DLA7 gm5_pfoff14 rep0 gpu2                                 4982.28 TFLOPS
+  P1-SMOKE DLA2 gm5_pfoff10 rep0 gpu1                                 4700.20 TFLOPS
+  P1-SMOKE DLA7 gm6_pfoff9 rep0 gpu2                                  4708.47 TFLOPS
+  P1-SMOKE DLA2 gm5_pfoff12 rep0 gpu1                                 4759.32 TFLOPS
+  P1-SMOKE DLA7 gm6_pfoff10 rep0 gpu2                                 4773.59 TFLOPS
+  P1-SMOKE DLA7 gm6_pfoff12 rep0 gpu2                                 4791.20 TFLOPS
+  P1-SMOKE DLA2 gm5_pfoff14 rep0 gpu1                                 4939.45 TFLOPS
+  P1-SMOKE DLA7 gm6_pfoff14 rep0 gpu2                                 4994.07 TFLOPS
+  P1-SMOKE DLA7 gm7_pfoff9 rep0 gpu2                                  4776.24 TFLOPS
+  P1-SMOKE DLA2 gm6_pfoff9 rep0 gpu1                                  4676.40 TFLOPS
+  P1-SMOKE DLA7 gm7_pfoff10 rep0 gpu2                                 4808.58 TFLOPS
+  P1-SMOKE DLA2 gm6_pfoff10 rep0 gpu1                                 4722.74 TFLOPS
+  P1-SMOKE DLA7 gm7_pfoff12 rep0 gpu2                                 4899.17 TFLOPS
+  P1-SMOKE DLA7 gm7_pfoff14 rep0 gpu2                                 5047.49 TFLOPS
+  P1-SMOKE DLA2 gm6_pfoff12 rep0 gpu1                                 4772.04 TFLOPS
+  P1-SMOKE DLA2 gm6_pfoff14 rep0 gpu1                                 4942.05 TFLOPS
+  P1-SMOKE DLA2 gm7_pfoff9 rep0 gpu1                                  4701.84 TFLOPS
+  P1-SMOKE DLA2 gm7_pfoff10 rep0 gpu1                                 4743.01 TFLOPS
+  P1-SMOKE DLA2 gm7_pfoff12 rep0 gpu1                                 4811.74 TFLOPS
+  P1-SMOKE DLA2 gm7_pfoff14 rep0 gpu1                                 4931.28 TFLOPS
+
+[DLA2] EXTENDED SWEEP grid (TFLOPS, 1 rep)
+  REF (R25D gm6_pfoff4) = 4453.19
+  gm\pf  pf 9  pf10  pf12  pf14
+  gm5     4663.1 4700.2 4759.3 4939.4
+  gm6     4676.4 4722.7 4772.0 4942.1
+  gm7     4701.8 4743.0 4811.7 4931.3
+
+[DLA7] EXTENDED SWEEP grid (TFLOPS, 1 rep)
+  REF (R25D gm6_pfoff4) = 4450.55
+  gm\pf  pf 9  pf10  pf12  pf14
+  gm5     4725.6 4748.3 4830.0 4982.3
+  gm6     4708.5 4773.6 4791.2 4994.1
+  gm7     4776.2 4808.6 4899.2 5047.5
+
+[DLA2] TOP 5 CANDIDATES for verify:
+  gm6_pfoff14: 4942.1 TFLOPS  (suffix=_r25f_gm6_pfoff14_dla2)
+  gm5_pfoff14: 4939.4 TFLOPS  (suffix=_r25f_gm5_pfoff14_dla2)
+  gm7_pfoff14: 4931.3 TFLOPS  (suffix=_r25f_gm7_pfoff14_dla2)
+  gm7_pfoff12: 4811.7 TFLOPS  (suffix=_r25f_gm7_pfoff12_dla2)
+  gm6_pfoff12: 4772.0 TFLOPS  (suffix=_r25f_gm6_pfoff12_dla2)
+
+[DLA7] TOP 5 CANDIDATES for verify:
+  gm7_pfoff14: 5047.5 TFLOPS  (suffix=_r25f_gm7_pfoff14_dla7)
+  gm6_pfoff14: 4994.1 TFLOPS  (suffix=_r25f_gm6_pfoff14_dla7)
+  gm5_pfoff14: 4982.3 TFLOPS  (suffix=_r25f_gm5_pfoff14_dla7)
+  gm7_pfoff12: 4899.2 TFLOPS  (suffix=_r25f_gm7_pfoff12_dla7)
+  gm5_pfoff12: 4830.0 TFLOPS  (suffix=_r25f_gm5_pfoff12_dla7)
+
+==============================================================================================================
+PHASE 2 — VERIFY (3 reps on top 5 candidates + REF)
+==============================================================================================================
+
+[P2-VERIFY DLA2] starting on GPU 1, 6 variants × 3 reps
+[P2-VERIFY DLA7] starting on GPU 2, 6 variants × 3 reps
+
+  P2-VERIFY DLA7 R25D_gm6_pfoff4_REF rep0 gpu2                        4432.92 TFLOPS
+  P2-VERIFY DLA2 R25D_gm6_pfoff4_REF rep0 gpu1                        4433.42 TFLOPS
+  P2-VERIFY DLA7 R25D_gm6_pfoff4_REF rep1 gpu2                        4443.06 TFLOPS
+  P2-VERIFY DLA7 R25D_gm6_pfoff4_REF rep2 gpu2                        4429.10 TFLOPS
+  P2-VERIFY DLA2 R25D_gm6_pfoff4_REF rep1 gpu1                        4427.62 TFLOPS
+  P2-VERIFY DLA7 gm7_pfoff14 rep0 gpu2                                5046.93 TFLOPS
+  P2-VERIFY DLA7 gm7_pfoff14 rep1 gpu2                                5045.29 TFLOPS
+  P2-VERIFY DLA2 R25D_gm6_pfoff4_REF rep2 gpu1                        4431.25 TFLOPS
+  P2-VERIFY DLA7 gm7_pfoff14 rep2 gpu2                                5029.45 TFLOPS
+  P2-VERIFY DLA2 gm6_pfoff14 rep0 gpu1                                4922.54 TFLOPS
+  P2-VERIFY DLA7 gm6_pfoff14 rep0 gpu2                                4916.98 TFLOPS
+  P2-VERIFY DLA7 gm6_pfoff14 rep1 gpu2                                4967.61 TFLOPS
+  P2-VERIFY DLA2 gm6_pfoff14 rep1 gpu1                                4927.77 TFLOPS
+  P2-VERIFY DLA7 gm6_pfoff14 rep2 gpu2                                4967.95 TFLOPS
+  P2-VERIFY DLA7 gm5_pfoff14 rep0 gpu2                                4973.84 TFLOPS
+  P2-VERIFY DLA2 gm6_pfoff14 rep2 gpu1                                4928.48 TFLOPS
+  P2-VERIFY DLA7 gm5_pfoff14 rep1 gpu2                                4966.44 TFLOPS
+  P2-VERIFY DLA2 gm5_pfoff14 rep0 gpu1                                4920.27 TFLOPS
+  P2-VERIFY DLA7 gm5_pfoff14 rep2 gpu2                                4950.18 TFLOPS
+  P2-VERIFY DLA7 gm7_pfoff12 rep0 gpu2                                4903.60 TFLOPS
+  P2-VERIFY DLA2 gm5_pfoff14 rep1 gpu1                                4928.33 TFLOPS
+  P2-VERIFY DLA7 gm7_pfoff12 rep1 gpu2                                4901.89 TFLOPS
+  P2-VERIFY DLA7 gm7_pfoff12 rep2 gpu2                                4878.74 TFLOPS
+  P2-VERIFY DLA2 gm5_pfoff14 rep2 gpu1                                4933.56 TFLOPS
+  P2-VERIFY DLA7 gm5_pfoff12 rep0 gpu2                                4813.91 TFLOPS
+  P2-VERIFY DLA2 gm7_pfoff14 rep0 gpu1                                4931.81 TFLOPS
+  P2-VERIFY DLA7 gm5_pfoff12 rep1 gpu2                                4825.64 TFLOPS
+  P2-VERIFY DLA7 gm5_pfoff12 rep2 gpu2                                4821.49 TFLOPS
+  P2-VERIFY DLA2 gm7_pfoff14 rep1 gpu1                                4926.77 TFLOPS
+  P2-VERIFY DLA2 gm7_pfoff14 rep2 gpu1                                4929.60 TFLOPS
+  P2-VERIFY DLA2 gm7_pfoff12 rep0 gpu1                                4806.49 TFLOPS
+  P2-VERIFY DLA2 gm7_pfoff12 rep1 gpu1                                4796.36 TFLOPS
+  P2-VERIFY DLA2 gm7_pfoff12 rep2 gpu1                                4800.87 TFLOPS
+  P2-VERIFY DLA2 gm6_pfoff12 rep0 gpu1                                4768.54 TFLOPS
+  P2-VERIFY DLA2 gm6_pfoff12 rep1 gpu1                                4775.21 TFLOPS
+  P2-VERIFY DLA2 gm6_pfoff12 rep2 gpu1                                4775.97 TFLOPS
+
+Total Elapsed: 304.5s
+
+==============================================================================================================
+FINAL VERIFY SUMMARY (3-rep mean, std, Δ vs R25-D REF; stability gate std≤30 TFLOPS)
+==============================================================================================================
+
+[DLA2] REF (R25D gm6_pfoff4): runs=[4433.42, 4427.62, 4431.25]  mean=4430.763333333333  std=2.4
+Traceback (most recent call last):
+  File "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/bench_round25_optF_verify.py", line 263, in <module>
+    main()
+  File "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/bench_round25_optF_verify.py", line 243, in main
+    print(f"  {vlabel:25s} runs={[round(x,1) for x in xs] if xs else '-':40s}  mean={mean if mean else 'N/A':>8}  std={std:.1f if std is not None else '-'}  Δ={d_str}  [{stab}]{err_note}" if std is not None else f"  {vlabel:25s} FAILED{err_note}")
+TypeError: unsupported format string passed to list.__format__
