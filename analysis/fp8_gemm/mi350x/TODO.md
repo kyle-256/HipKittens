@@ -381,8 +381,35 @@ Per R22A's mechanistic correction (TCP_TA_DATA_STALL = producer-side `buffer_loa
   - DLA1: ant1=−4.57%, ant2=−5.08%; DLA2: ant1=−6.69%, ant2=−8.25%; DLA7: ant1=−4.68%, ant2=−4.03%.
   - Combined with R22B (B-NT and B+A NT also LOSE), this **fully exhausts the {A,B,both}×{non_temporal,cache_stream} cache-hint matrix**: all 6 combinations regress on DLA shapes.
   - Mechanistic refutation: A-tile is M-streamed across CTAs, but the same A-line is consumed by multiple warps within a CTA (M-tile rows × K-iters); evicting early forces re-fetch. Even GLC-only `cache_stream` LOSEs.
-- **R24B — L2 prefetch hints** (s_load_dword for next K-tile A/B addresses inside current K-tile MFMA window) — **STILL OPEN**, dispatched as Round 25.
-- **R24C — outer-K pull-forward** (prefetch K+2/K+3 inside K+0/K+1 MFMA window; pure scheduling change) — **STILL OPEN**, dispatched as Round 25.
+- **R24B — extra `buffer_load_dwordx4` L2 prefetch (DEAD END)** (`r24b_results.md`):
+  - Macros `L2_PF_A`, `L2_PF_B` (intensity 1/2/3) emit additional discarded `buffer_load_dwordx4` ops in steady-state K-loop, targeting `bt+3` (K+2 tile).
+  - Disassembly confirmed 432→482→532→632 buffer_load_dwordx4 instructions across baseline→a1→ab1→a3 (linear scaling).
+  - Bench (warmup=200/iters=500/trim=10%, DLA1/2/7):
+    - DLA1: a1=−4.4%, b1=−6.0%, ab1=−8.6%, a3=ERR
+    - DLA2: a1=−0.4%, b1=−3.4%, ab1=−5.2%, a3=−8.0%
+    - DLA7: a1=−3.0%, b1=−3.2%, ab1=−5.6%, a3=−12.1%
+  - Every variant LOSES, regression scales monotonically with intensity (smoking gun: no inflection point where partial prefetch helps).
+  - HBM is already saturated by existing LDS prefetch; extra outer-K VMEM competes for HBM bandwidth, degrading inner-K prefetch's effective rate.
+- **R24C — outer-K pull-forward L2 prefetch (DEAD END)** (`r24c_results.md`):
+  - Macros `OUTER_K_PF_DEPTH=2/3` issue extra discarded `buffer_load_dwordx4` for K+2/K+3 in TAIL_SPLIT non-SWAP K-loop.
+  - Bench (DLA1/2/7):
+    - DLA1: l2=−23.6%, l3=−23.0%
+    - DLA2: l2=−15.6%, l3=−14.6%
+    - DLA7: l2=−18.1%, l3=−18.0%
+  - Hard 14-24% regression on every shape/depth. Saturation slope flat (depth=3 ≈ depth=2).
+  - Mechanistic: VMEM-issue-bound, not VMEM-latency-bound — single VMEM lane already saturated. Extra `buffer_load_dwordx4` queues behind inner LDS pf, starving it. Plus L2 thrash on DLA1 (K=128256 dwarfs 32 MB L2).
+
+## ⛔ HBM-BANDWIDTH AXIS EXHAUSTED on DLA shapes
+Three independent attacks (R22B B-NT, R24D A-NT, R24B extra-VMEM-pf, R24C outer-K-pf) all LOSE:
+- Cache **policy** axis (NT/streaming): {A, B, both} × {non_temporal, cache_stream} = 6/6 LOSE.
+- Cache **bandwidth** axis (extra discarded VMEM): {A, B, both} × {1, 2, 3 intensity} = all LOSE.
+- The DLA shapes are **VMEM-issue-bound** (single VMEM lane already saturated), not VMEM-latency-bound. R21-recon's 167-294% TCP_DATA_STALL was the *consumer-side* symptom (waiting on memory), not a producer-side opportunity.
+
+## Remaining vectors (high-cost / high-risk only)
+- **Tile-geometry axis** (BK depth, GROUP_SIZE_M widening) — pure structural rewrite, ~1-2d work.
+- **MFMA_32X32X64** alternative tiling — major asm rewrite, AGPR pressure unclear.
+- **PERSISTENT_XCD kernel-bug rewrite** — risky, would need re-verification of all 29 WIN shapes.
+- **Otherwise: accept CDNA4 hardware saturation at 29/42 WIN, average 105.3% ratio.**
 
 ## Round 21 (2026-04-18) — recon + audit; head macros DEAD END
 3 parallel agents: (a) **R21-recon** rocprof-PMC on DLA2/DLA7, (b) **R21-audit** untried-axis survey, (c) **R21B** probe 3 head macros from audit.

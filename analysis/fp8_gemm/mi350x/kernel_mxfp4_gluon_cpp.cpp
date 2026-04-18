@@ -809,6 +809,73 @@ __device__ __forceinline__ void emit_one_pf(const tile_pf_params& p, int idx) {
         p.cache_hint);
 }
 
+// ── R24C: Outer-K pull-forward L2 prefetch ──
+// Issues a buffer_load_dwordx4 inline asm with no LDS write and discards
+// the result, leaving data in L2 (and L1) for subsequent LDS-bound prefetches.
+// The compiler cannot DCE inline asm volatile.
+//
+// `voff_extra` allows offsetting the per-tile voff by one outer-K stride so
+// the load targets K+OUTER_K_PF_DEPTH instead of K+1. We compute the stride
+// in bytes: K-step in GMEM equals `BK * sizeof(fp8e4m3) / 2 = 64` bytes per
+// 16-thread group; a full tile prefetch step is `K_BYTES_PER_K0_STRIDE`.
+// To stay simple we use the existing pf_a0_p (which already targets bt+2)
+// and reissue with soff += K_OUTER_STRIDE_BYTES.
+#ifndef OUTER_K_PF_DEPTH
+#define OUTER_K_PF_DEPTH 1
+#endif
+
+#ifndef OUTER_K_PF_MODE
+// 0 = no extra; 1 = L2-only via buffer_load discarded; 2 = (reserved future LDS triple-buffer)
+#define OUTER_K_PF_MODE 0
+#endif
+
+// ── R24B: L2-only prefetch (always-available helper) ──
+// Issue a buffer_load_dwordx4 into a scratch VGPR (discarded), targeting the
+// SAME GMEM offsets as the supplied pf params. The data lands in L2 (and L1),
+// prewarming the cache for a future LDS-bound prefetch.
+__device__ __forceinline__ void emit_one_pf_l2only(const tile_pf_params& p, int idx)
+{
+    float4 sink;
+    asm volatile(
+        "buffer_load_dwordx4 %0, %1, %2, %3 offen\n"
+        : "=v"(sink)
+        : "v"(p.voffs[idx]), "s"(p.srd), "s"(p.soff)
+        : "memory"
+    );
+}
+
+template<int N>
+__device__ __forceinline__ void emit_full_pf_l2only(const tile_pf_params& p) {
+    #pragma unroll
+    for (int i = 0; i < N; ++i) emit_one_pf_l2only(p, i);
+}
+
+// ── R24B: L2 prefetch macros (default 0 = inactive) ──
+// L2_PF_A / L2_PF_B = 1 → 1 buffer_load_dwordx4 per thread per K-iter (cheap probe)
+// L2_PF_A / L2_PF_B = 2 → PF_MPT/2 loads per K-iter (mid intensity)
+// L2_PF_A / L2_PF_B = 3 → full PF_MPT loads per K-iter (full tile cover)
+// Targets pf_bt+1 = bt+3 (one extra outer-K iter beyond the existing LDS prefetch).
+#ifndef L2_PF_A
+#define L2_PF_A 0
+#endif
+#ifndef L2_PF_B
+#define L2_PF_B 0
+#endif
+
+template<int LEVEL>
+__device__ __forceinline__ void emit_l2_pf_block(const tile_pf_params& p) {
+    if constexpr (LEVEL == 1) {
+        emit_one_pf_l2only(p, 0);
+    } else if constexpr (LEVEL == 2) {
+        constexpr int N = (PF_MPT > 1) ? (PF_MPT / 2) : 1;
+        #pragma unroll
+        for (int i = 0; i < N; ++i) emit_one_pf_l2only(p, i);
+    } else if constexpr (LEVEL == 3) {
+        #pragma unroll
+        for (int i = 0; i < PF_MPT; ++i) emit_one_pf_l2only(p, i);
+    }
+}
+
 #ifndef STEP3_PF_N
 #define STEP3_PF_N 8
 #endif
@@ -2600,6 +2667,52 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         tile_pf_params pf_bl_p = make_pf_params(Bl_db[cur], g.b, coord<ST_tile>(0,0,bc*2,     pf_bt), so_b, srd_b, base_b, lb_bl[cur], R22B_B_HINT_VAL);
 #endif
         tile_pf_params pf_br_p = make_pf_params(Br_db[cur], g.b, coord<ST_tile>(0,0,bc*2+1,   pf_bt), so_b, srd_b, base_b, lb_br[cur], R22B_B_HINT_VAL);
+
+#if OUTER_K_PF_DEPTH > 1 && OUTER_K_PF_MODE == 1
+        // R24C: pull-forward L2-only prefetch for K+OUTER_K_PF_DEPTH (>=K+3 for depth=2).
+        // We rebuild pf params at pf_bt+(OUTER_K_PF_DEPTH-1) clamped to k_byte_iters-1
+        // and issue buffer_load_dwordx4 that lands in L2/L1 only (no LDS write).
+        // The LDS slot we encode does not matter — the load result is discarded.
+        {
+            const int pf2_bt = (pf_bt + (OUTER_K_PF_DEPTH - 1) < k_byte_iters)
+                              ? (pf_bt + (OUTER_K_PF_DEPTH - 1))
+                              : (k_byte_iters - 1);
+            tile_pf_params pf2_a0 = make_pf_params(A0_db[cur], g.a, coord<ST_tile>(0,0,br*2,     pf2_bt), so_a, srd_a, base_a, lb_a0[cur], R22B_A_HINT_VAL);
+            tile_pf_params pf2_a1 = make_pf_params(A1_db[cur], g.a, coord<ST_tile>(0,0,br*2+1,   pf2_bt), so_a, srd_a, base_a, lb_a1[cur], R22B_A_HINT_VAL);
+            tile_pf_params pf2_br = make_pf_params(Br_db[cur], g.b, coord<ST_tile>(0,0,bc*2+1,   pf2_bt), so_b, srd_b, base_b, lb_br[cur], R22B_B_HINT_VAL);
+            // Issue all PF_MPT loads per tile for A0/A1/Br. Skip Bl when DIRECT_BL.
+            emit_full_pf_l2only<PF_MPT>(pf2_a0);
+            emit_full_pf_l2only<PF_MPT>(pf2_a1);
+            emit_full_pf_l2only<PF_MPT>(pf2_br);
+#if !DIRECT_BL
+            tile_pf_params pf2_bl = make_pf_params(Bl_db[cur], g.b, coord<ST_tile>(0,0,bc*2,     pf2_bt), so_b, srd_b, base_b, lb_bl[cur], R22B_B_HINT_VAL);
+            emit_full_pf_l2only<PF_MPT>(pf2_bl);
+#endif
+        }
+#endif
+
+#if (L2_PF_A > 0) || (L2_PF_B > 0)
+        // R24B: L2-only prefetch one extra outer-K iter ahead of the LDS prefetch.
+        // pf_bt = bt+2 (LDS-going); pf3_bt = bt+3 (cache-warming only).
+        // Result is discarded by emit_one_pf_l2only (no LDS write, no live VGPR).
+        {
+            const int pf3_bt = (pf_bt + 1 < k_byte_iters) ? (pf_bt + 1) : (k_byte_iters - 1);
+#if (L2_PF_A > 0)
+            tile_pf_params pf3_a0 = make_pf_params(A0_db[cur], g.a, coord<ST_tile>(0,0,br*2,     pf3_bt), so_a, srd_a, base_a, lb_a0[cur], R22B_A_HINT_VAL);
+            tile_pf_params pf3_a1 = make_pf_params(A1_db[cur], g.a, coord<ST_tile>(0,0,br*2+1,   pf3_bt), so_a, srd_a, base_a, lb_a1[cur], R22B_A_HINT_VAL);
+            emit_l2_pf_block<L2_PF_A>(pf3_a0);
+            emit_l2_pf_block<L2_PF_A>(pf3_a1);
+#endif
+#if (L2_PF_B > 0)
+            tile_pf_params pf3_br = make_pf_params(Br_db[cur], g.b, coord<ST_tile>(0,0,bc*2+1,   pf3_bt), so_b, srd_b, base_b, lb_br[cur], R22B_B_HINT_VAL);
+            emit_l2_pf_block<L2_PF_B>(pf3_br);
+#if !DIRECT_BL
+            tile_pf_params pf3_bl = make_pf_params(Bl_db[cur], g.b, coord<ST_tile>(0,0,bc*2,     pf3_bt), so_b, srd_b, base_b, lb_bl[cur], R22B_B_HINT_VAL);
+            emit_l2_pf_block<L2_PF_B>(pf3_bl);
+#endif
+#endif
+        }
+#endif
 
 #if EARLY_SCALE_PF
         fp8e8m0_4 nxt_pf_a0[a_packs], nxt_pf_a1[a_packs], nxt_pf_bl[b_packs], nxt_pf_br[b_packs];

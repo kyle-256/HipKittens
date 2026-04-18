@@ -58,9 +58,14 @@
   - DLA1 4096x32768x128256 = 91.9%, DLA2 128256x32768x4096 = 96.3%, DLA7 28672x32768x4096 = 96.9%
   - mid-gap (95.7-99.9%): 14336x4096x32768, 4096x28672x32768, 16384x28672x4096, 28672x4096x16384, 4096x32768x14336, 4096x32768x28672, 16384x4096x28672, 16384x28672x2048, 14336x32768x4096, 4096x14336x16384
 - **R22B (NT/streaming on A+B), R23A (STATIC_XCD_REMAP), R23B (PERSISTENT_XCD)** — all DEAD END (R23B has correctness bug; R23A best DLA7 +1.50% borderline noise; R22B all regress)
-- **R24A — PERSISTENT_XCD bug fix attempts (Fix A+B+C) — DEAD END**. Host-side fixes did not resolve coverage bug (still 6.4%/28.6%). Bug is in kernel-side persistent loop logic, requires risky rewrite. Out of scope. Code committed (gated by `#if PERSISTENT_XCD`, no baseline impact).
-- **R24D — A-only NT cache hint — DEAD END**. All variants regress 4-8% on DLA1/2/7. Combined with R22B, **the entire {A,B,both} × {non_temporal,cache_stream} cache-hint axis is exhausted on DLA shapes**.
-- **Cache-hint axis: CLOSED.** Future DLA work must attack via (a) reducing LDS pressure / vmcnt waits, (b) restructuring K-loop for longer in-CTA B-tile reuse, or (c) L2 software prefetch via `s_load_dword`.
+- **R24A — PERSISTENT_XCD bug fix attempts (Fix A+B+C) — DEAD END**. Host-side fixes did not resolve coverage bug (still 6.4%/28.6%). Bug is in kernel-side persistent loop logic, requires risky rewrite. Out of scope.
+- **R24D — A-only NT cache hint — DEAD END** (4-8% regression).
+- **R24B — extra `buffer_load_dwordx4` L2 prefetch — DEAD END** (0.4-12% regression, monotone with intensity).
+- **R24C — outer-K pull-forward (K+2/K+3 prefetch) — DEAD END** (14-24% regression, saturation flat).
+- **Cache-policy axis ({A,B,both}×{NT, cache_stream})**: 6/6 LOSE → CLOSED.
+- **Cache-bandwidth axis (extra discarded VMEM, A/B, intensity 1-3)**: all LOSE → CLOSED.
+- **Mechanistic conclusion (R24B/R24C)**: DLA shapes are **VMEM-issue-bound, NOT VMEM-latency-bound**. Single VMEM lane already saturated by existing LDS-bound prefetch path. Extra outer-K VMEM competes with inner-K pf for HBM bandwidth and degrades it.
+- **Saturation reached.** Remaining vectors require kernel-level rewrites (tile geometry / MFMA_32X32X64 / fixed PERSISTENT_XCD) that risk breaking the 29 WIN baseline and cost 1-2 days each. **Recommendation**: accept CDNA4 hardware saturation at 29/42 WIN unless user explicitly authorizes a rewrite-class effort.
 
 - **R20B 最新 full bench (116 variants, R18+R19 wins wired)**: **27/42 WIN** (+3 LOSE→WIN flips: P1, S1, S5; 0 regressions)
 - **R20A 11 个 (parent + BARRIER_TO_WAITCNT) stacks wired into bench_all_42.py post-R20**: 127 variants — projected next bench **~34/42 WIN**

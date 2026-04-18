@@ -1,0 +1,27 @@
+R24C smoke: 9 bench jobs (3 shapes x 3 variants), GPUs [0, 1, 2, 4, 6, 7]
+warmup=200 iters=500 trim=0.1
+==============================================================================================================
+  DLA1   _r24c_baseline                 gpu=0   5223.78 TFLOPS  [WARN: C all-zero]
+  DLA2   _r24c_baseline                 gpu=4   4186.95 TFLOPS  [WARN: C all-zero]
+  DLA1   _r24c_okpf_l2                  gpu=1   3990.41 TFLOPS  [WARN: C all-zero]
+  DLA1   _r24c_okpf_l3                  gpu=2   4024.80 TFLOPS  [WARN: C all-zero]
+  DLA2   _r24c_okpf_l3                  gpu=7   3574.75 TFLOPS  [WARN: C all-zero]
+  DLA2   _r24c_okpf_l2                  gpu=6   3533.54 TFLOPS  [WARN: C all-zero]
+  DLA7   _r24c_baseline                 gpu=0   4272.03 TFLOPS  [WARN: C all-zero]
+  DLA7   _r24c_okpf_l2                  gpu=1   3496.88 TFLOPS  [WARN: C all-zero]
+  DLA7   _r24c_okpf_l3                  gpu=2   3503.99 TFLOPS  [WARN: C all-zero]
+
+Elapsed: 16.9s
+
+==============================================================================================================
+SUMMARY (Δ vs _r24c_baseline, +1.5pp gate)
+==============================================================================================================
+  DLA1 baseline = 5223.78 TFLOPS
+    _r24c_okpf_l2                    3990.41  Δ=-1233.37 (-23.61%)  LOSE
+    _r24c_okpf_l3                    4024.80  Δ=-1198.98 (-22.95%)  LOSE
+  DLA2 baseline = 4186.95 TFLOPS
+    _r24c_okpf_l2                    3533.54  Δ=-653.41 (-15.61%)  LOSE
+    _r24c_okpf_l3                    3574.75  Δ=-612.20 (-14.62%)  LOSE
+  DLA7 baseline = 4272.03 TFLOPS
+    _r24c_okpf_l2                    3496.88  Δ=-775.15 (-18.14%)  LOSE
+    _r24c_okpf_l3                    3503.99  Δ=-768.04 (-17.98%)  LOSE

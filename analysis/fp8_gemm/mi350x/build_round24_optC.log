@@ -1,0 +1,13 @@
+Round 24 OptC builds: 9 (3 shapes x 3 variants)
+====================================================================================================
+  DLA2  _ts_gm2_v12_memc_dc_r24c_baseline                                 OK       (4.9s)
+  DLA2  _ts_gm2_v12_memc_dc_r24c_okpf_l3                                  OK       (5.0s)
+  DLA2  _ts_gm2_v12_memc_dc_r24c_okpf_l2                                  OK       (5.1s)
+  DLA1  _ts_pf6_6_v12_memc_r24c_baseline                                  OK       (5.2s)
+  DLA1  _ts_pf6_6_v12_memc_r24c_okpf_l3                                   OK       (5.5s)
+  DLA1  _ts_pf6_6_v12_memc_r24c_okpf_l2                                   OK       (5.6s)
+  DLA7  _ts_lgk2_v12_memc_r24c_baseline                                   OK       (4.9s)
+  DLA7  _ts_lgk2_v12_memc_r24c_okpf_l3                                    OK       (5.0s)
+  DLA7  _ts_lgk2_v12_memc_r24c_okpf_l2                                    OK       (5.1s)
+
+Elapsed: 10.2s
