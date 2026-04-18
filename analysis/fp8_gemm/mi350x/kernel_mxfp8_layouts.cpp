@@ -580,6 +580,57 @@ __device__ __forceinline__ void load_col_from_v2_st_half_rect(
     }
 }
 
+// R34 Dev C — Stage A2 Path 2 helper.
+//
+// Same K_HALF=0 read math as load_col_from_v2_st_half_rect<RT, 0, RECT_HB_N>,
+// but the destination data-array index is parameterised explicitly so the
+// kernel can perform two K_HALF=0 reads from TWO separate HB_N=64 LDS tiles
+// (one staging the K=0..63 portion, one staging the K=64..127 portion) and
+// have them write into data[0..3] and data[4..7] of the same register tile.
+//
+// Use case: rect-V2 CRR Path 2 — keep HB_N=64 LDS to halve the per-tile K
+// buffering, but populate a full BK=128 K register tile by serialising two
+// K_HALF=0 reads from two separate tiles. See r34c_findings.md.
+template<typename RT, int IDX_BASE, int RECT_HB_N = HB_N>
+__device__ __forceinline__ void load_col_from_v2_st_half_rect_idx(
+    RT& dst,
+    const st_fp8e4m3<RECT_HB_N, BK, st_16x128_v2_s>& tile,
+    int col_start)
+{
+    static_assert(RECT_HB_N == 64 || RECT_HB_N == 128,
+                  "rect helper only scaffolded for HB_N in {64, 128}");
+    static_assert(IDX_BASE == 0 || IDX_BASE == 4,
+                  "IDX_BASE must be 0 (data[0..3]) or 4 (data[4..7])");
+
+    const int laneid = kittens::laneid();
+    const int row_off = ((laneid % 16) / 2) + ((laneid / 16) * 16);
+    const int col_off = (laneid % 2) * 8;
+    const uint32_t tile_base = reinterpret_cast<uintptr_t>(&tile.data[0]);
+
+    constexpr int idx = IDX_BASE;
+    // K_HALF=0 read math — k_row stays in [0, 63] regardless of IDX_BASE.
+    const int k_row = row_off;
+
+    const uint32_t stidx = k_row >> 4;
+    const uint32_t base_k = tile_base + (stidx << 11) + (stidx << 7) + ((k_row & 15) << 7);
+    const uint32_t sw_k   = (k_row & 7) << 4;
+
+    #pragma unroll
+    for (int j = 0; j < RT::width; j++) {
+        const uint32_t nc = col_start + j * 16 + col_off;
+        const uint32_t addr = base_k + (nc ^ sw_k);
+
+        asm volatile(
+            "ds_read_b64_tr_b8 %0, %2 offset:0\n"
+            "ds_read_b64_tr_b8 %1, %2 offset:1024\n"
+            : "=&v"(*reinterpret_cast<float2*>(&dst.tiles[0][j].data[idx])),
+              "=&v"(*reinterpret_cast<float2*>(&dst.tiles[0][j].data[idx + 2]))
+            : "v"(addr)
+            : "memory"
+        );
+    }
+}
+
 template<typename RT, int K_HALF, typename ST>
 __device__ __forceinline__ void load_col_from_v2a_st_half(
     RT& dst, const ST& tile, int col_start)

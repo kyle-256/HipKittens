@@ -1,0 +1,18 @@
+[sclk-pre-preheat] GPU[3]		: sclk clock level: 1: (435Mhz)
+[preheat 30.0s] done 8188 iters
+[sclk-post-preheat] GPU[3]		: sclk clock level: 1: (2375Mhz)
+CORRECTNESS_square snr_db=49.60 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_path2 snr_db=49.60 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[3]		: sclk clock level: 1: (2388Mhz)
+WARMUP 0 square=750.05 path2=695.08 sclk=GPU[3]		: sclk clock level: 1: (2408Mhz)
+WARMUP 1 square=754.63 path2=691.10 sclk=GPU[3]		: sclk clock level: 1: (2410Mhz)
+PAIR 0 square_1=753.43 path2_1=687.50 square_2=764.00 path2_2=694.31
+PAIR 1 square_1=766.81 path2_1=699.36 square_2=767.68 path2_2=697.37
+PAIR 2 square_1=770.89 path2_1=699.21 square_2=766.63 path2_2=695.22
+PAIR 3 square_1=765.86 path2_1=696.61 square_2=771.90 path2_2=695.97
+PAIR 4 square_1=765.23 path2_1=698.33 square_2=766.05 path2_2=698.35
+[sclk-post-bench] GPU[3]		: sclk clock level: 1: (2408Mhz)
+square median=766.34 mean=765.85 stdev=5.00 n=10
+path2 median=696.99 mean=696.22 stdev=3.50 n=10
+Welch t (square vs path2) = -36.087  (positive = path2 faster)
+DELTA_MEDIAN_PCT path2_vs_square = -9.049%
