@@ -1,0 +1,41 @@
+{
+  "timestamp": "2026-04-18 14:08:59",
+  "findings": [
+    {
+      "shape": [
+        4096,
+        32768,
+        28672
+      ],
+      "status": "NO_BUILD"
+    },
+    {
+      "shape": [
+        4096,
+        32768,
+        6144
+      ],
+      "suffix": "_ts_v12_gm7_memc_pfoff19_kx6144_btw_all",
+      "mean": 5262.3,
+      "std_pct": 0.5,
+      "delta_pp": 16.09,
+      "ratio_comp": 115.7,
+      "would_win": true,
+      "reps": [
+        5278.01,
+        5215.97,
+        5255.65,
+        5269.28,
+        5292.59
+      ]
+    },
+    {
+      "shape": [
+        16384,
+        4096,
+        14336
+      ],
+      "status": "NO_BUILD"
+    }
+  ]
+}
