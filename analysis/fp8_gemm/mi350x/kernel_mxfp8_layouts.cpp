@@ -3656,6 +3656,10 @@ __host__ inline void dispatch_rcr_exact_8wave_scaled_v2(const layout_globals& g)
 // when MXFP8_RECT_BLK_N=64. Default build (square) sees an empty
 // translation unit (guarded internally) so no behavioral change.
 #include "crr_mxfp8_exact_8wave_rect_fastpath.inc"
+// R32 Dev D — Stage A1: rect-V2 RCR fastpath kernel. Mirrors Dev A's
+// rect-V2 CRR scaffolding for the V2-RCR codepath. Same internal guard
+// (MXFP8_RECT_BLK_N=64) so default build sees an empty translation unit.
+#include "rcr_mxfp8_exact_8wave_rect_fastpath.inc"
 
 template<Layout L, bool PRESHUFFLED_QUANT=false>
 __global__ __launch_bounds__(_NUM_THREADS, GEMM_MIN_BLOCKS_PER_CU)
@@ -5486,6 +5490,18 @@ void dispatch_pq_v2(layout_globals g) {
         g.m = static_cast<int>(g.c.rows());
         g.n = static_cast<int>(g.c.cols());
         g.k = static_cast<int>(g.a.cols());
+        // R32 Dev D — Stage A1: rect-V2 RCR fastpath. Routes the gemm_rcr_pq_v2
+        // entry point to the rect kernel when MXFP8_RECT_BLK_N=64 and the
+        // shape predicate matches. Default build (MXFP8_RECT_BLK_N=128) sees
+        // an empty translation unit for the rect kernel and the rect predicate
+        // helper does not exist, so this block compiles to the square dispatch
+        // only — preserving byte-identical behavior.
+#if defined(MXFP8_RECT_BLK_N) && (MXFP8_RECT_BLK_N == 64)
+        if (rcr_can_use_exact_8wave_scaled_rect(g)) {
+            dispatch_rcr_exact_8wave_scaled_v2_rect<true>(g);
+            return;
+        }
+#endif
         if (rcr_can_use_exact_8wave_scaled(g)) {
             dispatch_rcr_exact_8wave_scaled_v2<true>(g);
             return;
