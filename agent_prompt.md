@@ -54,6 +54,51 @@ python3 test_mxfp8_python.py 4096 14336 4096
 5. 禁止提交 `*.so`、`*.s`、`*_layout_results_*.json`、`.bak*`、`gpucore.*`、`__pycache__` 等（`.gitignore` 已覆盖）
 6. 每个子 agent 使用不同 `HIP_VISIBLE_DEVICES` 以免 GPU 冲突：Dev A → 0，Dev B → 1，Dev C → 2，Reviewer/formal → 7
 
+## R38 cycle 完结 (2026-04-18) ★★ STRICT-PROMOTE + CRITICAL BUGFIX — 1 STRICT PROMOTE (8B-Down V2-RRR R36→R38) + 1 CRITICAL FIX (R37 Dev B 8B-KV production wire-in was dead) + 2 paradigm closures (HB-N shrink REFUTED on V2-CRR wide-N) + R38 NEW G1' fallback orchestrate + R38 NEW nm-based dead-code gate + 1 NEW methodology gap (predicate-fanout requires dispatcher-path verification)
+
+R38 派 4 dev (A HB-N shrink prototype 8B GU + 70B GU, B HB-N shrink fan-out 70B GU + 8B-Down, C 4-GPU STRICT promote 8B-Down V2-RRR N_PAIRS=15, D R37 NEW orchestrate G1' + nm-gate scripts) + Reviewer (8th-cycle baseline + Phase 2 RECONFIRM R37 SHIPs). **1 STRICT PROMOTE + 1 STRICT RECONFIRM + 0 NEW SHIPs (HB-N REFUTED) + 1 CRITICAL FAIL caught + FIXED in cycle wrap.**
+
+### ★★ Headline result — Dev C STRICT PROMOTE `e466e582` (8B-Down V2-RRR cleared after 2 cycles SHIP-LITE)
+- 4-GPU @ N_PAIRS=15: GPU2/3/6/7 min Δ% +7.42% / min Welch t +18.56 (was +5.87 R36 / +6.36 R37 due to N=5 statistical-power cap)
+- Cross-cycle Δ% rock-solid: +6.66% (R36) / +7.25% (R37) / +7.42% (R38)
+- Closes "K≥14336 K-noise floor" hypothesis — was statistical-power, not performance
+
+### ★★★ Critical fix — `66ef02d8` R37 Dev B 8B-KV production wire-in was DEAD
+- R38 Reviewer caught it: dispatcher hard-coded `g.k == 8192` while Dev B only extended `.inc` allow-list to K=4096
+- Production .so unfixed: 8B-KV -0.17% / +0.10% (kernel never reached)
+- PATCHED-wire test: 8B-KV +26.66% (matches Dev B's +24.96% claim)
+- Fix: predicate now `(g.k == 8192 || g.k == 4096)` per Dev B's allow-list
+
+### Dev A `4335cb57` + Dev B `fd673f15` (NO SHIP — HB-N shrink REFUTED on V2-CRR wide-N, 3-shape independent confirmation)
+- Dev A 8B GU -43.18% / 70B GU -44.85% (PIPE=0 bit-exact)
+- Dev B 70B GU -26.72% / 8B-Down -47.89% (PIPE=0 bit-exact) / 8B-Down PIPE=1 -30.16% (correctness FAIL)
+- VGPR savings confirmed (-82, even bigger than HB-M's -74) but no pipeline to feed
+- Mechanism: V2-CRR is bandwidth-saturated on wide-N (WARPS_N=4 + RBN=32). Halving N coverage doubles WG grid + barriers + scale-fetch overhead WITHOUT relieving real pressure
+- **CLOSES** "BLK_N reduction is symmetric counterpart to BLK_M reduction" on V2-CRR. Scaffolds kept dead-code-gated for R39+ V2-RRR HB-N exploration
+- Conflict resolution: both Devs independently created `crr_mxfp8_exact_8wave_hbnshrink_fastpath.inc`; cherry-pick used `-X ours` to keep Dev A's scaffold
+
+### Dev D `87107f54` (methodology hardening, ships orchestrate v2 + nm-gate as R38+ standard)
+- **r38_orchestrate.sh**: G1+G1'+G2a+G2b. G1' fallback (`bench_mhz ≥ 2200 AND median > 500 TF`) accepts samples failing pre-bench but passing post-bench. Validated on idle/synthetic-reject/hostile-contention.
+- **r38_nm_gate.sh**: drop-in for md5 hygiene (md5 unreliable in env). Symbol catalog: hbshrink (0 default / 4 PROD), hbn/subrbm/4wave/_8wave_rect (0 default), v2 dispatchers (1+ runtime-gated)
+- Verification re-bench R37 Dev A B1 on GPU4: +28.82% Welch t +21.78 → SHIP equivalence CONFIRMED
+
+### Reviewer Phase 1+2 `df649778` (8-cycle baseline + 1/2 STRICT + 1/2 critical bug)
+- **R38 baseline 777.62 TF** (between R36 775.15 and R37 786.64)
+- 8-cycle drift envelope: 766-787 TF, 2.67% spread
+- HB shrink B1 70B-KV STRICT RECONFIRM (5/5 cross-cycle: R36 +28%, R37 +30%, R37 4-GPU +25-31%, R38D +29%, R38R +28%)
+- HB shrink B1 8B-KV CRITICAL FAIL via wire-in bug → fixed in 66ef02d8
+
+### R38 paradigm corrections (2 → cumulative 37 closed levers; R32:21 + R33:5 + R34:4 + R35:1 + R36:2 + R37:2 + R38:2)
+- HB-N shrink REFUTED on V2-CRR wide-N (3-shape independent confirmation)
+- R36 Dev B 6th V2-RRR predicate STRICT-promoted; "K-noise floor" hypothesis closed
+
+### R39+ priority (rebuilt from R38)
+1. 【critical】Re-validate R38 wrap fix `66ef02d8` 8B-KV production via 4-GPU triangulation through dispatcher path (R38 Reviewer Phase 2 protocol)
+2. 【high】MXFP8_DISPATCH_TRACE=1 runtime tracepoint at every dispatch branch — nm-gate cannot catch "compiled-in but unreached" predicates
+3. 【medium】HB-N shrink on V2-RRR wide-N — V2-RRR is autotune-preferred for 8B GU per R34 Dev B, may not be bandwidth-saturated
+4. 【medium】4-GPU STRICT-promote remaining LITEs (R34/R35 Dev A 8B Gate via Dev D's r38_orchestrate.sh + N_PAIRS=15)
+5. 【methodology】All R29-R37 + R38 NEW: orchestrate v2 mandatory, nm-gate mandatory, predicate-fanout SHIPs MUST exercise dispatcher (not .inc-direct kernel calls)
+
 ## R37 cycle 完结 (2026-04-18) ★★★ DOMAIN-LOCK — HB shrink B1 production-wired (70B-KV +30.39%) + 8B-KV STRICT SHIP fan-out (+24.96%) + 3/3 R36 STRICT RECONFIRM + B1 domain rule established (N=1024 tall-thin only) + B3 PIPE=3 hybrid CLOSED structural + first V2-CRR cell to clear FP8 reference (107.4%)
 
 R37 派 4 dev (A wire HB shrink B1 production predicate 70B-KV + 4-GPU triangulation, B HB shrink B1 fan-out to 8B-KV + 8B Gate/Up rect, C HB shrink B1 fan-out to 70B Gate/Up + investigate B3 PIPE=3, D median-of-medians retroactive + 4-GPU triangulation R36 Dev B 8B-Down) + Reviewer (7th-cycle baseline + Phase 2 RECONFIRM HB shrink B1 + 2 V2-RCR predicates). **2 STRICT SHIPs + 1 SHIP-LITE + 2 NO-SHIP** (NO-SHIPs lock the B1 domain rule).
