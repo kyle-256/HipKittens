@@ -38,6 +38,8 @@
 # | double_pump   | double_pump                      | 0             | crr_exact_8wave_double_pump_fastpath.inc   |
 # | mxfp8_4wave   | _4wave                           | 0             | *_mxfp8_4wave_fastpath.inc                 |
 # | rect          | _8wave_rect                      | 0             | *_mxfp8_exact_8wave_rect_fastpath.inc      |
+# | decode_m1     | gemv_m1\|decode_m1               | 0             | mxfp8_decode_m1_fastpath.inc (R42 Dev A)   |
+# | smallm_b32    | smallm_b32\|gemm_tail_kernel_smallm | 0          | mxfp8_smallm_b32_fastpath.inc (R42 Dev B)  |
 #
 # Note (R38 Dev D): V2-RCR predicates (R36 Dev C) and V2-RRR predicates
 # (R36 Dev B) are runtime shape-gated, NOT compile-flag-gated. Their kernel
@@ -93,13 +95,23 @@ FEATURES[warpsm4]="warpsm4"
 FEATURES[double_pump]="double_pump"
 FEATURES[mxfp8_4wave]="_4wave"
 FEATURES[rect]="_8wave_rect"
+# R43 Dev D — extend catalog with R42 macros (decode_m1 + smallm_b32) so
+# default-build hygiene gate catches accidental defaults. Both are
+# `#if MACRO`-guarded with no #define fallback in kernel_mxfp8_layouts.cpp,
+# so the symbols are only emitted when -DMXFP8_DECODE_M1_ENABLE=1 or
+# -DMXFP8_SMALLM_B32_FASTPATH=1 is passed at compile time. Default 8192³
+# build must continue to show count=0 for both.
+FEATURES[decode_m1]="gemv_m1\\|decode_m1"
+FEATURES[smallm_b32]="smallm_b32\\|gemm_tail_kernel_smallm"
 # Runtime-gated (always present — checked with --check-present):
 FEATURES[rcr_v2]="dispatch_rcr_exact_8wave_scaled_v2"
 FEATURES[rrr_v2]="dispatch_rrr_exact_8wave_scaled_v2"
 FEATURES[crr_v2]="dispatch_crr_exact_8wave_scaled_v2"
 
 # Default catalog order (deterministic output)
-DEFAULT_ORDER=(hbshrink hbn subrbm warpsm4 double_pump mxfp8_4wave rect rcr_v2 rrr_v2 crr_v2)
+DEFAULT_ORDER=(hbshrink hbn subrbm warpsm4 double_pump mxfp8_4wave rect \
+               decode_m1 smallm_b32 \
+               rcr_v2 rrr_v2 crr_v2)
 
 # Decide which features to check
 if [ ${#USER_FEATURES[@]} -gt 0 ]; then
