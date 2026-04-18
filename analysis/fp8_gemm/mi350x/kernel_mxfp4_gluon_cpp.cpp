@@ -15,6 +15,8 @@
 #include "kittens.cuh"
 #include "pyutils/pyutils.cuh"
 #include <type_traits>
+#include <cstdlib>
+#include <cstdio>
 using namespace kittens;
 
 #ifndef M_DIM
@@ -3026,6 +3028,9 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 #endif
 
 #if PERSISTENT_XCD
+    __syncthreads();   // Fix B: ensure all stores for the current tile are visible
+                       // and all threads have left the store loop before the next
+                       // atomicAdd claim on the global tile counter.
     } // end while(true) persistent loop
 #else
     } // end static-dispatch block
@@ -3036,11 +3041,24 @@ void dispatch_gluon_cpp(gluon_globals g) {
     int m = static_cast<int>(g.c.rows());
     int n = static_cast<int>(g.c.cols());
 #if PERSISTENT_XCD
-    // Reset persistent tile counter to 0 before each launch
+    // Fix A: robust counter reset (checked symbol lookup + synchronous memset).
     unsigned int* counter_dev = nullptr;
-    hipGetSymbolAddress((void**)&counter_dev, HIP_SYMBOL(g_persistent_tile_counter));
-    hipMemsetAsync(counter_dev, 0, sizeof(unsigned int), 0);
-    const dim3 grid(PERSISTENT_GRID);
+    hipError_t err = hipGetSymbolAddress((void**)&counter_dev,
+                                         HIP_SYMBOL(g_persistent_tile_counter));
+    if (err != hipSuccess || counter_dev == nullptr) {
+        fprintf(stderr, "PERSISTENT_XCD: hipGetSymbolAddress failed (%d) - aborting\n",
+                (int)err);
+        std::abort();
+    }
+    hipError_t merr = hipMemset(counter_dev, 0, sizeof(unsigned int));
+    if (merr != hipSuccess) {
+        fprintf(stderr, "PERSISTENT_XCD: hipMemset failed (%d)\n", (int)merr);
+        std::abort();
+    }
+    // Fix C: cap grid by problem size so we never over-launch on small problems.
+    const int total_tiles = (m / BLK) * (n / BLK);
+    const int grid_x = total_tiles < PERSISTENT_GRID ? total_tiles : PERSISTENT_GRID;
+    const dim3 grid(grid_x);
 #else
     const dim3 grid((m / BLK) * (n / BLK));
 #endif

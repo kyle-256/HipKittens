@@ -1,0 +1,27 @@
+R24D smoke: 9 bench jobs (3 shapes x 3 variants), GPUs [0, 1, 2, 3]
+warmup=200 iters=500 trim=0.1
+==============================================================================================================
+  DLA1   _r24d_baseline                 gpu=0   5222.87 TFLOPS
+  DLA1   _r24d_ant2                     gpu=2   4957.36 TFLOPS
+  DLA1   _r24d_ant1                     gpu=1   4984.29 TFLOPS
+  DLA2   _r24d_baseline                 gpu=3   4221.82 TFLOPS
+  DLA7   _r24d_baseline                 gpu=2   4122.33 TFLOPS
+  DLA7   _r24d_ant1                     gpu=3   3929.40 TFLOPS
+  DLA2   _r24d_ant1                     gpu=0   3939.21 TFLOPS
+  DLA2   _r24d_ant2                     gpu=1   3873.47 TFLOPS
+  DLA7   _r24d_ant2                     gpu=0   3956.28 TFLOPS
+
+Elapsed: 20.9s
+
+==============================================================================================================
+SUMMARY (Δ vs _r24d_baseline, +1.5pp gate)
+==============================================================================================================
+  DLA1 baseline = 5222.87 TFLOPS
+    _r24d_ant1                       4984.29  Δ=-238.58 (-4.57%)  LOSE
+    _r24d_ant2                       4957.36  Δ=-265.51 (-5.08%)  LOSE
+  DLA2 baseline = 4221.82 TFLOPS
+    _r24d_ant1                       3939.21  Δ=-282.61 (-6.69%)  LOSE
+    _r24d_ant2                       3873.47  Δ=-348.35 (-8.25%)  LOSE
+  DLA7 baseline = 4122.33 TFLOPS
+    _r24d_ant1                       3929.40  Δ=-192.93 (-4.68%)  LOSE
+    _r24d_ant2                       3956.28  Δ=-166.05 (-4.03%)  LOSE

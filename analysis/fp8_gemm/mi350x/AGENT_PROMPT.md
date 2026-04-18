@@ -52,12 +52,15 @@
 - **工作目录**: `analysis/fp8_gemm/mi350x`
 - **Cursor Repo**: `/shared_nfs/kyle/test/Hipkittens2` (只读参考)
 
-## 当前成绩 (2026-04-18, post-R22-rebench + R23 dead-end)
+## 当前成绩 (2026-04-18, post-R24)
 - **R22-rebench (full 42-shape, COMPLETE)**: **29/42 WIN, 13/42 LOSE**, 0 ERR, avg ratio 105.3% (+5 vs R20B/24)
 - 13 LOSE shapes:
   - DLA1 4096x32768x128256 = 91.9%, DLA2 128256x32768x4096 = 96.3%, DLA7 28672x32768x4096 = 96.9%
   - mid-gap (95.7-99.9%): 14336x4096x32768, 4096x28672x32768, 16384x28672x4096, 28672x4096x16384, 4096x32768x14336, 4096x32768x28672, 16384x4096x28672, 16384x28672x2048, 14336x32768x4096, 4096x14336x16384
 - **R22B (NT/streaming on A+B), R23A (STATIC_XCD_REMAP), R23B (PERSISTENT_XCD)** — all DEAD END (R23B has correctness bug; R23A best DLA7 +1.50% borderline noise; R22B all regress)
+- **R24A — PERSISTENT_XCD bug fix attempts (Fix A+B+C) — DEAD END**. Host-side fixes did not resolve coverage bug (still 6.4%/28.6%). Bug is in kernel-side persistent loop logic, requires risky rewrite. Out of scope. Code committed (gated by `#if PERSISTENT_XCD`, no baseline impact).
+- **R24D — A-only NT cache hint — DEAD END**. All variants regress 4-8% on DLA1/2/7. Combined with R22B, **the entire {A,B,both} × {non_temporal,cache_stream} cache-hint axis is exhausted on DLA shapes**.
+- **Cache-hint axis: CLOSED.** Future DLA work must attack via (a) reducing LDS pressure / vmcnt waits, (b) restructuring K-loop for longer in-CTA B-tile reuse, or (c) L2 software prefetch via `s_load_dword`.
 
 - **R20B 最新 full bench (116 variants, R18+R19 wins wired)**: **27/42 WIN** (+3 LOSE→WIN flips: P1, S1, S5; 0 regressions)
 - **R20A 11 个 (parent + BARRIER_TO_WAITCNT) stacks wired into bench_all_42.py post-R20**: 127 variants — projected next bench **~34/42 WIN**

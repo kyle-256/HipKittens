@@ -366,11 +366,23 @@ Per R22A's mechanistic correction (TCP_TA_DATA_STALL = producer-side `buffer_loa
   - DLA7 _pxcd_b1/_b4 = "12834/14246 TFLOPS" with 28.6% coverage
   - VERDICT: PERSISTENT_XCD's atomic tile claim either races, deadlocks, or terminates after fewer iterations than there are tiles. Kernel-side bug in PERSISTENT_GRID dispatcher logic. Cannot evaluate perf until fixed.
 
-## Round 24 (next) — kernel-side fixes for R23B + new producer-side angles
-- **R24A — debug PERSISTENT_XCD coverage bug** (probably a wrong tile counter or an atomic CAS that reads stale state across XCD groups). Worth fixing because the dispatcher overhead reduction is a known win on H100 mega-M shapes; if the kernel can be made correct, +2-5pp on DLA2 is plausible.
-- **R24B — L2 prefetch hints (R23C, deferred)**: emit `s_load_dword` for next K-tile's A/B addresses inside current K-tile MFMA window. Speculative L2 fill hides HBM latency; only loads addresses, not data.
-- **R24C — outer-K pull-forward (R23D, deferred)**: prefetch K+2/K+3 inside K+0/K+1 MFMA window. Pure scheduling change; no LDS budget impact if data lives in L2 only.
-- **R24D — buffer_load_to_lds NT bit on A-tile only** (A is M-streamed, B is K-shared). Asymmetric NT may avoid the L2 reuse-thrash that killed R22B. Only A-stream sees no temporal reuse since K-iters re-stream A.
+## Round 24 (2026-04-18) — R24A debug + R24D dead-end; R24B/R24C still open
+- **R24A — debug PERSISTENT_XCD coverage bug (DEAD END after Fix A+B+C)**:
+  - Identified 3 root-cause hypotheses (see `r24a_pxcd_debug.md`):
+    - H1: `g_persistent_tile_counter` never reset — `hipGetSymbolAddress` rc not checked, host writes to NULL ptr
+    - H3: PERSISTENT_GRID=608 over-launches on small problems (DLA1)
+    - H4: missing `__syncthreads()` between tile-body tail and next atomicAdd
+  - Applied **Fix A** (checked counter reset + synchronous `hipMemset`) + **Fix B** (`__syncthreads()` before loop close) + **Fix C** (cap grid by `total_tiles`).
+  - Re-bench (`bench_round23_optB_v2.log`): coverage **STILL 6.4%/28.6%** on DLA2/DLA7; DLA1 STILL `rc=-6`.
+  - VERDICT: bug is in the kernel-side persistent loop itself (`kernel_mxfp4_gluon_cpp.cpp:2086-2137`), not in the host counter-reset path. Likely the atomicAdd return value, total_blocks calculation post-XCD-remap, or loop termination condition. Fixing it requires a kernel rewrite that risks breaking the static-dispatch baseline. **Out of scope for R24.**
+  - The 3 fixes are committed (gated by `#if PERSISTENT_XCD`, no behavior change at default PERSISTENT_XCD=0) as documentation of the debug attempt.
+- **R24D — A-only NT cache hint on DLA shapes (DEAD END)** (`r24d_results.md`):
+  - 3 variants on DLA1/2/7 (5-run smoke, warmup=200/iters=500/trim=0.10).
+  - DLA1: ant1=−4.57%, ant2=−5.08%; DLA2: ant1=−6.69%, ant2=−8.25%; DLA7: ant1=−4.68%, ant2=−4.03%.
+  - Combined with R22B (B-NT and B+A NT also LOSE), this **fully exhausts the {A,B,both}×{non_temporal,cache_stream} cache-hint matrix**: all 6 combinations regress on DLA shapes.
+  - Mechanistic refutation: A-tile is M-streamed across CTAs, but the same A-line is consumed by multiple warps within a CTA (M-tile rows × K-iters); evicting early forces re-fetch. Even GLC-only `cache_stream` LOSEs.
+- **R24B — L2 prefetch hints** (s_load_dword for next K-tile A/B addresses inside current K-tile MFMA window) — **STILL OPEN**, dispatched as Round 25.
+- **R24C — outer-K pull-forward** (prefetch K+2/K+3 inside K+0/K+1 MFMA window; pure scheduling change) — **STILL OPEN**, dispatched as Round 25.
 
 ## Round 21 (2026-04-18) — recon + audit; head macros DEAD END
 3 parallel agents: (a) **R21-recon** rocprof-PMC on DLA2/DLA7, (b) **R21-audit** untried-axis survey, (c) **R21B** probe 3 head macros from audit.
