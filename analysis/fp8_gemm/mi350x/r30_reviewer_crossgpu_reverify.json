@@ -1,0 +1,199 @@
+{
+  "meta": {
+    "agent": "R30 Reviewer",
+    "branch": "r30-rev",
+    "commit_base": "cd630fd8",
+    "purpose": "cross-GPU reverify of 3 R29-flagged negative-t MXFP8 cells",
+    "phys_gpu": "5",
+    "iters": "FP8 + MXFP8 WARMUP=50 ITERS=100 N_RUNS=5",
+    "preheat": "per-process 8s 16k FP16 matmul preheat (same as R29)",
+    "outlier_filter": "drop samples > 2 sigma from median",
+    "build_cache_hygiene": "rm -f tk_*.so before each build; per-build md5 logged in build_md5.log",
+    "note": "Source unchanged from R29 base (cd630fd8 = R29 cycle wrap); kernel binary equivalence enforced by verifying md5 of .so matches R27/R29 builds for same shape."
+  },
+  "cells": [
+    {
+      "name": "8b_gate_crr",
+      "shape": "4096x14336x4096",
+      "layout": "crr",
+      "r30_crossgpu": {
+        "fp8_samples": [
+          2534.6295,
+          2604.2217,
+          2604.5038,
+          2597.9937,
+          2613.3884
+        ],
+        "fp8_clean_samples": [
+          2604.2217,
+          2604.5038,
+          2597.9937,
+          2613.3884
+        ],
+        "fp8_median": 2604.36,
+        "fp8_stdev": 6.33,
+        "fp8_snr_db": 49.62,
+        "fp8_det_ok": true,
+        "mxfp8_samples": [
+          2322.7219,
+          2382.3136,
+          2381.7709,
+          2385.1677,
+          2380.14
+        ],
+        "mxfp8_clean_samples": [
+          2382.3136,
+          2381.7709,
+          2385.1677,
+          2380.14
+        ],
+        "mxfp8_median": 2382.04,
+        "mxfp8_stdev": 2.09,
+        "mxfp8_snr_db": 49.61,
+        "mxfp8_det_ok": true,
+        "ratio": 0.9146
+      },
+      "r29_gpu4": {
+        "fp8_median": 2660.37,
+        "mxfp8_median": 2390.72,
+        "ratio": 0.8986
+      },
+      "r27_gpu4": {
+        "fp8_median": 2610.48,
+        "mxfp8_median": 2405.79,
+        "ratio": 0.9216
+      },
+      "delta_mxfp8_pct_r30_vs_r27": -0.99,
+      "delta_mxfp8_pct_r30_vs_r29": -0.36,
+      "welch_t_mxfp8_r30_vs_r27": -9.23,
+      "welch_t_mxfp8_r30_vs_r29": -4.14,
+      "welch_t_fp8_r30_vs_r27": -0.89,
+      "welch_t_fp8_r30_vs_r29": -12.84,
+      "verdict": "inconclusive",
+      "rationale": "R30 cross-GPU MXFP8 median 2382.04 differs from both R29 (2390.72, delta=-0.36%, t=-4.14) and R27 (2405.79, delta=-0.99%, t=-9.23)."
+    },
+    {
+      "name": "8b_down_crr",
+      "shape": "4096x4096x14336",
+      "layout": "crr",
+      "r30_crossgpu": {
+        "fp8_samples": [
+          2941.7606,
+          3011.6147,
+          3028.3757,
+          3039.9586,
+          3067.0936
+        ],
+        "fp8_clean_samples": [
+          2941.7606,
+          3011.6147,
+          3028.3757,
+          3039.9586,
+          3067.0936
+        ],
+        "fp8_median": 3028.38,
+        "fp8_stdev": 47.05,
+        "fp8_snr_db": 49.6,
+        "fp8_det_ok": true,
+        "mxfp8_samples": [
+          2657.3927,
+          2750.5061,
+          2763.8072,
+          2794.7523,
+          2832.0973
+        ],
+        "mxfp8_clean_samples": [
+          2657.3927,
+          2750.5061,
+          2763.8072,
+          2794.7523,
+          2832.0973
+        ],
+        "mxfp8_median": 2763.81,
+        "mxfp8_stdev": 65.27,
+        "mxfp8_snr_db": 49.61,
+        "mxfp8_det_ok": true,
+        "ratio": 0.9126
+      },
+      "r29_gpu4": {
+        "fp8_median": 2993.91,
+        "mxfp8_median": 2712.16,
+        "ratio": 0.9059
+      },
+      "r27_gpu4": {
+        "fp8_median": 2958.56,
+        "mxfp8_median": 2779.39,
+        "ratio": 0.9394
+      },
+      "delta_mxfp8_pct_r30_vs_r27": -0.56,
+      "delta_mxfp8_pct_r30_vs_r29": 1.9,
+      "welch_t_mxfp8_r30_vs_r27": -0.6,
+      "welch_t_mxfp8_r30_vs_r29": 1.5,
+      "welch_t_fp8_r30_vs_r27": 2.81,
+      "welch_t_fp8_r30_vs_r29": 1.06,
+      "verdict": "gpu_state_artifact",
+      "rationale": "R30 cross-GPU MXFP8 median 2763.81 matches R27 GPU4 2779.39 within 1.5% (delta=-0.56%, Welch t vs R27 = -0.60). R29 GPU4 drop attributable to GPU4-state/DPM, not source-driven regression."
+    },
+    {
+      "name": "70b_kv_crr",
+      "shape": "4096x1024x8192",
+      "layout": "crr",
+      "r30_crossgpu": {
+        "fp8_samples": [
+          908.6128,
+          910.5589,
+          914.329,
+          913.4248,
+          915.2742
+        ],
+        "fp8_clean_samples": [
+          908.6128,
+          910.5589,
+          914.329,
+          913.4248,
+          915.2742
+        ],
+        "fp8_median": 913.42,
+        "fp8_stdev": 2.77,
+        "fp8_snr_db": 49.62,
+        "fp8_det_ok": true,
+        "mxfp8_samples": [
+          758.6995,
+          762.5861,
+          767.3649,
+          767.1044,
+          767.3854
+        ],
+        "mxfp8_clean_samples": [
+          762.5861,
+          767.3649,
+          767.1044,
+          767.3854
+        ],
+        "mxfp8_median": 767.23,
+        "mxfp8_stdev": 2.35,
+        "mxfp8_snr_db": 49.6,
+        "mxfp8_det_ok": true,
+        "ratio": 0.84
+      },
+      "r29_gpu4": {
+        "fp8_median": 940.81,
+        "mxfp8_median": 766.86,
+        "ratio": 0.8151
+      },
+      "r27_gpu4": {
+        "fp8_median": 911.31,
+        "mxfp8_median": 787.96,
+        "ratio": 0.8646
+      },
+      "delta_mxfp8_pct_r30_vs_r27": -2.63,
+      "delta_mxfp8_pct_r30_vs_r29": 0.05,
+      "welch_t_mxfp8_r30_vs_r27": -8.24,
+      "welch_t_mxfp8_r30_vs_r29": 0.56,
+      "welch_t_fp8_r30_vs_r27": 1.25,
+      "welch_t_fp8_r30_vs_r29": -22.79,
+      "verdict": "real_regression_or_persistent",
+      "rationale": "R30 cross-GPU MXFP8 median 767.23 matches R29 GPU4 766.86 (delta=+0.05%, t vs R29 = +0.56); both differ from R27 GPU4 (787.96, t vs R27 = -8.24). Consistent across GPUs \u21d2 either real regression since R27 or shared cross-cycle environment shift."
+    }
+  ]
+}

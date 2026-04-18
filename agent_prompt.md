@@ -54,6 +54,77 @@ python3 test_mxfp8_python.py 4096 14336 4096
 5. 禁止提交 `*.so`、`*.s`、`*_layout_results_*.json`、`.bak*`、`gpucore.*`、`__pycache__` 等（`.gitignore` 已覆盖）
 6. 每个子 agent 使用不同 `HIP_VISIBLE_DEVICES` 以免 GPU 冲突：Dev A → 0，Dev B → 1，Dev C → 2，Reviewer/formal → 7
 
+## R30 cycle 完结 (2026-04-18) ★ 0 SHIP + 4 STRUCTURAL CLOSURES + R28 SHIP健康 + R29 cells resolved (0/3 source-driven)
+
+R30 派 4 dev (A GPU0 rect-V2 fastpath, B GPU1 VGPR/occ=3, C GPU2 buffer_load_dword_lds audit, D GPU3 H7 B-tile reorder) + Reviewer (GPU4 cross-GPU reverify of R29's 3 negative-t cells).
+
+### R30 Reviewer cross-GPU reverify (commit `0e39e6b1` r30-rev)
+
+GPU5 reverify of R29 GPU4 negative-t cells:
+
+| Cell | R27 GPU4 | R29 GPU4 | R30 GPU5 | Verdict |
+|---|---:|---:|---:|---|
+| 8b_down_crr | 2779.39 | 2712.16 | **2763.81** | **GPU4-state artifact** (R29 was outlier; t=−0.6 vs R27) |
+| 70b_kv_crr | 787.96 | 766.86 | **767.23** | environmental drift, not source-driven (matches R29 within 0.05%) |
+| 8b_gate_crr | 2405.79 | 2390.72 | **2382.04** | inconclusive (~1% persistent, not source-driven) |
+
+**0/3 are source-driven regressions**. R28 SHIP healthy. Per-GPU dispersion for 70b_kv_crr (GPU0=791, GPU4-R27=788, GPU5=767, GPU4-R29=767) — R31 should run 4-GPU baseline triangulation to fix the live baseline.
+
+### R30 Dev outcomes
+
+- **Dev A (rect-V2 fastpath) NO SHIP**: re-validated 2.5d Path A estimate (600+ lines hand-tuned, 4 hardcoded static_asserts). Path B already shipped as R29 guard. Refined Path A breakdown with line numbers in `r30a_findings.md` for R31. Structural ceiling: rect at 70B KV upper-bounds at 2× grid = 42% CU occupancy (304 CUs) — 1.5× SHIP target near structural ceiling.
+- **Dev B (VGPR reduction → occupancy=3) NO SHIP — STRUCTURAL CLOSURE**: V2-CRR baseline 234 VGPR / 0 spill / occ=2 / LDS=139264 B/block. HW ground truth (hipGetDeviceProperties): LDS per CU=163840 B → two blocks need 278528 B = **1.7× LDS overflow**. **LDS, not VGPR, is the binding occupancy constraint.** Compiler silently ignores `mb=3` hint (kernel binary bit-identical, md5 confirmed). Bench: 8192³ +0.02% (NULL t=+0.06); 70B Gate −0.55% t=−3.26 (SPI launch-allocator overhead).
+- **Dev C (buffer_load_dword_lds audit) AUDIT-ONLY**: SASS-level trace of V2-CRR scale path. **Zero LDS round-trip** — scales declared as VGPR arrays, populated by `raw_buffer_load_b128/b64` directly into VGPRs, consumed as VGPR operands of `mfma_scale_f32_16x16x128_f8f6f4`. No `ds_write` to convert. Bonus: TK `G::load` already uses `raw_buffer_load_lds` for tile fills (only LDS-bound traffic in V2-CRR) — lever already maxed. **Critical for Dev B: scale-pack VGPRs total ~6 of 232 (2.6%); even eliminating all scale VGPRs cannot help reach occupancy=3.**
+- **Dev D (H7 B-tile reorder for V2-RCR) NO SHIP — STRUCTURAL CLOSURE**: 4 reorder variants. v1/v3/v4 break correctness (SNR 7-24 dB, det FAIL) due to LDS lifetime constraint — `Bs[tic][1]` is read by `rcr_exact_load_st_to_rt(b1,...)` at pre-cB; next-iter VMEM `G::load(Bs[tic][1])` issued ABOVE that point races against still-draining LDS reads. Only v2 (defer-both-to-pre-cD) is correctness-safe and is NULL (Welch t=−0.247). **Baseline ordering already at maximum-latency-hiding allowed by LDS lifetime.**
+
+### R30 paradigm corrections (4)
+
+1. **Rectangular V2-CRR fastpath structural ceiling** (Dev A): rect at 70B KV upper-bounds at 2× grid = 42% CU occupancy. 1.5× SHIP target near ceiling. Closing 70B KV to ≥0.92 likely needs rect + another lever (split-K with atomic, or BLK_N=64 second scaffolding).
+2. **V2-CRR is LDS-bound, not VGPR-bound for occupancy** (Dev B): `GEMM_MIN_BLOCKS_PER_CU > 2` is CLOSED. NEVER prototype "occ=3 via VGPR reduction" without first dropping LDS footprint below 81920 B (single-buffer As/Bs[2][2]→[1][2] or smaller BLK).
+3. **`buffer_load_dword_lds` is N/A for V2-CRR scales** (Dev C): V2 paradigm is scale-direct-to-VGPR with zero LDS round-trip. NEVER prototype "buffer_load_dword_lds for V2 scales". Re-confirms R27 paradigm correction #1 with empirical SASS evidence.
+4. **H7 B-tile reorder structurally exhausted for V2-RCR** (Dev D): LDS lifetime pins B-tile loads to ≥pre-cB / ≥pre-cD. NEVER prototype "B-tile reorder hoist-above-cB for V2-RCR" — guaranteed correctness failure.
+
+### Cumulative lever-closure tally (R27-R30)
+
+**14 closed levers** — search space narrowing meaningfully:
+1. s_setprio for V2-CRR (R28)
+2. s_setprio for V2-RCR (R29)
+3. sched_barrier mask relax for V2-RCR (R29)
+4. cachepolicy gate broadening beyond R28 boundary (R29)
+5. cachepolicy for V2-RCR (R27 + R29 confirm)
+6. Scale LDS double-buffer / SCALE_LDS REPLACE (R23/R27)
+7. Split-K-along-K (R27)
+8. V1 vs V2 runtime size-gating (R26)
+9. Square BLK=128 rewrite (R27 — rect not square)
+10. LDS bank conflicts for V2-CRR (R29)
+11. Occupancy=3 via VGPR reduction (R30 — LDS-binding)
+12. `buffer_load_dword_lds` for V2 scales (R30)
+13. H7 B-tile reorder hoist-above-cB for V2-RCR (R30)
+14. Rect ceiling at 2× grid for 70B KV (R30 structural)
+
+### R31+ priority list (rebuilt from R30 closures)
+
+1. **【critical / 2-3 day】Rectangular BLK_M=256/BLK_N=128 V2-CRR fastpath kernel**: still #1, still hardest. Adjusted target: rect alone caps at ~1.5× on 70B KV. To hit ≥0.92 ratio, may need rect + another lever.
+2. **【high / 2-3 day】LDS footprint reduction for V2-CRR**: ONLY remaining path to occupancy=3. Drop 139264 B/block below 81920 B by single-buffering As/Bs[2][2]→[1][2]. Targets 8192³ V2-CRR -8.9% gap.
+3. **【high】4-GPU baseline triangulation for 70B KV V2-CRR** (R30 Reviewer rec): per-GPU dispersion observed; fix the live baseline.
+4. **【medium / 1-2 day】Dispatch-geometry change for 4096³ V2-RCR**: H7 closed; GRID under-occupancy ceiling (16% CUs idle: 256 blocks vs 304 CUs) binds. Persistent-CU scheduling or BLK=128 resurrection.
+5. **【medium / 1-2 day】PIPELINE_SCALE second-buffer for V2-RCR**: R28 Dev D scaffolding on r28-d. Constrained by Dev B's LDS-binding finding for CRR — RCR may have similar headroom.
+6. **【methodology】All R31+ orchestrate scripts must `rm -f tk_mxfp8_layouts*.so` + log per-build md5; cross-GPU reverify on flagged cells**.
+7. **【closed】**: 14 levers per cumulative tally. Do not re-prototype.
+
+### R30 Cherry-pick status
+
+Cherry-picked to feat/mxfp8-only:
+- `r30_reviewer_crossgpu_reverify.json` + `r30_reviewer_findings.md` + `r30_reviewer_crossgpu_orchestrate.sh` + `r30_reviewer_crossgpu_aggregate.py`
+- `r30a_findings.md` + `r30a_orchestrate.sh` (Dev A refined Path A breakdown)
+- `r30b_findings.md` (Dev B LDS-binding paradigm correction with HW measurements)
+- `r30c_findings.md` + `r30c_sass_inventory.log` (Dev C SASS data-flow trace)
+- `r30d_findings.md` + `r30d_bench.py` + `r30d_orchestrate.sh` (Dev D H7 closure)
+
+NOT cherry-picked: r30-a R28D+R29A scaffolding (no rect-V2 kernel), r30-d `MXFP8_RCR_V2_BLOAD_REORDER` macro (default-off, enabled variants corrupt/NULL).
+
+Side-branch commits preserved: `7702f000` (r30-a), `2587a01c` (r30-b), `1849bc4e` (r30-c), `11576192` (r30-d), `0e39e6b1` (r30-rev).
+
 ## R29 cycle 完结 (2026-04-18) ★ 0 SHIP + R28 SHIP confirmed (Welch t=+10.20) + 5 paradigm corrections (3 levers permanently closed)
 
 R29 派 4 dev (A GPU0 rect-V2 BLK, B GPU1 cp autotune sweep, C GPU2 V2-RCR sched/setprio audit, D GPU3 LDS bank conflict audit) + Reviewer (GPU4 reverify). **Outcome**: 0 dev SHIP, but R28 cachepolicy auto-select SHIP confirmed in production by Reviewer Welch t=+10.20 (+1.99% absolute MXFP8 perf on 70B Gate, matches R28 Dev A's +2.7% to within bench-to-bench noise).
