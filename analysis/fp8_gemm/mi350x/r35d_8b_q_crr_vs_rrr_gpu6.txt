@@ -1,0 +1,20 @@
+[sclk-pre-preheat] GPU[6]		: sclk clock level: 1: (2349Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[6]		: sclk clock level: 1: (2036Mhz)
+CORRECTNESS_CRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[6]		: sclk clock level: 1: (2338Mhz)
+WARMUP 0 RRR=2076.24 CRR=2078.65 sclk=GPU[6]		: sclk clock level: 1: (2374Mhz)
+WARMUP 1 RRR=2076.77 CRR=2183.43 sclk=GPU[6]		: sclk clock level: 1: (2373Mhz)
+PAIR 0 RRR_1=2166.39 CRR_1=2099.70 RRR_2=2334.10 CRR_2=2247.01
+PAIR 1 RRR_1=2414.37 CRR_1=2286.61 RRR_2=2434.01 CRR_2=2310.46
+PAIR 2 RRR_1=2472.22 CRR_1=2349.01 RRR_2=2444.50 CRR_2=2370.79
+PAIR 3 RRR_1=2448.19 CRR_1=2347.40 RRR_2=2443.25 CRR_2=2364.75
+PAIR 4 RRR_1=2467.25 CRR_1=2339.22 RRR_2=2490.28 CRR_2=2323.09
+[sclk-post-bench] GPU[6]		: sclk clock level: 1: (2339Mhz)
+CRR  median=2331.15 mean=2303.80 stdev=80.96 n=10
+RRR  median=2443.87 mean=2411.46 stdev=96.05 n=10
+Welch t (CRR vs RRR) = 2.710  (positive = RRR faster)
+DELTA_MEDIAN_PCT RRR_vs_CRR = +4.835%
+CRR_TFLOPS_LIST 2099.6965,2247.0086,2286.6073,2310.4606,2349.0088,2370.7890,2347.3984,2364.7543,2339.2208,2323.0881
+RRR_TFLOPS_LIST 2166.3874,2334.1016,2414.3713,2434.0057,2472.2180,2444.5012,2448.1920,2443.2462,2467.2492,2490.2818

@@ -1,0 +1,45 @@
+########## BUILD PHASE — 14 cells ##########
+===== BUILD tag=8b_q 4096x4096x4096 =====
+BUILD OK tk_mxfp8_r35d_8b_q.cpython-310-x86_64-linux-gnu.so md5=6f0a0b38480e8b2c7c1882757177551e
+===== BUILD tag=8b_k 4096x1024x4096 =====
+BUILD OK tk_mxfp8_r35d_8b_k.cpython-310-x86_64-linux-gnu.so md5=95d94096d1a4363cd8134b62e3cac175
+===== BUILD tag=8b_v 4096x1024x4096 =====
+BUILD OK tk_mxfp8_r35d_8b_v.cpython-310-x86_64-linux-gnu.so md5=cc6d833643894062f70cf571b9d77f4e
+===== BUILD tag=8b_o 4096x4096x4096 =====
+BUILD OK tk_mxfp8_r35d_8b_o.cpython-310-x86_64-linux-gnu.so md5=e8a055eefdddad821bb6599702f5bef2
+===== BUILD tag=8b_gate 4096x14336x4096 =====
+BUILD OK tk_mxfp8_r35d_8b_gate.cpython-310-x86_64-linux-gnu.so md5=aa1696a83fe09a093d81b91e2b8ef6ef
+===== BUILD tag=8b_up 4096x14336x4096 =====
+BUILD OK tk_mxfp8_r35d_8b_up.cpython-310-x86_64-linux-gnu.so md5=a77ac316424a6bb633febf8a8482e1c3
+===== BUILD tag=8b_down 4096x4096x14336 =====
+BUILD OK tk_mxfp8_r35d_8b_down.cpython-310-x86_64-linux-gnu.so md5=c4fa89b4491c90eed5f7cc9553525cee
+===== BUILD tag=70b_q 4096x8192x8192 =====
+BUILD OK tk_mxfp8_r35d_70b_q.cpython-310-x86_64-linux-gnu.so md5=d1e4fcb56062f78cfa0dc68c02a5b6bf
+===== BUILD tag=70b_k 4096x1024x8192 =====
+BUILD OK tk_mxfp8_r35d_70b_k.cpython-310-x86_64-linux-gnu.so md5=a1ac6e2e58c5d20ac27027e967c5688a
+===== BUILD tag=70b_v 4096x1024x8192 =====
+BUILD OK tk_mxfp8_r35d_70b_v.cpython-310-x86_64-linux-gnu.so md5=dd02394c4b7dd7ff3ef50c3197edece9
+===== BUILD tag=70b_o 4096x8192x8192 =====
+BUILD OK tk_mxfp8_r35d_70b_o.cpython-310-x86_64-linux-gnu.so md5=7687c99d1647c42cf450871a511dfc48
+===== BUILD tag=70b_gate 4096x28672x8192 =====
+BUILD OK tk_mxfp8_r35d_70b_gate.cpython-310-x86_64-linux-gnu.so md5=90e94f6d311c65c0052c1dfa2d767e2f
+===== BUILD tag=70b_up 4096x28672x8192 =====
+BUILD OK tk_mxfp8_r35d_70b_up.cpython-310-x86_64-linux-gnu.so md5=617e85e2fe36664f25a3645868cff6e9
+===== BUILD tag=70b_down 4096x8192x28672 =====
+BUILD OK tk_mxfp8_r35d_70b_down.cpython-310-x86_64-linux-gnu.so md5=996df9a75c99016183317970a7618c46
+########## BUILD MD5 SUMMARY ##########
+6f0a0b38480e8b2c7c1882757177551e  tk_mxfp8_r35d_8b_q.cpython-310-x86_64-linux-gnu.so
+95d94096d1a4363cd8134b62e3cac175  tk_mxfp8_r35d_8b_k.cpython-310-x86_64-linux-gnu.so
+cc6d833643894062f70cf571b9d77f4e  tk_mxfp8_r35d_8b_v.cpython-310-x86_64-linux-gnu.so
+e8a055eefdddad821bb6599702f5bef2  tk_mxfp8_r35d_8b_o.cpython-310-x86_64-linux-gnu.so
+aa1696a83fe09a093d81b91e2b8ef6ef  tk_mxfp8_r35d_8b_gate.cpython-310-x86_64-linux-gnu.so
+a77ac316424a6bb633febf8a8482e1c3  tk_mxfp8_r35d_8b_up.cpython-310-x86_64-linux-gnu.so
+c4fa89b4491c90eed5f7cc9553525cee  tk_mxfp8_r35d_8b_down.cpython-310-x86_64-linux-gnu.so
+d1e4fcb56062f78cfa0dc68c02a5b6bf  tk_mxfp8_r35d_70b_q.cpython-310-x86_64-linux-gnu.so
+a1ac6e2e58c5d20ac27027e967c5688a  tk_mxfp8_r35d_70b_k.cpython-310-x86_64-linux-gnu.so
+dd02394c4b7dd7ff3ef50c3197edece9  tk_mxfp8_r35d_70b_v.cpython-310-x86_64-linux-gnu.so
+7687c99d1647c42cf450871a511dfc48  tk_mxfp8_r35d_70b_o.cpython-310-x86_64-linux-gnu.so
+90e94f6d311c65c0052c1dfa2d767e2f  tk_mxfp8_r35d_70b_gate.cpython-310-x86_64-linux-gnu.so
+617e85e2fe36664f25a3645868cff6e9  tk_mxfp8_r35d_70b_up.cpython-310-x86_64-linux-gnu.so
+996df9a75c99016183317970a7618c46  tk_mxfp8_r35d_70b_down.cpython-310-x86_64-linux-gnu.so
+DONE r35d MODE=build PHYS_GPU_ARG=6

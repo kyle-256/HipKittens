@@ -1,0 +1,742 @@
+########## BENCH PHASE — CRR vs RRR GPU7 ##########
+===== BENCH cell=8b_q GPU=7 (HIP=7) 4096x4096x4096 crr vs rrr attempt=1 =====
+[sclk-pre-preheat] GPU[7]		: sclk clock level: 1: (166Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[7]		: sclk clock level: 1: (2255Mhz)
+CORRECTNESS_CRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[7]		: sclk clock level: 1: (2367Mhz)
+WARMUP 0 RRR=2131.27 CRR=2196.40 sclk=GPU[7]		: sclk clock level: 1: (2374Mhz)
+WARMUP 1 RRR=2070.95 CRR=2146.08 sclk=GPU[7]		: sclk clock level: 1: (2369Mhz)
+PAIR 0 RRR_1=2057.06 CRR_1=2141.94 RRR_2=2348.97 CRR_2=2216.07
+PAIR 1 RRR_1=2352.55 CRR_1=2275.38 RRR_2=2397.72 CRR_2=2289.97
+PAIR 2 RRR_1=2375.57 CRR_1=2320.84 RRR_2=2417.06 CRR_2=2302.84
+PAIR 3 RRR_1=2407.58 CRR_1=2288.76 RRR_2=2364.40 CRR_2=2305.40
+PAIR 4 RRR_1=2386.50 CRR_1=2267.19 RRR_2=2360.50 CRR_2=2314.80
+[sclk-post-bench] GPU[7]		: sclk clock level: 1: (2338Mhz)
+CRR  median=2289.37 mean=2272.32 stdev=54.74 n=10
+RRR  median=2369.99 mean=2346.79 stdev=104.41 n=10
+Welch t (CRR vs RRR) = 1.998  (positive = RRR faster)
+DELTA_MEDIAN_PCT RRR_vs_CRR = +3.522%
+CRR_TFLOPS_LIST 2141.9420,2216.0710,2275.3769,2289.9660,2320.8442,2302.8381,2288.7648,2305.3961,2267.1884,2314.8003
+RRR_TFLOPS_LIST 2057.0586,2348.9702,2352.5527,2397.7202,2375.5703,2417.0556,2407.5789,2364.4028,2386.5015,2360.5036
+Saved /tmp/wt-r35-d/analysis/fp8_gemm/mi350x/r35d_8b_q_crr_vs_rrr_gpu7.txt
+===== BENCH cell=8b_k GPU=7 (HIP=7) 4096x1024x4096 crr vs rrr attempt=1 =====
+[sclk-pre-preheat] GPU[7]		: sclk clock level: 1: (2090Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[7]		: sclk clock level: 1: (1855Mhz)
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=1024, K=4096) is +8.13% to +8.63% faster on V2-RRR (R33 Dev C 8B KV SHIP, 4-GPU triangulated; min Δ% +8.13). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r33c_findings.md.
+CORRECTNESS_CRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RRR snr_db=49.60 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[7]		: sclk clock level: 1: (2317Mhz)
+WARMUP 0 RRR=692.52 CRR=659.85 sclk=GPU[7]		: sclk clock level: 1: (2358Mhz)
+WARMUP 1 RRR=696.03 CRR=660.83 sclk=GPU[7]		: sclk clock level: 1: (2382Mhz)
+PAIR 0 RRR_1=698.44 CRR_1=655.49 RRR_2=706.02 CRR_2=654.66
+PAIR 1 RRR_1=708.17 CRR_1=659.17 RRR_2=702.11 CRR_2=657.55
+PAIR 2 RRR_1=708.96 CRR_1=659.03 RRR_2=713.75 CRR_2=658.52
+PAIR 3 RRR_1=702.16 CRR_1=649.55 RRR_2=715.01 CRR_2=657.58
+PAIR 4 RRR_1=709.58 CRR_1=658.85 RRR_2=709.53 CRR_2=656.40
+[sclk-post-bench] GPU[7]		: sclk clock level: 1: (2405Mhz)
+CRR  median=657.57 mean=656.68 stdev=2.94 n=10
+RRR  median=708.56 mean=707.37 stdev=5.25 n=10
+Welch t (CRR vs RRR) = 26.635  (positive = RRR faster)
+DELTA_MEDIAN_PCT RRR_vs_CRR = +7.756%
+CRR_TFLOPS_LIST 655.4938,654.6642,659.1652,657.5513,659.0340,658.5189,649.5458,657.5810,658.8520,656.3951
+RRR_TFLOPS_LIST 698.4414,706.0192,708.1722,702.1058,708.9566,713.7515,702.1632,715.0104,709.5762,709.5299
+AUTO-RETRY: sclk-post-preheat=1855MHz < 2200, attempt=1
+===== BENCH cell=8b_k GPU=7 (HIP=7) 4096x1024x4096 crr vs rrr attempt=2 =====
+[sclk-pre-preheat] GPU[7]		: sclk clock level: 1: (1328Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[7]		: sclk clock level: 1: (2039Mhz)
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=1024, K=4096) is +8.13% to +8.63% faster on V2-RRR (R33 Dev C 8B KV SHIP, 4-GPU triangulated; min Δ% +8.13). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r33c_findings.md.
+CORRECTNESS_CRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RRR snr_db=49.60 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[7]		: sclk clock level: 1: (2365Mhz)
+WARMUP 0 RRR=702.43 CRR=662.35 sclk=GPU[7]		: sclk clock level: 1: (2391Mhz)
+WARMUP 1 RRR=700.95 CRR=650.39 sclk=GPU[7]		: sclk clock level: 1: (2404Mhz)
+PAIR 0 RRR_1=693.49 CRR_1=664.70 RRR_2=719.07 CRR_2=656.54
+PAIR 1 RRR_1=715.49 CRR_1=665.43 RRR_2=719.68 CRR_2=662.87
+PAIR 2 RRR_1=714.55 CRR_1=665.45 RRR_2=713.12 CRR_2=665.05
+PAIR 3 RRR_1=717.53 CRR_1=663.22 RRR_2=718.35 CRR_2=664.00
+PAIR 4 RRR_1=709.73 CRR_1=663.38 RRR_2=710.63 CRR_2=663.24
+[sclk-post-bench] GPU[7]		: sclk clock level: 1: (2396Mhz)
+CRR  median=663.69 mean=663.39 stdev=2.59 n=10
+RRR  median=715.02 mean=713.16 stdev=7.72 n=10
+Welch t (CRR vs RRR) = 19.338  (positive = RRR faster)
+DELTA_MEDIAN_PCT RRR_vs_CRR = +7.734%
+CRR_TFLOPS_LIST 664.7049,656.5359,665.4263,662.8686,665.4464,665.0450,663.2166,663.9958,663.3805,663.2376
+RRR_TFLOPS_LIST 693.4911,719.0682,715.4868,719.6830,714.5465,713.1225,717.5308,718.3469,709.7287,710.6329
+AUTO-RETRY: sclk-post-preheat=2039MHz < 2200, attempt=2
+===== BENCH cell=8b_k GPU=7 (HIP=7) 4096x1024x4096 crr vs rrr attempt=3 =====
+[sclk-pre-preheat] GPU[7]		: sclk clock level: 1: (327Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[7]		: sclk clock level: 1: (2269Mhz)
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=1024, K=4096) is +8.13% to +8.63% faster on V2-RRR (R33 Dev C 8B KV SHIP, 4-GPU triangulated; min Δ% +8.13). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r33c_findings.md.
+CORRECTNESS_CRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RRR snr_db=49.60 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[7]		: sclk clock level: 1: (2351Mhz)
+WARMUP 0 RRR=699.93 CRR=655.97 sclk=GPU[7]		: sclk clock level: 1: (2392Mhz)
+WARMUP 1 RRR=700.63 CRR=662.96 sclk=GPU[7]		: sclk clock level: 1: (2403Mhz)
+PAIR 0 RRR_1=702.98 CRR_1=661.46 RRR_2=710.79 CRR_2=660.54
+PAIR 1 RRR_1=716.24 CRR_1=654.39 RRR_2=716.44 CRR_2=660.12
+PAIR 2 RRR_1=715.19 CRR_1=662.21 RRR_2=716.79 CRR_2=660.77
+PAIR 3 RRR_1=707.23 CRR_1=665.48 RRR_2=711.52 CRR_2=661.15
+PAIR 4 RRR_1=710.76 CRR_1=662.63 RRR_2=718.07 CRR_2=665.18
+[sclk-post-bench] GPU[7]		: sclk clock level: 1: (2400Mhz)
+CRR  median=661.31 mean=661.39 stdev=3.08 n=10
+RRR  median=713.35 mean=712.60 stdev=4.85 n=10
+Welch t (CRR vs RRR) = 28.209  (positive = RRR faster)
+DELTA_MEDIAN_PCT RRR_vs_CRR = +7.870%
+CRR_TFLOPS_LIST 661.4605,660.5439,654.3854,660.1183,662.2150,660.7680,665.4773,661.1540,662.6333,665.1782
+RRR_TFLOPS_LIST 702.9800,710.7860,716.2394,716.4422,715.1884,716.7890,707.2280,711.5161,710.7625,718.0716
+Saved /tmp/wt-r35-d/analysis/fp8_gemm/mi350x/r35d_8b_k_crr_vs_rrr_gpu7.txt
+===== BENCH cell=8b_v GPU=7 (HIP=7) 4096x1024x4096 crr vs rrr attempt=1 =====
+[sclk-pre-preheat] GPU[7]		: sclk clock level: 1: (2370Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[7]		: sclk clock level: 1: (2261Mhz)
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=1024, K=4096) is +8.13% to +8.63% faster on V2-RRR (R33 Dev C 8B KV SHIP, 4-GPU triangulated; min Δ% +8.13). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r33c_findings.md.
+CORRECTNESS_CRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RRR snr_db=49.60 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[7]		: sclk clock level: 1: (2365Mhz)
+WARMUP 0 RRR=740.85 CRR=689.41 sclk=GPU[7]		: sclk clock level: 1: (2398Mhz)
+WARMUP 1 RRR=742.72 CRR=694.53 sclk=GPU[7]		: sclk clock level: 1: (2405Mhz)
+PAIR 0 RRR_1=745.48 CRR_1=677.73 RRR_2=754.58 CRR_2=692.04
+PAIR 1 RRR_1=751.73 CRR_1=690.95 RRR_2=754.24 CRR_2=691.20
+PAIR 2 RRR_1=748.09 CRR_1=691.23 RRR_2=755.21 CRR_2=690.57
+PAIR 3 RRR_1=754.51 CRR_1=701.74 RRR_2=764.24 CRR_2=696.12
+PAIR 4 RRR_1=759.28 CRR_1=699.50 RRR_2=758.46 CRR_2=698.08
+[sclk-post-bench] GPU[7]		: sclk clock level: 1: (2405Mhz)
+CRR  median=691.63 mean=692.92 stdev=6.70 n=10
+RRR  median=754.55 mean=754.58 stdev=5.42 n=10
+Welch t (CRR vs RRR) = 22.626  (positive = RRR faster)
+DELTA_MEDIAN_PCT RRR_vs_CRR = +9.097%
+CRR_TFLOPS_LIST 677.7331,692.0374,690.9466,691.2029,691.2252,690.5706,701.7390,696.1213,699.4990,698.0784
+RRR_TFLOPS_LIST 745.4790,754.5820,751.7276,754.2368,748.0889,755.2062,754.5147,764.2359,759.2759,758.4593
+Saved /tmp/wt-r35-d/analysis/fp8_gemm/mi350x/r35d_8b_v_crr_vs_rrr_gpu7.txt
+===== BENCH cell=8b_o GPU=7 (HIP=7) 4096x4096x4096 crr vs rrr attempt=1 =====
+[sclk-pre-preheat] GPU[7]		: sclk clock level: 1: (512Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[7]		: sclk clock level: 1: (2311Mhz)
+CORRECTNESS_CRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[7]		: sclk clock level: 1: (2355Mhz)
+WARMUP 0 RRR=2144.73 CRR=2245.89 sclk=GPU[7]		: sclk clock level: 1: (2368Mhz)
+WARMUP 1 RRR=2191.45 CRR=2208.59 sclk=GPU[7]		: sclk clock level: 1: (2372Mhz)
+PAIR 0 RRR_1=2142.40 CRR_1=2160.81 RRR_2=2378.77 CRR_2=2308.14
+PAIR 1 RRR_1=2441.27 CRR_1=2348.62 RRR_2=2505.68 CRR_2=2374.53
+PAIR 2 RRR_1=2514.08 CRR_1=2376.24 RRR_2=2519.24 CRR_2=2389.59
+PAIR 3 RRR_1=2528.92 CRR_1=2401.11 RRR_2=2520.28 CRR_2=2402.72
+PAIR 4 RRR_1=2534.97 CRR_1=2390.29 RRR_2=2492.05 CRR_2=2403.63
+[sclk-post-bench] GPU[7]		: sclk clock level: 1: (2336Mhz)
+CRR  median=2382.91 mean=2355.57 stdev=74.53 n=10
+RRR  median=2509.88 mean=2457.77 stdev=120.79 n=10
+Welch t (CRR vs RRR) = 2.277  (positive = RRR faster)
+DELTA_MEDIAN_PCT RRR_vs_CRR = +5.328%
+CRR_TFLOPS_LIST 2160.8064,2308.1357,2348.6226,2374.5287,2376.2357,2389.5877,2401.1107,2402.7243,2390.2867,2403.6303
+RRR_TFLOPS_LIST 2142.3988,2378.7708,2441.2673,2505.6828,2514.0769,2519.2400,2528.9198,2520.2757,2534.9687,2492.0501
+Saved /tmp/wt-r35-d/analysis/fp8_gemm/mi350x/r35d_8b_o_crr_vs_rrr_gpu7.txt
+===== BENCH cell=8b_gate GPU=7 (HIP=7) 4096x14336x4096 crr vs rrr attempt=1 =====
+[sclk-pre-preheat] GPU[7]		: sclk clock level: 1: (1230Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[7]		: sclk clock level: 1: (1941Mhz)
+CORRECTNESS_CRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[7]		: sclk clock level: 1: (2168Mhz)
+WARMUP 0 RRR=1562.48 CRR=1477.42 sclk=GPU[7]		: sclk clock level: 1: (2112Mhz)
+WARMUP 1 RRR=1563.66 CRR=1471.28 sclk=GPU[7]		: sclk clock level: 1: (2093Mhz)
+PAIR 0 RRR_1=2446.38 CRR_1=2341.15 RRR_2=2450.22 CRR_2=2347.78
+PAIR 1 RRR_1=2477.36 CRR_1=2361.68 RRR_2=2466.87 CRR_2=2358.23
+PAIR 2 RRR_1=2481.16 CRR_1=2350.65 RRR_2=2456.49 CRR_2=2363.91
+PAIR 3 RRR_1=2500.61 CRR_1=2384.75 RRR_2=2492.98 CRR_2=2343.11
+PAIR 4 RRR_1=2484.61 CRR_1=2373.93 RRR_2=2499.45 CRR_2=2377.59
+[sclk-post-bench] GPU[7]		: sclk clock level: 1: (2324Mhz)
+CRR  median=2359.95 mean=2360.28 stdev=14.96 n=10
+RRR  median=2479.26 mean=2475.61 stdev=19.86 n=10
+Welch t (CRR vs RRR) = 14.668  (positive = RRR faster)
+DELTA_MEDIAN_PCT RRR_vs_CRR = +5.056%
+CRR_TFLOPS_LIST 2341.1514,2347.7790,2361.6751,2358.2296,2350.6517,2363.9144,2384.7454,2343.1138,2373.9275,2377.5879
+RRR_TFLOPS_LIST 2446.3757,2450.2232,2477.3593,2466.8694,2481.1613,2456.4896,2500.6123,2492.9815,2484.6066,2499.4481
+AUTO-RETRY: sclk-post-preheat=1941MHz < 2200, attempt=1
+===== BENCH cell=8b_gate GPU=7 (HIP=7) 4096x14336x4096 crr vs rrr attempt=2 =====
+[sclk-pre-preheat] GPU[7]		: sclk clock level: 1: (185Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[7]		: sclk clock level: 1: (2302Mhz)
+CORRECTNESS_CRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[7]		: sclk clock level: 1: (2379Mhz)
+WARMUP 0 RRR=2375.37 CRR=2391.57 sclk=GPU[7]		: sclk clock level: 1: (2357Mhz)
+WARMUP 1 RRR=2384.12 CRR=2365.20 sclk=GPU[7]		: sclk clock level: 1: (2369Mhz)
+PAIR 0 RRR_1=2418.77 CRR_1=2348.07 RRR_2=2532.57 CRR_2=2393.69
+PAIR 1 RRR_1=2548.80 CRR_1=2409.63 RRR_2=2537.31 CRR_2=2396.37
+PAIR 2 RRR_1=2500.14 CRR_1=2404.77 RRR_2=2503.68 CRR_2=2361.43
+PAIR 3 RRR_1=2513.78 CRR_1=2413.52 RRR_2=2529.41 CRR_2=2412.41
+PAIR 4 RRR_1=2505.37 CRR_1=2416.46 RRR_2=2347.50 CRR_2=2353.37
+[sclk-post-bench] GPU[7]		: sclk clock level: 1: (2328Mhz)
+CRR  median=2400.57 mean=2390.97 stdev=26.50 n=10
+RRR  median=2509.58 mean=2493.73 stdev=62.71 n=10
+Welch t (CRR vs RRR) = 4.773  (positive = RRR faster)
+DELTA_MEDIAN_PCT RRR_vs_CRR = +4.541%
+CRR_TFLOPS_LIST 2348.0721,2393.6884,2409.6306,2396.3688,2404.7741,2361.4252,2413.5199,2412.4143,2416.4581,2353.3750
+RRR_TFLOPS_LIST 2418.7715,2532.5670,2548.7994,2537.3119,2500.1442,2503.6839,2513.7842,2529.4141,2505.3738,2347.4973
+Saved /tmp/wt-r35-d/analysis/fp8_gemm/mi350x/r35d_8b_gate_crr_vs_rrr_gpu7.txt
+===== BENCH cell=8b_up GPU=7 (HIP=7) 4096x14336x4096 crr vs rrr attempt=1 =====
+[sclk-pre-preheat] GPU[7]		: sclk clock level: 1: (2017Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[7]		: sclk clock level: 1: (2175Mhz)
+CORRECTNESS_CRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[7]		: sclk clock level: 1: (2310Mhz)
+WARMUP 0 RRR=2341.00 CRR=2322.42 sclk=GPU[7]		: sclk clock level: 1: (2362Mhz)
+WARMUP 1 RRR=2334.92 CRR=2314.58 sclk=GPU[7]		: sclk clock level: 1: (2339Mhz)
+PAIR 0 RRR_1=2335.60 CRR_1=2328.76 RRR_2=2498.41 CRR_2=2357.60
+PAIR 1 RRR_1=2472.56 CRR_1=2374.15 RRR_2=2478.51 CRR_2=2375.27
+PAIR 2 RRR_1=2483.40 CRR_1=2372.42 RRR_2=2497.37 CRR_2=2368.98
+PAIR 3 RRR_1=2434.41 CRR_1=2353.65 RRR_2=2484.97 CRR_2=2381.01
+PAIR 4 RRR_1=2477.40 CRR_1=2377.45 RRR_2=2482.23 CRR_2=2353.44
+[sclk-post-bench] GPU[7]		: sclk clock level: 1: (2324Mhz)
+CRR  median=2370.70 mean=2364.27 stdev=15.98 n=10
+RRR  median=2480.37 mean=2464.49 stdev=48.61 n=10
+Welch t (CRR vs RRR) = 6.193  (positive = RRR faster)
+DELTA_MEDIAN_PCT RRR_vs_CRR = +4.626%
+CRR_TFLOPS_LIST 2328.7566,2357.6011,2374.1518,2375.2680,2372.4186,2368.9794,2353.6511,2381.0146,2377.4466,2353.4392
+RRR_TFLOPS_LIST 2335.6043,2498.4088,2472.5609,2478.5122,2483.3955,2497.3716,2434.4102,2484.9652,2477.3994,2482.2265
+AUTO-RETRY: sclk-post-preheat=2175MHz < 2200, attempt=1
+===== BENCH cell=8b_up GPU=7 (HIP=7) 4096x14336x4096 crr vs rrr attempt=2 =====
+[sclk-pre-preheat] GPU[7]		: sclk clock level: 1: (1759Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[7]		: sclk clock level: 1: (2067Mhz)
+CORRECTNESS_CRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[7]		: sclk clock level: 1: (2318Mhz)
+WARMUP 0 RRR=2340.53 CRR=2288.18 sclk=GPU[7]		: sclk clock level: 1: (2317Mhz)
+WARMUP 1 RRR=2345.38 CRR=2350.00 sclk=GPU[7]		: sclk clock level: 1: (2321Mhz)
+PAIR 0 RRR_1=2322.50 CRR_1=2358.32 RRR_2=2468.21 CRR_2=2180.97
+PAIR 1 RRR_1=2485.28 CRR_1=2313.03 RRR_2=2322.60 CRR_2=2283.80
+PAIR 2 RRR_1=2418.41 CRR_1=2302.35 RRR_2=2495.42 CRR_2=2345.90
+PAIR 3 RRR_1=2500.40 CRR_1=2374.60 RRR_2=2476.89 CRR_2=2383.21
+PAIR 4 RRR_1=2463.83 CRR_1=2379.55 RRR_2=2500.04 CRR_2=2347.10
+[sclk-post-bench] GPU[7]		: sclk clock level: 1: (2293Mhz)
+CRR  median=2346.50 mean=2326.88 stdev=61.40 n=10
+RRR  median=2472.55 mean=2445.36 stdev=69.02 n=10
+Welch t (CRR vs RRR) = 4.056  (positive = RRR faster)
+DELTA_MEDIAN_PCT RRR_vs_CRR = +5.372%
+CRR_TFLOPS_LIST 2358.3221,2180.9654,2313.0343,2283.7968,2302.3529,2345.9005,2374.6016,2383.2137,2379.5541,2347.1001
+RRR_TFLOPS_LIST 2322.4957,2468.2066,2485.2828,2322.6034,2418.4106,2495.4221,2500.4035,2476.8886,2463.8269,2500.0400
+AUTO-RETRY: sclk-post-preheat=2067MHz < 2200, attempt=2
+===== BENCH cell=8b_up GPU=7 (HIP=7) 4096x14336x4096 crr vs rrr attempt=3 =====
+[sclk-pre-preheat] GPU[7]		: sclk clock level: 1: (274Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[7]		: sclk clock level: 1: (2009Mhz)
+CORRECTNESS_CRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[7]		: sclk clock level: 1: (2205Mhz)
+WARMUP 0 RRR=1534.39 CRR=1433.26 sclk=GPU[7]		: sclk clock level: 1: (2172Mhz)
+WARMUP 1 RRR=1549.79 CRR=1431.11 sclk=GPU[7]		: sclk clock level: 1: (2167Mhz)
+PAIR 0 RRR_1=1533.11 CRR_1=2358.22 RRR_2=2492.09 CRR_2=2380.55
+PAIR 1 RRR_1=2504.13 CRR_1=2389.58 RRR_2=2509.78 CRR_2=2368.69
+PAIR 2 RRR_1=2506.06 CRR_1=2385.79 RRR_2=2485.34 CRR_2=2362.84
+PAIR 3 RRR_1=2451.29 CRR_1=2371.48 RRR_2=2513.43 CRR_2=2363.14
+PAIR 4 RRR_1=2486.09 CRR_1=2094.59 RRR_2=2257.26 CRR_2=2355.33
+[sclk-post-bench] GPU[7]		: sclk clock level: 1: (2337Mhz)
+CRR  median=2365.92 mean=2343.02 stdev=88.05 n=10
+RRR  median=2489.09 mean=2373.86 stdev=305.11 n=10
+Welch t (CRR vs RRR) = 0.307  (positive = RRR faster)
+DELTA_MEDIAN_PCT RRR_vs_CRR = +5.206%
+CRR_TFLOPS_LIST 2358.2203,2380.5530,2389.5780,2368.6901,2385.7862,2362.8442,2371.4829,2363.1414,2094.5858,2355.3290
+RRR_TFLOPS_LIST 1533.1082,2492.0924,2504.1309,2509.7761,2506.0622,2485.3352,2451.2915,2513.4272,2486.0854,2257.2556
+Saved /tmp/wt-r35-d/analysis/fp8_gemm/mi350x/r35d_8b_up_crr_vs_rrr_gpu7.txt
+===== BENCH cell=8b_down GPU=7 (HIP=7) 4096x4096x14336 crr vs rrr attempt=1 =====
+[sclk-pre-preheat] GPU[7]		: sclk clock level: 1: (1709Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[7]		: sclk clock level: 1: (1921Mhz)
+CORRECTNESS_CRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[7]		: sclk clock level: 1: (2331Mhz)
+WARMUP 0 RRR=2688.32 CRR=2600.36 sclk=GPU[7]		: sclk clock level: 1: (2362Mhz)
+WARMUP 1 RRR=2689.53 CRR=2364.68 sclk=GPU[7]		: sclk clock level: 1: (2305Mhz)
+PAIR 0 RRR_1=2676.43 CRR_1=2629.93 RRR_2=2823.98 CRR_2=2656.25
+PAIR 1 RRR_1=2846.72 CRR_1=2662.61 RRR_2=2880.54 CRR_2=2669.32
+PAIR 2 RRR_1=2907.76 CRR_1=2662.58 RRR_2=2893.22 CRR_2=2689.49
+PAIR 3 RRR_1=2895.16 CRR_1=2686.71 RRR_2=2917.34 CRR_2=2734.66
+PAIR 4 RRR_1=2946.18 CRR_1=2703.30 RRR_2=2926.21 CRR_2=2753.52
+[sclk-post-bench] GPU[7]		: sclk clock level: 1: (2226Mhz)
+CRR  median=2678.02 mean=2684.84 stdev=37.46 n=10
+RRR  median=2894.19 mean=2871.35 stdev=77.48 n=10
+Welch t (CRR vs RRR) = 6.854  (positive = RRR faster)
+DELTA_MEDIAN_PCT RRR_vs_CRR = +8.072%
+CRR_TFLOPS_LIST 2629.9331,2656.2473,2662.6103,2669.3161,2662.5782,2689.4922,2686.7141,2734.6601,2703.3033,2753.5192
+RRR_TFLOPS_LIST 2676.4301,2823.9779,2846.7182,2880.5389,2907.7601,2893.2216,2895.1579,2917.3385,2946.1842,2926.2129
+AUTO-RETRY: sclk-post-preheat=1921MHz < 2200, attempt=1
+===== BENCH cell=8b_down GPU=7 (HIP=7) 4096x4096x14336 crr vs rrr attempt=2 =====
+[sclk-pre-preheat] GPU[7]		: sclk clock level: 1: (165Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[7]		: sclk clock level: 1: (2351Mhz)
+CORRECTNESS_CRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[7]		: sclk clock level: 1: (2389Mhz)
+WARMUP 0 RRR=2680.81 CRR=2633.38 sclk=GPU[7]		: sclk clock level: 1: (2368Mhz)
+WARMUP 1 RRR=2710.48 CRR=2625.12 sclk=GPU[7]		: sclk clock level: 1: (2369Mhz)
+PAIR 0 RRR_1=2722.38 CRR_1=2664.57 RRR_2=2839.85 CRR_2=2655.75
+PAIR 1 RRR_1=2898.48 CRR_1=2636.22 RRR_2=2896.93 CRR_2=2687.66
+PAIR 2 RRR_1=2897.14 CRR_1=2679.49 RRR_2=2912.29 CRR_2=2665.03
+PAIR 3 RRR_1=2881.67 CRR_1=2685.17 RRR_2=2616.25 CRR_2=2697.79
+PAIR 4 RRR_1=2891.86 CRR_1=2634.40 RRR_2=2892.23 CRR_2=2676.99
+[sclk-post-bench] GPU[7]		: sclk clock level: 1: (2295Mhz)
+CRR  median=2671.01 mean=2668.31 stdev=21.32 n=10
+RRR  median=2892.05 mean=2844.91 stdev=97.73 n=10
+Welch t (CRR vs RRR) = 5.583  (positive = RRR faster)
+DELTA_MEDIAN_PCT RRR_vs_CRR = +8.275%
+CRR_TFLOPS_LIST 2664.5719,2655.7486,2636.2163,2687.6577,2679.4929,2665.0307,2685.1661,2697.7902,2634.4032,2676.9914
+RRR_TFLOPS_LIST 2722.3816,2839.8480,2898.4808,2896.9311,2897.1394,2912.2946,2881.6722,2616.2500,2891.8594,2892.2328
+Saved /tmp/wt-r35-d/analysis/fp8_gemm/mi350x/r35d_8b_down_crr_vs_rrr_gpu7.txt
+===== BENCH cell=70b_q GPU=7 (HIP=7) 4096x8192x8192 crr vs rrr attempt=1 =====
+[sclk-pre-preheat] GPU[7]		: sclk clock level: 1: (2158Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[7]		: sclk clock level: 1: (2290Mhz)
+CORRECTNESS_CRR snr_db=49.59 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RRR snr_db=49.60 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[7]		: sclk clock level: 1: (2339Mhz)
+WARMUP 0 RRR=2677.09 CRR=2672.70 sclk=GPU[7]		: sclk clock level: 1: (2311Mhz)
+WARMUP 1 RRR=2718.25 CRR=2657.40 sclk=GPU[7]		: sclk clock level: 1: (2302Mhz)
+PAIR 0 RRR_1=2691.85 CRR_1=2634.06 RRR_2=2842.88 CRR_2=2661.52
+PAIR 1 RRR_1=2868.20 CRR_1=2719.74 RRR_2=2894.88 CRR_2=2690.55
+PAIR 2 RRR_1=2924.57 CRR_1=2721.99 RRR_2=2835.59 CRR_2=2739.08
+PAIR 3 RRR_1=2893.80 CRR_1=2627.55 RRR_2=2610.76 CRR_2=2650.63
+PAIR 4 RRR_1=2875.79 CRR_1=2692.63 RRR_2=2897.50 CRR_2=2683.93
+[sclk-post-bench] GPU[7]		: sclk clock level: 1: (2230Mhz)
+CRR  median=2687.24 mean=2682.17 stdev=38.21 n=10
+RRR  median=2872.00 mean=2833.58 stdev=101.41 n=10
+Welch t (CRR vs RRR) = 4.418  (positive = RRR faster)
+DELTA_MEDIAN_PCT RRR_vs_CRR = +6.875%
+CRR_TFLOPS_LIST 2634.0557,2661.5193,2719.7390,2690.5507,2721.9901,2739.0781,2627.5495,2650.6266,2692.6291,2683.9307
+RRR_TFLOPS_LIST 2691.8470,2842.8754,2868.1964,2894.8750,2924.5666,2835.5907,2893.8016,2610.7562,2875.7946,2897.4987
+Saved /tmp/wt-r35-d/analysis/fp8_gemm/mi350x/r35d_70b_q_crr_vs_rrr_gpu7.txt
+===== BENCH cell=70b_k GPU=7 (HIP=7) 4096x1024x8192 crr vs rrr attempt=1 =====
+[sclk-pre-preheat] GPU[7]		: sclk clock level: 1: (158Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[7]		: sclk clock level: 1: (1928Mhz)
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=1024, K=8192) is +10.24% to +10.83% faster on V2-RRR (R33 Dev C 70B KV SHIP, 4-GPU triangulated; min Δ% +10.24). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r33c_findings.md.
+CORRECTNESS_CRR snr_db=49.60 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RRR snr_db=49.60 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[7]		: sclk clock level: 1: (2167Mhz)
+WARMUP 0 RRR=824.16 CRR=768.17 sclk=GPU[7]		: sclk clock level: 1: (2352Mhz)
+WARMUP 1 RRR=824.81 CRR=760.25 sclk=GPU[7]		: sclk clock level: 1: (2376Mhz)
+PAIR 0 RRR_1=668.42 CRR_1=636.96 RRR_2=848.06 CRR_2=764.42
+PAIR 1 RRR_1=841.34 CRR_1=764.34 RRR_2=842.83 CRR_2=642.06
+PAIR 2 RRR_1=831.34 CRR_1=764.05 RRR_2=846.79 CRR_2=764.94
+PAIR 3 RRR_1=837.84 CRR_1=763.96 RRR_2=847.12 CRR_2=764.14
+PAIR 4 RRR_1=847.20 CRR_1=764.62 RRR_2=842.99 CRR_2=766.02
+[sclk-post-bench] GPU[7]		: sclk clock level: 1: (2398Mhz)
+CRR  median=764.24 mean=739.55 stdev=52.74 n=10
+RRR  median=842.91 mean=825.39 stdev=55.39 n=10
+Welch t (CRR vs RRR) = 3.549  (positive = RRR faster)
+DELTA_MEDIAN_PCT RRR_vs_CRR = +10.294%
+CRR_TFLOPS_LIST 636.9612,764.4191,764.3445,642.0557,764.0452,764.9431,763.9568,764.1403,764.6231,766.0209
+RRR_TFLOPS_LIST 668.4230,848.0619,841.3419,842.8288,831.3428,846.7910,837.8385,847.1177,847.2017,842.9941
+AUTO-RETRY: sclk-post-preheat=1928MHz < 2200, attempt=1
+===== BENCH cell=70b_k GPU=7 (HIP=7) 4096x1024x8192 crr vs rrr attempt=2 =====
+[sclk-pre-preheat] GPU[7]		: sclk clock level: 1: (204Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[7]		: sclk clock level: 1: (2006Mhz)
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=1024, K=8192) is +10.24% to +10.83% faster on V2-RRR (R33 Dev C 70B KV SHIP, 4-GPU triangulated; min Δ% +10.24). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r33c_findings.md.
+CORRECTNESS_CRR snr_db=49.60 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RRR snr_db=49.60 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[7]		: sclk clock level: 1: (2332Mhz)
+WARMUP 0 RRR=836.19 CRR=766.84 sclk=GPU[7]		: sclk clock level: 1: (2365Mhz)
+WARMUP 1 RRR=836.85 CRR=760.93 sclk=GPU[7]		: sclk clock level: 1: (2390Mhz)
+PAIR 0 RRR_1=825.31 CRR_1=767.68 RRR_2=846.11 CRR_2=769.16
+PAIR 1 RRR_1=854.12 CRR_1=769.67 RRR_2=845.86 CRR_2=768.96
+PAIR 2 RRR_1=852.68 CRR_1=768.38 RRR_2=848.76 CRR_2=766.63
+PAIR 3 RRR_1=844.52 CRR_1=765.99 RRR_2=846.87 CRR_2=767.55
+PAIR 4 RRR_1=850.18 CRR_1=768.13 RRR_2=851.31 CRR_2=770.75
+[sclk-post-bench] GPU[7]		: sclk clock level: 1: (2402Mhz)
+CRR  median=768.25 mean=768.29 stdev=1.42 n=10
+RRR  median=847.81 mean=846.57 stdev=8.11 n=10
+Welch t (CRR vs RRR) = 30.076  (positive = RRR faster)
+DELTA_MEDIAN_PCT RRR_vs_CRR = +10.356%
+CRR_TFLOPS_LIST 767.6843,769.1624,769.6655,768.9558,768.3782,766.6296,765.9936,767.5541,768.1309,770.7499
+RRR_TFLOPS_LIST 825.3129,846.1077,854.1249,845.8569,852.6836,848.7585,844.5190,846.8676,850.1778,851.3070
+AUTO-RETRY: sclk-post-preheat=2006MHz < 2200, attempt=2
+===== BENCH cell=70b_k GPU=7 (HIP=7) 4096x1024x8192 crr vs rrr attempt=3 =====
+[sclk-pre-preheat] GPU[7]		: sclk clock level: 1: (260Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[7]		: sclk clock level: 1: (2245Mhz)
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=1024, K=8192) is +10.24% to +10.83% faster on V2-RRR (R33 Dev C 70B KV SHIP, 4-GPU triangulated; min Δ% +10.24). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r33c_findings.md.
+CORRECTNESS_CRR snr_db=49.60 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RRR snr_db=49.60 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[7]		: sclk clock level: 1: (2371Mhz)
+WARMUP 0 RRR=857.49 CRR=790.08 sclk=GPU[7]		: sclk clock level: 1: (2400Mhz)
+WARMUP 1 RRR=861.10 CRR=789.36 sclk=GPU[7]		: sclk clock level: 1: (2400Mhz)
+PAIR 0 RRR_1=862.63 CRR_1=787.37 RRR_2=875.42 CRR_2=791.22
+PAIR 1 RRR_1=877.10 CRR_1=669.86 RRR_2=872.17 CRR_2=791.27
+PAIR 2 RRR_1=874.77 CRR_1=789.76 RRR_2=874.88 CRR_2=791.22
+PAIR 3 RRR_1=880.62 CRR_1=785.03 RRR_2=880.15 CRR_2=791.97
+PAIR 4 RRR_1=883.39 CRR_1=790.30 RRR_2=878.03 CRR_2=792.55
+[sclk-post-bench] GPU[7]		: sclk clock level: 1: (2402Mhz)
+CRR  median=790.76 mean=778.05 stdev=38.08 n=10
+RRR  median=876.26 mean=875.92 stdev=5.73 n=10
+Welch t (CRR vs RRR) = 8.036  (positive = RRR faster)
+DELTA_MEDIAN_PCT RRR_vs_CRR = +10.812%
+CRR_TFLOPS_LIST 787.3667,791.2177,669.8618,791.2691,789.7628,791.2247,785.0283,791.9689,790.3005,792.5460
+RRR_TFLOPS_LIST 862.6258,875.4169,877.0974,872.1724,874.7657,874.8820,880.6220,880.1528,883.3937,878.0303
+Saved /tmp/wt-r35-d/analysis/fp8_gemm/mi350x/r35d_70b_k_crr_vs_rrr_gpu7.txt
+===== BENCH cell=70b_v GPU=7 (HIP=7) 4096x1024x8192 crr vs rrr attempt=1 =====
+[sclk-pre-preheat] GPU[7]		: sclk clock level: 1: (2149Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[7]		: sclk clock level: 1: (2308Mhz)
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=1024, K=8192) is +10.24% to +10.83% faster on V2-RRR (R33 Dev C 70B KV SHIP, 4-GPU triangulated; min Δ% +10.24). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r33c_findings.md.
+CORRECTNESS_CRR snr_db=49.60 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RRR snr_db=49.60 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[7]		: sclk clock level: 1: (2350Mhz)
+WARMUP 0 RRR=838.31 CRR=762.84 sclk=GPU[7]		: sclk clock level: 1: (2390Mhz)
+WARMUP 1 RRR=816.81 CRR=767.60 sclk=GPU[7]		: sclk clock level: 1: (2404Mhz)
+PAIR 0 RRR_1=832.83 CRR_1=770.18 RRR_2=846.93 CRR_2=769.07
+PAIR 1 RRR_1=847.91 CRR_1=768.12 RRR_2=851.77 CRR_2=769.78
+PAIR 2 RRR_1=851.75 CRR_1=769.83 RRR_2=850.34 CRR_2=771.59
+PAIR 3 RRR_1=851.21 CRR_1=769.87 RRR_2=851.82 CRR_2=770.94
+PAIR 4 RRR_1=851.11 CRR_1=772.23 RRR_2=850.41 CRR_2=768.79
+[sclk-post-bench] GPU[7]		: sclk clock level: 1: (2407Mhz)
+CRR  median=769.85 mean=770.04 stdev=1.26 n=10
+RRR  median=850.76 mean=848.61 stdev=5.79 n=10
+Welch t (CRR vs RRR) = 41.932  (positive = RRR faster)
+DELTA_MEDIAN_PCT RRR_vs_CRR = +10.510%
+CRR_TFLOPS_LIST 770.1831,769.0662,768.1237,769.7757,769.8311,771.5875,769.8726,770.9367,772.2326,768.7905
+RRR_TFLOPS_LIST 832.8341,846.9342,847.9115,851.7707,851.7542,850.3370,851.2134,851.8211,851.1128,850.4134
+Saved /tmp/wt-r35-d/analysis/fp8_gemm/mi350x/r35d_70b_v_crr_vs_rrr_gpu7.txt
+===== BENCH cell=70b_o GPU=7 (HIP=7) 4096x8192x8192 crr vs rrr attempt=1 =====
+[sclk-pre-preheat] GPU[7]		: sclk clock level: 1: (2171Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[7]		: sclk clock level: 1: (2329Mhz)
+CORRECTNESS_CRR snr_db=49.59 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RRR snr_db=49.60 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[7]		: sclk clock level: 1: (2358Mhz)
+WARMUP 0 RRR=2752.50 CRR=2675.49 sclk=GPU[7]		: sclk clock level: 1: (2355Mhz)
+WARMUP 1 RRR=2748.34 CRR=2673.86 sclk=GPU[7]		: sclk clock level: 1: (2324Mhz)
+PAIR 0 RRR_1=2690.88 CRR_1=2654.30 RRR_2=2867.41 CRR_2=2707.63
+PAIR 1 RRR_1=2889.35 CRR_1=2679.54 RRR_2=2857.49 CRR_2=2722.51
+PAIR 2 RRR_1=2639.44 CRR_1=2757.74 RRR_2=2861.76 CRR_2=2680.80
+PAIR 3 RRR_1=2890.95 CRR_1=2659.94 RRR_2=2867.67 CRR_2=2685.14
+PAIR 4 RRR_1=2884.42 CRR_1=2718.06 RRR_2=2865.28 CRR_2=2676.85
+[sclk-post-bench] GPU[7]		: sclk clock level: 1: (2301Mhz)
+CRR  median=2682.97 mean=2694.25 stdev=31.85 n=10
+RRR  median=2866.34 mean=2831.46 stdev=89.24 n=10
+Welch t (CRR vs RRR) = 4.579  (positive = RRR faster)
+DELTA_MEDIAN_PCT RRR_vs_CRR = +6.835%
+CRR_TFLOPS_LIST 2654.3023,2707.6301,2679.5356,2722.5077,2757.7431,2680.8004,2659.9431,2685.1357,2718.0601,2676.8536
+RRR_TFLOPS_LIST 2690.8773,2867.4054,2889.3485,2857.4858,2639.4405,2861.7578,2890.9530,2867.6686,2884.4249,2865.2787
+Saved /tmp/wt-r35-d/analysis/fp8_gemm/mi350x/r35d_70b_o_crr_vs_rrr_gpu7.txt
+===== BENCH cell=70b_gate GPU=7 (HIP=7) 4096x28672x8192 crr vs rrr attempt=1 =====
+[sclk-pre-preheat] GPU[7]		: sclk clock level: 1: (2165Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[7]		: sclk clock level: 1: (2251Mhz)
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=28672, K=8192) is +7.18% to +7.99% faster on V2-RRR (R33 Dev C 70B Gate/Up SHIP, 4-GPU triangulated; min Δ% +7.18). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r33c_findings.md.
+CORRECTNESS_CRR snr_db=49.59 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RRR snr_db=49.60 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[7]		: sclk clock level: 1: (2331Mhz)
+WARMUP 0 RRR=2549.30 CRR=2382.28 sclk=GPU[7]		: sclk clock level: 1: (2254Mhz)
+WARMUP 1 RRR=2553.38 CRR=2374.77 sclk=GPU[7]		: sclk clock level: 1: (2233Mhz)
+PAIR 0 RRR_1=2555.84 CRR_1=2398.11 RRR_2=2560.66 CRR_2=2388.61
+PAIR 1 RRR_1=2485.35 CRR_1=2316.24 RRR_2=2565.66 CRR_2=2377.85
+PAIR 2 RRR_1=2559.82 CRR_1=2384.76 RRR_2=2579.72 CRR_2=2379.67
+PAIR 3 RRR_1=2560.88 CRR_1=2384.07 RRR_2=2566.39 CRR_2=2391.55
+PAIR 4 RRR_1=2572.39 CRR_1=2394.91 RRR_2=2561.49 CRR_2=2380.59
+[sclk-post-bench] GPU[7]		: sclk clock level: 1: (2308Mhz)
+CRR  median=2384.41 mean=2379.64 stdev=23.25 n=10
+RRR  median=2561.18 mean=2556.82 stdev=26.05 n=10
+Welch t (CRR vs RRR) = 16.046  (positive = RRR faster)
+DELTA_MEDIAN_PCT RRR_vs_CRR = +7.413%
+CRR_TFLOPS_LIST 2398.1134,2388.6081,2316.2413,2377.8519,2384.7594,2379.6703,2384.0690,2391.5509,2394.9088,2380.5936
+RRR_TFLOPS_LIST 2555.8357,2560.6603,2485.3467,2565.6641,2559.8181,2579.7155,2560.8781,2566.3870,2572.3925,2561.4863
+Saved /tmp/wt-r35-d/analysis/fp8_gemm/mi350x/r35d_70b_gate_crr_vs_rrr_gpu7.txt
+===== BENCH cell=70b_up GPU=7 (HIP=7) 4096x28672x8192 crr vs rrr attempt=1 =====
+[sclk-pre-preheat] GPU[7]		: sclk clock level: 1: (168Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[7]		: sclk clock level: 1: (2015Mhz)
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=28672, K=8192) is +7.18% to +7.99% faster on V2-RRR (R33 Dev C 70B Gate/Up SHIP, 4-GPU triangulated; min Δ% +7.18). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r33c_findings.md.
+CORRECTNESS_CRR snr_db=49.59 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RRR snr_db=49.60 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[7]		: sclk clock level: 1: (2376Mhz)
+WARMUP 0 RRR=2553.68 CRR=2398.01 sclk=GPU[7]		: sclk clock level: 1: (2355Mhz)
+WARMUP 1 RRR=2553.10 CRR=2384.54 sclk=GPU[7]		: sclk clock level: 1: (2307Mhz)
+PAIR 0 RRR_1=2563.75 CRR_1=2382.97 RRR_2=2573.27 CRR_2=2397.75
+PAIR 1 RRR_1=2561.96 CRR_1=2389.95 RRR_2=2581.22 CRR_2=2381.72
+PAIR 2 RRR_1=2578.93 CRR_1=2391.52 RRR_2=2577.29 CRR_2=2369.95
+PAIR 3 RRR_1=2575.95 CRR_1=2365.81 RRR_2=2566.70 CRR_2=2371.14
+PAIR 4 RRR_1=2557.01 CRR_1=2368.89 RRR_2=2569.85 CRR_2=2391.23
+[sclk-post-bench] GPU[7]		: sclk clock level: 1: (2254Mhz)
+CRR  median=2382.34 mean=2381.09 stdev=11.44 n=10
+RRR  median=2571.56 mean=2570.59 stdev=8.06 n=10
+Welch t (CRR vs RRR) = 42.831  (positive = RRR faster)
+DELTA_MEDIAN_PCT RRR_vs_CRR = +7.942%
+CRR_TFLOPS_LIST 2382.9664,2397.7451,2389.9539,2381.7180,2391.5200,2369.9465,2365.8084,2371.1446,2368.8889,2391.2304
+RRR_TFLOPS_LIST 2563.7498,2573.2681,2561.9559,2581.2244,2578.9269,2577.2910,2575.9467,2566.7020,2557.0094,2569.8502
+AUTO-RETRY: sclk-post-preheat=2015MHz < 2200, attempt=1
+===== BENCH cell=70b_up GPU=7 (HIP=7) 4096x28672x8192 crr vs rrr attempt=2 =====
+[sclk-pre-preheat] GPU[7]		: sclk clock level: 1: (2247Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[7]		: sclk clock level: 1: (2216Mhz)
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=28672, K=8192) is +7.18% to +7.99% faster on V2-RRR (R33 Dev C 70B Gate/Up SHIP, 4-GPU triangulated; min Δ% +7.18). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r33c_findings.md.
+CORRECTNESS_CRR snr_db=49.59 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RRR snr_db=49.60 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[7]		: sclk clock level: 1: (2347Mhz)
+WARMUP 0 RRR=2576.32 CRR=2391.29 sclk=GPU[7]		: sclk clock level: 1: (2315Mhz)
+WARMUP 1 RRR=2535.31 CRR=2401.27 sclk=GPU[7]		: sclk clock level: 1: (2353Mhz)
+PAIR 0 RRR_1=2546.87 CRR_1=2405.79 RRR_2=2577.19 CRR_2=2388.43
+PAIR 1 RRR_1=2584.86 CRR_1=2378.57 RRR_2=2573.66 CRR_2=2377.65
+PAIR 2 RRR_1=2570.69 CRR_1=2391.24 RRR_2=2554.96 CRR_2=2378.80
+PAIR 3 RRR_1=2563.82 CRR_1=2381.74 RRR_2=2568.41 CRR_2=2387.11
+PAIR 4 RRR_1=2566.23 CRR_1=2402.72 RRR_2=2556.50 CRR_2=2280.37
+[sclk-post-bench] GPU[7]		: sclk clock level: 1: (2320Mhz)
+CRR  median=2384.42 mean=2377.24 stdev=35.42 n=10
+RRR  median=2567.32 mean=2566.32 stdev=11.30 n=10
+Welch t (CRR vs RRR) = 16.083  (positive = RRR faster)
+DELTA_MEDIAN_PCT RRR_vs_CRR = +7.670%
+CRR_TFLOPS_LIST 2405.7870,2388.4349,2378.5712,2377.6495,2391.2391,2378.7950,2381.7366,2387.1075,2402.7198,2280.3745
+RRR_TFLOPS_LIST 2546.8717,2577.1862,2584.8554,2573.6562,2570.6880,2554.9559,2563.8237,2568.4068,2566.2255,2556.4986
+Saved /tmp/wt-r35-d/analysis/fp8_gemm/mi350x/r35d_70b_up_crr_vs_rrr_gpu7.txt
+===== BENCH cell=70b_down GPU=7 (HIP=7) 4096x8192x28672 crr vs rrr attempt=1 =====
+[sclk-pre-preheat] GPU[7]		: sclk clock level: 1: (188Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[7]		: sclk clock level: 1: (2114Mhz)
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=8192, K=28672) is +12.14% faster on V2-RRR (R32 Dev C SHIP, cross-GPU triangulated). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r32c_findings.md.
+CORRECTNESS_CRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RRR snr_db=49.60 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[7]		: sclk clock level: 1: (2340Mhz)
+WARMUP 0 RRR=2818.62 CRR=2531.47 sclk=GPU[7]		: sclk clock level: 1: (2309Mhz)
+WARMUP 1 RRR=2831.20 CRR=2541.29 sclk=GPU[7]		: sclk clock level: 1: (2267Mhz)
+PAIR 0 RRR_1=2824.80 CRR_1=2537.64 RRR_2=2854.62 CRR_2=2541.09
+PAIR 1 RRR_1=2751.16 CRR_1=2466.91 RRR_2=2841.29 CRR_2=2541.28
+PAIR 2 RRR_1=2867.07 CRR_1=2533.70 RRR_2=2853.46 CRR_2=2538.25
+PAIR 3 RRR_1=2846.37 CRR_1=2533.44 RRR_2=2843.37 CRR_2=2527.52
+PAIR 4 RRR_1=2849.38 CRR_1=2537.92 RRR_2=2857.25 CRR_2=2546.55
+[sclk-post-bench] GPU[7]		: sclk clock level: 1: (2360Mhz)
+CRR  median=2537.78 mean=2530.43 stdev=22.91 n=10
+RRR  median=2847.88 mean=2838.88 stdev=32.79 n=10
+Welch t (CRR vs RRR) = 24.384  (positive = RRR faster)
+DELTA_MEDIAN_PCT RRR_vs_CRR = +12.219%
+CRR_TFLOPS_LIST 2537.6438,2541.0943,2466.9092,2541.2794,2533.7034,2538.2464,2533.4418,2527.5183,2537.9194,2546.5530
+RRR_TFLOPS_LIST 2824.8028,2854.6182,2751.1600,2841.2883,2867.0693,2853.4566,2846.3688,2843.3737,2849.3833,2857.2490
+AUTO-RETRY: sclk-post-preheat=2114MHz < 2200, attempt=1
+===== BENCH cell=70b_down GPU=7 (HIP=7) 4096x8192x28672 crr vs rrr attempt=2 =====
+[sclk-pre-preheat] GPU[7]		: sclk clock level: 1: (2322Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[7]		: sclk clock level: 1: (2294Mhz)
+[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=8192, K=28672) is +12.14% faster on V2-RRR (R32 Dev C SHIP, cross-GPU triangulated). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r32c_findings.md.
+CORRECTNESS_CRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RRR snr_db=49.60 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[7]		: sclk clock level: 1: (2333Mhz)
+WARMUP 0 RRR=2812.80 CRR=2530.83 sclk=GPU[7]		: sclk clock level: 1: (2320Mhz)
+WARMUP 1 RRR=2792.17 CRR=2527.76 sclk=GPU[7]		: sclk clock level: 1: (2298Mhz)
+PAIR 0 RRR_1=2810.35 CRR_1=2536.21 RRR_2=2835.79 CRR_2=2521.56
+PAIR 1 RRR_1=2832.88 CRR_1=2540.29 RRR_2=2838.87 CRR_2=2521.25
+PAIR 2 RRR_1=2824.85 CRR_1=2499.41 RRR_2=2813.76 CRR_2=2536.39
+PAIR 3 RRR_1=2793.25 CRR_1=2534.59 RRR_2=2838.12 CRR_2=2505.29
+PAIR 4 RRR_1=2843.01 CRR_1=2551.15 RRR_2=2857.30 CRR_2=2535.01
+[sclk-post-bench] GPU[7]		: sclk clock level: 1: (2316Mhz)
+CRR  median=2534.80 mean=2528.11 stdev=16.11 n=10
+RRR  median=2834.33 mean=2828.82 stdev=18.60 n=10
+Welch t (CRR vs RRR) = 38.638  (positive = RRR faster)
+DELTA_MEDIAN_PCT RRR_vs_CRR = +11.817%
+CRR_TFLOPS_LIST 2536.2119,2521.5611,2540.2917,2521.2468,2499.4136,2536.3857,2534.5871,2505.2922,2551.1531,2535.0063
+RRR_TFLOPS_LIST 2810.3513,2835.7865,2832.8810,2838.8696,2824.8499,2813.7613,2793.2525,2838.1223,2843.0133,2857.3044
+Saved /tmp/wt-r35-d/analysis/fp8_gemm/mi350x/r35d_70b_down_crr_vs_rrr_gpu7.txt
+########## BENCH PHASE — CRR vs RCR (square only) GPU7 ##########
+===== BENCH cell=8b_q GPU=7 (HIP=7) 4096x4096x4096 crr vs rcr attempt=1 =====
+[sclk-pre-preheat] GPU[7]		: sclk clock level: 1: (193Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[7]		: sclk clock level: 1: (2085Mhz)
+CORRECTNESS_CRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RCR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[7]		: sclk clock level: 1: (2357Mhz)
+WARMUP 0 RCR=2019.67 CRR=2132.30 sclk=GPU[7]		: sclk clock level: 1: (2365Mhz)
+WARMUP 1 RCR=2140.16 CRR=2092.46 sclk=GPU[7]		: sclk clock level: 1: (2374Mhz)
+PAIR 0 RCR_1=2061.30 CRR_1=2132.80 RCR_2=2299.49 CRR_2=2182.86
+PAIR 1 RCR_1=2381.87 CRR_1=2254.70 RCR_2=2405.55 CRR_2=2276.36
+PAIR 2 RCR_1=2402.18 CRR_1=2279.32 RCR_2=2419.78 CRR_2=2291.57
+PAIR 3 RCR_1=2411.93 CRR_1=2268.28 RCR_2=2425.96 CRR_2=2278.11
+PAIR 4 RCR_1=2447.22 CRR_1=2262.30 RCR_2=2443.21 CRR_2=2269.06
+[sclk-post-bench] GPU[7]		: sclk clock level: 1: (2371Mhz)
+CRR  median=2268.67 mean=2249.54 stdev=50.76 n=10
+RCR  median=2408.74 mean=2369.85 stdev=116.14 n=10
+Welch t (CRR vs RCR) = 3.002  (positive = RCR faster)
+DELTA_MEDIAN_PCT RCR_vs_CRR = +6.174%
+CRR_TFLOPS_LIST 2132.7967,2182.8555,2254.7003,2276.3598,2279.3217,2291.5735,2268.2787,2278.1105,2262.3011,2269.0569
+RCR_TFLOPS_LIST 2061.3007,2299.4877,2381.8684,2405.5453,2402.1843,2419.7783,2411.9291,2425.9613,2447.2182,2443.2150
+AUTO-RETRY: sclk-post-preheat=2085MHz < 2200, attempt=1
+===== BENCH cell=8b_q GPU=7 (HIP=7) 4096x4096x4096 crr vs rcr attempt=2 =====
+[sclk-pre-preheat] GPU[7]		: sclk clock level: 1: (177Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[7]		: sclk clock level: 1: (2350Mhz)
+CORRECTNESS_CRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RCR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[7]		: sclk clock level: 1: (2354Mhz)
+WARMUP 0 RCR=2189.37 CRR=2131.63 sclk=GPU[7]		: sclk clock level: 1: (2377Mhz)
+WARMUP 1 RCR=2097.78 CRR=2136.13 sclk=GPU[7]		: sclk clock level: 1: (2381Mhz)
+PAIR 0 RCR_1=2166.67 CRR_1=2228.78 RCR_2=2414.85 CRR_2=2236.10
+PAIR 1 RCR_1=2456.98 CRR_1=2309.97 RCR_2=2510.48 CRR_2=2360.92
+PAIR 2 RCR_1=2546.95 CRR_1=2374.03 RCR_2=2574.97 CRR_2=2354.26
+PAIR 3 RCR_1=2565.70 CRR_1=2371.35 RCR_2=2499.04 CRR_2=2370.37
+PAIR 4 RCR_1=2536.12 CRR_1=2394.82 RCR_2=2578.22 CRR_2=2356.06
+[sclk-post-bench] GPU[7]		: sclk clock level: 1: (2343Mhz)
+CRR  median=2358.49 mean=2335.66 stdev=58.54 n=10
+RCR  median=2523.30 mean=2485.00 stdev=123.66 n=10
+Welch t (CRR vs RCR) = 3.451  (positive = RCR faster)
+DELTA_MEDIAN_PCT RCR_vs_CRR = +6.988%
+CRR_TFLOPS_LIST 2228.7812,2236.0960,2309.9667,2360.9180,2374.0332,2354.2581,2371.3470,2370.3703,2394.8157,2356.0638
+RCR_TFLOPS_LIST 2166.6668,2414.8498,2456.9829,2510.4766,2546.9515,2574.9716,2565.7038,2499.0427,2536.1222,2578.2166
+Saved /tmp/wt-r35-d/analysis/fp8_gemm/mi350x/r35d_8b_q_crr_vs_rcr_gpu7.txt
+===== BENCH cell=8b_o GPU=7 (HIP=7) 4096x4096x4096 crr vs rcr attempt=1 =====
+[sclk-pre-preheat] GPU[7]		: sclk clock level: 1: (2161Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[7]		: sclk clock level: 1: (1991Mhz)
+CORRECTNESS_CRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RCR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[7]		: sclk clock level: 1: (2374Mhz)
+WARMUP 0 RCR=2218.48 CRR=2162.47 sclk=GPU[7]		: sclk clock level: 1: (2389Mhz)
+WARMUP 1 RCR=2144.67 CRR=2176.80 sclk=GPU[7]		: sclk clock level: 1: (2382Mhz)
+PAIR 0 RCR_1=2129.99 CRR_1=2149.08 RCR_2=2406.96 CRR_2=2275.67
+PAIR 1 RCR_1=2445.61 CRR_1=2307.02 RCR_2=2451.65 CRR_2=2338.61
+PAIR 2 RCR_1=2523.87 CRR_1=2351.49 RCR_2=2522.16 CRR_2=2364.98
+PAIR 3 RCR_1=2544.46 CRR_1=2377.72 RCR_2=2549.86 CRR_2=2352.93
+PAIR 4 RCR_1=2534.37 CRR_1=2393.35 RCR_2=2578.91 CRR_2=2388.06
+[sclk-post-bench] GPU[7]		: sclk clock level: 1: (2364Mhz)
+CRR  median=2352.21 mean=2329.89 stdev=73.15 n=10
+RCR  median=2523.01 mean=2468.78 stdev=130.83 n=10
+Welch t (CRR vs RCR) = 2.930  (positive = RCR faster)
+DELTA_MEDIAN_PCT RCR_vs_CRR = +7.261%
+CRR_TFLOPS_LIST 2149.0793,2275.6693,2307.0206,2338.6142,2351.4869,2364.9822,2377.7164,2352.9289,2393.3470,2388.0589
+RCR_TFLOPS_LIST 2129.9944,2406.9600,2445.6131,2451.6508,2523.8672,2522.1590,2544.4599,2549.8632,2534.3666,2578.9142
+AUTO-RETRY: sclk-post-preheat=1991MHz < 2200, attempt=1
+===== BENCH cell=8b_o GPU=7 (HIP=7) 4096x4096x4096 crr vs rcr attempt=2 =====
+[sclk-pre-preheat] GPU[7]		: sclk clock level: 1: (264Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[7]		: sclk clock level: 1: (2182Mhz)
+CORRECTNESS_CRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RCR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[7]		: sclk clock level: 1: (2361Mhz)
+WARMUP 0 RCR=2127.33 CRR=2181.42 sclk=GPU[7]		: sclk clock level: 1: (2362Mhz)
+WARMUP 1 RCR=2107.52 CRR=2151.14 sclk=GPU[7]		: sclk clock level: 1: (2379Mhz)
+PAIR 0 RCR_1=2131.93 CRR_1=2120.73 RCR_2=2396.75 CRR_2=2246.15
+PAIR 1 RCR_1=2491.29 CRR_1=2340.17 RCR_2=2509.34 CRR_2=2355.54
+PAIR 2 RCR_1=2571.81 CRR_1=2388.82 RCR_2=2546.80 CRR_2=2377.42
+PAIR 3 RCR_1=2561.42 CRR_1=2391.88 RCR_2=2562.26 CRR_2=2386.20
+PAIR 4 RCR_1=2537.81 CRR_1=2398.93 RCR_2=2537.43 CRR_2=2391.42
+[sclk-post-bench] GPU[7]		: sclk clock level: 1: (2355Mhz)
+CRR  median=2381.81 mean=2339.73 stdev=89.35 n=10
+RCR  median=2537.62 mean=2484.68 stdev=134.07 n=10
+Welch t (CRR vs RCR) = 2.845  (positive = RCR faster)
+DELTA_MEDIAN_PCT RCR_vs_CRR = +6.542%
+CRR_TFLOPS_LIST 2120.7313,2246.1507,2340.1719,2355.5396,2388.8227,2377.4203,2391.8833,2386.2015,2398.9314,2391.4163
+RCR_TFLOPS_LIST 2131.9266,2396.7527,2491.2939,2509.3380,2571.8088,2546.8014,2561.4166,2562.2599,2537.8090,2537.4341
+AUTO-RETRY: sclk-post-preheat=2182MHz < 2200, attempt=2
+===== BENCH cell=8b_o GPU=7 (HIP=7) 4096x4096x4096 crr vs rcr attempt=3 =====
+[sclk-pre-preheat] GPU[7]		: sclk clock level: 1: (185Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[7]		: sclk clock level: 1: (2034Mhz)
+CORRECTNESS_CRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RCR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[7]		: sclk clock level: 1: (2356Mhz)
+WARMUP 0 RCR=2222.21 CRR=2183.73 sclk=GPU[7]		: sclk clock level: 1: (2383Mhz)
+WARMUP 1 RCR=2073.69 CRR=2135.89 sclk=GPU[7]		: sclk clock level: 1: (2397Mhz)
+PAIR 0 RCR_1=2198.63 CRR_1=2160.95 RCR_2=2428.91 CRR_2=2245.36
+PAIR 1 RCR_1=2472.40 CRR_1=2282.43 RCR_2=2480.78 CRR_2=2342.25
+PAIR 2 RCR_1=2514.96 CRR_1=2365.93 RCR_2=2529.18 CRR_2=2359.85
+PAIR 3 RCR_1=2540.10 CRR_1=2324.09 RCR_2=2527.35 CRR_2=2362.51
+PAIR 4 RCR_1=2525.24 CRR_1=2362.12 RCR_2=2544.20 CRR_2=2333.94
+[sclk-post-bench] GPU[7]		: sclk clock level: 1: (2344Mhz)
+CRR  median=2338.09 mean=2313.94 stdev=66.58 n=10
+RCR  median=2520.10 mean=2476.18 stdev=104.00 n=10
+Welch t (CRR vs RCR) = 4.154  (positive = RCR faster)
+DELTA_MEDIAN_PCT RCR_vs_CRR = +7.784%
+CRR_TFLOPS_LIST 2160.9470,2245.3632,2282.4348,2342.2466,2365.9300,2359.8519,2324.0898,2362.5073,2362.1248,2333.9415
+RCR_TFLOPS_LIST 2198.6328,2428.9135,2472.3976,2480.7848,2514.9611,2529.1814,2540.1007,2527.3517,2525.2370,2544.1952
+Saved /tmp/wt-r35-d/analysis/fp8_gemm/mi350x/r35d_8b_o_crr_vs_rcr_gpu7.txt
+===== BENCH cell=70b_q GPU=7 (HIP=7) 4096x8192x8192 crr vs rcr attempt=1 =====
+[sclk-pre-preheat] GPU[7]		: sclk clock level: 1: (2191Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[7]		: sclk clock level: 1: (2105Mhz)
+CORRECTNESS_CRR snr_db=49.59 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RCR snr_db=49.60 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[7]		: sclk clock level: 1: (2339Mhz)
+WARMUP 0 RCR=2748.17 CRR=2672.83 sclk=GPU[7]		: sclk clock level: 1: (2321Mhz)
+WARMUP 1 RCR=2799.18 CRR=2687.36 sclk=GPU[7]		: sclk clock level: 1: (2325Mhz)
+PAIR 0 RCR_1=2749.19 CRR_1=2710.63 RCR_2=2936.15 CRR_2=2486.90
+PAIR 1 RCR_1=2694.73 CRR_1=2674.89 RCR_2=2993.16 CRR_2=2541.75
+PAIR 2 RCR_1=2928.70 CRR_1=2695.31 RCR_2=2972.06 CRR_2=2781.11
+PAIR 3 RCR_1=2942.33 CRR_1=2685.07 RCR_2=2970.04 CRR_2=2744.81
+PAIR 4 RCR_1=2943.35 CRR_1=2724.96 RCR_2=2943.37 CRR_2=2714.35
+[sclk-post-bench] GPU[7]		: sclk clock level: 1: (2241Mhz)
+CRR  median=2702.97 mean=2675.98 stdev=91.34 n=10
+RCR  median=2942.84 mean=2907.31 stdev=100.45 n=10
+Welch t (CRR vs RCR) = 5.388  (positive = RCR faster)
+DELTA_MEDIAN_PCT RCR_vs_CRR = +8.875%
+CRR_TFLOPS_LIST 2710.6286,2486.9000,2674.8916,2541.7544,2695.3085,2781.1123,2685.0714,2744.8095,2724.9575,2714.3545
+RCR_TFLOPS_LIST 2749.1917,2936.1476,2694.7319,2993.1608,2928.7021,2972.0595,2942.3334,2970.0428,2943.3542,2943.3668
+AUTO-RETRY: sclk-post-preheat=2105MHz < 2200, attempt=1
+===== BENCH cell=70b_q GPU=7 (HIP=7) 4096x8192x8192 crr vs rcr attempt=2 =====
+[sclk-pre-preheat] GPU[7]		: sclk clock level: 1: (231Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[7]		: sclk clock level: 1: (2020Mhz)
+CORRECTNESS_CRR snr_db=49.59 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RCR snr_db=49.60 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[7]		: sclk clock level: 1: (2331Mhz)
+WARMUP 0 RCR=2760.01 CRR=2703.14 sclk=GPU[7]		: sclk clock level: 1: (2301Mhz)
+WARMUP 1 RCR=2776.07 CRR=2657.61 sclk=GPU[7]		: sclk clock level: 1: (2282Mhz)
+PAIR 0 RCR_1=2787.91 CRR_1=2675.49 RCR_2=2646.09 CRR_2=2683.05
+PAIR 1 RCR_1=2932.49 CRR_1=2726.70 RCR_2=2973.59 CRR_2=2712.87
+PAIR 2 RCR_1=2957.60 CRR_1=2726.04 RCR_2=2952.41 CRR_2=2724.15
+PAIR 3 RCR_1=2967.62 CRR_1=2693.23 RCR_2=2954.74 CRR_2=2701.90
+PAIR 4 RCR_1=2907.66 CRR_1=2751.62 RCR_2=2967.73 CRR_2=2714.89
+[sclk-post-bench] GPU[7]		: sclk clock level: 1: (2277Mhz)
+CRR  median=2713.88 mean=2710.99 stdev=22.99 n=10
+RCR  median=2953.58 mean=2904.78 stdev=106.23 n=10
+Welch t (CRR vs RCR) = 5.639  (positive = RCR faster)
+DELTA_MEDIAN_PCT RCR_vs_CRR = +8.832%
+CRR_TFLOPS_LIST 2675.4855,2683.0474,2726.6975,2712.8653,2726.0376,2724.1465,2693.2264,2701.9006,2751.6237,2714.8902
+RCR_TFLOPS_LIST 2787.9051,2646.0929,2932.4889,2973.5896,2957.6046,2952.4081,2967.6181,2954.7433,2907.6606,2967.7340
+AUTO-RETRY: sclk-post-preheat=2020MHz < 2200, attempt=2
+===== BENCH cell=70b_q GPU=7 (HIP=7) 4096x8192x8192 crr vs rcr attempt=3 =====
+[sclk-pre-preheat] GPU[7]		: sclk clock level: 1: (160Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[7]		: sclk clock level: 1: (2228Mhz)
+CORRECTNESS_CRR snr_db=49.59 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RCR snr_db=49.60 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[7]		: sclk clock level: 1: (2390Mhz)
+WARMUP 0 RCR=2718.67 CRR=2621.22 sclk=GPU[7]		: sclk clock level: 1: (2382Mhz)
+WARMUP 1 RCR=2690.90 CRR=2584.60 sclk=GPU[7]		: sclk clock level: 1: (2319Mhz)
+PAIR 0 RCR_1=2728.32 CRR_1=2603.63 RCR_2=2881.66 CRR_2=2633.30
+PAIR 1 RCR_1=2884.12 CRR_1=2691.16 RCR_2=2899.55 CRR_2=2694.36
+PAIR 2 RCR_1=2873.21 CRR_1=2722.07 RCR_2=2900.57 CRR_2=2661.87
+PAIR 3 RCR_1=2885.61 CRR_1=2649.55 RCR_2=2919.52 CRR_2=2691.55
+PAIR 4 RCR_1=2929.96 CRR_1=2694.68 RCR_2=2918.30 CRR_2=2716.36
+[sclk-post-bench] GPU[7]		: sclk clock level: 1: (2219Mhz)
+CRR  median=2691.36 mean=2675.85 stdev=37.81 n=10
+RCR  median=2892.58 mean=2882.08 stdev=57.15 n=10
+Welch t (CRR vs RCR) = 9.517  (positive = RCR faster)
+DELTA_MEDIAN_PCT RCR_vs_CRR = +7.477%
+CRR_TFLOPS_LIST 2603.6340,2633.2959,2691.1600,2694.3568,2722.0742,2661.8672,2649.5500,2691.5502,2694.6841,2716.3607
+RCR_TFLOPS_LIST 2728.3208,2881.6647,2884.1193,2899.5514,2873.2064,2900.5669,2885.6095,2919.5187,2929.9630,2918.3039
+Saved /tmp/wt-r35-d/analysis/fp8_gemm/mi350x/r35d_70b_q_crr_vs_rcr_gpu7.txt
+===== BENCH cell=70b_o GPU=7 (HIP=7) 4096x8192x8192 crr vs rcr attempt=1 =====
+[sclk-pre-preheat] GPU[7]		: sclk clock level: 1: (2380Mhz)
+[preheat 45.0s] done 10236 iters
+[sclk-post-preheat] GPU[7]		: sclk clock level: 1: (2224Mhz)
+CORRECTNESS_CRR snr_db=49.59 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RCR snr_db=49.60 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[7]		: sclk clock level: 1: (2378Mhz)
+WARMUP 0 RCR=2746.30 CRR=2688.65 sclk=GPU[7]		: sclk clock level: 1: (2334Mhz)
+WARMUP 1 RCR=2774.43 CRR=2747.07 sclk=GPU[7]		: sclk clock level: 1: (2328Mhz)
+PAIR 0 RCR_1=2788.73 CRR_1=2710.07 RCR_2=2980.06 CRR_2=2765.02
+PAIR 1 RCR_1=2972.88 CRR_1=2702.80 RCR_2=2969.49 CRR_2=2731.78
+PAIR 2 RCR_1=2938.73 CRR_1=2784.04 RCR_2=2970.62 CRR_2=2692.55
+PAIR 3 RCR_1=2927.33 CRR_1=2718.61 RCR_2=2944.68 CRR_2=2702.63
+PAIR 4 RCR_1=3003.43 CRR_1=2697.04 RCR_2=2943.95 CRR_2=2694.42
+[sclk-post-bench] GPU[7]		: sclk clock level: 1: (2328Mhz)
+CRR  median=2706.44 mean=2719.90 stdev=31.45 n=10
+RCR  median=2957.08 mean=2943.99 stdev=59.10 n=10
+Welch t (CRR vs RCR) = 10.585  (positive = RCR faster)
+DELTA_MEDIAN_PCT RCR_vs_CRR = +9.261%
+CRR_TFLOPS_LIST 2710.0725,2765.0189,2702.8033,2731.7806,2784.0403,2692.5516,2718.6061,2702.6319,2697.0433,2694.4186
+RCR_TFLOPS_LIST 2788.7301,2980.0620,2972.8824,2969.4903,2938.7335,2970.6199,2927.3282,2944.6773,3003.4287,2943.9462
+Saved /tmp/wt-r35-d/analysis/fp8_gemm/mi350x/r35d_70b_o_crr_vs_rcr_gpu7.txt
+DONE r35d MODE=bench-gpu7 PHYS_GPU_ARG=6
