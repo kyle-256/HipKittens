@@ -318,6 +318,22 @@ Decider 提出 5 个 untested vectors, 3 个 in-session 可执行. 启动 3 个 
 
 **Round 5 净增**: 0 WIN, 0 gap reduction. 触发用户的 GOAL PIVOT 指令 (见文档顶部).
 
+## Round 22 (2026-04-18, IN FLIGHT) — memory-stall axis attack
+3 parallel optimizers + 1 reviewer attacking R21-recon's memory-stall finding.
+
+- **R22A — LDS sub-arbitration via s_nop stagger after ds_read_b128 (DEAD END, committed `a4074d2d`)**:
+  - Added `LDS_RD_STAGGER_NOP=0/1/2` macro (default 0 = no-op `LDS_NOP_STR=""` → bit-identical baseline). 40 sites injected across 4 KPAIR functions.
+  - Smoke (warmup=200 iters=500): all 3 DLA shapes Δ ∈ [-4.07%, +0.01%]. Best DLA2/nop1 = +0.01% (noise). Gate (+1.5pp) failed everywhere.
+  - **CRITICAL MECHANISTIC CORRECTION**: TCP_TA_DATA_STALL counts TCP (L1) **back-pressure on the TA side**, which for an MXFP4 GEMM (no textures) reflects **producer-side `buffer_load_to_lds` L2-miss / HBM-latency stalls**, NOT consumer-side `ds_read` LDS port contention. Consistent with raw HBM only 7-20% of peak (latency-bound, not bandwidth-bound). Spreading consumer ds_reads cannot help when producer is the bottleneck.
+  - **Reframes R23 frontier**: producer-side fixes (STATIC_XCD_REMAP for DLA2/DLA7, `buffer_load_to_lds` SLC/DLC bits, L2 prefetch, outer-iter pull-forward).
+  - Macro framework retained as zero-overhead opt-in for future probes.
+- **R22C — Finer SCHED_GROUP_BARRIERS masks at R21B's 4 hook sites (DEAD END, no commit)**:
+  - 6 mask combos × 4 shapes = 24 builds. Tested: 0x004 (MFMA-only), 0x044 (MFMA+DS_R), 0x008 (VMEM), 0x040|0x080 (DS_R+W=0xc0), 0x004 size=2, 0x004 size=8.
+  - Best smoke: DLA7 + `mfmadsr_h0f` mask=0x044 = +0.13% (noise). All other combos −0.5% to −14.7%. Gate failed on all.
+  - Confirms R21B's diagnosis: even fine-grained scheduler hints disrupt the LLVM-tuned MFMA/prefetch interleave more than they help. The hooks are wired but no usable mask exists for these shapes.
+- **R22B — Streaming/non-temporal global loads on B-tile (status: aperture-probed, smoke pending)**.
+- **R22-rebench — full 42-shape rebench locking R20A's 11 wires (status: 8/42 complete, multiplexed across all 8 GPUs)**.
+
 ## Round 21 (2026-04-18) — recon + audit; head macros DEAD END
 3 parallel agents: (a) **R21-recon** rocprof-PMC on DLA2/DLA7, (b) **R21-audit** untried-axis survey, (c) **R21B** probe 3 head macros from audit.
 

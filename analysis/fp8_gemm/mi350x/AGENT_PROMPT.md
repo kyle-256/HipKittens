@@ -226,6 +226,13 @@
   - **EARLY_SCALE_PF (E)**: **BROKEN + no perf gain**. Compiler aliases `pf_*` and shadow `nxt_pf_*` to same VGPRs → race; baseline ASM already issues scale loads at iter top with ~512 cyc hiding > ~400 cyc VMEM latency, no untapped scheduling room. Code has `#error` guard if enabled. See `test_early_scale_pf.py`.
   - **F, G**: INFEASIBLE in single session.
   Triggered the user's GOAL PIVOT directive at the top of this file.
+- **Round 22 (2026-04-18, IN FLIGHT, memory-stall axis)**: 3 optimizers + 1 reviewer attacking R21-recon's memory-stall finding.
+  - **R22A (LDS_RD_STAGGER_NOP probe, committed `a4074d2d`)** — DEAD END. **CRITICAL CORRECTION**: TCP_TA_DATA_STALL = **producer-side `buffer_load_to_lds` L2-miss/HBM-latency stalls**, NOT consumer-side LDS port contention as R21-recon implied. Confirmed by raw HBM at only 7-20% of peak (latency-bound). Spreading consumer ds_reads can't help when producer is the bottleneck.
+  - **R22C (finer SCHED_GROUP_BARRIERS masks, no commit)** — DEAD END. Even narrow masks (0x004 MFMA, 0x044 MFMA+DS_R, 0x008 VMEM, 0xc0 DS_R+W) regress −0.5% to −14.7%; best smoke is +0.13% noise. The LLVM-tuned MFMA/prefetch interleave cannot be improved by manual scheduler hints on these shapes.
+  - **R22B** (cache=streaming on B-tile global loads): aperture-probed, smoke pending.
+  - **R22-rebench**: full 42-shape lock-in of R20A's 11 wires; 8/42 done at update time.
+  - **Reframes R23 frontier**: producer-side fixes — STATIC_XCD_REMAP for DLA2/DLA7 (untested), `buffer_load_to_lds` SLC/DLC cache hints, L2 prefetch, outer-iter pull-forward.
+
 - **Round 21 (2026-04-18, recon + audit + head-macro probe)**: 3 parallel agents; **0 new WINs**, but R21-recon delivered the highest-value finding of the post-R20 axis: DLA1/DLA2/DLA7 are **memory-stall bound**.
   - **R21-recon — rocprof PMC sweep on DLA2 + DLA7** (parallels R17A's DLA1 profile):
     - DLA2 (128256×32768×4096): MFMA fills 24.7 % of wall; **TCP_DATA_STALL = 292.6 % of GRBM**; HBM 1054 GB/s (19.9 % of 5.3 TB/s peak); 0 % LDS bank conflict.
