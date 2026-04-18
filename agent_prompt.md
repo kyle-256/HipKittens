@@ -54,6 +54,16 @@ python3 test_mxfp8_python.py 4096 14336 4096
 5. 禁止提交 `*.so`、`*.s`、`*_layout_results_*.json`、`.bak*`、`gpucore.*`、`__pycache__` 等（`.gitignore` 已覆盖）
 6. 每个子 agent 使用不同 `HIP_VISIBLE_DEVICES` 以免 GPU 冲突：Dev A → 0，Dev B → 1，Dev C → 2，Reviewer/formal → 7
 
+## R28 cycle 进行中 (2026-04-18) ★ 1 SHIP so far (cachepolicy auto-select)
+
+### R28 SHIP #1 cherry-pick: `88d5a7d5` cachepolicy=2 auto-select gate (Dev A)
+
+Extends R27's `MXFP8_CRR_V2_SCALE_CACHEPOLICY` macro at `analysis/fp8_gemm/mi350x/crr_mxfp8_exact_8wave_fastpath.inc:9-21` so it auto-defaults to 2 (SLC) when compile-time `N_DIM>=28672 && K_DIM>=8192`. Outside region stays 0 = binary identical to R27. **+2.7% on 70B Gate V2-CRR (4096×28672×8192) without manual flag.** No regression on 70B KV / 8B Gate / 8192³.
+
+5x preheat-then-bench (GPU0, sclk-verified): B vs B0 Welch t=+12.83, Δ=+61.49 TFLOPS / +2.61%. SNR≥49.59 dB, det 3/3 PASS on all 6 cells. Cherry-pick excludes 254-line build logs (kept on r28-a side branch).
+
+R28 dev B in flight: s_setprio sweep on V2-CRR cp=2 baseline.
+
 ## R27 cycle 完结 (2026-04-18) ★ 1 partial production ship (cachepolicy macro infra) + 3 paradigm correction
 
 5 agent (Dev A GPU0, Dev B GPU1, Dev C GPU2, Dev D GPU3, Reviewer GPU4) 攻 R26 后剩下的 V2 levers。

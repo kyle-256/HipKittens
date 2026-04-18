@@ -54,6 +54,26 @@
 
 **baseline 建立**：首次需在每个 LLaMA shape 上跑 FP8 per-tensor + MXFP8 V2 baseline 各 5x，记录 median TFLOPS 作为后续对照。
 
+## R28 cycle 进行中 (2026-04-18, 2+ devs in parallel with R27 Reviewer)
+
+### R28 SHIP #1: cachepolicy=2 auto-select gate (Dev A, commit `88d5a7d5`)
+
+**+2.7% direct on 70B Gate V2-CRR with NO build flag.** Compile-time gate `N_DIM>=28672 && K_DIM>=8192` triggers `MXFP8_CRR_V2_SCALE_CACHEPOLICY=2` automatically when shape is pinned. Outside region stays 0 = binary identical to R27 baseline. User -D override still wins.
+
+5x preheat-then-bench (GPU0, sclk-verified, SNR≥49.59 dB det 3/3 all PASS):
+| Cell | Shape | Auto cp | TFLOPS (mean ± std) | Verdict |
+|---|---|---|---|---|
+| A | 8192³ CRR (no -D) | 0 | 2844.28 ± 15.11 | +0.97% no-regress |
+| B | 70B Gate 4096×28672×8192 | 2 (auto) | 2419.99 ± 8.92 | matches R27 cp=2 target |
+| B0 | same shape, explicit cp=0 | 0 | 2358.49 ± 5.95 | matches R27 cp=0 baseline |
+| C | 70B KV 4096×1024×8192 | 0 (N<28672) | 794.04 ± 3.95 | +1.04% no-regress |
+| D | 8B Gate 4096×14336×4096 | 0 (K<8192) | 2408.80 ± 51.10 | -0.96% mean (median 0.08%) |
+| E | 4096³ RCR (untouched) | n/a | 2441.65 ± 94.21 | within R27 1σ |
+
+Welch B vs B0: Δ=+61.49 TFLOPS / +2.61%, t=+12.83. Matches R27 +2.7%/t≈+13 to within bench-to-bench noise.
+
+R28 in flight: Dev B s_setprio sweep on V2-CRR cp=2 baseline (GPU1), R27 Reviewer baseline matrix (GPU4).
+
 ## R27 cycle 完结 (2026-04-18, 4 dev + 1 reviewer，1 partial production ship + 3 paradigm corrections)
 
 R27 派 5 agent (Dev A GPU0, Dev B GPU1, Dev C GPU2, Dev D GPU3, Reviewer GPU4) 攻 R26 后剩下的 V2 levers。**1 个 macro infrastructure SHIP** (cherry-pick `12785d98`)，**3 paradigm correction**。
