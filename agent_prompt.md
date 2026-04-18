@@ -54,6 +54,76 @@ python3 test_mxfp8_python.py 4096 14336 4096
 5. 禁止提交 `*.so`、`*.s`、`*_layout_results_*.json`、`.bak*`、`gpucore.*`、`__pycache__` 等（`.gitignore` 已覆盖）
 6. 每个子 agent 使用不同 `HIP_VISIBLE_DEVICES` 以免 GPU 冲突：Dev A → 0，Dev B → 1，Dev C → 2，Reviewer/formal → 7
 
+## R29 cycle 完结 (2026-04-18) ★ 0 SHIP + R28 SHIP confirmed (Welch t=+10.20) + 5 paradigm corrections (3 levers permanently closed)
+
+R29 派 4 dev (A GPU0 rect-V2 BLK, B GPU1 cp autotune sweep, C GPU2 V2-RCR sched/setprio audit, D GPU3 LDS bank conflict audit) + Reviewer (GPU4 reverify). **Outcome**: 0 dev SHIP, but R28 cachepolicy auto-select SHIP confirmed in production by Reviewer Welch t=+10.20 (+1.99% absolute MXFP8 perf on 70B Gate, matches R28 Dev A's +2.7% to within bench-to-bench noise).
+
+### R29 Reviewer 10-cell reverify summary (commit `73dd4444` r29-rev → cherry-pick `r29_reviewer_*`)
+
+GPU4 5x preheat. Same 10 cells as R27 baseline matrix.
+
+| Cell | R29 ratio | R27 ratio | MXFP8 Welch t | Verdict |
+|---|---:|---:|---:|---|
+| 8k_rcr | 0.9095 | 0.9324 | -1.04 | regressed (FP8 drift up; MXFP8 unchanged) |
+| 8k_rrr | 0.9086 | 0.9270 | +1.87 | regressed (FP8 drift up; MXFP8 +0.27%) |
+| 8k_crr | 0.9017 | 0.9266 | +1.95 | regressed (FP8 drift up; MXFP8 +0.37%) |
+| 4k_rcr | 0.9218 | 0.9229 | +0.52 | unchanged |
+| 8b_gate_crr | 0.8986 | 0.9216 | -4.11 | **MXFP8 regression** (-0.63%) ⚠ re-verify |
+| 8b_down_crr | 0.9059 | 0.9394 | -3.66 | **MXFP8 regression** (-2.42%) ⚠ re-verify |
+| 70b_qo_rcr | 0.9106 | 0.9373 | -2.29 | regressed (mostly FP8 drift) |
+| 70b_kv_crr | 0.8151 | 0.8646 | -8.51 | **MXFP8 regression** (-2.68%) ⚠ re-verify largest |
+| 70b_gate_crr | 0.8351 | 0.8351 | **+10.20** | **R28 SHIP CONFIRMED** ✅ |
+| 70b_down_crr | 0.8274 | 0.8459 | +1.88 | regressed (FP8 drift up; MXFP8 +0.55%) |
+
+**0/10 pass perf gate (unchanged from R27)**. FP8 drifted +1-3% universally vs R27 (likely DPM/GPU-state on GPU4). Three cells show real MXFP8 absolute drops without source change since R28 — flagged for R30 cross-GPU reverify.
+
+### R29 Dev results
+
+- **Dev A (rect-V2 completion) NO SHIP**: cherry-picked r28-d scaffolding clean + added host-side dispatcher guard preventing GPU memory fault on `-DMXFP8_RECT_BLK_N=64` builds. V1 fallback validated (SNR 49.59, det 3/3) but only 2.66 TFLOPS (294× slower than V2 781). No rect-V2 fastpath kernel exists yet (~2.5 day item). 8192³ no-regression check passed -0.42%. Guard NOT cherry-picked to main (dead code without scaffolding); docs+harness cherry-picked.
+- **Dev B (per-shape cp autotune sweep) NO SHIP**: 5-shape sweep cp=0 vs cp=2 — every shape NEUTRAL or LOSE. Closest gate-boundary shape N=20480 K=8192 loses 2.5% with t=-27.5. **R28 gate `(N≥28672 AND K≥8192)` is exactly tight on both axes**, not just good enough.
+- **Dev C (V2-RCR sched/setprio sweep) NO SHIP**: 6 cells (4096³+8192³ × {p2, p3, sched_barrier_mask}) all |t|≤0.61, |Δ%|≤0.35%. Lever exhausted. Bonus: documented Makefile build-cache bug (`make clean` doesn't remove .so).
+- **Dev D (LDS bank conflict audit) AUDIT-ONLY**: static analysis proves V2-CRR has zero LDS bank conflicts. Existing `(nc ^ sw_k)` swizzle places lanes on all 32 banks per cycle. Empirically corroborated by R22-B/R26-A profiling: SQ_LDS_BANK_CONFLICT/SQ_INSTS_LDS < 1%.
+
+### R29 paradigm corrections (5 — extends R27/R28 closure list)
+
+1. **cp=2 win region is sharp not gradient** (Dev B): R28 gate `(N≥28672 AND K≥8192)` is exactly tight on both axes. NEVER prototype "broaden cachepolicy=2 gate beyond R28 boundary" — even N=20480 (71% of N threshold) loses 2.5% catastrophically.
+2. **`s_setprio` is CLOSED for V2-RCR too** (Dev C, extends R28 V2-CRR closure): same wave-uniformity root cause. NEVER prototype "elevate MFMA wave priority" again, neither V2-CRR nor V2-RCR.
+3. **`sched_barrier` mask relax is BENIGN for V2-RCR** (Dev C): even at mask=0xB Welch t<0.6. Surrounding `s_barrier()` already pins schedule. NEVER prototype "relax sched_barrier mask" for V2-RCR.
+4. **Cachepolicy bits exhausted for V2-RCR** (Dev C, extends R27): cp=1 NULL, cp=2/3 catastrophic. NEVER prototype "tune cachepolicy for V2-RCR" — CRR-specific lever only.
+5. **V2-CRR has ZERO LDS bank conflicts** (Dev D): `(nc^sw_k)` swizzle is conflict-free. Rejected sub-experiments: row padding, sw_k bit re-mask, sched_barrier(0xff). NEVER prototype "LDS bank conflict reduction" for V2-CRR.
+
+### R29 structural finding (open question for R30)
+
+- **4096³ V2-RCR may be GRID under-occupancy bounded** (Dev C): 256 blocks at BLK=256 / 304 CUs = 0.84 wave-fill, 16% CUs always idle. Per-kernel optimization may be structurally bounded; closing the 0.92 gap likely requires dispatch-geometry changes (block tile reshape, streamk).
+
+### R29 measurement methodology fix
+
+- **Build-cache hygiene** (Dev C bonus): `make clean` does NOT remove `tk_mxfp8_layouts*.so`. Under race conditions r27/r28 orchestrate scripts could load stale .so masking rebuilds. **R30+ rule**: all orchestrate scripts must explicitly `rm -f tk_mxfp8_layouts*.so` + log per-build md5. Reference impl: `r29c_orchestrate.sh`.
+
+### R30+ priority list (rebuilt from R29 closures)
+
+1. **【critical / 2-3 day】Rectangular BLK_M=256/BLK_N=128 V2 fastpath kernel**: still #1. R29 Dev A added defensive guard but no fastpath. Path A (true rect-V2 kernel) or Path B (force V1 fallback for rect mode). Targets 70B KV V2-CRR 0.8151 → ~0.92 from 2× CU utilization. r29a_bench.py + r29a_orchestrate.sh ready.
+2. **【high / 1-2 day】VGPR reduction for V2-CRR occupancy=3** (R29 Dev D recommendation): identify spillable VGPR bands (especially scale broadcast registers held across MFMA quadrants), refactor to occ=3. Targets 8192³ V2-CRR -8.9% gap.
+3. **【high / 2-3 day】`buffer_load_dword_lds` direct VMEM→LDS path** (R29 Dev D recommendation): bypass VGPR staging on B-side scale loads. Most invasive R30 lever.
+4. **【medium / 1 day】B-tile load reorder (H7) for V2-RCR** (R29 Dev C recommendation): unexplored. Targets 4096³ V2-RCR if not GRID-bounded.
+5. **【medium / 1-2 day】PIPELINE_SCALE second-buffer for V2-RCR**: R28 Dev D scaffolding on r28-d. Requires LDS budget analysis.
+6. **【low / re-verify】R29 Reviewer's 3 negative-t cells**: cross-GPU reverify before treating as real regressions.
+7. **【methodology】All R30+ orchestrate scripts must `rm -f tk_mxfp8_layouts*.so` + log per-build md5**.
+8. **【closed】**: s_setprio (CRR+RCR), sched_barrier mask relax (RCR), cachepolicy gate broadening, LDS bank conflicts (CRR), cachepolicy for RCR. Do not re-prototype.
+
+### R29 Cherry-pick status
+
+Cherry-picked to feat/mxfp8-only:
+- `r29_reviewer_baseline_gpu4.json` + `r29_reviewer_findings.md` + `r29_reviewer_bench5x.py` + `r29_reviewer_aggregate.py` + `r29_reviewer_orchestrate.sh` (R30 reverify ready)
+- `r29a_findings.md` + `r29a_bench.py` + `r29a_orchestrate.sh` + `r29a_cell{1,2,3}_*.txt` (Dev A docs+harness)
+- `r29b_findings.md` (5-shape lookup table for R30)
+- `r29c_findings.md` + `r29c_orchestrate.sh` (sweep harness with build-cache fix)
+- `r29d_lds_bank_audit.md` (audit record)
+
+NOT cherry-picked (kernel/scaffolding-only on side branches): r29-a dispatcher guard (dead without scaffolding), r29-b cp=2 build configs, r29-c MMA_SETPRIO/SCHED_BARRIER_MASK macros (no-op at defaults).
+
+Side-branch commits preserved: `b2cc032f` (r29-a), `b82eab24` (r29-b), `5b48ff76` (r29-c), `63fc644b` (r29-d), `73dd4444` (r29-rev).
+
 ## R28 cycle 完结 (2026-04-18) ★ 1 SHIP + 2 NO SHIP + 1 SCAFFOLDING + 2 paradigm corrections
 
 R28 派 4 dev parallel + R27 Reviewer baseline matrix on GPU4. Production state: feat/mxfp8-only commit `<head>` ahead of R26 by R27 macro infra (`12785d98`) + R28 auto-select gate (`88d5a7d5`).
