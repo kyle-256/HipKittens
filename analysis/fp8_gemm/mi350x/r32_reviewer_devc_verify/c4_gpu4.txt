@@ -1,0 +1,21 @@
+W20260418 08:42:55.370147 140069243351040 agent.cpp:461] Attempt to enable hip visiblity for agent-2 which is not visible to HSA (ROCR)
+[sclk-pre-preheat] GPU[4]		: sclk clock level: 1: (157Mhz)
+[preheat 60.0s] done 12284 iters
+[sclk-post-preheat] GPU[4]		: sclk clock level: 1: (2305Mhz)
+CORRECTNESS_CRR snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_RRR snr_db=49.60 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[4]		: sclk clock level: 1: (2367Mhz)
+WARMUP 0 CRR=2530.89 RRR=2814.28 sclk=GPU[4]		: sclk clock level: 1: (2317Mhz)
+WARMUP 1 CRR=2508.81 RRR=2830.60 sclk=GPU[4]		: sclk clock level: 1: (2310Mhz)
+PAIR 0 CRR_1=2517.21 RRR_1=2815.16 CRR_2=2517.66 RRR_2=2825.23
+PAIR 1 CRR_1=2518.50 RRR_1=2740.40 CRR_2=2476.80 RRR_2=2818.86
+PAIR 2 CRR_1=2520.01 RRR_1=2819.37 CRR_2=2504.87 RRR_2=2816.26
+PAIR 3 CRR_1=2449.94 RRR_1=2818.87 CRR_2=2522.37 RRR_2=2832.78
+PAIR 4 CRR_1=2503.83 RRR_1=2810.24 CRR_2=2501.79 RRR_2=2810.01
+[sclk-post-bench] GPU[4]		: sclk clock level: 1: (2268Mhz)
+CRR median=2511.04 mean=2503.30 stdev=23.16 n=10
+RRR median=2817.56 mean=2810.72 stdev=25.60 n=10
+Welch t (CRR vs RRR) = 28.157  (positive = RRR faster)
+DELTA_MEDIAN_PCT RRR_vs_CRR = +12.207%
+CRR_TFLOPS_LIST 2517.2098,2517.6567,2518.5045,2476.8040,2520.0120,2504.8711,2449.9376,2522.3690,2503.8336,2501.7861
+RRR_TFLOPS_LIST 2815.1602,2825.2330,2740.4049,2818.8588,2819.3727,2816.2595,2818.8720,2832.7834,2810.2413,2810.0130

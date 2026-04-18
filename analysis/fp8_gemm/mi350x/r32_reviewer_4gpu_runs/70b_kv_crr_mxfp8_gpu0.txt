@@ -1,0 +1,23 @@
+===== cell=70b_kv_crr kind=mxfp8 layout=crr M=4096 N=1024 K=8192 phys_gpu=0 =====
+[orchestrate] phys_gpu=0 N_RUNS=5 WARMUP=50 ITERS=100
+[orchestrate] sclk readings now use phys_gpu=0 (R31 Reviewer fix applied)
+Sat Apr 18 07:48:36 UTC 2026
+[pre-orchestrate sclk check]
+GPU[0]		: sclk clock level: 1: (157Mhz)
+[sclk-pre-preheat] phys_gpu=0 GPU[0]		: sclk clock level: 1: (157Mhz)
+[preheat] sustained 8s 16k matmul...
+[preheat] done 5116 iters
+[sclk-post-preheat] phys_gpu=0 GPU[0]		: sclk clock level: 1: (2282Mhz)
+CORRECTNESS snr_db=49.60 pass_rate_pct=100.00
+DETERMINISM ok=True
+[sclk-pre-bench] phys_gpu=0 GPU[0]		: sclk clock level: 1: (2366Mhz)
+RUN 0 avg_ms=0.0895 tflops=767.56
+RUN 1 avg_ms=0.0906 tflops=758.50
+RUN 2 avg_ms=0.0893 tflops=769.53
+RUN 3 avg_ms=0.0894 tflops=768.43
+RUN 4 avg_ms=0.0894 tflops=769.00
+[sclk-post-bench] phys_gpu=0 GPU[0]		: sclk clock level: 1: (2390Mhz)
+SUMMARY median=768.43 mean=766.60 stdev=4.59 runs=5
+TFLOPS_LIST 767.5576,758.4955,769.5276,768.4261,768.9970
+DONE gpu=0
+Sat Apr 18 07:49:27 UTC 2026
