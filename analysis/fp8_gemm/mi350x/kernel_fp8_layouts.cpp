@@ -2321,7 +2321,10 @@ void dispatch(layout_globals g) {
     }
 }
 
-PYBIND11_MODULE(tk_fp8_layouts, m) {
+#ifndef PY_MODULE_NAME
+#define PY_MODULE_NAME tk_fp8_layouts
+#endif
+PYBIND11_MODULE(PY_MODULE_NAME, m) {
     m.doc() = "FP8 GEMM: RCR(mma_ABt), RRR(col_l+mma_AB), CRR(col_l+mma_AtB)";
     py::bind_function<dispatch<Layout::RCR>>(m, "gemm_rcr",
         &layout_globals::a, &layout_globals::b, &layout_globals::c, &layout_globals::scale);

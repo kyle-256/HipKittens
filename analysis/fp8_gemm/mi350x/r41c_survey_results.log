@@ -1,0 +1,42 @@
+--- mxfp8 rcr M=1 N=4096 K=4096 (mod=tk_mxfp8_8b_4kx4kx4k) ---
+R41C_RESULT module=tk_mxfp8_8b_4kx4kx4k kind=mxfp8 layout=rcr shape=1x4096x4096 avg_ms=0.518865 tflops=0.0647 snr_db=NA
+[mxfp8_dispatch] rcr_v2: shape=(M=1,N=4096,K=4096) -> V1-LEGACY-FALLBACK (no V2 predicate matched)
+
+--- fp8 rcr M=1 N=4096 K=4096 (mod=tk_fp8_8b_4kx4kx4k) ---
+R41C_RESULT module=tk_fp8_8b_4kx4kx4k kind=fp8 layout=rcr shape=1x4096x4096 avg_ms=0.356104 tflops=0.0942 snr_db=NA
+
+--- mxfp8 rcr M=32 N=4096 K=4096 (mod=tk_mxfp8_8b_4kx4kx4k) ---
+R41C_RESULT module=tk_mxfp8_8b_4kx4kx4k kind=mxfp8 layout=rcr shape=32x4096x4096 avg_ms=1.228714 tflops=0.8739 snr_db=NA
+[mxfp8_dispatch] rcr_v2: shape=(M=32,N=4096,K=4096) -> V1-LEGACY-FALLBACK (no V2 predicate matched)
+
+--- fp8 rcr M=32 N=4096 K=4096 (mod=tk_fp8_8b_4kx4kx4k) ---
+R41C_RESULT module=tk_fp8_8b_4kx4kx4k kind=fp8 layout=rcr shape=32x4096x4096 avg_ms=0.954170 tflops=1.1253 snr_db=NA
+
+--- mxfp8 rcr M=128 N=4096 K=4096 (mod=tk_mxfp8_8b_4kx4kx4k) ---
+R41C_RESULT module=tk_mxfp8_8b_4kx4kx4k kind=mxfp8 layout=rcr shape=128x4096x4096 avg_ms=4.870031 tflops=0.8819 snr_db=NA
+[mxfp8_dispatch] rcr_v2: shape=(M=128,N=4096,K=4096) -> V1-LEGACY-FALLBACK (no V2 predicate matched)
+
+--- fp8 rcr M=128 N=4096 K=4096 (mod=tk_fp8_8b_4kx4kx4k) ---
+R41C_RESULT module=tk_fp8_8b_4kx4kx4k kind=fp8 layout=rcr shape=128x4096x4096 avg_ms=3.748659 tflops=1.1457 snr_db=NA
+
+--- mxfp8 rcr M=1 N=8192 K=8192 (mod=tk_mxfp8_70b_4kx8kx8k) ---
+R41C_RESULT module=tk_mxfp8_70b_4kx8kx8k kind=mxfp8 layout=rcr shape=1x8192x8192 avg_ms=1.255193 tflops=0.1069 snr_db=NA
+[mxfp8_dispatch] rcr_v2: shape=(M=1,N=8192,K=8192) -> V1-LEGACY-FALLBACK (no V2 predicate matched)
+
+--- fp8 rcr M=1 N=8192 K=8192 (mod=tk_fp8_70b_4kx8kx8k) ---
+R41C_RESULT module=tk_fp8_70b_4kx8kx8k kind=fp8 layout=rcr shape=1x8192x8192 avg_ms=0.723867 tflops=0.1854 snr_db=NA
+
+--- mxfp8 rcr M=32 N=8192 K=8192 (mod=tk_mxfp8_70b_4kx8kx8k) ---
+R41C_RESULT module=tk_mxfp8_70b_4kx8kx8k kind=mxfp8 layout=rcr shape=32x8192x8192 avg_ms=4.855790 tflops=0.8845 snr_db=NA
+[mxfp8_dispatch] rcr_v2: shape=(M=32,N=8192,K=8192) -> V1-LEGACY-FALLBACK (no V2 predicate matched)
+
+--- fp8 rcr M=32 N=8192 K=8192 (mod=tk_fp8_70b_4kx8kx8k) ---
+R41C_RESULT module=tk_fp8_70b_4kx8kx8k kind=fp8 layout=rcr shape=32x8192x8192 avg_ms=3.772578 tflops=1.1385 snr_db=NA
+
+--- mxfp8 rcr M=128 N=8192 K=8192 (mod=tk_mxfp8_70b_4kx8kx8k) ---
+R41C_RESULT module=tk_mxfp8_70b_4kx8kx8k kind=mxfp8 layout=rcr shape=128x8192x8192 avg_ms=19.409756 tflops=0.8851 snr_db=NA
+[mxfp8_dispatch] rcr_v2: shape=(M=128,N=8192,K=8192) -> V1-LEGACY-FALLBACK (no V2 predicate matched)
+
+--- fp8 rcr M=128 N=8192 K=8192 (mod=tk_fp8_70b_4kx8kx8k) ---
+R41C_RESULT module=tk_fp8_70b_4kx8kx8k kind=fp8 layout=rcr shape=128x8192x8192 avg_ms=15.016551 tflops=1.1441 snr_db=NA
+
