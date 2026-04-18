@@ -7,7 +7,125 @@
 - SNR ≥ 48 dB (FP8) / ≥ 47 dB (BF16 vs torch.mm), bit-exact determinism are hard gates.
 - Never commit `*.so`, `.autotune_cache.json` is OK to keep (it's text), logs are not.
 
-## Current Status (2026-04-18, post-P22 close — Route 1 LDS write-side swizzle DESIGN APPROVED-WITH-AMENDMENTS; P23 implementation queued, ~4-4.5 sessions, 60-75% conf ≥+2pp on RCR worst shape)
+## Current Status (2026-04-18, post-P23 Session 1 close — Route 1 swizzle reconciled to identity row-major; additive shape `st_64x32_padded_b128` landed; Step 5 correctness gate added; Path A approved for Step 4)
+
+P23 Session 1 dispatched 3 Devs (A re-proof, B shape-add, C design)
++ 1 Reviewer in parallel against the open swizzle question. **Net:
+Reviewer overturned the brief's "Dev A K-octet col-major is the
+true bank-conflict-zero layout" framing — both layouts are
+bit-identically conflict-free, but only Dev B's identity row-major
+(a) produces directly-MFMA-compatible per-lane payload from
+`ds_read_b128` with NO `v_perm` fixup and (b) is compatible with
+the existing `prefill_swizzled_offsets` HBM voffset reconstruction
+(`global_to_shared.cuh:149-151`). Dev A's K-octet col-major would
+have required modifying g2s — non-additive — and would have left a
+v_perm tax that defeats the entire P22 design rationale.**
+
+Confidence range updated post-reconciliation: **65-80%** ≥ +2 pp
+on RCR worst shape (was 60-75%). Adjustments: R2 closed (pad
+granularity not load-bearing — any subtile ≥ 1 K-octet is
+conflict-free at +32 stride), R3 closed (HBM voffset works
+out-of-the-box for identity), R5 introduced (Path A lane-VGPR
+fan-out unverified — Step 4 prototype must demonstrate or fall
+back to Path B at 4× issue cost).
+
+- **Dev A (GPU 7, P23 probe re-proof for amended `st_64x32`
+  shape, opus)** — re-ran the P22 probe with `subtile_rows=64,
+  subtile_cols=32, subtile_padding=32` (4096-B subtile, +32 B pad,
+  4128-B stride) using a custom K-octet column-major LDS write
+  (`(c/8)*1024 + r*16 + (c%8)*2`). PMC: 0 bank conflicts across
+  4096/4096 writes and 2048/2048 reads. Probe is internally
+  consistent BUT Reviewer found the K-octet col-major layout is
+  **incompatible with TK production**: it cannot round-trip through
+  `prefill_swizzled_offsets` and produces a per-lane MFMA payload
+  that needs `v_perm` to align. Probe lesson is preserved as a
+  "what NOT to ship" reference; no production code derives from it.
+
+- **Dev B (GPU 5, P23 add `st_64x32_padded_b128` shape, opus)** —
+  added the shape struct to `include/types/shared/st_shape.cuh:336-379`
+  (identity row-major swizzle, `subtile_padding=32`,
+  `bytes_per_thread=16`) and `concept all` whitelist at
+  `st_shape.cuh:418`; added export alias `st_64x32_padded_b128_s` in
+  `include/types/types.cuh:83`. Built an LDS-peek probe at
+  `analysis/bf16_gemm/mi350x/probe_st64x32_prefill/probe.cpp` that
+  feeds DTL writes through `prefill_swizzled_offsets` and verifies
+  8192/8192 cells round-trip; pad bytes preserved as 0xDEAD
+  sentinel (0 violations). Confirms the new shape is **fully
+  additive** — existing kernels rebuild byte-identically (Reviewer
+  smoke: VGPRs 216-220, no spills, occupancy=2 hint, perf 1374
+  TFLOPS on RCR (4096, 28672, 4096) unchanged from baseline).
+
+- **Dev C (GPU 7, P23 Step 4 design, opus, worktree
+  `agent-a1edd01b`, design at `p23_dev_c_DESIGN.md`)** — produced
+  Step 4 design memo. Key contributions: (1) **MFMA col_l A-operand
+  payload mismatch is the load-bearing risk** — `ds_read_b128`
+  returns lane L holding `(M=L%16, K=(L/16)*8..+7)`, MFMA col_l
+  A-operand for `v_mfma_f32_16x16x32_bf16` expects `(M=L%16,
+  K-octet=L/16)` — these align only under identity row-major LDS
+  layout; under K-octet col-major they 90°-rotate. (2) **Path A
+  (1 b128 issue per (subtile, r) fans out across 4 K-octets via
+  the 4 lane-groups) vs Path B (4 b128 issues per (subtile, r),
+  one per compile-time K-octet, 75% wasted bandwidth)** as the
+  Step-4 implementation choice tree. (3) Compile-time fallback
+  flag `BF16_RCR_PADDED_B128` for one-line revert. (4) End-to-end
+  MFMA correctness gate sketch for Step 5.
+
+- **Reviewer (GPU 7, P23 swizzle reconciliation, opus, output at
+  `/tmp/p23_reviewer/REVIEW.md` + `check_bank_conflict_both.py`)** —
+  built independent side-by-side bank-conflict counter for both
+  Dev A and Dev B layouts. **Both are bank-conflict-zero with
+  bit-identical bank histograms** (8 lanes/bank/cycle uniform
+  across all 4 dword cycles). Brief's claim that Dev B's layout
+  has "lanes 0,8 hit bank 0; lanes 1,9 hit bank 4 = half-conflict
+  per word" was a counting error. Verdict: **APPROVE Session 2
+  AS-IS, NO swizzle correction required, identity row-major is
+  CORRECT**. Recommended Path A for Step 4 (1 b128 issue per
+  (subtile, r) — emitted as 4-`j`-loop fan-out so the
+  compile-time `dst.tiles[i][j]` indexing is clean; 16 b128 per
+  RT base-tile-set per K-iter, matches BL's 64 b128 per A-tile-half
+  per K-iter). Path B is the documented fallback (mechanically
+  guaranteed correct at 4× cost). Smoke-built kernel with new
+  shape present in `st_shape.cuh`: SNR=47.83 dB (≥47 dB gate),
+  perf 1374 TFLOPS on RCR (4096, 28672, 4096) — zero regression.
+
+**P23 Session 1 close-out summary table:**
+
+| Item                                              | Status | Notes                                              |
+|---------------------------------------------------|:------:|----------------------------------------------------|
+| `st_64x32_padded_b128` shape (additive)           | LANDED | identity row-major; `st_shape.cuh:336-379`         |
+| Per-block LDS / VGPR / occupancy regression check | PASSED | VGPRs 216-220, no spills, occupancy hint preserved |
+| `prefill_swizzled_offsets` round-trip for new shape | PASSED | LDS-peek probe 8192/8192 cells; pad preserved      |
+| Step 5 end-to-end correctness gate vs torch.mm    | LANDED | smoke shape (256, 256, 128); SNR=47.83 dB on (4096, 28672, 4096) |
+| K-octet col-major swizzle (Dev A)                 | REJECTED | incompatible with `prefill_swizzled_offsets`; defeats P22 design (v_perm tax) |
+| Path A vs Path B for Step 4                       | DECIDED | Path A first (4-`j`-loop fan-out); Path B is mechanical fallback |
+
+**P23 Session 2 dispatch (next session) — Step 4 implementation:**
+
+Implement the `ds_read_b128` dispatch branch in
+`include/ops/warp/memory/tile/shared_to_register.cuh:195` (the
+`load(col_l)` template) for `st_64x32_padded_b128`. Use Path A
+(per-`j` 4-loop fan-out) as the first attempt. Lane address per
+issue: `lane_addr(L, subtile_id, r, j) = subtile_id * 4128 +
+r * 16 * 64 + (L % 16) * 64 + j * 16`. Indirect through
+`ST::shape::swizzle({r,c})` rather than hard-code (Dev C R3
+hardening — auto-propagates if swizzle ever changes). Add the new
+`if constexpr` as the FIRST branch in `load(col_l)`'s Branch A
+bf16 instruction-selection block (Branch A = subtile ≥ register
+base, the case `st_64x32_padded_b128` lands in). Compile-time
+fallback flag `BF16_RCR_PADDED_B128` (Dev C §4) for one-line
+revert. **Step 5 correctness gate (already landed) is the safety
+net** — if Path A fails the SNR ≥ 47 dB allclose vs `torch.mm`,
+switch to Path B (also documented in Dev C §3.4). After Step 4
++ Step 5 land, P23 Session 3 will do Step 6 (RCR kernel wiring +
+paired bench), Step 7 (PMC validation: LDS_BANK_CONFLICT drop
+from ~67.6M to <1M expected), Step 8 (cross-GPU paired bench).
+
+**Out of scope for P23+ (deferred):** CRR + RRR Route 1 (need
+separate BL `Ailk_Bjlk` reverse-engineering — Dev A's row-pair
+swizzle is the right framing); Stream-K re-evaluation (post-P23,
+new bandwidth headroom may make `bc4392bf` abandonment reversible).
+
+## [P23 Session 1 archive] Earlier Status (2026-04-18, post-P22 close — Route 1 LDS write-side swizzle DESIGN APPROVED-WITH-AMENDMENTS; P23 implementation queued, ~4-4.5 sessions, 60-75% conf ≥+2pp on RCR worst shape)
 
 P22 dispatched 4 Devs (A/B/C/D) + 1 Reviewer in parallel against the
 Route 1 LDS write-side swizzle design problem (left open by P21).

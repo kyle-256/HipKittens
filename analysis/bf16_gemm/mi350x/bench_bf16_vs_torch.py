@@ -39,8 +39,13 @@ def gen_gemm_test_cases(config):
     ]
 
 WARMUP, ITERS = 20, 40
-GM_SEARCH = [1, 2, 4, 8, 16]
-XCD_SEARCH = [4, 8, 16]
+# P10 (Dev2): Expanded autotune search.
+# Discovery: many tall-N losing shapes find +1-6pp wins at gm=24 (a value
+# outside the original {1,2,4,8,16} search). Several also benefit from
+# xcd=2 or xcd=32 (outside the original {4,8,16}).
+# Expanded: gm += {6, 24}, xcd += {2, 32}. Bench runtime grows ~1.7x.
+GM_SEARCH = [1, 2, 4, 6, 8, 16, 24]
+XCD_SEARCH = [2, 4, 8, 16, 32]
 # Best-of-N repeats to reject launch/DVFS noise: per-gm we time ITERS kernel
 # launches NREPEAT times and take the min of each set, then the min across
 # repeats. Min is used because GEMM time is lower-bounded by hardware and any
@@ -48,6 +53,87 @@ XCD_SEARCH = [4, 8, 16]
 NREPEAT = 3
 BLK = tk_bf16_layouts.BLOCK_SIZE
 K_STEP = tk_bf16_layouts.K_STEP
+
+# P23 Step 5: end-to-end MFMA correctness gate. Catches silent operand-mapping
+# errors (per Dev C §2.5: a Step-4 implementation that compiles, builds, and
+# benches but produces wrong MFMA outputs because ds_read_b128's lane payload
+# is rotated 90° vs MFMA col_l A-operand expectation).
+#
+# Smoke shape: M=N=256, K=128. Notes on shape selection:
+#   - Dev C §6.1 sketched (M=N=128, K=64); empirically that shape returns
+#     `hipErrorInvalidConfiguration` because BLOCK_SIZE=256 (one tile floor).
+#   - Module exports K_STEP=64, but the kernel's actual K-correctness floor
+#     is 128 — at K=64, gemm_rcr returns silent garbage (max_abs ~ 33 on
+#     unit-variance inputs vs ref). The smoke gate explicitly avoids that
+#     trap; Step-4 Devs should treat K=64 as untested.
+#   - (M=256, N=256, K=128) is the smallest valid shape: 1 row-block × 1
+#     col-block × 1 K-tile, deterministic, ~120 µs round-trip.
+#
+# Tolerance: rtol=1e-2, atol=K*1e-2 (Dev C §6.2). Reference is FP32-promoted
+# torch.mm to remove BF16-vs-BF16 accumulator coupling — we want to catch
+# kernel-side mapping errors, not hipBLASLt's BF16 accumulator drift.
+SMOKE_M, SMOKE_N, SMOKE_K = 256, 256, 128
+
+
+def verify_correctness(M, N, K, layout, gm=1, xcd=4, _log_handle=None):
+    """Run TK kernel once and compare vs FP32-promoted torch.mm.
+
+    Returns True on pass. Raises RuntimeError on mismatch with first ~10
+    mismatched indices, max abs/rel err, and the failing (M,N,K,layout).
+    """
+    assert M % BLK == 0 and N % BLK == 0, f"smoke shape (M={M},N={N}) not aligned to BLOCK_SIZE={BLK}"
+    assert K % 128 == 0, f"smoke shape K={K} below kernel correctness floor (128); see harness comment"
+    if layout == "rcr":
+        A = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
+        B = torch.randn(N, K, dtype=torch.bfloat16, device="cuda")
+        ref = torch.mm(A.float(), B.float().T)
+        fn = tk_bf16_layouts.gemm_rcr
+    elif layout == "rrr":
+        A = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
+        B = torch.randn(K, N, dtype=torch.bfloat16, device="cuda")
+        ref = torch.mm(A.float(), B.float())
+        fn = tk_bf16_layouts.gemm_rrr
+    elif layout == "crr":
+        A = torch.randn(K, M, dtype=torch.bfloat16, device="cuda")
+        B = torch.randn(K, N, dtype=torch.bfloat16, device="cuda")
+        ref = torch.mm(A.float().T, B.float())
+        fn = tk_bf16_layouts.gemm_crr
+    else:
+        raise ValueError(f"unknown layout {layout!r}")
+
+    C = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
+    fn(A, B, C, gm, xcd)
+    torch.cuda.synchronize()
+
+    rtol, atol = 1e-2, K * 1e-2
+    Cf = C.float()
+    diff = (Cf - ref).abs()
+    if not torch.allclose(Cf, ref, rtol=rtol, atol=atol):
+        max_abs = diff.max().item()
+        rel = diff / (ref.abs() + 1e-9)
+        max_rel = rel.max().item()
+        # First ~10 mismatched indices (use the same allclose mask).
+        bad = (diff > (atol + rtol * ref.abs()))
+        idxs = torch.nonzero(bad, as_tuple=False)
+        n_show = min(10, idxs.shape[0])
+        msg_lines = [
+            f"[CORRECTNESS] FAIL layout={layout} M={M} N={N} K={K} gm={gm} xcd={xcd}",
+            f"[CORRECTNESS]   max_abs={max_abs:.4f}  max_rel={max_rel:.4e}  atol={atol:.3f}  rtol={rtol}",
+            f"[CORRECTNESS]   {idxs.shape[0]} mismatched / {Cf.numel()} elements; first {n_show}:",
+        ]
+        for k in range(n_show):
+            i, j = int(idxs[k, 0]), int(idxs[k, 1])
+            msg_lines.append(f"[CORRECTNESS]     C[{i},{j}] got={Cf[i,j].item():.4f} expected={ref[i,j].item():.4f}")
+        msg = "\n".join(msg_lines)
+        print(msg, flush=True)
+        raise RuntimeError(msg)
+
+    line = f"[CORRECTNESS] M={M} N={N} K={K} layout={layout} PASS  (max_abs={diff.max().item():.4f}, atol={atol:.3f})"
+    print(line, flush=True)
+    if _log_handle is not None:
+        _log_handle.write(line + "\n")
+        _log_handle.flush()
+    return True
 
 
 def _time(run):
@@ -120,6 +206,15 @@ for config in DenseModelConfigs.values():
 shapes = sorted(all_shapes)
 
 LAYOUTS = ["rcr", "rrr", "crr"]
+
+# P23 Step 5: MANDATORY correctness gate — runs BEFORE any perf timing.
+# Aborts the bench if any layout silently produces wrong MFMA outputs.
+# Do NOT make conditional or opt-out: this is the trap-door for Step 4.
+print(f"[CORRECTNESS] P23 Step 5 gate: smoke shape M={SMOKE_M} N={SMOKE_N} K={SMOKE_K}")
+for _layout in LAYOUTS:
+    verify_correctness(SMOKE_M, SMOKE_N, SMOKE_K, _layout)
+print(f"[CORRECTNESS] all {len(LAYOUTS)} layouts PASSED gate; proceeding to perf bench")
+
 print(f"BF16 GEMM benchmark: {len(shapes)} shapes × {len(LAYOUTS)} layouts vs torch.mm (hipBLASLt)")
 print(f"{'M':>5} {'N':>6} {'K':>5}", end="")
 for lay in LAYOUTS:

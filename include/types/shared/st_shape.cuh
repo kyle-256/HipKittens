@@ -333,6 +333,51 @@ struct st_16x128_v3 {
     }
 };
 
+// P23 Dev B (BF16 RCR Route 1, padded-b128 design):
+//   Identity-swizzle 64x32 BF16 subtile with 32-byte padding tacked onto
+//   the END of each 4096-B subtile. The padding (not any within-subtile
+//   permutation) is what breaks the 128-B LDS-bank alias for stride-128
+//   ds_read_b128 on gfx950's 32-bank x 4-B banks.
+//
+//   Per-subtile bytes  : 64 * 32 * 2 = 4096
+//   Per-subtile stride : 4096 + 32   = 4128
+//   bytes_per_thread   : 16          (b128 DTL writes from g2s)
+//
+//   Used as st_bf<128, 64, st_64x32_padded_b128> for both ST_A and ST_B
+//   in BF16 RCR (Route 1). Within-subtile swizzle is IDENTITY so that
+//   prefill_swizzled_offsets's HBM voffset reconstruction at lines
+//   149-151 of include/ops/warp/memory/tile/global_to_shared.cuh stays
+//   bit-correct without a code change. Padding is applied between
+//   subtiles via underlying_subtile_stride_bytes (see st.cuh:68,83 +
+//   global_to_shared.cuh:60,98,212,236,305).
+struct st_64x32_padded_b128 {
+    static constexpr int rows = 64;
+    static constexpr int cols = 32;
+    static constexpr int subtile_padding = 32;
+
+    template<typename _T>
+    static constexpr int bytes_per_thread() {
+        if constexpr (sizeof(_T) == 2) {
+            return 16;
+        } else {
+            static_assert(false, "Unsupported type");
+        }
+    }
+
+    template<typename _T>
+    __device__ __forceinline__ static const uint32_t swizzle (int2 coord) {
+        const int r = coord.x, c = coord.y;
+        using T = _T;
+        const uint32_t offset = sizeof(T)*(r*cols + c);
+        if constexpr (sizeof(T) == 2) {
+            // Identity: padding lives between subtiles, not inside.
+            return offset;
+        } else {
+            static_assert(false, "Unsupported type");
+        }
+    }
+};
+
 struct st_128x16 {
     static constexpr int rows = 128;
     static constexpr int cols = 16;
@@ -370,6 +415,7 @@ concept all = std::is_same_v<T, st_16x16> ||
               std::is_same_v<T, st_16x128_v2> ||
               std::is_same_v<T, st_16x128_v2a> ||
               std::is_same_v<T, st_16x128_v3> ||
+              std::is_same_v<T, st_64x32_padded_b128> ||
               std::is_same_v<T, st_128x16>;
 
 

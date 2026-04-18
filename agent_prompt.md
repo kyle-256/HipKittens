@@ -183,6 +183,109 @@ BF16 work is paused unless a clean structural restructure is on the table
 
 ## Session Log
 
+### 2026-04-18 — P23 Session 1 (3 Devs + 1 Reviewer; GPUs 5/7; CLOSE — `st_64x32_padded_b128` shape LANDED additive; identity row-major swizzle CONFIRMED correct; Path A approved for Step 4; Step 5 correctness gate landed)
+
+**Outcome: P23 Session 1 lands additive infrastructure for the
+BF16 RCR Route 1 padded-b128 design with ZERO regression on the
+existing kernel. The Decider brief's premise that Dev A's
+K-octet column-major swizzle was "the true bank-conflict-zero
+layout" was overturned by the Reviewer: both layouts are
+bit-identically conflict-free, but only Dev B's identity
+row-major (a) produces a directly-MFMA-compatible per-lane
+payload from `ds_read_b128` with NO `v_perm` fixup, and (b) is
+compatible with the existing `prefill_swizzled_offsets` HBM
+voffset reconstruction. Confidence range bumped from 60-75% to
+65-80% on ≥+2pp RCR-worst lift after Step 4 lands.**
+
+**The 3 Devs + 1 Reviewer:**
+
+- **Dev A (GPU 7, P23 probe re-proof for amended `st_64x32`,
+  opus, worktree `agent-af88efae`)** — re-ran the P22 probe with
+  the amended shape (subtile_padding=32, 4096-B subtile, 4128-B
+  stride) using a **K-octet column-major LDS write formula**
+  (`(c/8)*1024 + r*16 + (c%8)*2`). PMC: 0 bank conflicts across
+  4096/4096 writes and 2048/2048 reads. Probe is internally
+  consistent BUT Reviewer found this layout would break the TK
+  production code path: it cannot round-trip through
+  `prefill_swizzled_offsets` (`global_to_shared.cuh:149-151`
+  reconstructs HBM voffset assuming swizzle stays within
+  `row_bytes` mod), and would require `v_perm` fixup per
+  `ds_read_b128` to align the per-lane payload with MFMA col_l
+  A-operand expectation — defeating the entire P22 design
+  rationale (BL uses 0× `v_perm` in RCR). Probe lesson preserved
+  as a "what NOT to ship" reference.
+
+- **Dev B (GPU 5, P23 add `st_64x32_padded_b128` shape, opus)** —
+  added the shape struct to `include/types/shared/st_shape.cuh:336-379`
+  (identity row-major swizzle, `subtile_padding=32`,
+  `bytes_per_thread=16`); added to `concept all` whitelist at
+  `st_shape.cuh:418`; added export alias `st_64x32_padded_b128_s`
+  in `include/types/types.cuh:83`. Built an LDS-peek probe at
+  `analysis/bf16_gemm/mi350x/probe_st64x32_prefill/probe.cpp`
+  feeding DTL writes through `prefill_swizzled_offsets` and
+  verifying 8192/8192 cells round-trip (pad bytes preserved as
+  0xDEAD sentinel; 0 violations). Confirms the new shape is
+  fully additive: existing kernels rebuild byte-identically
+  (Reviewer smoke: VGPRs 216-220, no spills, occupancy=2 hint,
+  perf 1374 TFLOPS unchanged from baseline on RCR (4096, 28672,
+  4096)).
+
+- **Dev C (GPU 7, P23 Step 4 design memo, opus, worktree
+  `agent-a1edd01b`, design at `p23_dev_c_DESIGN.md`)** — produced
+  Step 4 design memo. Key contributions: (1) **MFMA col_l
+  A-operand payload mismatch is the load-bearing risk**:
+  `ds_read_b128` returns lane L holding `(M=L%16,
+  K=(L/16)*8..+7)`; MFMA col_l A-operand for
+  `v_mfma_f32_16x16x32_bf16` expects `(M=L%16, K-octet=L/16)` —
+  these align only under identity row-major LDS layout; under
+  K-octet col-major they 90°-rotate. (2) **Path A** (1 b128 issue
+  per (subtile, r) fans out across 4 K-octets via 4 lane-groups)
+  vs **Path B** (4 b128 issues per (subtile, r), one per
+  compile-time K-octet, 75% wasted bandwidth). (3) Compile-time
+  fallback flag `BF16_RCR_PADDED_B128` for one-line revert.
+  (4) End-to-end MFMA correctness gate sketch (Step 5).
+
+- **Reviewer (GPU 7, P23 swizzle reconciliation, opus, output at
+  `/tmp/p23_reviewer/REVIEW.md` + `check_bank_conflict_both.py`)** —
+  built independent side-by-side bank-conflict counter for both
+  Dev A and Dev B layouts. **Both are bank-conflict-zero with
+  bit-identical bank histograms** (uniform 8 lanes/bank/cycle
+  across all 4 dword cycles). Brief's claim that Dev B's layout
+  has half-conflict was a counting error. **Verdict: APPROVE
+  Session 2 AS-IS, NO swizzle correction required, identity
+  row-major is CORRECT.** Recommended Path A for Step 4 with the
+  explicit 4-`j`-loop fan-out (so the compile-time
+  `dst.tiles[i][j]` indexing stays clean; 16 b128 per RT
+  base-tile-set per K-iter, matches BL's 64 b128 per A-tile-half
+  per K-iter). Path B is the mechanical fallback at 4× cost.
+  Smoke-built kernel with new shape present: SNR=47.83 dB
+  (≥47 dB gate), perf 1374 TFLOPS — zero regression.
+
+**Memo for future Decider runs**: When two probe Devs disagree on
+"the right" LDS layout, **the load-bearing reconciliation is NOT
+just bank conflicts — it's also (a) per-lane MFMA payload
+alignment and (b) compatibility with `prefill_swizzled_offsets`
+HBM voffset reconstruction**. A layout that is bank-conflict-free
+in isolation can still be production-incompatible. Always
+cross-check against `global_to_shared.cuh:149-151` and the MFMA
+operand-layout doc for the target instruction.
+
+**P23 Session 2 dispatch (next session)**: Step 4
+implementation. Add `ds_read_b128` dispatch branch to
+`include/ops/warp/memory/tile/shared_to_register.cuh:195` (the
+`load(col_l)` template) for `st_64x32_padded_b128`. Use Path A
+(4-`j`-loop fan-out) as first attempt; lane address per issue:
+`lane_addr(L, subtile_id, r, j) = subtile_id * 4128 + r * 16 *
+64 + (L % 16) * 64 + j * 16`. Indirect through
+`ST::shape::swizzle({r,c})` rather than hard-coding. Add the
+new `if constexpr` branch as the FIRST branch in Branch A's
+bf16 instruction-selection block (Branch A is the case `subtile
+≥ register base`, where `st_64x32_padded_b128` lands). Gated
+by compile-time flag `BF16_RCR_PADDED_B128` (one-line revert).
+Step 5 correctness gate (already landed in
+`bench_bf16_vs_torch.py`) is the safety net — if Path A fails
+SNR ≥ 47 dB allclose vs `torch.mm`, switch to Path B.
+
 ### 2026-04-18 — P22 (4 Devs + 1 Reviewer; multi-GPU; CLOSE — Route 1 LDS write-side swizzle DESIGN APPROVED-WITH-AMENDMENTS; one CRITICAL framing correction overrides P21 Dev A; one autotuner lever DEFINITIVELY CLOSED)
 
 **Outcome: Design `st_64x32_padded_b128` for BF16 RCR Route 1 is

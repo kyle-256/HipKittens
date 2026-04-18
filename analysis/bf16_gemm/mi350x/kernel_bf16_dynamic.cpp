@@ -21,6 +21,105 @@ using G = kittens::group<NUM_WARPS>;
 
 enum class Layout { RCR, RRR, CRR };
 
+// P21 Dev D — port the FP8 RCR m0-broadcast hoist (P19 commit 49647b11) to
+// BF16 RCR + RRR. The baseline kernel emits one `s_mov_b32 m0, sX` plus one
+// `s_mov_b32 sX, s_next` rotation per `buffer_load_dwordx4 ... offen lds`.
+// The intrinsic path lets LLVM rotate m0 via a single working SGPR which
+// inserts an extra scalar move per load. Inline asm pre-computes a fully
+// unrolled SGPR ramp of LDS byte addresses in the prologue and issues
+//   s_mov_b32 m0, <per-pass SGPR>
+//   buffer_load_dwordx4 <vphantom>, <SRD>, <SOFF> offen lds
+// which removes the SGPR rotate and leaves only the unavoidable m0 write.
+//
+// CRR is left on the stock G::load path: its DTL pattern is structurally
+// different (b64_tr_b16 dominant, 8x more buffer_loads) and any change there
+// must be measured separately.
+//
+// Default 0 — flip to 1 only on a measured wall-clock win with SNR > 5 dB
+// AND zero-byte CRR delta.
+#ifndef BF16_HOIST_M0
+#define BF16_HOIST_M0 0
+#endif
+
+#if BF16_HOIST_M0
+namespace bf16_dev_d {
+using as3_uint32_ptr = __attribute__((address_space(3))) unsigned int*;
+
+template<int N_THREADS,
+         ducks::st::all ST,
+         ducks::gl::all GL,
+         ducks::coord::tile COORD = coord<ST>>
+__device__ __forceinline__ void load_hoist(
+    ST& dst, const GL& src, const COORD& idx,
+    const uint32_t* __restrict__ swizzled_offsets,
+    i32x4 SRD, const void* base_ptr, const uint32_t lds_base)
+{
+    using T = typename ST::dtype;
+    static_assert(sizeof(T) == 2, "bf16 hoist expects 2-byte dtype");
+
+    constexpr int bytes_per_thread = 16;
+    constexpr int bytes_per_memcpy = bytes_per_thread * N_THREADS;
+    constexpr int memcpy_per_tile  =
+        (ST::rows * ST::cols * sizeof(T)) / bytes_per_memcpy;
+    static_assert(bytes_per_memcpy % 16 == 0, "LDS bump must be 16-aligned");
+
+    // Wave-uniform SOFF (pulled into SGPR; mirrors stock to_sgpr_u32 helper).
+    coord<> unit_coord = idx.template unit_coord<2, 3>();
+    T* __restrict__ gptr = (T*)&src[unit_coord];
+    uint32_t SOFF = static_cast<uint32_t>(
+        reinterpret_cast<const char*>(gptr) -
+        reinterpret_cast<const char*>(base_ptr));
+    SOFF = __builtin_amdgcn_readfirstlane(SOFF);
+    asm volatile("" : "+s"(SOFF));
+
+    // Wave-uniform LDS tile base (matches the per-warp `lds_base` arg's
+    // tile origin; we recompute warp_offset from the same delta as the stock
+    // path so the two layouts are byte-identical when BF16_HOIST_M0=0).
+    uint32_t lds_tile_base3 = static_cast<uint32_t>(
+        reinterpret_cast<uintptr_t>(&dst.data[0]));
+    lds_tile_base3 = __builtin_amdgcn_readfirstlane(lds_tile_base3);
+    asm volatile("" : "+s"(lds_tile_base3));
+    const uint32_t warp_offset = lds_base - lds_tile_base3;
+
+    // Hoist per-pass scalar LDS-byte ramp into SGPRs in the prologue.
+    uint32_t lds_addrs[memcpy_per_tile > 0 ? memcpy_per_tile : 1];
+    #pragma unroll
+    for (int i = 0; i < memcpy_per_tile; ++i) {
+        const uint32_t linear_offset =
+            warp_offset + static_cast<uint32_t>(i) * bytes_per_memcpy;
+        const uint32_t subtile_id_lds = linear_offset / ST::underlying_subtile_bytes;
+        uint32_t lds_byte = lds_tile_base3 + linear_offset +
+                            subtile_id_lds * ST::subtile_padding;
+        lds_byte = __builtin_amdgcn_readfirstlane(lds_byte);
+        asm volatile("" : "+s"(lds_byte));
+        lds_addrs[i] = lds_byte;
+    }
+
+    // Inline-asm DTL — set m0 from the SGPR-hoisted per-pass offset and issue
+    // buffer_load_dwordx4 ... offen lds. The intrinsic
+    // `__builtin_amdgcn_raw_buffer_load_lds` lets the scheduler reschedule
+    // the m0 write back through a vector intermediate; inline asm forecloses
+    // that and keeps the per-iter cluster down to 1 scalar move + 1 DTL.
+    // Operand binding mirrors P19 Dev A's working FP8 8w pattern:
+    //   %0 = s "lds_off" (SGPR)  %1 = v "goff" (per-lane VGPR offset)
+    //   %2 = s "SRD" (4-SGPR buffer resource)  %3 = s "SOFF" (scalar offset)
+    // v0 satisfies the asm constraint; `buffer_load_dwordx4 ... lds` does not
+    // actually write a VGPR.
+    #pragma unroll
+    for (int i = 0; i < memcpy_per_tile; ++i) {
+        const uint32_t lds_off = lds_addrs[i];
+        const uint32_t goff    = swizzled_offsets[i];
+        asm volatile(
+            "s_mov_b32 m0, %0\n\t"
+            "buffer_load_dwordx4 %1, %2, %3 offen lds\n\t"
+            :
+            : "s"(lds_off), "v"(goff), "s"(SRD), "s"(SOFF)
+            : "memory");
+    }
+}
+} // namespace bf16_dev_d
+#endif // BF16_HOIST_M0
+
 struct layout_globals {
     _gl a, b, c;
     hipStream_t stream;
@@ -166,6 +265,22 @@ void gemm_kernel(const layout_globals g) {
     uint32_t swizzled_offsets_B[memcpy_per_tile/2];
     G::prefill_swizzled_offsets(As[0][0], g.a, swizzled_offsets_A);
     G::prefill_swizzled_offsets(Bs[0][0], g.b, swizzled_offsets_B);
+
+    // P21 Dev D — gated DTL hoist. Layout-isolated via `if constexpr` so the
+    // CRR codegen path is byte-identical to the BF16_HOIST_M0=0 build.
+    auto bf16_dtl_load = [&]<typename DST>(DST& dst, const _gl& gl, auto coord_,
+                                            const uint32_t* swo, i32x4 srd,
+                                            const bf16* base, uint32_t lds_off) {
+#if BF16_HOIST_M0
+        if constexpr (L == Layout::RCR || L == Layout::RRR) {
+            bf16_dev_d::load_hoist<NUM_THREADS>(dst, gl, coord_, swo, srd, base, lds_off);
+        } else {
+            G::load(dst, gl, coord_, swo, srd, base, lds_off);
+        }
+#else
+        G::load(dst, gl, coord_, swo, srd, base, lds_off);
+#endif
+    };
 
     // Subtile extraction helpers
     auto load_a_subtile = [&](A_reg_t& dst, auto& smem_tile, int warp_idx) {

@@ -80,6 +80,7 @@ using st_16x128_s = ducks::st_shape::st_16x128;
 using st_16x128_v2_s = ducks::st_shape::st_16x128_v2;
 using st_16x128_v2a_s = ducks::st_shape::st_16x128_v2a;
 using st_16x128_v3_s = ducks::st_shape::st_16x128_v3;
+using st_64x32_padded_b128_s = ducks::st_shape::st_64x32_padded_b128;
 using st_128x16_s = ducks::st_shape::st_128x16;
 
 }

@@ -1,0 +1,40 @@
+{
+  "tag": "baseline",
+  "threshold_ratio": 0.05,
+  "threshold_abs": 1000000,
+  "verdict_pass": true,
+  "results": {
+    "crr|m4096n28672k4096": {
+      "kernel": "void gemm_kernel(layout_globals)",
+      "MFMA_BF16": 58720256.0,
+      "GRBM_GUI_ACTIVE": 11211052.0,
+      "INSTS_LDS": 44040192.0,
+      "BANK_CONFLICT": 88080384.0,
+      "WAIT_INST_LDS": 109580799.0
+    },
+    "crr|m8192n22016k4096": {
+      "kernel": "void gemm_kernel(layout_globals)",
+      "MFMA_BF16": 90177536.0,
+      "GRBM_GUI_ACTIVE": 17298925.0,
+      "INSTS_LDS": 67633152.0,
+      "BANK_CONFLICT": 135266304.0,
+      "WAIT_INST_LDS": 168484914.0
+    },
+    "rcr|m4096n28672k4096": {
+      "kernel": "void gemm_kernel(layout_globals)",
+      "MFMA_BF16": 58720256.0,
+      "GRBM_GUI_ACTIVE": 9784069.0,
+      "INSTS_LDS": 22020096.0,
+      "BANK_CONFLICT": 0.0,
+      "WAIT_INST_LDS": 47771843.0
+    },
+    "rcr|m8192n22016k4096": {
+      "kernel": "void gemm_kernel(layout_globals)",
+      "MFMA_BF16": 90177536.0,
+      "GRBM_GUI_ACTIVE": 14938730.0,
+      "INSTS_LDS": 33816576.0,
+      "BANK_CONFLICT": 0.0,
+      "WAIT_INST_LDS": 73236557.0
+    }
+  }
+}
