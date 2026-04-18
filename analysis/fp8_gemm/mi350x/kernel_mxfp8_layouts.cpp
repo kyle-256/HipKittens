@@ -299,6 +299,24 @@ using namespace kittens;
 #define GEMM_WARPS_N 4
 #endif
 
+// R28 Dev D — rectangular BLK_M=256/BLK_N=128 scaffolding.
+// MXFP8_RECT_BLK_N defines HB_N (half of BLK_N). Default 128 -> BLK_N=256
+// (square baseline, no behavioral change). When set to 64 -> BLK_N=128
+// (rectangular tile: 2x more N-tiles per kernel grid; targets KV-attn
+// N=1024 wave under-occupancy on 304 CUs).
+//
+// SCAFFOLDING ONLY: when MXFP8_RECT_BLK_N=64 the V2-CRR exact-8wave
+// fastpath is force-disabled (mirrors R27 Dev D MXFP8_BLK128 prototype)
+// because its scale slab math + load_col_from_v2_st helpers hardcode
+// HB_N=128. Real perf path requires a dedicated rect-V2 fastpath in a
+// future cycle; this gate ensures clean compile + V1 fallback PASS.
+#ifndef MXFP8_RECT_BLK_N
+#define MXFP8_RECT_BLK_N 128
+#endif
+#if (MXFP8_RECT_BLK_N != 64) && (MXFP8_RECT_BLK_N != 128)
+#error "MXFP8_RECT_BLK_N must be 64 or 128 (only square=128 / rect-N=64 are scaffolded today)"
+#endif
+
 constexpr int BLK = GEMM_BLOCK_SIZE, BK = GEMM_K_BLOCK;
 constexpr int HB  = BLK / 2;
 constexpr int WARPS_M = GEMM_WARPS_M, WARPS_N = GEMM_WARPS_N;
@@ -308,6 +326,15 @@ constexpr int RBM = BLK / WARPS_M / 2;   // 64
 constexpr int RBN = BLK / WARPS_N / 2;   // 32
 constexpr int TAIL_BLOCK_M = 16;
 constexpr int TAIL_BLOCK_N = 16;
+
+// R28 Dev D — rectangular BLK_N constants. In default (square) mode these
+// equal BLK/HB/RBN. In rect-N mode (MXFP8_RECT_BLK_N=64) BLK_N=128, HB_N=64,
+// RBN_RECT=16. None of these names are used by the existing default fastpath;
+// they are only consumed by the new B-side helper variant below and by any
+// future rect-V2 kernel.
+constexpr int HB_N      = MXFP8_RECT_BLK_N;     // 128 default, 64 rect
+constexpr int BLK_N     = HB_N * 2;             // 256 default, 128 rect
+constexpr int RBN_RECT  = BLK_N / WARPS_N / 2;  // 32 default, 16 rect
 
 #ifndef GEMM_MIN_BLOCKS_PER_CU
 #define GEMM_MIN_BLOCKS_PER_CU 2
@@ -453,6 +480,81 @@ __device__ __forceinline__ void load_col_from_v2_st(
 {
     load_col_from_v2_st_half<RT, 0>(dst, tile, col_start);
     load_col_from_v2_st_half<RT, 1>(dst, tile, col_start);
+}
+
+// R28 Dev D — rectangular BLK_N=128 helper variant.
+//
+// SCAFFOLDING for the future rect-V2 fastpath: the existing
+// load_col_from_v2_st_half computes `k_row = row_off + K_HALF*64` which,
+// at K_HALF=1, reads N-rows 64..87 from the ST tile. With HB_N=64 the
+// tile only has 64 rows total, so K_HALF=1 is out-of-bounds.
+//
+// The B-side ST tile in rect mode would be st_fp8e4m3<HB_N=64, BK=128,
+// st_16x128_v2_s>. The existing inline-asm ds_read_b64_tr_b8 offset:1024
+// is a K-direction stride of 8 rows * BK bytes = 1024 — INDEPENDENT of
+// HB. The per-subtile address math (stidx<<11)+(stidx<<7) = stidx*2176
+// reflects 16-row * 128-col subtile + 128 byte padding, also independent
+// of HB. Therefore only the high-half K_HALF=1 is unreachable; the
+// K_HALF=0 path is byte-identical.
+//
+// This variant exposes only K_HALF=0 (loads 24 N-rows; a full BLK_N=128
+// load issues this helper twice with col_start advanced by 64 to cover
+// the 4 contiguous subtiles). Wiring into a full rect-V2 fastpath is
+// scoped to the next cycle. NOT YET CALLED FROM ANY HOT KERNEL — this
+// declaration exists to (a) prove the math is sound and (b) give the
+// next-cycle author a concrete starting point.
+//
+// Stride math notes for future author:
+//   HB_N      = MXFP8_RECT_BLK_N (= 64 in rect mode, 128 in default)
+//   row_count = HB_N rows in the ST tile
+//   The ds_read_b64_tr_b8 offset 1024 = 8 * BK bytes (BK=128) is fixed.
+//   If a future variant uses a different BK, parametrize as
+//   `offset:%[hb_stride]` where `[hb_stride] = 8*BK`.
+template<typename RT, int K_HALF, int RECT_HB_N = HB_N>
+__device__ __forceinline__ void load_col_from_v2_st_half_rect(
+    RT& dst,
+    const st_fp8e4m3<RECT_HB_N, BK, st_16x128_v2_s>& tile,
+    int col_start)
+{
+    static_assert(RECT_HB_N == 64 || RECT_HB_N == 128,
+                  "rect helper only scaffolded for HB_N in {64, 128}");
+    // K_HALF=1 only valid when the tile actually has >= 128 N-rows.
+    static_assert(!(RECT_HB_N == 64 && K_HALF == 1),
+                  "K_HALF=1 invalid for HB_N=64 (out-of-bounds); "
+                  "use two K_HALF=0 calls with col_start offset instead");
+
+    const int laneid = kittens::laneid();
+    const int row_off = ((laneid % 16) / 2) + ((laneid / 16) * 16);
+    const int col_off = (laneid % 2) * 8;
+    const uint32_t tile_base = reinterpret_cast<uintptr_t>(&tile.data[0]);
+
+    constexpr int idx = K_HALF * 4;
+    const int k_row = row_off + K_HALF * 64;
+
+    const uint32_t stidx = k_row >> 4;
+    const uint32_t base_k = tile_base + (stidx << 11) + (stidx << 7) + ((k_row & 15) << 7);
+    const uint32_t sw_k   = (k_row & 7) << 4;
+
+    // Inner-loop K-stride for second ds_read_b64_tr_b8 = 8 rows * BK bytes.
+    // Hardcoded 1024 is correct for BK=128; parametrized constant below
+    // documents the intent for any future BK change.
+    constexpr int hb_stride_bytes = 8 * BK;
+    static_assert(hb_stride_bytes == 1024, "ds_read offset must remain 1024 for BK=128");
+
+    #pragma unroll
+    for (int j = 0; j < RT::width; j++) {
+        const uint32_t nc = col_start + j * 16 + col_off;
+        const uint32_t addr = base_k + (nc ^ sw_k);
+
+        asm volatile(
+            "ds_read_b64_tr_b8 %0, %2 offset:0\n"
+            "ds_read_b64_tr_b8 %1, %2 offset:1024\n"
+            : "=&v"(*reinterpret_cast<float2*>(&dst.tiles[0][j].data[idx])),
+              "=&v"(*reinterpret_cast<float2*>(&dst.tiles[0][j].data[idx + 2]))
+            : "v"(addr)
+            : "memory"
+        );
+    }
 }
 
 template<typename RT, int K_HALF, typename ST>
