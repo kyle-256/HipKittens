@@ -1,0 +1,20 @@
+[sclk-pre-preheat] GPU[2]		: sclk clock level: 1: (158Mhz)
+[preheat 60.0s] done 11260 iters
+[sclk-post-preheat] GPU[2]		: sclk clock level: 1: (2115Mhz)
+CORRECTNESS_cp0 snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+CORRECTNESS_cp3 snr_db=49.61 pass_rate_pct=100.00 det_ok=True
+[sclk-pre-bench] GPU[2]		: sclk clock level: 1: (2336Mhz)
+WARMUP 0 cp3=2521.08 cp0=2544.85 sclk=GPU[2]		: sclk clock level: 1: (2331Mhz)
+WARMUP 1 cp3=2490.44 cp0=2499.79 sclk=GPU[2]		: sclk clock level: 1: (2327Mhz)
+PAIR 0 cp3_1=2482.41 cp0_1=2514.66 cp3_2=2510.73 cp0_2=2509.08
+PAIR 1 cp3_1=2494.29 cp0_1=2510.22 cp3_2=2510.23 cp0_2=2521.07
+PAIR 2 cp3_1=2490.45 cp0_1=2521.08 cp3_2=2508.65 cp0_2=2504.03
+PAIR 3 cp3_1=2518.97 cp0_1=2512.49 cp3_2=2504.61 cp0_2=2507.10
+PAIR 4 cp3_1=2501.03 cp0_1=2513.34 cp3_2=2510.81 cp0_2=2502.68
+[sclk-post-bench] GPU[2]		: sclk clock level: 1: (2308Mhz)
+cp0  median=2511.36 mean=2511.58 stdev=6.31 n=10
+cp3  median=2506.63 mean=2503.22 stdev=11.17 n=10
+Welch t (cp0 vs cp3) = -2.060  (positive = cp3 faster)
+DELTA_MEDIAN_PCT cp3_vs_cp0 = -0.188%
+cp0_TFLOPS_LIST 2514.6607,2509.0842,2510.2205,2521.0745,2521.0845,2504.0294,2512.4909,2507.1020,2513.3420,2502.6791
+cp3_TFLOPS_LIST 2482.4101,2510.7338,2494.2904,2510.2333,2490.4481,2508.6493,2518.9672,2504.6107,2501.0320,2510.8074
