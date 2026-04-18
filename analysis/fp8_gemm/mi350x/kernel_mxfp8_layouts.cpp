@@ -5090,6 +5090,10 @@ template __global__ void gemm_kernel<Layout::RCR, true>(const layout_globals);
 // Explicit instantiation for R21 V2-RCR fastpath path (SCALE_VERSION=2).
 template __global__ void rcr_exact_8wave_scaled_kernel<true, 2>(const layout_globals);
 #endif
+#if MXFP8_RRR_EXACT_8WAVE_FAST_ENABLE
+// Explicit instantiation for R22 V2-RRR fastpath path (SCALE_VERSION=2).
+template __global__ void rrr_exact_8wave_scaled_kernel<true, 2>(const layout_globals);
+#endif
 template __global__ void gemm_kernel<Layout::RRR, false>(const layout_globals);
 template __global__ void gemm_kernel<Layout::RRR, true>(const layout_globals);
 template __global__ void gemm_kernel<Layout::CRR, false>(const layout_globals);
@@ -5223,6 +5227,10 @@ void dispatch_pq(layout_globals g) {
 // R21 milestone-2: dispatch entry that routes RCR PRESHUFFLED_QUANT through
 // the V2-RCR fastpath (SCALE_VERSION=2). For non-RCR layouts this falls back
 // to the regular V1 PRESHUFFLED_QUANT path.
+//
+// R22 milestone-1: extended to route RRR PRESHUFFLED_QUANT through the
+// V2-RRR fastpath (SCALE_VERSION=2). Same V2 wave-tile preshuffle layout as
+// RCR — A/B scale base address formulas are identical between RCR and RRR.
 template<Layout L>
 void dispatch_pq_v2(layout_globals g) {
 #if MXFP8_RCR_EXACT_8WAVE_FAST_ENABLE
@@ -5232,6 +5240,17 @@ void dispatch_pq_v2(layout_globals g) {
         g.k = static_cast<int>(g.a.cols());
         if (rcr_can_use_exact_8wave_scaled(g)) {
             dispatch_rcr_exact_8wave_scaled_v2<true>(g);
+            return;
+        }
+    }
+#endif
+#if MXFP8_RRR_EXACT_8WAVE_FAST_ENABLE
+    if constexpr (L == Layout::RRR) {
+        g.m = static_cast<int>(g.c.rows());
+        g.n = static_cast<int>(g.c.cols());
+        g.k = static_cast<int>(g.a.cols());
+        if (rrr_can_use_exact_8wave_scaled(g)) {
+            dispatch_rrr_exact_8wave_scaled_v2<true>(g);
             return;
         }
     }
@@ -5296,6 +5315,13 @@ PYBIND11_MODULE(tk_mxfp8_layouts, m) {
     // host-side scale tensors to be packed via
     // preshuffle_scale_matrix_mfma16_v2_rcr_a/b.
     py::bind_function<dispatch_pq_v2<Layout::RCR>>(m, "gemm_rcr_pq_v2",
+        &layout_globals::a, &layout_globals::b,
+        &layout_globals::a_scale, &layout_globals::b_scale,
+        &layout_globals::c);
+    // R22 milestone-1 V2-RRR: same signature as gemm_rrr_pq but expects the
+    // host-side scale tensors to be packed via
+    // preshuffle_scale_matrix_mfma16_v2_rcr_a/b (same V2 layout as RCR).
+    py::bind_function<dispatch_pq_v2<Layout::RRR>>(m, "gemm_rrr_pq_v2",
         &layout_globals::a, &layout_globals::b,
         &layout_globals::a_scale, &layout_globals::b_scale,
         &layout_globals::c);

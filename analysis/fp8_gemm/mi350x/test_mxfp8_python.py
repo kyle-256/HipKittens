@@ -41,6 +41,10 @@ use_preshuffle_quant = os.environ.get("MXFP8_PRESHUFFLE_QUANT", "0") != "0"
 # reordered V2 layout (option a) so the kernel can issue buffer_load_b128 /
 # buffer_load_b64 for scales.
 use_v2_rcr = os.environ.get("MXFP8_RCR_PRESHUFFLE_V2_RUNTIME", "1") != "0"
+# R22 milestone-1 V2-RRR runtime gate: when set, RRR-PQ uses the same V2
+# wave-tile reordered scale layout as RCR. Default ON after R22-A 5x A/B
+# benchmark passed (+168.64 TFLOPS / +5.94% / Welch t=4.76).
+use_v2_rrr = os.environ.get("MXFP8_RRR_PRESHUFFLE_V2_RUNTIME", "1") != "0"
 requested_layouts = {
     layout.strip().lower()
     for layout in os.environ.get("MXFP8_LAYOUTS", "rcr,rrr,crr").split(",")
@@ -448,9 +452,16 @@ if "rrr" in requested_layouts:
     A_scale_exp = generate_scale_matrix(build_M, k_blocks, M)
     B_scale_exp = generate_scale_matrix(build_N, k_blocks, N)
     if use_preshuffle_quant:
-        A_scale = preshuffle_scale_matrix_mfma16(A_scale_exp)
-        B_scale = preshuffle_scale_matrix_mfma16(B_scale_exp)
-        run = lambda: tk_mxfp8_layouts.gemm_rrr_pq(A, B, A_scale, B_scale, C)
+        if use_v2_rrr:
+            # R22 V2-RRR: reuse RCR's wave-tile reordered preshuffle (A/B
+            # scale base formulas are identical between RCR and RRR).
+            A_scale = preshuffle_scale_matrix_mfma16_v2_rcr_a(A_scale_exp)
+            B_scale = preshuffle_scale_matrix_mfma16_v2_rcr_b(B_scale_exp)
+            run = lambda: tk_mxfp8_layouts.gemm_rrr_pq_v2(A, B, A_scale, B_scale, C)
+        else:
+            A_scale = preshuffle_scale_matrix_mfma16(A_scale_exp)
+            B_scale = preshuffle_scale_matrix_mfma16(B_scale_exp)
+            run = lambda: tk_mxfp8_layouts.gemm_rrr_pq(A, B, A_scale, B_scale, C)
     else:
         A_scale = A_scale_exp
         B_scale = B_scale_exp
