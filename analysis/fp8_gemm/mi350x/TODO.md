@@ -1,9 +1,23 @@
 # MXFP4 GEMM Optimization TODO
 
-## Current State (2026-04-19, post-R34)
+## Current State (2026-04-19, post-R37)
 
-**Bench**: `bench_all42_results_R25_FINAL_v2.{json,log}` + R29 single-shape verifies
-**Result**: **41/42 WIN, 1/42 LOSE, 0 ERR, projected win rate 97.6%** — unchanged since R29.
+**Bench**: `bench_all42_results_R37_fixB.json` (correctness-gated leaderboard)
+**Result**: **WIN: 14/42, LOSE: 0/42, WRONG_OUTPUT: 19/42, CRASH: 9/42** — first valid leaderboard.
+
+The 14 WINs run at 104-118% of `competitor_tflops` with verified correct output (kernel_finite ≥ 0.995). All other shapes are blocked on two structural bugs that R38 will attack in parallel.
+
+### R37 NEW KNOWLEDGE (durable, 2026-04-19) — FIRST CORRECTNESS-GATED LEADERBOARD
+- **R37 Fix B SUCCEEDS where R36 failed**: backporting `kpair_64mfma_step34` into the default code path with `pf_active` semantics (driven by `R37_FIX_B` macro, default ON) + S1-force-back-to-`s_barrier` produces correct output on **14/42 shapes** at 104-118% of comp.
+- **`-mllvm -amdgpu-sched-strategy=max-memory-clause` IS THE ENEMY for fused-step34**: the LLVM "memory clause" scheduler reorders `raw_buffer_load_lds` calls across iteration boundaries, breaking the fused step34 ordering invariant. Stripping this flag (in `build_R37.py`) is what unlocks correctness. The 19 WRONG_OUTPUT shapes still fail because their BEST_VARIANTS flag stack contains another `memc`/scheduler-aggressive flag we did NOT strip.
+- **9 CRASH shapes all share `_ts_lgk2_gm6_v12_memc_pfoff4`** (or sibling without `_kx_btw_all`): the R25-C tail-pf-off path interacts with fused step34 to emit OOB SRD loads on the final K-iter. Needs srd-bounded prefetches in fused mode.
+- **bench_all_42_R37.py is the new bench harness** — uses constant scale=-4 + finite_frac ≥ 0.995 gate. ALL future leaderboards must run through this gate. The `bench_all_42.py` legacy script measures wall-clock-of-garbage and must NOT be cited.
+- **Files**: `kernel_mxfp4_gluon_cpp.cpp` (R37_FIX_B path, default ON), `build_R37.py`, `bench_all_42_R37.py`, `R37_LEADERBOARD.md`, `bench_all42_results_R37_fixB.json`, `R37_BENCH_RUN.log`.
+
+### R38 candidates (post R37) — TARGET 42/42
+1. **R38 Opt A**: convert `emit_one_pf` (the `__builtin_amdgcn_raw_buffer_load_lds` intrinsic call) into an inline `asm volatile("buffer_load_dword_lds ...")` block to make the LLVM scheduler unable to reorder it. Targets the **19 WRONG_OUTPUT** shapes that still trigger memc reordering.
+2. **R38 Opt B**: add srd-bounded tail prefetches in the fused-step34 branch, so R25-C `pfoff` ≥ 1 is honored without the OOB risk. Targets the **9 CRASH** shapes on `_ts_lgk2_gm6_v12_memc_pfoff4` family.
+3. R38 must re-run the full `bench_all_42_R37.py` correctness-gated harness to confirm 42/42.
 
 ### R35-R36 NEW KNOWLEDGE (durable, 2026-04-19) — CORRECTNESS BUG ROOT-CAUSED
 - **R35 Opt B SMOKING GUN**: the ~17% deterministic-wrong cells live in the **upper-left 128x128 quadrant of every 256x256 output tile** (`acc_A0Bl` accumulator). Other 3 quadrants are 100% clean. `_f34` (FUSED_STEP34=1) variant fixes it — non-finite drops from 5-8% to 0.06%, upper-left from ~27% to 0.00%. Mechanism: non-fused step3+step4 emits 4 separate `asm volatile` blocks, compiler interleaves clobbering moves between them.

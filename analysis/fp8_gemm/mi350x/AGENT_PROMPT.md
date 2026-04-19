@@ -2,9 +2,18 @@
 
 你在继续推进 `HipKittens` 的 MXFP4 GEMM 优化工作，跟 Cursor (Hipkittens2) 竞赛。
 
-## ⚠️ 当前优化目标 (2026-04-19, post-R34)
-> 41/42 WIN (97.6%) = **structurally saturated, RE-CONFIRMED 6 rounds**.
-> R29 (V8 peel DEAD), R30 (transplant + K_EXACT audit DEAD), R31 (UNROLL_K + Persistent-XCD + STEP3_BARRIER_VMCNT 全 DEAD), R32 (K_LOOP_SYNC + NT_LOAD + V6 split-K 全 DEAD), R33 (aiter binary archaeology + SRD swap + vmcnt-mimic 全 DEAD), R34 (VGPR-PF for B-tile 编译成功但 compiler bug 导致结果错; SNR sweep 揭示 17% 单元 deterministic-wrong).
+## ⚠️ 当前优化目标 (2026-04-19, post-R37)
+> **WIN: 14/42, LOSE: 0/42, WRONG_OUTPUT: 19/42, CRASH: 9/42** — 第一份 correctness-gated leaderboard。
+> R37 Fix B 给出了 6 轮以来第一批"真正"的 WIN (14 个 shape, 104-118% of comp, kernel_finite ≥ 0.995)。剩余 28 个 shape 都被两个结构性 bug 卡住，R38 用并行两支 attack:
+> - **R38 Opt A**: 把 `emit_one_pf` 内的 `__builtin_amdgcn_raw_buffer_load_lds` 转成内联 `asm volatile` block，让 LLVM scheduler 没法 reorder。瞄准 **19 WRONG_OUTPUT**.
+> - **R38 Opt B**: 在 fused-step34 branch 里加 srd-bounded tail prefetches，让 R25-C `pfoff ≥ 1` 不再 OOB。瞄准 **9 CRASH** (`_ts_lgk2_gm6_v12_memc_pfoff4` family).
+> 全部回归必须用 `bench_all_42_R37.py` (correctness-gated, kernel_finite ≥ 0.995)。`bench_all_42.py` 已废弃 — 它测 wall-clock-of-garbage。
+
+> **R37 NEW KNOWLEDGE (durable, 2026-04-19)**:
+> - **`-mllvm -amdgpu-sched-strategy=max-memory-clause` 是 fused-step34 的敌人**: LLVM "memory clause" scheduler 会跨 K-iter reorder `raw_buffer_load_lds`，破坏 fused step34 顺序约束。`build_R37.py` 在 build flags 里删掉它就解锁正确性。
+> - **R37_FIX_B macro 默认 ON** (`kernel_mxfp4_gluon_cpp.cpp`): 把 `kpair_64mfma_step34` backport 进 default path + `pf_active` template parameter (尾迭代跳 prefetch) + S1-force-back-to-`s_barrier` (R25-C tail-pf-off / FUSED_STEP34 路径强制 `BARRIER_TO_WAITCNT_STEP3_S1=0`)。
+> - **9 CRASH 都在 `_ts_lgk2_gm6_v12_memc_pfoff4`** (或同族无 `_kx_btw_all`) — R25-C tail-pf-off + fused step34 在 final K-iter 越界 SRD。
+> - **bench gate**: `bench_all_42_R37.py` 用 const scale=-4 验 finite_frac，再用 random [-2,3] 测时延; `kernel_finite >= 0.995` 才计入 WIN/LOSE。
 
 > **R35-R36 NEW KNOWLEDGE (durable, 2026-04-19) — 修正 41/42 WIN 是 INVALID, 需要 R37 Fix B**:
 > - **R35 Opt B 找到 root cause**: 17% deterministic-wrong cells 都在每个 256x256 tile 的左上 128x128 (`acc_A0Bl` 累加器). 其他三个 quadrant 100% clean. `_f34` (FUSED_STEP34=1) 完美修正 — non-finite 从 5-8% 降到 0.06%, 左上 corruption 从 ~27% 降到 0%.
