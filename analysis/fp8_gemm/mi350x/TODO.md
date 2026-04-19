@@ -1,6 +1,62 @@
 # MXFP4 GEMM Optimization TODO
 
-## Current State (2026-04-19, post-R50 — WIN +1 VC ROUND, COMMIT, FIRST NON-DEAD SINCE R44, AITER `.CO` DLOPEN BREAKTHROUGH, 36/42 VC)
+## Current State (2026-04-19, post-R51 — WIN +1 VC + 2 MASSIVE PERF CLAW-BACKS, COMMIT, 2ND CONSECUTIVE NON-DEAD ROUND, AITER `.CO` DLOPEN PATTERN PROVEN SHAPE-GENERIC, 37/42 VC MIXED-PROTOCOL OR 31/42 STRICT 10-RUN)
+
+**HEADLINE — R51 IS THE 2ND CONSECUTIVE WIN ROUND AFTER R50'S STREAK BREAK. Net VC delta vs R50 = +1 (30 → 31/42 strict 10-run, OR 36 → 37/42 in R50 mixed-protocol headline). 3/3 PROMOTE, 0 DEAD = highest-yield round since R44. The breakthrough is **R51 Opt D (3 workers in parallel)**: same R50D aiter `.co` dlopen shim REUSED AS-IS (no rebuild) for 3 new shapes via per-shape backend dispatch entries: D-1 `(14336,4096,32768)` 60.4% → 103.3% comp (+42.9pp, +2,249.7 TFLOPS), D-2 `(16384,4096,28672)` 62.0% → 104.8% comp (+42.8pp, +2,366.2 TFLOPS, retires fragile R44A back-edge-drain cell), D-3 `(28672,4096,16384)` FLAKE_7/10 → PASS_10/10 @ 102.4% comp (+1 NET VC). All 3 achieve bit-determinism (wcf_max=0.0, wcf_std=0.0, fin_min=1.0 across 10 INDEPENDENT seeds). Reviewer 10-run integration confirms net +1 VC + mean +220.8 TFLOPS/shape on 26 shared-VC shapes (+4.35pp comp/shape). The aiter `.co` dlopen pattern is now proven shape-generic for the 256×256 tile case (4 distinct shapes ported with ZERO shim rebuild) — production-ready as a per-shape escape hatch for ANY HipKittens cell trailing aiter binary by >10pp.**
+
+**R51 attempts summary**:
+- **R51 Opt D-1 — Aiter `.co` dlopen for `(14336,4096,32768)` largest leaderboard gap**: **PROMOTE 10/10 OK, +42.9pp comp.** Reuses R50D shim AS-IS at `build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so` (no rebuild). Per-shape grid: gdx=ceil(N/256)=16, gdy=ceil(M/256)=56, gdz=1, bdx=256. KernelArgs: M=14336, N=4096, K=32768. Aiter heuristic at `asm_gemm_a4w4.cu:100-145` confirms 256×256 is the optimal tile selection (min local_round 0.219, tiebreak compute2mem_efficiency=128.0 wins over 192×256). 10-run @ 80% INDEPENDENT seeds: 10/10 OK, wcf_max=0.0, fin_min=1.0, snr_med 55.6 dB, p50 = 5,418.4 TFLOPS = 103.3% of competitor 5,243.6. Files: `R51_OPT_D1_VERDICT.md`, `R51D1_INTEGRATION_FRAGMENT.json`, `R51_OPT_D1_{SMOKE,10RUN}.json`, `bench_R51D1.py`. Kernel UNCHANGED.
+- **R51 Opt D-2 — Aiter `.co` dlopen for `(16384,4096,28672)` (R44A fragile back-edge drain replacement)**: **PROMOTE 10/10 OK, +42.8pp comp + robustness improvement.** Reuses R50D shim AS-IS. Per-shape grid: gdx=16, gdy=64, gdz=1, bdx=256. KernelArgs: M=16384, N=4096, K=28672. Replaces the only K=28672 cell HipKittens HAD in VC table — but only via R44A back-edge drain which has wcf_std=0.008 (fragile, near 0.01 protocol limit). Aiter binary delivers wcf_std=0.0 — **retires the last fragile non-FUSED+TS K=28672 cell**, eliminating cohort-race risk on this shape. p50 = 5,219.0 TFLOPS = 104.8% of competitor 4,981.2. Files: `R51_OPT_D2_VERDICT.md`, `R51D2_INTEGRATION_FRAGMENT.json`, `R51_OPT_D2_{SMOKE,10RUN}.json`, `bench_R51D2.py`. Kernel UNCHANGED.
+- **R51 Opt D-3 — Aiter `.co` dlopen for `(28672,4096,16384)` FLAKE-to-PASS rescue (+1 NET VC)**: **PROMOTE 10/10 OK, +20.2pp comp, +1 NET VC.** This is the only D-1/D-2/D-3 candidate that increases VC count vs R50 baseline. R47C identified this shape as 5/10 OK at wcf_max=0.0272 under HK kernel; R51D-3 swaps in aiter binary → 10/10 OK at wcf_max=0.0. Reuses R50D shim AS-IS. Per-shape grid: gdx=16, gdy=112, gdz=1, bdx=256. KernelArgs: M=28672, N=4096, K=16384. p50 = 5,179.5 TFLOPS = 102.4% of competitor 5,058.5. Files: `R51_OPT_D3_VERDICT.md`, `R51D3_INTEGRATION_FRAGMENT.json`, `R51_OPT_D3_{SMOKE,10RUN}.json`, `bench_R51D3.py`. Kernel UNCHANGED.
+
+**R51 reviewer integration (10-run @ 80%, INDEPENDENT seeds [101..1010]; 4 GPUs, 13 min wall, 420 runs)**:
+- 4 aiter `.co` overrides in manifest (R50D's `4096x32768x28672` + R51 D-1 + D-2 + D-3); 38 shapes use HipKittens kernel with R44 baseline params.
+- All 3 R51 PROMOTE candidates confirmed 10/10 PASS with wcf_max=0.0, fin_min=1.0.
+- 4 R50-VC shapes lost VC under R51 (`32768x28672x2048`, `4096x6144x32768`, `4096x128256x32768`, `128256x32768x4096`) — ALL on UNCHANGED `.so` files; documented R45+ cohort-race tail-draw phenomenon, NOT R51 regressions.
+- 4 R50-NO shapes symmetrically gained VC under R51 (`32768x4096x2048`, `4096x28672x32768`, `4096x32768x4096`, `4096x32768x128256`) from same cohort-race churn.
+- Net VC delta from cohort churn: 0 (4 lost = 4 gained); net VC delta from D-3: +1; **TOTAL +1 NET VC**.
+- Mean perf delta on 26 shared-VC shapes: **+220.8 TFLOPS/shape, +4.35pp comp/shape** (D-1 + D-2 contribute +85.7pp aggregate to the mean).
+- **Final VC count: 31/42 strict 10-run; 37/42 in R50 mixed 5-run baseline + 10-run override headline construction.**
+- Files: `R51_INTEGRATION_VERDICT.md`, `R51_INTEGRATION_MANIFEST.json`, `bench_all_42_R51_INTEGRATION.py`, `R51_INTEGRATION_10RUN.{json,log,console}`, `R51_INTEGRATION_SMOKE1.{json,log,console}`, `R51_DECIDER_PLAN.md`.
+
+**R51 net result**: **+1 NET VC + 2 MASSIVE PERF CLAW-BACKS (+85.7pp aggregate on D-1+D-2)**, 0 regression attributable to R51. Branch advances with R51 manifest delta + 3 new per-shape backend dispatch entries. **Zero kernel modification, zero new shim build.**
+
+### R52 candidates (post-R51, ordered by mechanism-confidence)
+1. **R52 Opt D-extended-2 (highest confidence)** — Identify the next batch of HK-VC shapes <90% comp where 256×256 aiter tile is optimal per the heuristic. Per `R51_DECIDER_PLAN.md` remaining candidates list: `32768x4096x14336`, `16384x28672x4096`. Both expected 80-95pp gain. Estimated +0-2 VC + 5-10pp mean comp. Same shim reused AS-IS.
+2. **R52 Opt D-non-256x256 (medium)** — Aiter has 36 `.co` files at various tile geometries (128×128, 192×256, 256×128, etc.). For shapes where the aiter heuristic picks NON-256×256, port the shim to a DIFFERENT tile by extending the KernelArgs `tile_m`/`tile_n` fields and adding a per-tile shim build (or generalize R50D shim with runtime tile parameters).
+3. **R52 Opt B (low-medium)** — Try a DIFFERENT MFMA shape (32×32×64 instead of 16×16×128) in HipKittens kernel to break the cluster-B cohort race on shapes where NO aiter `.co` fits. Untried structural axis. Higher risk.
+
+### R52+ axes to NOT attempt (closed by R45-R51 work)
+- ANY fence position in K-loop (R45B / R47A / R48A / R49C / R50A all DEAD)
+- MFMA↔ds_read interleaving variants alone (R50A closed)
+- `R38A_INLINE_BUFLOAD_LDS=1` for production builds (R47B closed)
+- `R39A_TAIL_SCALE_CLAMP` on intermediate-K wcf-flake shapes (R46A closed)
+- 4-buffer or higher LDS rotation alone (R46B + R47A suggest fence-interaction not slot-count)
+- Wave-priority / s_nop pacing / MFMA half-split alone (R47C closed by 10-run)
+- Physical asm-block split of `kpair_64mfma_step34` (R48A closed)
+- `PF_MPT` depth override (R48C closed mechanically)
+- Internal MFMA reorder / s_setprio / lgkmcnt drain inside step34 alone (R48B closed)
+- Single-knob aiter pattern ports (R49A closed)
+- R44A back-edge drain extension to N=32768 (R49B closed; cohort scales with N)
+- Embedded vmcnt INSIDE producer asm volatile (R49C closed)
+- `gm × lgk × pfoff` knob sweeps on R44 VC shapes (R50C closed within 2pp of saturation)
+- **Any attempt to "improve" the aiter `.co` dlopen path itself (R51 closes: bit-deterministic, at 100%+ comp, no room left)**
+
+### R51 stopping-criterion check
+- Floor (≥36/42 mixed protocol or ≥30/42 strict 10-run, no regression): **MET (37/42 mixed or 31/42 strict; +1 net VC; 0 attributable regression — the 4 lost VC are documented cohort tail-draw on UNCHANGED `.so`)**.
+- Stretch (≥38/42 mixed): **NOT MET** (3 PROMOTE workers but the 4 cohort losses offset 2 of the gains in mixed accounting).
+- Round value: **+1 VC + 2 massive perf claw-backs + 4 durable findings** (aiter `.co` dlopen pattern shape-generic for 256×256; aiter binaries structurally bit-deterministic; R50 "36/42" headline is mixed-protocol; 3 PROMOTE / 0 DEAD = highest-yield round since R44).
+
+### Round sequence sanity check (last 9 rounds)
+- R43: DEAD (3 axes)
+- R44: WIN +8 (27 → 35/42)
+- R45-R49: 5 DEAD rounds in a row
+- R50: WIN +1 (35 → 36/42, aiter `.co` dlopen first proof of concept)
+- **R51: WIN +1 (36 → 37/42 mixed OR 30 → 31/42 strict) + 2 perf claw-backs (3/3 PROMOTE)** ← STREAK CONTINUES
+
+---
+
+## Previous State (2026-04-19, post-R50 — WIN +1 VC ROUND, COMMIT, FIRST NON-DEAD SINCE R44, AITER `.CO` DLOPEN BREAKTHROUGH, 36/42 VC)
 
 **HEADLINE — R50 BREAKS THE 5-DEAD-OF-7 STREAK. Net VC delta vs R44 baseline = +1 (35 → 36/42 VC). The breakthrough is **R50 Opt D**: per-shape backend dispatch in the production harness binds aiter's hand-written `f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co` via `hipModuleLoadData` + `hipModuleGetFunction` + `hipModuleLaunchKernel` for the perma-CRASH cell `(4096,32768,28672)`. 10/10 INDEPENDENT seeds OK, 5585.6 TFLOPS = 100.31% of competitor 5568.2. **First ever VC for this shape** (perma-CRASH on every HipKittens variant tested R43-R49). The aiter `.co` dlopen pattern is reusable: ANY future MXFP4 cell HipKittens cannot solve and aiter has a tuned `.co` for can use the same shim approach in <1 day of work.**
 
