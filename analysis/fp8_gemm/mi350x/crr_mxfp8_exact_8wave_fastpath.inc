@@ -93,6 +93,26 @@
 #define MXFP8_CRR_COOPERATIVE_BSCALE 0
 #endif
 
+// R50 Dev A: CRR scale prefetch lead-distance lever.
+// Baseline (LEAD=0): load_raw_scales(k_pair) is issued at the TOP of each
+// even K-iteration; the cA MMA in the same iter consumes those scales after
+// only a partial-iter vmcnt drain (LDS loads + barrier).
+// Treatment (LEAD=1): pre-issue load_raw_scales(0) once before the K-loop,
+// then re-issue load_raw_scales((k+1)>>1) at the END of each ODD iter (after
+// cD MMA, the last consumer of the OLD scales). This places ~one full BK of
+// vmcnt drain between scale-issue and cA-MMA consumption — targeting the
+// CRR ~92% structural ceiling (R47D / R49C §7.2). No shadow scale registers
+// are required (the >>16 shift on odd iters operates in-place on the still-
+// current packs, and the post-cD issue overwrites them only after the last
+// MMA reads complete). The tail block (k=k_iters-2) gets its scales from
+// the loop-tail prefetch (last loop iter is always odd given even k_iters),
+// so the tail's own load_raw_scales becomes redundant under LEAD=1. Default
+// OFF — must clear ship gate (≥+1.5% geomean, no -2% regression, SNR≥45 dB,
+// det 3/3) before flipping.
+#ifndef MXFP8_CRR_SCALE_LEAD
+#define MXFP8_CRR_SCALE_LEAD 0
+#endif
+
 #ifndef CRR_USE_EXACT_8WAVE_FASTPATH
 #define CRR_USE_EXACT_8WAVE_FASTPATH 1
 #endif
@@ -895,8 +915,36 @@ void crr_exact_8wave_scaled_kernel(const layout_globals g)
     TK_WAIT_VMCNT(CRR_INIT1_VMCNT);
     __builtin_amdgcn_s_barrier();
 
+#if MXFP8_CRR_SCALE_LEAD
+    // R50 Dev A: pre-issue scales for k_pair=0 once before the K-loop. The
+    // steady-state loop then re-issues at the END of each odd iter for the
+    // NEXT k_pair (see post-cD block below). This grants ~one extra BK of
+    // vmcnt drain time before the consuming cA MMA.
+    if (k_iters > 0) {
+        load_raw_scales(0);
+    }
+#endif
+
     TK_PRAGMA_UNROLL(CRR_MAIN_UNROLL)
     for (int k = 0; k < k_iters - 2; k++, tic ^= 1, toc ^= 1) {
+#if MXFP8_CRR_SCALE_LEAD
+        // LEAD=1: scales for even iters are already in regs (preloaded once
+        // before the loop, and re-issued at end of each odd iter). Odd iters
+        // shift in place (uses second half of the same k_pair's b128/b64
+        // load), same as baseline.
+        if ((k & 1) == 1) {
+            #pragma unroll
+            for (int g = 0; g < crr_a_pack_count; g++) {
+                a0_scale_packs[g] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(a0_scale_packs[g]) >> 16);
+                a1_scale_packs[g] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(a1_scale_packs[g]) >> 16);
+            }
+            #pragma unroll
+            for (int g = 0; g < crr_b_pack_count; g++) {
+                b0_scale_packs[g] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(b0_scale_packs[g]) >> 16);
+                b1_scale_packs[g] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(b1_scale_packs[g]) >> 16);
+            }
+        }
+#else
         if ((k & 1) == 0) {
             load_raw_scales(k >> 1);
         } else {
@@ -911,6 +959,7 @@ void crr_exact_8wave_scaled_kernel(const layout_globals g)
                 b1_scale_packs[g] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(b1_scale_packs[g]) >> 16);
             }
         }
+#endif
 
         load_b(b0, Bs[tic][0], wn);
 #if !CRR_EXACT_INTERLEAVE_B1_LDS
@@ -948,13 +997,30 @@ void crr_exact_8wave_scaled_kernel(const layout_globals g)
         crr_mma_scaled_from_packs_fixed_phase(cC, a, b0, a1_scale_packs, b0_scale_packs);
         crr_mma_scaled_from_packs_fixed_phase(cD, a, b1, a1_scale_packs, b1_scale_packs);
         CRR_MMA_END();
+#if MXFP8_CRR_SCALE_LEAD
+        // R50 Dev A: lead-distance scale prefetch. After cD MMA on an odd
+        // iter, the OLD scale packs are no longer needed; issue the NEXT
+        // k_pair's scales now so vmcnt has the entire next iter's LDS-load
+        // window to drain before the cA MMA consumes them. We unconditionally
+        // issue here when k is odd; the tail block (k=k_iters-2, even) then
+        // expects scales already loaded — its own load_raw_scales is gated
+        // off below. k_iters is always even for the production compute-bound
+        // shapes (k = K/128 with K ∈ {4096,8192,14336,28672}), so the LAST
+        // loop iter is k=k_iters-3 which is ODD — its post-cD prefetch fills
+        // scales for the tail's k_pair = (k_iters-2)>>1.
+        if ((k & 1) == 1) {
+            load_raw_scales((k + 1) >> 1);
+        }
+#endif
         __builtin_amdgcn_s_barrier();
         global_load_b(Bs[tic][0], bc * 2, k + 2);
     }
 
     {
         const int k = k_iters - 2;
+#if !MXFP8_CRR_SCALE_LEAD
         load_raw_scales(k >> 1);
+#endif
 
         load_b(b0, Bs[tic][0], wn);
         load_a(a, As[tic][0], wm);
