@@ -1,0 +1,10 @@
+=== R52 Dev G confirmation: 70B Gate/Up CRR, 8 runs/arm ===
+  --> 70B_GateUp_CRR  POST  (swizzle OFF — patch in effect)
+      sleep 60s
+  --> 70B_GateUp_CRR  PRE   (swizzle ON  — current HEAD)
+CONFIRM_70B_GateUp_CRR post:
+  raw med=2354.1 count=8 all=[2343.86, 2348.88, 2349.64, 2354.08, 2354.21, 2354.22, 2355.83, 2362.18]
+  cleaned med=2354.1 count=8 all=[2343.86, 2348.88, 2349.64, 2354.08, 2354.21, 2354.22, 2355.83, 2362.18]
+CONFIRM_70B_GateUp_CRR pre:
+  raw med=2488.4 count=8 all=[2468.45, 2484.83, 2486.12, 2488.12, 2488.76, 2489.17, 2490.4, 2493.0]
+  cleaned med=2488.4 count=8 all=[2468.45, 2484.83, 2486.12, 2488.12, 2488.76, 2489.17, 2490.4, 2493.0]

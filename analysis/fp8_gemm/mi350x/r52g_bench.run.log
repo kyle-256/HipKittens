@@ -1,0 +1,45 @@
+=== R52 Dev G: CRR XCD swizzle per-shape gate strict-SCLK A/B ===
+  --> 70B_GateUp_CRR (4096 x 28672 x 8192) crr  [post-patch / off-or-on]
+      sleep 60s
+  --> 70B_GateUp_CRR (4096 x 28672 x 8192) crr  [pre-patch / always-on]
+      sleep 60s
+  --> 70B_Down_CRR (4096 x 8192 x 28672) crr  [post-patch / off-or-on]
+      sleep 60s
+  --> 70B_Down_CRR (4096 x 8192 x 28672) crr  [pre-patch / always-on]
+      sleep 60s
+  --> 70B_QO_CRR (4096 x 8192 x 8192) crr  [post-patch / off-or-on]
+      sleep 60s
+  --> 70B_QO_CRR (4096 x 8192 x 8192) crr  [pre-patch / always-on]
+      sleep 60s
+  --> 8B_GateUp_CRR (4096 x 14336 x 4096) crr  [post-patch / off-or-on]
+      sleep 60s
+  --> 8B_GateUp_CRR (4096 x 14336 x 4096) crr  [pre-patch / always-on]
+      sleep 60s
+  --> 8B_QO_CRR (4096 x 4096 x 4096) crr  [post-patch / off-or-on]
+      sleep 60s
+  --> 8B_QO_CRR (4096 x 4096 x 4096) crr  [pre-patch / always-on]
+      sleep 60s
+  --> 8B_Down_CRR (4096 x 4096 x 14336) crr  [post-patch / off-or-on]
+      sleep 60s
+  --> 8B_Down_CRR (4096 x 4096 x 14336) crr  [pre-patch / always-on]
+      sleep 60s
+  --> 8192cube_CRR (8192 x 8192 x 8192) crr  [post-patch / off-or-on]
+      sleep 60s
+  --> 8192cube_CRR (8192 x 8192 x 8192) crr  [pre-patch / always-on]
+      sleep 60s
+=== Auto-gate verification (no -DMXFP8_CRR_BLOCK_SWIZZLE flag) ===
+
+========== R52 Dev G — strict-SCLK A/B summary ==========
+Cell                     |   PRE (current HEAD) |  POST (per-shape gate) |  delta | expected
+------------------------------------------------------------------------------------------------------------------------------------------------------
+70B_GateUp_CRR           | PRE(swizzle ON, current HEAD) med= 2483.0 sp=54.73% | POST(per-shape gate) med= 2323.8 sp=84.53% | dlt= -6.41% | expected=+ (recover from R47B regression)
+70B_Down_CRR             | PRE(swizzle ON, current HEAD) med= 2646.0 sp= 0.59% | POST(per-shape gate) med= 2651.8 sp= 0.64% | dlt= +0.22% | expected== (no-op)
+70B_QO_CRR               | PRE(swizzle ON, current HEAD) med= 2711.4 sp= 0.54% | POST(per-shape gate) med= 2715.2 sp= 0.54% | dlt= +0.14% | expected== (no-op)
+8B_GateUp_CRR            | PRE(swizzle ON, current HEAD) med= 2349.5 sp= 0.12% | POST(per-shape gate) med= 2346.5 sp= 0.59% | dlt= -0.13% | expected== (no-op)
+8B_QO_CRR                | PRE(swizzle ON, current HEAD) med= 2170.4 sp= 5.97% | POST(per-shape gate) med= 2162.2 sp= 1.27% | dlt= -0.38% | expected== (no-op)
+8B_Down_CRR              | PRE(swizzle ON, current HEAD) med= 2752.8 sp= 0.35% | POST(per-shape gate) med= 2759.0 sp= 1.64% | dlt= +0.22% | expected== (no-op)
+8192cube_CRR             | PRE(swizzle ON, current HEAD) med= 2783.8 sp= 0.53% | POST(per-shape gate) med= 2789.8 sp= 0.43% | dlt= +0.22% | expected== (no-op)
+
+--- Auto-gate verification ---
+AUTOGATE_70B_GateUp_CRR      | med= 2346.2 sp= 1.07%
+AUTOGATE_8B_GateUp_CRR       | med= 2354.5 sp= 0.66%
