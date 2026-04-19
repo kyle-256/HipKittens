@@ -1,0 +1,26 @@
+=== FP8 GEMM Layout Benchmark (native layouts, no preshuffle): M=4096, N=4096, K=4096 ===
+Warmup=100, iters=200, correctness=off
+Layouts=crr,rcr,rrr
+
+--- RCR Layout: C = A @ B^T ---
+  Avg time: 0.0546 ms, TFLOPS: 2516.10
+
+--- RRR Layout: C = A @ B ---
+  Avg time: 0.0529 ms, TFLOPS: 2600.37
+
+--- CRR Layout: C = A^T @ B ---
+  Avg time: 0.0558 ms, TFLOPS: 2460.93
+
+============================================================
+Layout     Time (ms)    TFLOPS     % of RCR  
+------------------------------------------------------------
+RCR        0.0546       2516.10    100.00%   
+RRR        0.0529       2600.37    103.35%
+CRR        0.0558       2460.93    97.81%
+============================================================
+
+95% target: MET
+  RRR: 103.35% of RCR
+  CRR: 97.81% of RCR
+
+Results saved to fp8_layout_results_4096.json

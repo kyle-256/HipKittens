@@ -34,16 +34,9 @@
 | Up (MLP) | RCR | 4096 | 28672 | 8192 | SwiGLU up |
 | Down (MLP) | RCR | 4096 | 8192 | 28672 | SwiGLU down |
 
-### 典型 batch decode shapes
+### ~~典型 batch decode shapes~~ (R45 DEPRIORITIZED — memory-bound, AI=2-252 FLOP/byte, 不在优化重点范围)
 
-| 场景 | M | N | K |
-|---|---:|---:|---:|
-| 单 token decode (8B) | 1 | 4096 | 4096 |
-| batch=32 decode (8B) | 32 | 4096 | 4096 |
-| batch=128 decode (8B) | 128 | 4096 | 4096 |
-| 单 token decode (70B) | 1 | 8192 | 8192 |
-| batch=32 decode (70B) | 32 | 8192 | 8192 |
-| batch=128 decode (70B) | 128 | 8192 | 8192 |
+~~已移除：M=1/32/128 decode shapes 为 memory-bound GEMM，arithmetic intensity 远低于 MI355X roofline crossover (~300 FLOP/byte)。优化重点聚焦 compute-bound prefill shapes（M=4096）。已 SHIP 的 decode 优化（R42A M=1, R42B M=32/128, R43B M=1 RRR/CRR, R44A M=2..16）保留但不再继续投入。~~
 
 **注**：当前 dispatcher gates on compile-time `M_DIM`/`N_DIM`/`K_DIM`（`kernel_mxfp8_layouts.cpp:5-12`，默认 8192），非正方形需 rebuild：`make CXXFLAGS_EXTRA="-DM_DIM=4096 -DN_DIM=14336 -DK_DIM=4096"` 然后 `python3 test_mxfp8_python.py 4096 14336 4096`。**每 shape 需单独 rebuild .so**。
 
@@ -53,6 +46,45 @@
 3. **无回归**: 同 shape 对比 MXFP8 V2 优化前后，Δ ≥ 0（不能因优化 8192³ 而在 LLaMA shape 上退化）
 
 **baseline 建立**：首次需在每个 LLaMA shape 上跑 FP8 per-tensor + MXFP8 V2 baseline 各 5x，记录 median TFLOPS 作为后续对照。
+
+## R45 cycle 完结 (2026-04-19, 4 devs, reviewer crashed) ★ STRATEGY PIVOT — memory-bound decode DEPRIORITIZED, focus compute-bound prefill + 1 REFUTATION (45th lever) + 1 methodology advance (within-GPU variance baseline) + 1 NEW kernel prototype (B-side vectorization BVEC, bitwise-correct +543-817% preliminary)
+
+R45 派 4 dev (A M=2..16 SHIP retry, B Gate/Up BLK_N=256, C B-side vectorization, D within-GPU variance + split-K scoping) + Reviewer (crashed — no work). **★ STRATEGY PIVOT: memory-bound decode shapes DEPRIORITIZED (M=1/2..16/32/128 all AI<300). R46+ focus on compute-bound prefill (M=4096). Baseline established: 3/21 cells PASS ≥95%, worst gap 14% on CRR large-K/N shapes.**
+
+### R45 Dev results
+- **Dev A** (`95039f23`, salvaged — agent crashed before commit) SCLK-CONTAMINATED: 4-GPU sweep (M=4/8/16 × RRR/CRR/RCR × GPU2/3/6/7) ran but R36 3-gate exhausted on 30/48 cells (sclk never stable ≥2200 MHz). Dispatch trace confirms R44A kernel hits correctly. Data unreliable, R46 retry needed with extended preheat.
+- **Dev B** (`d3e93367`) ★ REFUTED-AT-DESIGN (45th lever): R44D survey contains off-by-2x error — kernel already covers BLK_N=256 via cB/cD sub-tiles (epilogue stores at `WARPS_N + wn` = 256 cols/WG). Real 2× expansion (BLK_N=512) requires +128 VGPR/wave for accumulator alone → occ=1, explodes spills beyond 256-VGPR architectural cap. Closes BLK_N-expansion direction.
+- **Dev C** (`66df6ec1`, salvaged — agent crashed before commit) PROTOTYPE: New `gemm_tail_kernel_smallm_b32_bvec<L, PQ>` replaces per-byte scalar fp8 loads with uint32_t packed vector loads. RCR: A+B vectorized. RRR: A-only. CRR: scalar fallback. Bitwise-correct (abs_max_err=0.0, snr_db=inf). Preliminary bench +543% M=32 / +817% M=128 (sclk-contaminated). Macro-gated `MXFP8_SMALLM_B32_BSIDE_VEC_ENABLE` (default OFF). **DEPRIORITIZED per strategy pivot — targets memory-bound decode N=1024 tail.**
+- **Dev D** (`a2bad0c6`) WITHIN-GPU VARIANCE BASELINE: 4 cells × N=5 reps (GPU4/5, R36 3-gate). 70B-KV B1 INSIDE (+28.51±0.44, R44 +29.25 within envelope). 8B-KV B1 INSIDE (+24.15±0.81, R44 +25.20 within envelope). 8B-Down OUTSIDE-high / 8B Gate/Up OUTSIDE-low in opposite directions = silicon-bin signature. **R44 "TIGHT +0.37pp" Gate/Up verdict REFUTED** — GPU4 actual margin +1.6pp (R44 GPU7 was -6σ outlier). 0/4 cells warrant kernel attention. N=4096 split-K SK=4 scoped for R46+ (expected M=8 68%→88-95%).
+- **Reviewer** — agent crashed with 0 work done. No 15th-cycle baseline.
+
+### R45 全量 compute-bound baseline (GPU2, warmup=100, iters=200, SNR>45 + det 3/3 PASS on all)
+| Shape | FP8 RCR | MX RCR | RCR% | FP8 RRR | MX RRR | RRR% | FP8 CRR | MX CRR | CRR% |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 8192³ | 3096 | 2940 | 95.0% | 3092 | 2905 | 93.9% | 2886 | 2722 | 94.3% |
+| 8B Q/O (4096³) | 2516 | 2384 | 94.7% | 2600 | 2329 | 89.6% | 2461 | 2214 | 90.0% |
+| 8B Gate/Up | 2722 | 2554 | 93.8% | 2760 | 2494 | 90.3% | 2570 | 2357 | 91.7% |
+| 8B Down | 3059 | 2846 | 93.0% | 2758 | 2809 | **101.9%** | 2854 | 2656 | 93.1% |
+| 70B Q/O | 3013 | 2875 | **95.4%** | 3032 | 2833 | 93.4% | 2822 | 2674 | 94.8% |
+| 70B Gate/Up | 2963 | 2685 | 90.6% | 2949 | 2592 | 87.9% | 2800 | 2410 | 86.1% |
+| 70B Down | 3212 | 2905 | 90.4% | 2730 | 2881 | **105.5%** | 2994 | 2573 | 85.9% |
+
+**PASS 3/21**: 70B Q/O RCR (95.4%), 8B Down RRR (101.9%), 70B Down RRR (105.5%). Correctness: all 21 cells SNR=49.6 dB, determinism 3/3 PASS.
+
+### R45 paradigm corrections (1 → cumulative 45; R32:21 + R33:5 + R34:4 + R35:1 + R36:2 + R37:2 + R38:2 + R39:1 + R40:1 + R41:3 + R42:1 + R43:0 + R44:1 + R45:1)
+
+### R45 Cherry-pick status (4/4 on `feat/mxfp8-only`, Reviewer N/A)
+- `8cffca33` Dev B — BLK_N=256 REFUTED-AT-DESIGN (45th lever, off-by-2x in R44D survey)
+- `23842680` Dev D — within-GPU variance baseline + N=4096 split-K scoping
+- `7af0785d` Dev A — M=2..16 SHIP attempt SCLK-CONTAMINATED (salvaged, 328 raw logs)
+- `bd0b9c2e` Dev C — B-side vectorization prototype BVEC (salvaged, kernel + bench, DEPRIORITIZED)
+
+### R46+ priority list (compute-bound prefill focus)
+1. **RCR prefill 95% parity** — 4/7 shapes at 93-95%, need 1-5pp lift. Analyze scale-load overhead vs FP8 per-tensor in 8-wave fastpath K-loop.
+2. **Large-N/K shape gap** — 70B Gate/Up (90.6%) and 70B Down (90.4%) worst RCR cells. Likely K-loop iteration overhead from MXFP8 scale handling at large K=28672 or grid geometry at N=28672.
+3. **CRR fastpath parity** — CRR worst at 85-95%, structural gap. Analyze A-transpose fetch pattern overhead.
+4. **RRR on non-Down shapes** — RRR beats FP8 on Down (K>N) but falls behind on square/Gate shapes (87-94%). Investigate B-fetch pattern when N≥K.
+5. **4096³ shape-specific optimization** — 8B Q/O at 94.7% RCR, close to target.
 
 ## R44 cycle 完结 (2026-04-18, 4 devs + 1 reviewer) ★ DECODE-COVERAGE EXPANSION (M=2..16) + 2 REFUTATIONS (44/45 cumulative levers) + METHODOLOGY HARDENING (3 retroactive harness patches) — Dev A M=2..16 MFMA fastpath SHIP-LITE-PARTIAL (4/6 cells PASS predicate: M=4×4096²=101%, M=4×8192²=96%, M=16×8192²=96%, M=8×8192²=79% ALLOW-because-beats-V1; M=8/16×4096² EXCLUDED due to N/64=64 grid undersubscription; macro `MXFP8_DECODE_M2_16_ENABLE` default OFF, byte-identical default 8192³, dispatcher waterfall extended via R43C `MXFP8_DISPATCH_TRACE_ONCE`; full SHIP gated on R45+ GPU2/3/6/7 triangulation with R36 retry harness) + Dev B persistent-CU dispatch for KV-decode N=1024 REFUTED-BY-INSPECTION (44th lever; brief premise wrong — V2 fastpaths unreachable for M<256 per R41C, production routes through R42B smallm tail at TAIL_BLOCK=16 giving 128/512 tiles not 16; R31D paradigm forecloses all variants) + Dev C 8B-KV HB shrink B1 drift bisect REFUTED-AS-MEASUREMENT-NOISE (R43D drift hypothesis OVERTURNED; bisect R38→R43 shows R42 HEAD is BEST point not worst; single-GPU run-to-run variance 3.39pp > cited cycle-drift 2.86pp; cross-GPU spread on identical .so md5 = 2.62pp directly mirrors R42→R43 reviewer "drift") + Dev D 3-gate retry harness migration audit (6 `r37_paired_bench_2so.py` invocation sites, all 6 non-compliant in source; 3 PATCH-NOW applied: r40_reviewer_phase2_pair.sh, r42_reviewer_phase23.sh **retroactively patches the R42 P3.3 false-positive source**, r43_reviewer_phase23.sh; 3 DEPRECATED-marked: r37/r38/r39 ship_verify.sh; r39_reviewer_findings.md silent doc-drift surfaced — claimed R36 NEW 3-gate but source had no retry loop) + Dev D margin tightening survey (70B-KV HB B1 +0.49pp = FLOOR-LIMIT NO-CHANGE per R36A SHIP floor; 8B Gate/Up V2-RRR +0.28pp = FLOOR-LIMIT NO-CHANGE per dispatcher comment kernel_mxfp8_layouts.cpp:5978 R34B +5.025% min) + Reviewer IN-FLIGHT (14th-cycle baseline + 2 R43 SHIP STRICT RECONFIRM + 4 gold-standard re-bench + 4 methodology — to be cherry-picked next conversation when complete)
 
@@ -118,15 +150,15 @@ R44 派 4 dev (A M=2..16 MFMA fastpath, B persistent-CU N=1024, C 8B-KV B1 drift
 
 ### R44 cumulative tally → 44 closed levers (Dev B persistent-CU N=1024 — REFUTED-BY-INSPECTION via R31D paradigm extension)
 
-### R45+ priority list (rebuilt from R44 dev results, pending Reviewer)
-1. **R44 Dev A SHIP completion** — GPU2/3/6/7 triangulation with R36 retry harness on 4 INCLUDED M=2..16 cells (M=4×4096², M=4×8192², M=8×8192², M=16×8192²); RRR/CRR layouts bench (geometry symmetric to RCR)
-2. **B-side scalar-load vectorization in `gemm_tail_kernel_smallm_b32`** (R44 Dev B replacement recommendation, also R43+ #4) — needs warp-shuffle to gather strided K-elements; B-fp32 cache footprint reduction; highest-leverage lever for KV-decode N=1024
-3. **R44 Dev A excluded N=4096 cells** (M=8/16): split-K or wider BLK_N — separate scoping
-4. **R44 Dev A M=8 8k×8k 79% lift** — full MFMA path needed (M=2..16 GEMV ceiling per Dev A analysis)
-5. **8B Gate/Up V2-RRR BLK_N=256** (R44 Dev D R45+ scope, ~0.5-1.5pp expected lift)
-6. **HB-shrink B1 PIPE=4 ("B3v2") sub-tile interleave** (R44 Dev D R45+ scope, only if falling trend surfaces — Dev C bisect refutes current trend so DEFER)
+### R45+ priority list (R45 rebuilt — memory-bound decode shapes DEPRIORITIZED, focus on compute-bound prefill)
+1. ~~R44 Dev A SHIP completion~~ **DEPRIORITIZED** — M=2..16 decode shapes are memory-bound, not optimization focus
+2. ~~B-side scalar-load vectorization in `gemm_tail_kernel_smallm_b32`~~ **DEPRIORITIZED** — KV-decode N=1024 tail kernel is memory-bound
+3. ~~R44 Dev A excluded N=4096 cells~~ **DEPRIORITIZED** — M=8/16 decode memory-bound
+4. ~~R44 Dev A M=8 8k×8k 79% lift~~ **DEPRIORITIZED** — M=8 decode memory-bound
+5. **8B Gate/Up V2-RRR compute-bound prefill optimization** — 8192³ default square + Gate 4096×14336×4096 + Down 4096×4096×14336 compute-bound shapes; current margin TIGHT +0.37pp (R44D FLOOR-LIMIT verdict, R45B BLK_N=256 REFUTED-AT-DESIGN); explore remaining compute-bound levers
+6. **V2-RRR / V2-CRR compute-bound prefill parity** — target: MXFP8 ≥ FP8 × 95% on all LLaMA prefill shapes across all 3 layouts
 7. **Cross-cycle within-GPU variance baseline establishment** (NEW rule 1 enforcement) — adopt N≥3 same-.so reps as standard reviewer phase
-8. **R45 Reviewer must use Δ%-reproducibility for ALL STRICT/SHIP gates** (R43 NEW rule 3) AND apply NEW rule 1 (within-GPU variance) for any cycle-drift claim
+8. **Reviewer must use Δ%-reproducibility for ALL STRICT/SHIP gates** (R43 NEW rule 3) AND apply NEW rule 1 (within-GPU variance) for any cycle-drift claim
 
 ### R44 Cherry-pick status (5/5 on `feat/mxfp8-only`)
 - `7b08fa19` R44 Dev A — M=2..16 small-batch decode MXFP8 fastpath (kernel + dispatcher)

@@ -31,7 +31,7 @@
 | **LLaMA-8B Down** | 4096 | 4096 | 14336 | K > N 非正方形 |
 | **LLaMA-70B Gate** | 4096 | 28672 | 8192 | 大 N shape |
 | **LLaMA-70B Q** | 4096 | 8192 | 8192 | attention shape |
-| **batch decode** | 128 | 8192 | 8192 | 小 M decode |
+| ~~batch decode~~ | ~~128~~ | ~~8192~~ | ~~8192~~ | ~~小 M decode~~ R45 DEPRIORITIZED — memory-bound |
 
 **编译**：dispatcher gates on compile-time `M_DIM`/`N_DIM`/`K_DIM`（`kernel_mxfp8_layouts.cpp:5-12`，默认 8192）。非正方形需 rebuild：
 ```bash
@@ -54,6 +54,33 @@ python3 test_mxfp8_python.py 4096 14336 4096
 5. 禁止提交 `*.so`、`*.s`、`*_layout_results_*.json`、`.bak*`、`gpucore.*`、`__pycache__` 等（`.gitignore` 已覆盖）
 6. 每个子 agent 使用不同 `HIP_VISIBLE_DEVICES` 以免 GPU 冲突：Dev A → 0，Dev B → 1，Dev C → 2，Reviewer/formal → 7
 
+## R45 cycle 完结 (2026-04-19) ★ STRATEGY PIVOT — compute-bound prefill focus + 1 REFUTATION (45th lever) + baseline established 3/21 PASS
+
+- **Dev A** (salvaged) SCLK-CONTAMINATED: M=2..16 4-GPU sweep, 30/48 cells R36 3-gate exhausted. Dispatch trace confirms R44A kernel hits. DEPRIORITIZED (decode = memory-bound).
+- **Dev B** (`d3e93367`) REFUTED-AT-DESIGN (45th lever): BLK_N=256 already present via cB/cD sub-tiles; real 2× (BLK_N=512) blocked by 256-VGPR cap.
+- **Dev C** (salvaged) PROTOTYPE DEPRIORITIZED: `gemm_tail_kernel_smallm_b32_bvec` bitwise-correct +543-817% on N=1024 decode tail. Memory-bound target, deprioritized.
+- **Dev D** (`a2bad0c6`) VARIANCE BASELINE: 0/4 gold-standard cells warrant kernel attention. R44 "TIGHT +0.37pp" Gate/Up REFUTED — actual margin +1.6pp (GPU7 was -6σ outlier). N=4096 split-K SK=4 scoped.
+- **Reviewer** — crashed, no work.
+
+### R45 compute-bound baseline (GPU2, all SNR=49.6dB + det 3/3 PASS)
+| Shape | RCR% | RRR% | CRR% |
+|---|---:|---:|---:|
+| 8192³ | 95.0 | 93.9 | 94.3 |
+| 8B Q/O | 94.7 | 89.6 | 90.0 |
+| 8B Gate/Up | 93.8 | 90.3 | 91.7 |
+| 8B Down | 93.0 | **101.9** | 93.1 |
+| 70B Q/O | **95.4** | 93.4 | 94.8 |
+| 70B Gate/Up | 90.6 | 87.9 | 86.1 |
+| 70B Down | 90.4 | **105.5** | 85.9 |
+
+PASS 3/21. Worst: 70B Down CRR 85.9%, 70B Gate/Up CRR 86.1%.
+
+### R46+ priority (compute-bound prefill)
+1. RCR 95% parity — 4/7 shapes at 93-95%, 1-5pp lift needed
+2. Large-N/K gap — 70B Gate/Up (90.6%) + 70B Down (90.4%) worst RCR
+3. CRR fastpath — structural gap 85-95%
+4. RRR on non-Down shapes — 87-94%
+
 ## R44 cycle 完结 (2026-04-18, 4 devs + 1 reviewer) ★ DECODE-COVERAGE EXPANSION (M=2..16) + 2 REFUTATIONS (44 cumulative) + METHODOLOGY HARDENING — Dev A M=2..16 MFMA fastpath SHIP-LITE-PARTIAL (4/6 cells PASS predicate: M=4×4096²=101%, M=4×8192²=96%, M=16×8192²=96%; M=8/16×4096² EXCLUDED N/64 grid undersub; macro `MXFP8_DECODE_M2_16_ENABLE` default OFF, byte-identical default 8192³; full SHIP gated on R45+ triangulation) + Dev B persistent-CU N=1024 REFUTED-BY-INSPECTION (44th lever; brief premise wrong — V2 unreachable for M<256 per R41C, prod routes through R42B smallm tail TAIL_BLOCK=16 = 128/512 tiles not 16; R31D forecloses) + Dev C 8B-KV B1 drift bisect REFUTED-AS-MEASUREMENT-NOISE (R43D drift hypothesis OVERTURNED; bisect R38→R43 shows R42 HEAD is BEST not worst; single-GPU run-to-run variance 3.39pp > cycle-drift 2.86pp) + Dev D 3-gate retry harness migration audit (6 sites all non-compliant; 3 PATCH-NOW including retroactive r42_phase23.sh which caused R42 P3.3 false-positive; 3 DEPRECATED; r39_findings.md silent doc-drift surfaced) + Dev D margin survey (70B-KV HB B1 +0.49pp + 8B Gate/Up V2-RRR +0.28pp both FLOOR-LIMIT NO-CHANGE — at structural perf ceilings) + Reviewer IN-FLIGHT (14th-cycle baseline + 2 R43 SHIP RECONFIRM + 4 gold-standard + 4 methodology — defer to next conversation)
 
 R44 派 4 dev (A M=2..16 MFMA, B persistent-CU N=1024, C 8B-KV B1 drift bisect, D 3-gate retry audit + margin survey) + Reviewer (14th-cycle baseline + 2 R43 RECONFIRM + 4 gold-standard + 4 methodology). **★ 1 SHIP-LITE-PARTIAL (Dev A 4/6 cells) + 2 REFUTATIONS (Dev B 44th lever + Dev C R43D drift OVERTURNED) + 1 methodology pass (Dev D 3 retroactive patches + 2 floor-limit verdicts).**
@@ -72,15 +99,15 @@ R44 派 4 dev (A M=2..16 MFMA, B persistent-CU N=1024, C 8B-KV B1 drift bisect, 
 
 ### R44 paradigm corrections (1 → cumulative 44; R32:21 + R33:5 + R34:4 + R35:1 + R36:2 + R37:2 + R38:2 + R39:1 + R40:1 + R41:3 + R42:1 + R43:0 + R44:1)
 
-### R45+ priority list (rebuilt from R44 dev results)
-1. R44 Dev A SHIP completion — GPU2/3/6/7 triangulation R36 retry on 4 INCLUDED M=2..16 cells; bench RRR/CRR
-2. B-side scalar-load vectorization in `gemm_tail_kernel_smallm_b32` (R44 Dev B replacement, highest KV N=1024 lever)
-3. R44 Dev A excluded N=4096 cells: split-K or wider BLK_N
-4. R44 Dev A M=8 8k×8k 79% lift — full MFMA path
-5. 8B Gate/Up V2-RRR BLK_N=256 (R44 Dev D R45+ scope, ~0.5-1.5pp lift)
-6. HB-shrink B1 PIPE=4 ("B3v2") DEFER (Dev C bisect refutes drift)
+### R46+ priority list (R45 rebuilt — memory-bound decode DEPRIORITIZED, focus compute-bound prefill)
+1. ~~R44 Dev A SHIP completion~~ DEPRIORITIZED — M=2..16 decode memory-bound
+2. ~~B-side scalar-load vectorization~~ DEPRIORITIZED — KV-decode N=1024 tail memory-bound
+3. ~~R44 Dev A excluded N=4096 cells~~ DEPRIORITIZED — M=8/16 decode memory-bound
+4. ~~R44 Dev A M=8 8k×8k 79% lift~~ DEPRIORITIZED — M=8 decode memory-bound
+5. **8B Gate/Up V2-RRR compute-bound prefill** — 8192³ + Gate 4096×14336×4096 + Down 4096×4096×14336; TIGHT margin +0.37pp (R44D FLOOR-LIMIT, R45B BLK_N=256 REFUTED-AT-DESIGN); explore remaining compute-bound levers
+6. **V2-RRR / V2-CRR compute-bound prefill parity** — target MXFP8 ≥ FP8 × 95% all LLaMA prefill shapes × 3 layouts
 7. Cross-cycle within-GPU variance baseline (NEW rule 1)
-8. R45 Reviewer apply NEW rule 1 + Δ%-reproducibility (R43 NEW rule 3) for ALL STRICT/SHIP
+8. Reviewer apply NEW rule 1 + Δ%-reproducibility (R43 NEW rule 3) for ALL STRICT/SHIP
 
 ### R44 Cherry-pick status (5/5 on `feat/mxfp8-only`)
 - `7b08fa19` Dev A — M=2..16 small-batch decode MXFP8 fastpath (kernel + dispatcher)

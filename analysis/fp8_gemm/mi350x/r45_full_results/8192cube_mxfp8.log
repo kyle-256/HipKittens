@@ -1,0 +1,36 @@
+=== MXFP8 GEMM Layout Benchmark (preshuffle-quant): M=8192, N=8192, K=8192 ===
+Warmup=100, iters=200, correctness=on
+SNR threshold=45.0 dB, determinism_runs=3
+Layouts=crr,rcr,rrr
+
+--- RCR Layout: C = A @ B^T ---
+  Avg time: 0.3740 ms, TFLOPS: 2939.84
+  [RCR] Correctness (rtol=0.1000, atol=3.0):
+    Max  abs error: 0.0312, Mean abs error: 0.0021
+    Max  rel error: 0.0078, Mean rel error: 0.0017
+    SNR: 49.60 dB (threshold 45.0 dB)
+    Pass rate: 67108864/67108864 (100.00%)
+    Result: PASS
+  [RCR] Determinism (3 runs): PASS
+
+--- RRR Layout: C = A @ B ---
+  Avg time: 0.3785 ms, TFLOPS: 2904.65
+  [RRR] Correctness (rtol=0.1000, atol=3.0):
+    Max  abs error: 0.0312, Mean abs error: 0.0022
+    Max  rel error: 0.0078, Mean rel error: 0.0017
+    SNR: 49.59 dB (threshold 45.0 dB)
+    Pass rate: 67108864/67108864 (100.00%)
+    Result: PASS
+  [RRR] Determinism (3 runs): PASS
+
+--- CRR Layout: C = A^T @ B ---
+  Avg time: 0.4040 ms, TFLOPS: 2721.86
+  [CRR] Correctness (rtol=0.1000, atol=3.0):
+    Max  abs error: 0.0312, Mean abs error: 0.0022
+    Max  rel error: 0.0078, Mean rel error: 0.0017
+    SNR: 49.60 dB (threshold 45.0 dB)
+    Pass rate: 67108864/67108864 (100.00%)
+    Result: PASS
+  [CRR] Determinism (3 runs): PASS
+
+Results saved to mxfp8_layout_results_8192_pq.json
