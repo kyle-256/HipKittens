@@ -1,0 +1,22 @@
+=== B_70B_Down_CRR (R49: CONFIRMED, OFF spread 70.94%) ===
+  --> B_70B_Down_CRR (4096 x 8192 x 28672) crr  WITHOUT
+      sleep 60s
+  --> B_70B_Down_CRR (4096 x 8192 x 28672) crr  WITH
+      sleep 60s
+=== B_8B_Down_CRR (R49: NOISE, OFF spread 94.63%) ===
+  --> B_8B_Down_CRR (4096 x 4096 x 14336) crr  WITHOUT
+      sleep 60s
+  --> B_8B_Down_CRR (4096 x 4096 x 14336) crr  WITH
+      sleep 60s
+=== C_70B_GateUp_CRR (R49: CONFIRMED, OFF spread 14.77%) ===
+  --> C_70B_GateUp_CRR (4096 x 28672 x 8192) crr  WITHOUT
+      sleep 60s
+  --> C_70B_GateUp_CRR (4096 x 28672 x 8192) crr  WITH
+      sleep 60s
+
+========== R52 REVIEWER PHASE 2 (focused) — strict-SCLK A/B summary ==========
+Cell                     |         OFF (med, sp%) |          ON (med, sp%) |  real % |  claim |         R52 | R49
+------------------------------------------------------------------------------------------------------------------------------------------------------
+B_70B_Down_CRR           |  2555.6 sp= 0.36% [2559.86, 2554.63, 2563.94, 2555.61, 2554.63] |  2648.7 sp= 0.15% |  +3.64% | +3.35% |   CONFIRMED | R49=CONFIRMED (was +4.84%)
+B_8B_Down_CRR            |  2702.3 sp= 0.35% [2702.27, 2702.75, 2694.82, 2704.37, 2695.6] |  2728.5 sp= 0.30% |  +0.97% | +1.13% |   CONFIRMED | R49=NOISE (was +0.37%)  <-- FLIP from NOISE
+C_70B_GateUp_CRR         |  2461.0 sp= 0.87% [2455.97, 2450.11, 2471.64, 2464.13, 2461.03] |  2482.9 sp= 0.72% |  +0.89% | +1.52% |    INFLATED | R49=CONFIRMED (was +9.74%)  <-- FLIP from CONFIRMED
