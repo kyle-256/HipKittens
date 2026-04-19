@@ -1,0 +1,7 @@
+R54 Opt E-2/2 bench — mode=smoke, gpu=[4], shape=(4096,32768,6144), tile=256x256
+==========================================================================================
+  seed=  101 gpu=4 status=OK                     fin=1.0      wcf=0.0        snr_med=55.59    tflops=4982.3     (8.5s)
+------------------------------------------------------------------------------------------
+SUMMARY: {"mode": "smoke", "shape": [4096, 32768, 6144], "tile": [256, 256], "competitor_tflops": 4548.6, "n_runs": 1, "n_OK": 1, "n_OK_5": 1, "fin_min": 1.0, "fin_max": 1.0, "wcf_min": 0.0, "wcf_max": 0.0, "wcf_std": 0.0, "snr_min": 55.59, "snr_max": 55.59, "snr_med": 55.59, "tflops_f
+Wrote R54_OPT_E2_2_SMOKE.json
+Wrote /shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/R54_OPT_E2_2_SMOKE.log

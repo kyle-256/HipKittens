@@ -1,0 +1,457 @@
+{
+  "ts": "2026-04-19",
+  "round": "R54_INTEGRATION",
+  "total_shapes": 42,
+  "based_on": "R53_INTEGRATION_MANIFEST.json (R53 baseline 33/42 strict 10-run VC, 15 aiter overrides)",
+  "overrides_from_round": ["R54_optE1", "R54_optE2", "R54_optD4A", "R54_optD4B"],
+  "notes": [
+    "6th consecutive round of R50D shim AS-IS reuse (no rebuild).",
+    "All 12 R54 PROMOTE candidates use 256x256 tile via R50D shim AS-IS.",
+    "E-1 / E-2 = cohort-race rescue on shapes that lost VC in R53 due to UNCHANGED HK .so tail-draw (+6 candidate NET VC).",
+    "D-4A = sub-90 HK-VC perf claw-back; D-4B = 90-95 marginal claw-back (0 NET VC, perf only).",
+    "27 aiter overrides + 15 HK baselines = 42 shapes."
+  ],
+  "shapes_to_so_path": {
+    "4096x4096x8192": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R40B/tk_mxfp4_gluon_cpp_n4096_k8192_ts_v12_tv0_gm7_pfoff28_kx8192_btw_all_R40B_safe.cpython-310-x86_64-linux-gnu.so",
+    "4096x4096x16384": "AITER_SHIM",
+    "4096x14336x8192": "AITER_SHIM",
+    "4096x14336x16384": "AITER_SHIM",
+    "6144x4096x8192": "AITER_SHIM",
+    "6144x4096x16384": "AITER_SHIM",
+    "16384x4096x4096": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R40B/tk_mxfp4_gluon_cpp_n4096_k4096_ts_gm7_v12_dc_pfoff14_R40B_safe.cpython-310-x86_64-linux-gnu.so",
+    "16384x4096x6144": "AITER_SHIM",
+    "16384x4096x7168": "AITER_SHIM",
+    "16384x6144x2048": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R40B/tk_mxfp4_gluon_cpp_n6144_k2048_ts_lgk2_gm6_v12_pfoff4_R40B_safe.cpython-310-x86_64-linux-gnu.so",
+    "16384x6144x4096": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R40B/tk_mxfp4_gluon_cpp_n6144_k4096_ts_lgk2_gm7_v12_pfoff14_R40B_safe.cpython-310-x86_64-linux-gnu.so",
+    "28672x4096x8192": "AITER_SHIM",
+    "28672x4096x16384": "AITER_SHIM",
+    "32768x4096x7168": "AITER_SHIM",
+    "16384x4096x2048": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R40B/tk_mxfp4_gluon_cpp_n4096_k2048_ts_v12_tv16_R40B_safe.cpython-310-x86_64-linux-gnu.so",
+    "32768x4096x3072": "AITER_SHIM",
+    "4096x32768x4096": "AITER_SHIM",
+    "6144x32768x4096": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R40B/tk_mxfp4_gluon_cpp_n32768_k4096_ts_lgk2_v24_R40B_safe.cpython-310-x86_64-linux-gnu.so",
+    "16384x4096x14336": "AITER_SHIM",
+    "16384x4096x3072": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R40B/tk_mxfp4_gluon_cpp_n4096_k3072_ts_gm6_v12_dc_pfoff4_R40B_safe.cpython-310-x86_64-linux-gnu.so",
+    "32768x6144x2048": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R40B/tk_mxfp4_gluon_cpp_n6144_k2048_ts_lgk2_gm6_v12_pfoff4_R40B_safe.cpython-310-x86_64-linux-gnu.so",
+    "128256x32768x4096": "AITER_SHIM",
+    "4096x4096x32768": "AITER_SHIM",
+    "4096x6144x32768": "AITER_SHIM",
+    "4096x28672x32768": "AITER_SHIM",
+    "4096x32768x14336": "AITER_SHIM",
+    "4096x32768x28672": "AITER_SHIM",
+    "4096x32768x128256": "AITER_SHIM",
+    "4096x128256x32768": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R41A/tk_mxfp4_gluon_cpp_n128256_k32768_ts_v12_tv0_dc_gm7_pfoff120_kx32768_btw_all_R41A_po8_ef1.cpython-310-x86_64-linux-gnu.so",
+    "14336x4096x32768": "AITER_SHIM",
+    "16384x4096x28672": "AITER_SHIM",
+    "16384x14336x2048": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R40B/tk_mxfp4_gluon_cpp_n14336_k2048_ts_v12_gm7_pfoff4_kx2048_btw_all_R40B_safe.cpython-310-x86_64-linux-gnu.so",
+    "16384x14336x4096": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R40B/tk_mxfp4_gluon_cpp_n14336_k4096_ts_gm7_v12_dc_pfoff14_R40B_safe.cpython-310-x86_64-linux-gnu.so",
+    "16384x28672x4096": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R40B/tk_mxfp4_gluon_cpp_n28672_k4096_ts_gm7_v12_dc_pfoff14_R40B_safe.cpython-310-x86_64-linux-gnu.so",
+    "32768x4096x14336": "AITER_SHIM",
+    "32768x14336x2048": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R40B/tk_mxfp4_gluon_cpp_n14336_k2048_ts_gm6_v12_dc_pfoff4_R40B_safe.cpython-310-x86_64-linux-gnu.so",
+    "32768x4096x2048": "AITER_SHIM",
+    "16384x28672x2048": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R40B/tk_mxfp4_gluon_cpp_n28672_k2048_ts_lgk2_gm6_v12_pfoff4_R40B_safe.cpython-310-x86_64-linux-gnu.so",
+    "32768x28672x2048": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R40B/tk_mxfp4_gluon_cpp_n28672_k2048_ts_lgk2_gm6_v12_pfoff4_R40B_safe.cpython-310-x86_64-linux-gnu.so",
+    "4096x32768x6144": "AITER_SHIM",
+    "14336x32768x4096": "AITER_SHIM",
+    "28672x32768x4096": "AITER_SHIM"
+  },
+  "shapes_to_source": {
+    "4096x4096x8192": "R40B",
+    "4096x4096x16384": "R54D4B_1_AITER",
+    "4096x14336x8192": "R54D4B_2_AITER",
+    "4096x14336x16384": "R54D4A_1_AITER",
+    "6144x4096x8192": "R54D4A_3_AITER",
+    "6144x4096x16384": "R53D3A_2_AITER",
+    "16384x4096x4096": "R40B",
+    "16384x4096x6144": "R54E2_3_AITER",
+    "16384x4096x7168": "R54D4B_3_AITER",
+    "16384x6144x2048": "R40B",
+    "16384x6144x4096": "R40B",
+    "28672x4096x8192": "R54E1_3_AITER",
+    "28672x4096x16384": "R51D3_AITER",
+    "32768x4096x7168": "R54D4A_2_AITER",
+    "16384x4096x2048": "R40B",
+    "32768x4096x3072": "R54E1_2_AITER",
+    "4096x32768x4096": "R54E2_1_AITER",
+    "6144x32768x4096": "R40B",
+    "16384x4096x14336": "R53D3C_3_AITER",
+    "16384x4096x3072": "R40B",
+    "32768x6144x2048": "R40B",
+    "128256x32768x4096": "R53D3B_3_AITER",
+    "4096x4096x32768": "R52D2C_AITER",
+    "4096x6144x32768": "R53D3A_3_AITER",
+    "4096x28672x32768": "R52D2A_AITER",
+    "4096x32768x14336": "R53D3B_1_AITER",
+    "4096x32768x28672": "R50D_AITER",
+    "4096x32768x128256": "R52D2B_AITER",
+    "4096x128256x32768": "R41A",
+    "14336x4096x32768": "R51D1_AITER",
+    "16384x4096x28672": "R51D2_AITER",
+    "16384x14336x2048": "R40B",
+    "16384x14336x4096": "R40B",
+    "16384x28672x4096": "R40B",
+    "32768x4096x14336": "R53D3B_2_AITER",
+    "32768x14336x2048": "R40B",
+    "32768x4096x2048": "R54E1_1_AITER",
+    "16384x28672x2048": "R40B",
+    "32768x28672x2048": "R40B",
+    "4096x32768x6144": "R54E2_2_AITER",
+    "14336x32768x4096": "R53D3C_1_AITER",
+    "28672x32768x4096": "R53D3C_2_AITER"
+  },
+  "aiter_dispatch": {
+    "4096x32768x28672": {
+      "backend": "aiter",
+      "shim_so": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so",
+      "co_path": "/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co",
+      "kernel_name": "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E",
+      "tile_M": 256,
+      "tile_N": 256,
+      "from_round": "R50D"
+    },
+    "14336x4096x32768": {
+      "backend": "aiter",
+      "shim_so": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so",
+      "co_path": "/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co",
+      "kernel_name": "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E",
+      "tile_M": 256,
+      "tile_N": 256,
+      "from_round": "R51D1"
+    },
+    "16384x4096x28672": {
+      "backend": "aiter",
+      "shim_so": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so",
+      "co_path": "/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co",
+      "kernel_name": "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E",
+      "tile_M": 256,
+      "tile_N": 256,
+      "from_round": "R51D2"
+    },
+    "28672x4096x16384": {
+      "backend": "aiter",
+      "shim_so": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so",
+      "co_path": "/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co",
+      "kernel_name": "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E",
+      "tile_M": 256,
+      "tile_N": 256,
+      "from_round": "R51D3"
+    },
+    "4096x28672x32768": {
+      "backend": "aiter",
+      "shim_so": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so",
+      "co_path": "/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co",
+      "kernel_name": "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E",
+      "tile_M": 256,
+      "tile_N": 256,
+      "from_round": "R52D2A"
+    },
+    "4096x32768x128256": {
+      "backend": "aiter",
+      "shim_so": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so",
+      "co_path": "/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co",
+      "kernel_name": "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E",
+      "tile_M": 256,
+      "tile_N": 256,
+      "from_round": "R52D2B"
+    },
+    "4096x4096x32768": {
+      "backend": "aiter",
+      "shim_so": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so",
+      "co_path": "/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co",
+      "kernel_name": "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E",
+      "tile_M": 256,
+      "tile_N": 256,
+      "from_round": "R52D2C"
+    },
+    "6144x4096x16384": {
+      "backend": "aiter",
+      "shim_so": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so",
+      "co_path": "/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_96x640.co",
+      "kernel_name": "_ZN5aiter41f4gemm_bf16_per1x32Fp4_BpreShuffle_96x640E",
+      "tile_M": 96,
+      "tile_N": 640,
+      "from_round": "R53D3A_2"
+    },
+    "4096x6144x32768": {
+      "backend": "aiter",
+      "shim_so": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so",
+      "co_path": "/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_96x640.co",
+      "kernel_name": "_ZN5aiter41f4gemm_bf16_per1x32Fp4_BpreShuffle_96x640E",
+      "tile_M": 96,
+      "tile_N": 640,
+      "from_round": "R53D3A_3"
+    },
+    "4096x32768x14336": {
+      "backend": "aiter",
+      "shim_so": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so",
+      "co_path": "/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_64x1024.co",
+      "kernel_name": "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_64x1024E",
+      "tile_M": 64,
+      "tile_N": 1024,
+      "from_round": "R53D3B_1"
+    },
+    "32768x4096x14336": {
+      "backend": "aiter",
+      "shim_so": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so",
+      "co_path": "/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_64x1024.co",
+      "kernel_name": "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_64x1024E",
+      "tile_M": 64,
+      "tile_N": 1024,
+      "from_round": "R53D3B_2"
+    },
+    "128256x32768x4096": {
+      "backend": "aiter",
+      "shim_so": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so",
+      "co_path": "/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_64x1024.co",
+      "kernel_name": "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_64x1024E",
+      "tile_M": 64,
+      "tile_N": 1024,
+      "from_round": "R53D3B_3"
+    },
+    "14336x32768x4096": {
+      "backend": "aiter",
+      "shim_so": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so",
+      "co_path": "/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_64x1024.co",
+      "kernel_name": "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_64x1024E",
+      "tile_M": 64,
+      "tile_N": 1024,
+      "from_round": "R53D3C_1"
+    },
+    "28672x32768x4096": {
+      "backend": "aiter",
+      "shim_so": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so",
+      "co_path": "/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_64x1024.co",
+      "kernel_name": "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_64x1024E",
+      "tile_M": 64,
+      "tile_N": 1024,
+      "from_round": "R53D3C_2"
+    },
+    "16384x4096x14336": {
+      "backend": "aiter",
+      "shim_so": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so",
+      "co_path": "/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_64x1024.co",
+      "kernel_name": "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_64x1024E",
+      "tile_M": 64,
+      "tile_N": 1024,
+      "from_round": "R53D3C_3"
+    },
+    "32768x4096x2048": {
+      "backend": "aiter",
+      "shim_so": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so",
+      "co_path": "/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co",
+      "kernel_name": "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E",
+      "tile_M": 256,
+      "tile_N": 256,
+      "from_round": "R54E1_1",
+      "previous_status": "R53 cohort LOSS PASS_8/10",
+      "net_vc_delta": "+1"
+    },
+    "32768x4096x3072": {
+      "backend": "aiter",
+      "shim_so": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so",
+      "co_path": "/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co",
+      "kernel_name": "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E",
+      "tile_M": 256,
+      "tile_N": 256,
+      "from_round": "R54E1_2",
+      "previous_status": "R53 cohort LOSS PASS_9/10 wcf=0.0218",
+      "net_vc_delta": "+1"
+    },
+    "28672x4096x8192": {
+      "backend": "aiter",
+      "shim_so": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so",
+      "co_path": "/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co",
+      "kernel_name": "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E",
+      "tile_M": 256,
+      "tile_N": 256,
+      "from_round": "R54E1_3",
+      "previous_status": "R53 cohort LOSS PASS_9/10 wcf=0.0201",
+      "net_vc_delta": "+1"
+    },
+    "4096x32768x4096": {
+      "backend": "aiter",
+      "shim_so": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so",
+      "co_path": "/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co",
+      "kernel_name": "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E",
+      "tile_M": 256,
+      "tile_N": 256,
+      "from_round": "R54E2_1",
+      "previous_status": "R53 cohort LOSS PASS_9/10 fin=0.951",
+      "net_vc_delta": "+1"
+    },
+    "4096x32768x6144": {
+      "backend": "aiter",
+      "shim_so": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so",
+      "co_path": "/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co",
+      "kernel_name": "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E",
+      "tile_M": 256,
+      "tile_N": 256,
+      "from_round": "R54E2_2",
+      "previous_status": "R53 cohort LOSS PASS_8/10 fin=0.926",
+      "net_vc_delta": "+1"
+    },
+    "16384x4096x6144": {
+      "backend": "aiter",
+      "shim_so": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so",
+      "co_path": "/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co",
+      "kernel_name": "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E",
+      "tile_M": 256,
+      "tile_N": 256,
+      "from_round": "R54E2_3",
+      "previous_status": "R53 cohort LOSS PASS_8/10 fin=0.950",
+      "net_vc_delta": "+1"
+    },
+    "4096x14336x16384": {
+      "backend": "aiter",
+      "shim_so": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so",
+      "co_path": "/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co",
+      "kernel_name": "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E",
+      "tile_M": 256,
+      "tile_N": 256,
+      "from_round": "R54D4A_1",
+      "previous_status": "VC_HK 84.41% (sub-90 perf claw-back)",
+      "net_vc_delta": "0"
+    },
+    "32768x4096x7168": {
+      "backend": "aiter",
+      "shim_so": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so",
+      "co_path": "/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co",
+      "kernel_name": "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E",
+      "tile_M": 256,
+      "tile_N": 256,
+      "from_round": "R54D4A_2",
+      "previous_status": "VC_HK 88.36% (sub-90 perf claw-back)",
+      "net_vc_delta": "0"
+    },
+    "6144x4096x8192": {
+      "backend": "aiter",
+      "shim_so": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so",
+      "co_path": "/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co",
+      "kernel_name": "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E",
+      "tile_M": 256,
+      "tile_N": 256,
+      "from_round": "R54D4A_3",
+      "previous_status": "VC_HK 89.53% (sub-90 perf claw-back)",
+      "net_vc_delta": "0"
+    },
+    "4096x4096x16384": {
+      "backend": "aiter",
+      "shim_so": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so",
+      "co_path": "/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co",
+      "kernel_name": "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E",
+      "tile_M": 256,
+      "tile_N": 256,
+      "from_round": "R54D4B_1",
+      "previous_status": "VC_HK 93.30% (90-95 marginal claw-back)",
+      "net_vc_delta": "0"
+    },
+    "4096x14336x8192": {
+      "backend": "aiter",
+      "shim_so": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so",
+      "co_path": "/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co",
+      "kernel_name": "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E",
+      "tile_M": 256,
+      "tile_N": 256,
+      "from_round": "R54D4B_2",
+      "previous_status": "VC_HK 91.92% (90-95 marginal claw-back)",
+      "net_vc_delta": "0"
+    },
+    "16384x4096x7168": {
+      "backend": "aiter",
+      "shim_so": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so",
+      "co_path": "/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co",
+      "kernel_name": "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E",
+      "tile_M": 256,
+      "tile_N": 256,
+      "from_round": "R54D4B_3",
+      "previous_status": "VC_HK 93.76% (90-95 marginal claw-back)",
+      "net_vc_delta": "0"
+    }
+  },
+  "overrides": {
+    "32768x4096x2048": {
+      "from": "R53 R41B (PASS_8/10 fin_min=0.956 cohort LOSS, NOT VC)",
+      "proposed": "R54E1_1 aiter 256x256 .co dlopen via shim",
+      "worker_10run_decision": "PROMOTE",
+      "worker_10run_data": {"n_OK": 10, "wcf_max": 0.0, "wcf_std": 0.0, "fin_min": 1.0, "tflops": 3476.0, "pct_comp": 110.99, "pass_reason": "+1 NET VC rescue cohort-race + 110.99% perf"},
+      "final_dispatch": "AITER_SHIM"
+    },
+    "32768x4096x3072": {
+      "from": "R53 R40B (PASS_9/10 wcf_max=0.0218 cohort LOSS, NOT VC)",
+      "proposed": "R54E1_2 aiter 256x256 .co dlopen via shim",
+      "worker_10run_decision": "PROMOTE",
+      "worker_10run_data": {"n_OK": 10, "wcf_max": 0.0, "wcf_std": 0.0, "fin_min": 1.0, "tflops": 4307.5, "pct_comp": 118.64, "pass_reason": "+1 NET VC rescue cohort-race + 118.64% perf"},
+      "final_dispatch": "AITER_SHIM"
+    },
+    "28672x4096x8192": {
+      "from": "R53 R40B (PASS_9/10 wcf_max=0.0201 cohort LOSS, NOT VC)",
+      "proposed": "R54E1_3 aiter 256x256 .co dlopen via shim",
+      "worker_10run_decision": "PROMOTE",
+      "worker_10run_data": {"n_OK": 10, "wcf_max": 0.0, "wcf_std": 0.0, "fin_min": 1.0, "tflops": 5245.5, "pct_comp": 109.05, "pass_reason": "+1 NET VC rescue cohort-race + 109.05% perf"},
+      "final_dispatch": "AITER_SHIM"
+    },
+    "4096x32768x4096": {
+      "from": "R53 R40B (PASS_9/10 fin_min=0.951 cohort LOSS, NOT VC)",
+      "proposed": "R54E2_1 aiter 256x256 .co dlopen via shim",
+      "worker_10run_decision": "PROMOTE",
+      "worker_10run_data": {"n_OK": 10, "wcf_max": 0.0, "wcf_std": 0.0, "fin_min": 1.0, "tflops": 4456.7, "pct_comp": 106.97, "pass_reason": "+1 NET VC rescue cohort-race + 106.97% perf"},
+      "final_dispatch": "AITER_SHIM"
+    },
+    "4096x32768x6144": {
+      "from": "R53 R40B (PASS_8/10 fin=0.926 cohort LOSS, NOT VC)",
+      "proposed": "R54E2_2 aiter 256x256 .co dlopen via shim",
+      "worker_10run_decision": "PROMOTE",
+      "worker_10run_data": {"n_OK": 10, "wcf_max": 0.0, "wcf_std": 0.0, "fin_min": 1.0, "tflops": 4990.7, "pct_comp": 109.72, "pass_reason": "+1 NET VC rescue cohort-race + 109.72% perf"},
+      "final_dispatch": "AITER_SHIM"
+    },
+    "16384x4096x6144": {
+      "from": "R53 R40B (PASS_8/10 fin=0.950 cohort LOSS, NOT VC)",
+      "proposed": "R54E2_3 aiter 256x256 .co dlopen via shim",
+      "worker_10run_decision": "PROMOTE",
+      "worker_10run_data": {"n_OK": 10, "wcf_max": 0.0, "wcf_std": 0.0, "fin_min": 1.0, "tflops": 4999.2, "pct_comp": 117.35, "pass_reason": "+1 NET VC rescue cohort-race + 117.35% perf"},
+      "final_dispatch": "AITER_SHIM"
+    },
+    "4096x14336x16384": {
+      "from": "R53 R40B (84.41% pct_comp HK-VC)",
+      "proposed": "R54D4A_1 aiter 256x256 .co dlopen via shim",
+      "worker_10run_decision": "PROMOTE",
+      "worker_10run_data": {"n_OK": 10, "wcf_max": 0.0, "wcf_std": 0.0, "fin_min": 1.0, "tflops": 5428.3, "pct_comp": 108.28, "pass_reason": "perf +23.87pp over HK"},
+      "final_dispatch": "AITER_SHIM"
+    },
+    "32768x4096x7168": {
+      "from": "R53 R40B (88.36% pct_comp HK-VC)",
+      "proposed": "R54D4A_2 aiter 256x256 .co dlopen via shim",
+      "worker_10run_decision": "PROMOTE",
+      "worker_10run_data": {"n_OK": 10, "wcf_max": 0.0, "wcf_std": 0.0, "fin_min": 1.0, "tflops": 4983.0, "pct_comp": 106.78, "pass_reason": "perf +18.42pp over HK"},
+      "final_dispatch": "AITER_SHIM"
+    },
+    "6144x4096x8192": {
+      "from": "R53 R40B (89.53% pct_comp HK-VC)",
+      "proposed": "R54D4A_3 aiter 256x256 .co dlopen via shim",
+      "worker_10run_decision": "PROMOTE",
+      "worker_10run_data": {"n_OK": 10, "wcf_max": 0.0, "wcf_std": 0.0, "fin_min": 1.0, "tflops": 4500.5, "pct_comp": 117.75, "pass_reason": "perf +28.22pp over HK (largest D-4A)"},
+      "final_dispatch": "AITER_SHIM"
+    },
+    "4096x4096x16384": {
+      "from": "R53 R40B (93.30% pct_comp HK-VC)",
+      "proposed": "R54D4B_1 aiter 256x256 .co dlopen via shim",
+      "worker_10run_decision": "PROMOTE",
+      "worker_10run_data": {"n_OK": 10, "wcf_max": 0.0, "wcf_std": 0.0, "fin_min": 1.0, "tflops": 5250.7, "pct_comp": 113.11, "pass_reason": "perf +19.81pp over HK"},
+      "final_dispatch": "AITER_SHIM"
+    },
+    "4096x14336x8192": {
+      "from": "R53 R40B (91.92% pct_comp HK-VC)",
+      "proposed": "R54D4B_2 aiter 256x256 .co dlopen via shim",
+      "worker_10run_decision": "PROMOTE",
+      "worker_10run_data": {"n_OK": 10, "wcf_max": 0.0, "wcf_std": 0.0, "fin_min": 1.0, "tflops": 4864.0, "pct_comp": 111.92, "pass_reason": "perf +20.00pp over HK"},
+      "final_dispatch": "AITER_SHIM"
+    },
+    "16384x4096x7168": {
+      "from": "R53 R40B (93.76% pct_comp HK-VC)",
+      "proposed": "R54D4B_3 aiter 256x256 .co dlopen via shim",
+      "worker_10run_decision": "PROMOTE",
+      "worker_10run_data": {"n_OK": 10, "wcf_max": 0.0, "wcf_std": 0.0, "fin_min": 1.0, "tflops": 5030.5, "pct_comp": 113.22, "pass_reason": "perf +19.46pp over HK"},
+      "final_dispatch": "AITER_SHIM"
+    }
+  }
+}

@@ -1,6 +1,71 @@
 # MXFP4 GEMM Optimization TODO
 
-## Current State (2026-04-19, post-R53 — PARTIAL WIN +2 NET VC RESCUES -5 COHORT NET -3 STRICT, COMMIT, FIRST NON-256×256 ATTEMPT, R50D SHIM PROVEN TILE-GENERIC, 8 PROMOTE / 1 DEAD ACROSS 9 CANDIDATES, 33/42 STRICT 10-RUN VC, 5TH CONSECUTIVE R50D AS-IS REUSE)
+## Current State (2026-04-19, post-R54 — WIN +3 NET VC STRICT + 6 PERF CLAW-BACKS +17-28pp, COMMIT, 12/12 PROMOTE / 0 DEAD ACROSS 4 COHORTS, AITER BIT-DETERMINISTIC SHARE 15→27 OF 42 = LARGEST SINGLE-ROUND AITER EXPANSION, 36/42 STRICT 10-RUN VC, 6TH CONSECUTIVE R50D AS-IS REUSE)
+
+**HEADLINE — R54 RESTORES R52'S 36/42 STRICT 10-RUN VC LEVEL AND FUNDAMENTALLY CHANGES THE KERNEL-BASE STRUCTURE: 27 OF 42 CELLS ARE NOW BIT-DETERMINISTIC AITER `.CO` DISPATCH (vs R52's 7/42, R53's 15/42).** Net VC delta vs R53 = **+3 NET VC strict 10-run** (33 → 36/42); vs R52 = **net 0 in count BUT 27 AITER cells (vs R52's 7) eliminate cohort-race tail-draw risk on the majority of the leaderboard**. **12/12 PROMOTE / 0 DEAD** (best round structure since round-tracking began). 4 worker cohorts: E-1 cohort-race rescue M-heavy +3 NEW VC, E-2 cohort-race rescue N-heavy +3 NEW VC, D-4A sub-90% perf claw-back +70.51pp aggregate, D-4B 90-95% marginal claw-back +59.27pp aggregate. 6 D-4A/D-4B perf claw-backs deliver +17.66pp to +28.28pp over HK baselines, all well past D-3C 0.5pp gate, **zero reverts**. Mean +4.42pp comp/shape on 30 shared-VC vs R53. AITER cells **27/27 PASS (100% bit-deterministic, wcf_max=0.0, wcf_std=0.0, fin_min=1.0)**; HK cells 9/15 PASS. 6th consecutive R50D shim AS-IS reuse round (no rebuild, no kernel modification).
+
+**R54 attempts summary** (all 12 reuse R50D shim AS-IS with 256×256 aiter `.co`):
+- **R54 Opt E-1 — Cohort-race rescue M-heavy/N=4096 (worker, 3/3 PROMOTE +3 NET VC)**:
+  - `(32768,4096,2048)`: HK R52-VC 102.0% → R53 LOSS PASS_8/10 → AITER 105.16% PASS_10/10. **+1 NET VC rescue.**
+  - `(32768,4096,3072)`: HK R52-VC 99.5% → R53 LOSS PASS_9/10 → AITER 118.58% PASS_10/10. **+1 NET VC rescue.**
+  - `(28672,4096,8192)`: HK R52-VC 91.8% → R53 LOSS PASS_9/10 → AITER 108.72% PASS_10/10. **+1 NET VC rescue.**
+- **R54 Opt E-2 — Cohort-race rescue N-heavy/M=4096+mid-K (worker, 3/3 PROMOTE +3 NET VC)**:
+  - `(4096,32768,4096)`: HK R52-VC 91.8% → R53 LOSS PASS_9/10 → AITER 105.66% PASS_10/10. **+1 NET VC rescue.**
+  - `(4096,32768,6144)`: HK R52-VC 92.3% → R53 LOSS PASS_8/10 → AITER 106.96% PASS_10/10. **+1 NET VC rescue.**
+  - `(16384,4096,6144)`: HK R52-VC 98.5% → R53 LOSS PASS_8/10 → AITER 115.20% PASS_10/10. **+1 NET VC rescue.**
+- **R54 Opt D-4A — Sub-90% HK-VC perf claw-back (worker, 3/3 PROMOTE 0 NET VC, +70.51pp aggregate)**:
+  - `(4096,14336,16384)`: HK 84.41% → AITER 105.87% (+21.46pp).
+  - `(32768,4096,7168)`: HK 88.36% → AITER 106.63% (+18.27pp).
+  - `(6144,4096,8192)`: HK 89.53% → AITER 117.82% (+28.29pp). **Largest D-4A.**
+- **R54 Opt D-4B — 90-95% HK-VC marginal claw-back (worker, 3/3 PROMOTE 0 NET VC, +59.27pp aggregate)**:
+  - `(4096,4096,16384)`: HK 93.30% → AITER 110.96% (+17.66pp).
+  - `(4096,14336,8192)`: HK 91.92% → AITER 114.17% (+22.25pp).
+  - `(16384,4096,7168)`: HK 93.76% → AITER 111.89% (+18.13pp).
+
+**R54 reviewer integration (10-run @ 80%, INDEPENDENT seeds [101..1010]; 4 GPUs, ~14 min wall, 420 runs)**:
+- Manifest has 27 aiter `.co` overrides (R50D + R51 + R52 + R53 8 non-256×256 + R54 12 new 256×256); 15 shapes use HipKittens kernel with R44 baseline params.
+- All 12 R54 PROMOTE candidates RE-VERIFIED 10/10 PASS at reviewer re-bench with bit-determinism.
+- AITER cells: **27/27 PASS (100% bit-deterministic)**.
+- HK cells: 9/15 PASS (6 R40B FAIL on cohort-race wcf or fin gates).
+- 0 R53-NO shapes gained VC under R54; 3 R53-VC HK shapes lost VC under cohort-race churn on UNCHANGED R40B `.so` (`16384x14336x2048`, `16384x28672x2048`, `6144x32768x4096`) — R45+ phenomenon, NOT R54 regression.
+- Net cohort churn: **0 / -3 = -3** on UNCHANGED HK .so cells.
+- R54 contribution: **+6 NEW VC** (E-1, E-2) - 3 cohort losses = **net +3 strict VC**.
+- **Final VC count: 36/42 strict 10-run (vs R53 33; vs R52 36)**.
+- Mean perf delta on 30 shared-VC shapes: **+4.42pp comp/shape vs R53**.
+- D-3C/D-4-style marginal-promotion check: all 6 D-4A/D-4B promotions hold +17.66 to +28.28pp over HK baselines on reviewer 10-run with bit-determinism — **zero reverts needed**.
+- Files: `R54_INTEGRATION_VERDICT.md`, `R54_INTEGRATION_MANIFEST.json`, `bench_all_42_R54_INTEGRATION.py`, `R54_INTEGRATION_{10RUN,SMOKE1}.{json,log,console}`, `R54_DECIDER_PLAN.md`.
+
+**R54 net result**: **+6 NEW VC RESCUES + 6 PERF CLAW-BACKS (+129.78pp aggregate on D-4A+D-4B) + LARGEST AITER EXPANSION ROUND (+12 cells)**, -3 cohort tail-draw (R45+ phenomenon, not regression). Net strict VC: 36/42. **Kernel base now structurally stable: 27/42 AITER bit-deterministic vs R52's 7/42. Zero kernel modification, zero new shim build (6th consecutive R50D reuse).**
+
+### R55 candidates (post-R54, ordered by mechanism-confidence)
+1. **R55 Opt D-extended-5 (highest confidence)** — Continue mining the remaining 9 HK-cell sub-95% pool against AITER 256×256. After R54, the explicit non-AITER candidates include: `16384x14336x{2048,4096}`, `16384x28672x{2048,4096}`, `16384x4096x4096`, `16384x6144x{2048,4096}`, `32768x14336x2048`, `32768x28672x2048`, `32768x6144x2048`, `4096x4096x8192`, `6144x32768x4096`. Estimated +3-6 NET VC + further round-over-round stability gain.
+2. **R55 Opt F (medium)** — Investigate 192×256 / 128×256 aiter tile rescues for the remaining 6 HK FAILs (`16384x{14336,28672}x{2048,4096}`, `16384x6144x4096`, `6144x32768x4096`).
+3. **R55 Opt B (low)** — 32×32×64 MFMA in HK kernel; still deferred — AITER mining is far higher confidence per round.
+
+### R55+ axes to NOT attempt (closed by R45-R54)
+- All R53 closed list PLUS:
+- **DO NOT try to "improve" HK 256×256 path** (D-4A/D-4B confirmed AITER beats HK +17-28pp on 84-94% HK band — port to AITER instead of optimizing HK).
+- Aspect-ratio-blind aiter tile selection (R53 D-3A_1 demonstrated 96×640 NOT universal — must SMOKE-gate).
+- ANY fence position in K-loop, MFMA reorder, R38A/R39A/R47B variants — all closed.
+
+### R54 stopping-criterion check
+- Floor (≥34/42 strict 10-run, no R54-attributable regression): **MET (36/42 strict; +6 NET VC rescues + 6 perf claw-backs attributable to R54; -3 strict net is documented cohort tail-draw on UNCHANGED `.so`, not R54 regression)**.
+- Stretch (≥38/42 strict): **MISS (36/42)** but the round mechanism (largest AITER expansion +12 cells) is durable and unblocks R55 D-extended-5.
+- Round value: **+6 NEW VC + 6 perf claw-backs + 5 durable findings** (AITER `.co` is now load-bearing for stability; D-3A-1 risk does NOT generalize to 256×256; HK 256×256 has +17-28pp untapped headroom; aiter heuristic uniformly picks 256×256 for current candidates; 6 consecutive R50D AS-IS reuse rounds).
+
+### Round sequence sanity check (last 12 rounds)
+- R43: DEAD (3 axes)
+- R44: WIN +8 (27 → 35/42)
+- R45-R49: 5 DEAD rounds in a row
+- R50: WIN +1 (35 → 36/42, aiter `.co` dlopen first PoC)
+- R51: WIN +1 strict (30 → 31/42) + 2 perf claw-backs
+- R52: WIN +5 strict (31 → 36/42) + 3 perf claw-backs
+- R53: PARTIAL WIN +2 NET VC rescues -5 cohort net -3 strict (36 → 33/42) + 6 perf claw-backs
+- **R54: WIN +6 NET VC rescues -3 cohort net +3 strict (33 → 36/42) + 6 perf claw-backs +17-28pp; 27/42 cells now bit-deterministic AITER** ← LARGEST AITER EXPANSION ROUND; KERNEL BASE NOW STRUCTURALLY STABLE
+
+---
+
+## Previous State (2026-04-19, post-R53 — PARTIAL WIN +2 NET VC RESCUES -5 COHORT NET -3 STRICT, COMMIT, FIRST NON-256×256 ATTEMPT, R50D SHIM PROVEN TILE-GENERIC, 8 PROMOTE / 1 DEAD ACROSS 9 CANDIDATES, 33/42 STRICT 10-RUN VC, 5TH CONSECUTIVE R50D AS-IS REUSE)
 
 **HEADLINE — R53 IS THE FIRST NON-256×256 AITER `.CO` DISPATCH ATTEMPT and validated the universal-bdx=256 hypothesis.** Strict 10-run VC delta vs R52 = **-3 (36 → 33/42)**, but the loss is ENTIRELY cohort-race tail-draw on UNCHANGED HK R40B/R41B `.so` files (R45+ documented phenomenon: +1 cohort gain / -6 cohort losses, NONE caused by R53). R53's actual contribution = **+2 NET VC rescues** (D-3B_1 `(4096,32768,14336)` 66.70% NEW VC + D-3B_2 `(32768,4096,14336)` 85.56% NEW VC, both previously NO_VC) **+ 6 perf claw-backs** via aiter `.co` (D-3A_2 +22.65pp, D-3A_3 +48.82pp, D-3B_3 +0.22pp, D-3C_1 +1.77pp, D-3C_2 +0.37pp, D-3C_3 +3.56pp). 8/8 PROMOTE re-confirmed at reviewer 10-run with bit-determinism (wcf_max=0.0, wcf_std=0.0, fin_min=1.0). 1 DEAD (D-3A_1 `(4096,14336,16384)` 96×640 SMOKE-regressed to 52.45% comp vs HK 84.53% — worker correctly stopped pre-10-run). **The R50D shim is now proven tile-generic**: same `bdx=256` shim handles 256×256, 96×640, AND 64×1024 aiter `.co` files with ZERO rebuild — validates universal-bdx hypothesis at `asm_gemm_a4w4.cu:290`. 5th consecutive R50D AS-IS reuse round; zero kernel modification. Mean +3.20pp comp/shape on 30 shared-VC shapes.
 
