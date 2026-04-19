@@ -47,6 +47,39 @@
 
 **baseline 建立**：首次需在每个 LLaMA shape 上跑 FP8 per-tensor + MXFP8 V2 baseline 各 5x，记录 median TFLOPS 作为后续对照。
 
+## R49 cycle 完结 (2026-04-19, 5 devs + 1 reviewer-in-flight) ★ 0 SHIP + 5 REFUTATION + R48 strict-protocol baseline (7/21 PASS) — closes 5 candidate levers, reaffirms 256-CU hardware bound
+
+R49 派 5 devs (A CRR opsel, B RRR phase split, C persistent kernel, D GROUP_M=8 re-bench, E dormant CRR variants) + 1 Reviewer (R47 SHIP re-validation). All 5 devs REFUTED — Reviewer still in flight. R48 strict-protocol baseline landed first as standalone commit.
+
+### R49 commits on `feat/mxfp8-only`
+- `7e469af6` R48 strict-protocol baseline: 7/21 PASS (SUMMARY.txt + r48_full_results)
+- `c5140f11` Dev D — per-shape GROUP_M=8 gate REFUTED (was merged earlier in cycle)
+- `f0efd077` R49 cycle wrap: Dev A/B/C/E REFUTATIONS bundled
+
+### R49 Dev results (5 REFUTATIONS, 0 SHIP)
+- **Dev A** (`f0efd077`) REFUTED: CRR opsel-friendly scale layout. Geomean Δ -14.16% across 7 shapes; worst -34.78% (8192³). Re-pack eliminated 6 `v_lshrrev_b32`/K-pair as designed but forced extra `v_perm_b32` lane permutations + occupancy-2→1 collapse. SNR/det clean. `crr_mxfp8_exact_8wave_opsel_fastpath.inc` retained as documented dead-code.
+- **Dev B** (`f0efd077`) REFUTED — CATASTROPHIC: RRR `do_k_iter` noinline phase split. -97% on 4 of 7 shapes, -99.91% on 70B Down (705 ms vs 5 ms baseline), 2 cells crashed. Only 8B Gate/Up neutral (-0.23%). `__attribute__((noinline))` materializes a real call frame which forces all live K-loop values to spill. **`MXFP8_RRR_PHASE_SPLIT` macro retained in `rrr_mxfp8_exact_8wave_fastpath.inc` (default OFF)** as documented dead code.
+- **Dev C** (`f0efd077`) REFUTED — pre-prototype: persistent-CTA at 4096³ family. **Critical correction: MI355X has 256 CUs, NOT 304 as the orchestrator prompt assumed.** At BLK=256, 4096-M family with N ∈ {4096, 8192} has total_tiles ≤ nCU → zero structural wave-tail. Single tail-bearing shape (4096×14336×4096, 14.3% upper bound) cannot be improved by static-round-robin tile-loop persistent — per-tile prologue is 0.011% of per-tile wall-clock. Extends and corrects R31 Dev D's NULL with corrected CU count. No source landed.
+- **Dev D** (`c5140f11`) REFUTED: per-shape GROUP_M=8 gate. Strict-SCLK 5×/30s re-bench of R48 Dev C's +5.47% claim → actual +0.40% (13× inflated by 3-run noise). Validates Dev A's broader finding that R48-era 3-run/no-cooldown measurements are systematically noise-dominated.
+- **Dev E** (`f0efd077`) REFUTED: dormant CRR variants resweep (`hbnshrink` BLK_N=128, `rect` BLK_N=64). Both variants regress 35–50% on every cell (3 cells × 2 variants). `rect` doubles tile count → wave-tail; `hbnshrink` halves tile count + doubles per-tile B-side LDS → SCLK throttle. R47-era's "dormant" status confirmed appropriate. `crr_mxfp8_exact_8wave_hbnshrink_fastpath.inc` retained for archival.
+
+### R49 Reviewer (still in flight, GPU 0, worktree `agent-ad014724`)
+**R47 SHIP re-validation under strict SCLK** — A/B re-bench WITH/WITHOUT each of R47's 3 SHIPs (`6edb05f9` RCR XCD swizzle +8.46%, `0b2f19ae` CRR XCD swizzle +3.35%, `9315a0bf` CRR SLC removal). At wrap time: Phase A complete, Phase B complete, Phase C in progress. Will land in follow-up commit when complete. Highest retrospective leverage in the cycle.
+
+### R49 cycle outcome
+**0 baseline movement** (5 levers tested, all REFUTED). The cumulative deliverable is **5 closed candidate paths** + the **256-CU correction** + **first cycle entirely under strict-SCLK protocol** (every dev produced reliable verdicts; no within-cell spread > 5% on the meaningful treatment branches).
+
+After R49: remaining HEADROOM cells from R48 Dev D's STOP list are even more structurally bounded:
+- 70B Gate/Up CRR (88.5%, +4.0pp gap) — opsel REFUTED, dormant variants REFUTED
+- 8B Gate/Up RRR (90.4%, +3.1pp) — phase split REFUTED (catastrophic)
+- 8B Q/O RRR (91.2%, +2.3pp) and CRR (89.7%, +2.3pp) — persistent REFUTED (analytical)
+
+### R49+ remaining candidate levers (post 5 REFUTATIONS)
+1. **CRR scale prefetch lead-distance** (proposed in r49c §7.2) — re-issue cA pre-fetch one BK earlier so its lgkmcnt drops cleanly before cB MMA dependency edge.
+2. **8B Gate/Up RRR**: revisit `RRR_MAIN_UNROLL=2` and `=8` at this single shape (R48G covered 4/8/16 generically; per-shape sweep at the only structurally-spilling shape may unlock sweet spot). VGPR spill at the 56-CTA-per-row strip with K=4096 full unroll is the documented cause.
+3. **Occupancy-1 vs occupancy-2 at 4096³ specifically** (proposed in r49c §7.3) — at 4096³ the kernel runs naturally at occ=1 (256 tiles = 256 CUs), so VGPR/LDS budget can be spent more aggressively without occupancy penalty. Build a 4096³-specific variant gated on `total_tiles == nCU` at compile time using the second LDS slot for an A-prefetch buffer.
+4. **`asm volatile("" ::: "memory")` soft barrier** between RRR phases — softer alternative to `noinline` that gates the scheduler without a call frame. R47-era attempts showed <1% effect; revisit under strict-SCLK to confirm noise-bounded.
+
 ## R48 cycle 完结 (2026-04-19, 7 devs + 1 reviewer) ★ 0 SHIP + 6 REFUTATION + 1 HARDWARE-CEILING DEEPENING + 1 REVIEWER AUDIT — cleanly bounds remaining MXFP8 headroom; defines structural R49 priorities
 
 R48 派 7 devs + 1 reviewer. No SHIP commits this cycle — every "easy" lever from the R47+ frontier was tested and structurally refuted. The cumulative outcome is a much tighter bound on what's achievable: **15 of 21 cells are at predicted hardware ceiling** (Dev D), and the remaining 4 HEADROOM cells need kernel rewrites (not pragma sweeps) to close.

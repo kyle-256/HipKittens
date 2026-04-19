@@ -54,6 +54,34 @@ python3 test_mxfp8_python.py 4096 14336 4096
 5. 禁止提交 `*.so`、`*.s`、`*_layout_results_*.json`、`.bak*`、`gpucore.*`、`__pycache__` 等（`.gitignore` 已覆盖）
 6. 每个子 agent 使用不同 `HIP_VISIBLE_DEVICES` 以免 GPU 冲突：Dev A → 0，Dev B → 1，Dev C → 2，Reviewer/formal → 7
 
+## R49 cycle 完结 (2026-04-19, 5 devs + 1 reviewer-in-flight) ★ 0 SHIP + 5 REFUTATION + R48 strict-protocol baseline (7/21 PASS)
+
+R49 派 5 devs (A/B/C/D/E) + 1 Reviewer (R47 SHIP re-validation). All 5 devs REFUTED — Reviewer still in flight. R48 strict-protocol baseline landed first (7/21 PASS).
+
+### R49 commits on `feat/mxfp8-only`
+- `7e469af6` R48 strict-protocol baseline (538 files, 5×/30s/60s SCLK)
+- `c5140f11` Dev D — GROUP_M=8 gate REFUTED (merged earlier in cycle)
+- `f0efd077` R49 cycle wrap: Dev A/B/C/E REFUTATIONS bundled
+
+### R49 Dev results (5 REFUTATIONS, 0 SHIP)
+- **Dev A** REFUTED: CRR opsel scale layout. Geomean -14.16%, worst -34.78% (8192³). Re-pack eliminated 6× `v_lshrrev_b32`/K-pair as designed but forced extra `v_perm_b32` + occupancy-2→1 collapse. SNR/det clean. `crr_mxfp8_exact_8wave_opsel_fastpath.inc` retained as documented dead code.
+- **Dev B** REFUTED — CATASTROPHIC: RRR `do_k_iter` noinline phase split. -97% on 4 of 7 shapes, -99.91% on 70B Down (705 ms vs 5 ms). Only 8B Gate/Up neutral. `__attribute__((noinline))` materializes a real call frame → spills entire K-loop live set. `MXFP8_RRR_PHASE_SPLIT` macro retained in `rrr_mxfp8_exact_8wave_fastpath.inc` as dead code (default OFF). **Soft-barrier alternative** (`asm volatile("" ::: "memory")`) earmarked for future cycles.
+- **Dev C** REFUTED — pre-prototype: persistent-CTA. **Critical correction: MI355X has 256 CUs, NOT 304 as orchestrator prompt assumed.** At BLK=256, 4096-M family with N ∈ {4096, 8192} has total_tiles ≤ nCU → zero structural wave-tail. Single tail-bearing shape (4096×14336×4096, 14.3% upper bound) cannot be improved by static-round-robin tile-loop persistent — per-tile prologue is 0.011% of per-tile wall-clock. Extends and corrects R31 Dev D NULL.
+- **Dev D** (`c5140f11`) REFUTED: per-shape GROUP_M=8 gate. Strict-SCLK gave +0.40% (was +5.47% — 13× SCLK noise inflation).
+- **Dev E** REFUTED: dormant CRR variants (`hbnshrink`, `rect`) on 3 wide-N cells. All 6 cell×variant combos regress 35–50%. R47-era's "dormant" status confirmed. `crr_mxfp8_exact_8wave_hbnshrink_fastpath.inc` retained for archival.
+
+### R49 Reviewer (still in flight, GPU 0)
+**R47 SHIP re-validation under strict SCLK** — A/B re-bench WITH/WITHOUT each of R47's 3 SHIPs (RCR XCD swizzle, CRR XCD swizzle, CRR SLC removal). At wrap time: Phase A complete, Phase B complete, Phase C in progress. Will land in follow-up commit.
+
+### R49 cycle outcome
+**0 baseline movement** (5 levers REFUTED) + **first cycle entirely under strict-SCLK** (every dev produced reliable verdicts). After R49: HEADROOM cells from R48 Dev D's STOP list are even more structurally bounded — opsel REFUTED for CRR ceiling (Dev A), phase split REFUTED for RRR spill (Dev B), persistent REFUTED for 4096³ wave-tail (Dev C, with 256-CU correction).
+
+### R49+ remaining candidate levers
+1. CRR scale prefetch lead-distance (proposed in r49c §7.2)
+2. 8B Gate/Up RRR per-shape `RRR_MAIN_UNROLL=2/8` sweep (R48G covered generically; per-shape may unlock sweet spot)
+3. Occupancy-1-specific 4096³ variant gated on `total_tiles == nCU` (use second LDS slot for A-prefetch buffer)
+4. `asm volatile("" ::: "memory")` soft barrier between RRR phases (softer alternative to `noinline`)
+
 ## R48 cycle 完结 (2026-04-19, 7 devs + 1 reviewer) ★ 0 SHIP + 6 REFUTATION + 1 HARDWARE-CEILING DEEPENING + 1 REVIEWER AUDIT — bounds remaining headroom; defines structural R49 priorities
 
 R48 派 7 devs (A/B/C/D/E/F/G) + 1 reviewer. **No SHIP commits** — every easy lever from R47+ frontier was tested and structurally refuted. Cumulative deliverable: **15 of 21 cells classified at hardware ceiling** (Dev D extension to all 4096³ shapes); remaining 4 HEADROOM cells need kernel rewrite (not pragma sweeps).
