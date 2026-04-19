@@ -1,0 +1,26 @@
+[sclk-pre-preheat] GPU[6]		: sclk clock level: 1: (1831Mhz)
+[preheat 90.0s] done 15356 iters
+[sclk-post-preheat] GPU[6]		: sclk clock level: 1: (1813Mhz)
+CORRECTNESS_BVEC_vs_R42B abs_max_err=0.0000e+00 snr_db=inf
+[sclk-pre-bench] GPU[6]		: sclk clock level: 1: (1824Mhz)
+WARMUP 0 B_bvec=2.6504 A_r42b=0.4952
+WARMUP 1 B_bvec=2.6747 A_r42b=0.4998
+PAIR 0 B_bvec_1=2.6625 A_r42b_1=0.4872 B_bvec_2=2.6572 A_r42b_2=0.4974
+PAIR 1 B_bvec_1=2.3959 A_r42b_1=0.4990 B_bvec_2=2.6562 A_r42b_2=0.5038
+PAIR 2 B_bvec_1=2.6599 A_r42b_1=0.4817 B_bvec_2=2.6620 A_r42b_2=0.5041
+PAIR 3 B_bvec_1=2.6572 A_r42b_1=0.5010 B_bvec_2=2.6588 A_r42b_2=0.4923
+PAIR 4 B_bvec_1=2.6599 A_r42b_1=0.5023 B_bvec_2=2.6630 A_r42b_2=0.4954
+PAIR 5 B_bvec_1=2.6619 A_r42b_1=0.4917 B_bvec_2=2.6641 A_r42b_2=0.4980
+PAIR 6 B_bvec_1=2.6699 A_r42b_1=0.4826 B_bvec_2=2.6731 A_r42b_2=0.4940
+PAIR 7 B_bvec_1=2.6651 A_r42b_1=0.5583 B_bvec_2=2.6358 A_r42b_2=0.5572
+[sclk-post-bench] GPU[6]		: sclk clock level: 1: (2386Mhz)
+R42B_BASELINE  median=0.4977 mean=0.5029 stdev=0.0225 n=16
+BVEC_CANDIDATE median=2.6609 mean=2.6439 stdev=0.0666 n=16
+Welch t (BVEC vs R42B) = +121.813  (positive = BVEC faster)
+DELTA_MEDIAN_PCT BVEC_vs_R42B = +434.604%
+FP8_REFERENCE  median=0.4868 mean=0.4951 stdev=0.0297 n=8
+BVEC/FP8 ratio = 546.57%
+R42B/FP8 ratio = 102.24%
+R42B_TFLOPS_LIST 0.4872,0.4974,0.4990,0.5038,0.4817,0.5041,0.5010,0.4923,0.5023,0.4954,0.4917,0.4980,0.4826,0.4940,0.5583,0.5572
+BVEC_TFLOPS_LIST 2.6625,2.6572,2.3959,2.6562,2.6599,2.6620,2.6572,2.6588,2.6599,2.6630,2.6619,2.6641,2.6699,2.6731,2.6651,2.6358
+FP8_TFLOPS_LIST 0.4975,0.4780,0.4700,0.4949,0.4867,0.4816,0.4869,0.5652

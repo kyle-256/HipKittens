@@ -5627,6 +5627,23 @@ void dispatch(layout_globals g) {
         if constexpr (PRESHUFFLED_QUANT) {
             const char* lname = (L == Layout::RCR) ? "rcr_v2"
                               : (L == Layout::RRR) ? "rrr_v2" : "crr_v2";
+#if MXFP8_SMALLM_B32_BSIDE_VEC_ENABLE
+            // R45 Dev C — B-side (and A-side for RCR) packed-uint vectorization
+            // variant. Strict superset of R42B (preserves hoisted scale + adds
+            // 4-byte vec loads on contiguous-K operands). Macro-gated, default
+            // OFF: when off, falls through to R42B kernel below.
+            MXFP8_DISPATCH_TRACE_ONCE(lname, "SMALLM-B32-TAIL-BVEC (R45C)", g);
+            g.fast_m = 0; g.fast_n = 0; g.fast_k = 0;
+            g.bpr = 0; g.bpc = 0; g.ki = 0;
+            dim3 tail_block(TAIL_BLOCK_N, TAIL_BLOCK_M);
+            dim3 tail_grid(
+                kittens::ceil_div(g.n, TAIL_BLOCK_N),
+                kittens::ceil_div(g.m, TAIL_BLOCK_M)
+            );
+            gemm_tail_kernel_smallm_b32_bvec<L, PRESHUFFLED_QUANT>
+                <<<tail_grid, tail_block, 0, g.stream>>>(g);
+            return;
+#else
             MXFP8_DISPATCH_TRACE_ONCE(lname, "SMALLM-B32-TAIL (R42B)", g);
             g.fast_m = 0; g.fast_n = 0; g.fast_k = 0;
             g.bpr = 0; g.bpc = 0; g.ki = 0;
@@ -5638,6 +5655,7 @@ void dispatch(layout_globals g) {
             gemm_tail_kernel_smallm_b32<L, PRESHUFFLED_QUANT>
                 <<<tail_grid, tail_block, 0, g.stream>>>(g);
             return;
+#endif
         }
 #endif
         // No small-M predicate matched — fall through to the existing M≥BLK
@@ -5754,9 +5772,15 @@ void dispatch(layout_globals g) {
         if constexpr (PRESHUFFLED_QUANT) {
             const char* lname = (L == Layout::RCR) ? "rcr_v2"
                               : (L == Layout::RRR) ? "rrr_v2" : "crr_v2";
+#if MXFP8_SMALLM_B32_BSIDE_VEC_ENABLE
+            MXFP8_DISPATCH_TRACE_ONCE(lname,
+                "SMALLM-B32-TAIL-BVEC-LEFTOVER (R45C/R43C)", g);
+            gemm_tail_kernel_smallm_b32_bvec<L, PRESHUFFLED_QUANT><<<tail_grid, tail_block, 0, g.stream>>>(g);
+#else
             MXFP8_DISPATCH_TRACE_ONCE(lname,
                 "SMALLM-B32-TAIL-LEFTOVER (R42B/R43C)", g);
             gemm_tail_kernel_smallm_b32<L, PRESHUFFLED_QUANT><<<tail_grid, tail_block, 0, g.stream>>>(g);
+#endif
         } else {
             gemm_tail_kernel<L, PRESHUFFLED_QUANT><<<tail_grid, tail_block, 0, g.stream>>>(g);
         }
