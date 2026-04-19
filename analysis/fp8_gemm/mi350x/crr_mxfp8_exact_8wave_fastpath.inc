@@ -84,6 +84,14 @@
 #ifndef MXFP8_CRR_V2_SCALE_CACHEPOLICY
 #define MXFP8_CRR_V2_SCALE_CACHEPOLICY 0
 #endif
+// R48 Dev B: cooperative B-scale lever — issue B-scale b64 BEFORE A-scale
+// b128 in the V2-CRR scale loader. Hypothesis: smaller B-scale transactions
+// return faster and unblock MMA dispatch sooner; on large-K shapes
+// (70B Down 4096×8192×28672) where B-scale = 7.34 MB > L2 (8 MB per XCD),
+// shifting issue order may help VMEM scheduling. Default OFF.
+#ifndef MXFP8_CRR_COOPERATIVE_BSCALE
+#define MXFP8_CRR_COOPERATIVE_BSCALE 0
+#endif
 
 #ifndef CRR_USE_EXACT_8WAVE_FASTPATH
 #define CRR_USE_EXACT_8WAVE_FASTPATH 1
@@ -461,6 +469,26 @@ void crr_exact_8wave_scaled_kernel(const layout_globals g)
                     (static_cast<uint32_t>(lane_kblk) << 8) |
                     (static_cast<uint32_t>(lane_nonk) << 4);
                 const uint32_t a_soff = static_cast<uint32_t>(k_pair) << 10;
+                const uint32_t b_voff =
+                    (static_cast<uint32_t>(lane_kblk) << 7) |
+                    (static_cast<uint32_t>(lane_nonk) << 3);
+                const uint32_t b_soff = static_cast<uint32_t>(k_pair) << 9;
+#if MXFP8_CRR_COOPERATIVE_BSCALE
+                // R48 Dev B: issue B-scale b64 BEFORE A-scale b128.
+                const uint64_t b_raw =
+                    llvm_amdgcn_raw_buffer_load_b64(b_v2_srsrc, b_voff, b_soff, MXFP8_CRR_V2_SCALE_CACHEPOLICY);
+                __builtin_amdgcn_sched_barrier(0);
+                const __uint128_t a_raw =
+                    llvm_amdgcn_raw_buffer_load_b128(a_v2_srsrc, a_voff, a_soff, MXFP8_CRR_V2_SCALE_CACHEPOLICY);
+                b0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(b_raw      ));
+                b1_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(b_raw >> 32));
+                a0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw      ));
+                a1_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw >> 32));
+                if constexpr (crr_a_pack_count > 1) {
+                    a0_scale_packs[1] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw >> 64));
+                    a1_scale_packs[1] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw >> 96));
+                }
+#else
                 const __uint128_t a_raw =
                     llvm_amdgcn_raw_buffer_load_b128(a_v2_srsrc, a_voff, a_soff, MXFP8_CRR_V2_SCALE_CACHEPOLICY);
                 a0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw      ));
@@ -469,14 +497,11 @@ void crr_exact_8wave_scaled_kernel(const layout_globals g)
                     a0_scale_packs[1] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw >> 64));
                     a1_scale_packs[1] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw >> 96));
                 }
-                const uint32_t b_voff =
-                    (static_cast<uint32_t>(lane_kblk) << 7) |
-                    (static_cast<uint32_t>(lane_nonk) << 3);
-                const uint32_t b_soff = static_cast<uint32_t>(k_pair) << 9;
                 const uint64_t b_raw =
                     llvm_amdgcn_raw_buffer_load_b64(b_v2_srsrc, b_voff, b_soff, MXFP8_CRR_V2_SCALE_CACHEPOLICY);
                 b0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(b_raw      ));
                 b1_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(b_raw >> 32));
+#endif
                 return;
             }
             const uint32_t soff = static_cast<uint32_t>(k_pair) << 8;

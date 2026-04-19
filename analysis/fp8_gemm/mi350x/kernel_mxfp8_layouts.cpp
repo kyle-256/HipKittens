@@ -417,6 +417,15 @@ constexpr int RBN_RECT  = BLK_N / WARPS_N / 2;  // 32 default, 16 rect
 #ifndef MXFP8_RCR_V2_SCALE_PREFETCH
 #define MXFP8_RCR_V2_SCALE_PREFETCH 0
 #endif
+// R48 Dev B: cooperative B-scale lever — issue B-scale b64 BEFORE A-scale
+// b128 inside load_scale_buffer (V2-RCR). Hypothesis: smaller B-scale
+// transactions return faster and unblock MMA dispatch sooner; on large-K
+// shapes (70B Down 4096×8192×28672) where B-scale = 7.34 MB > L2 (8 MB
+// per XCD), shifting issue order may help VMEM scheduling.
+// Default OFF.
+#ifndef MXFP8_RCR_COOPERATIVE_BSCALE
+#define MXFP8_RCR_COOPERATIVE_BSCALE 0
+#endif
 #ifndef MXFP8_RCR_EXACT_PQ_HOIST_HI_ENABLE
 #define MXFP8_RCR_EXACT_PQ_HOIST_HI_ENABLE 1
 #endif
@@ -2839,6 +2848,18 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
                     (static_cast<uint32_t>(lane_kblk) << 8) |
                     (static_cast<uint32_t>(lane_nonk) << 4);
                 const uint32_t a_soff = static_cast<uint32_t>(k_pair) << 10;
+#if MXFP8_RCR_COOPERATIVE_BSCALE
+                // R48 Dev B: pre-issue B-scale b64 BEFORE the A-scale b128.
+                // Compute B offsets early; emit b64 first; sched_barrier
+                // prevents the scheduler from re-floating the order.
+                const uint32_t _coop_b_voff =
+                    (static_cast<uint32_t>(lane_kblk) << 7) |
+                    (static_cast<uint32_t>(lane_nonk) << 3);
+                const uint32_t _coop_b_soff = static_cast<uint32_t>(k_pair) << 9;
+                const uint64_t _coop_b_raw =
+                    llvm_amdgcn_raw_buffer_load_b64(b_v2_srsrc, _coop_b_voff, _coop_b_soff, MXFP8_RCR_V2_SCALE_CACHEPOLICY);
+                __builtin_amdgcn_sched_barrier(0);
+#endif
                 const __uint128_t a_raw =
                     llvm_amdgcn_raw_buffer_load_b128(a_v2_srsrc, a_voff, a_soff, MXFP8_RCR_V2_SCALE_CACHEPOLICY);
                 const uint32_t a_w0 = static_cast<uint32_t>(a_raw      );
@@ -2864,6 +2885,11 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
                     a1_scale_packs[1] = std::bit_cast<fp8e8m0_4>(a_w3);
                 }
 #endif
+#if MXFP8_RCR_COOPERATIVE_BSCALE
+                // R48 Dev B: reuse the pre-issued b64 result.
+                const uint32_t b_w0 = static_cast<uint32_t>(_coop_b_raw      );
+                const uint32_t b_w1 = static_cast<uint32_t>(_coop_b_raw >> 32);
+#else
                 const uint32_t b_voff =
                     (static_cast<uint32_t>(lane_kblk) << 7) |
                     (static_cast<uint32_t>(lane_nonk) << 3);
@@ -2872,6 +2898,7 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
                     llvm_amdgcn_raw_buffer_load_b64(b_v2_srsrc, b_voff, b_soff, MXFP8_RCR_V2_SCALE_CACHEPOLICY);
                 const uint32_t b_w0 = static_cast<uint32_t>(b_raw      );
                 const uint32_t b_w1 = static_cast<uint32_t>(b_raw >> 32);
+#endif
 #if MXFP8_RCR_EXACT_PQ_PHASE_U16_CACHE_ENABLE
                 b0_phase_u16[0][0] = static_cast<uint16_t>(b_w0);
                 b0_phase_u16[1][0] = static_cast<uint16_t>(b_w0 >> 16);
@@ -3318,6 +3345,27 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
                         (static_cast<uint32_t>(lane_kblk) << 8) |
                         (static_cast<uint32_t>(lane_nonk) << 4);
                     const uint32_t a_soff = static_cast<uint32_t>(k_pair) << 10;
+                    const uint32_t b_voff =
+                        (static_cast<uint32_t>(lane_kblk) << 7) |
+                        (static_cast<uint32_t>(lane_nonk) << 3);
+                    const uint32_t b_soff = static_cast<uint32_t>(k_pair) << 9;
+#if MXFP8_RCR_COOPERATIVE_BSCALE
+                    // R48 Dev B: issue B-scale b64 BEFORE A-scale b128.
+                    // Sched-barrier prevents LLVM from re-floating order.
+                    const uint64_t b_raw =
+                        llvm_amdgcn_raw_buffer_load_b64(b_v2_srsrc, b_voff, b_soff, MXFP8_RCR_V2_SCALE_CACHEPOLICY);
+                    __builtin_amdgcn_sched_barrier(0);
+                    const __uint128_t a_raw =
+                        llvm_amdgcn_raw_buffer_load_b128(a_v2_srsrc, a_voff, a_soff, MXFP8_RCR_V2_SCALE_CACHEPOLICY);
+                    b0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(b_raw      ));
+                    b1_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(b_raw >> 32));
+                    a0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw      ));
+                    a1_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw >> 32));
+                    if constexpr (RBM / 32 > 1) {
+                        a0_scale_packs[1] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw >> 64));
+                        a1_scale_packs[1] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw >> 96));
+                    }
+#else
                     const __uint128_t a_raw =
                         llvm_amdgcn_raw_buffer_load_b128(a_v2_srsrc, a_voff, a_soff, MXFP8_RCR_V2_SCALE_CACHEPOLICY);
                     a0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw      ));
@@ -3326,14 +3374,11 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
                         a0_scale_packs[1] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw >> 64));
                         a1_scale_packs[1] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw >> 96));
                     }
-                    const uint32_t b_voff =
-                        (static_cast<uint32_t>(lane_kblk) << 7) |
-                        (static_cast<uint32_t>(lane_nonk) << 3);
-                    const uint32_t b_soff = static_cast<uint32_t>(k_pair) << 9;
                     const uint64_t b_raw =
                         llvm_amdgcn_raw_buffer_load_b64(b_v2_srsrc, b_voff, b_soff, MXFP8_RCR_V2_SCALE_CACHEPOLICY);
                     b0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(b_raw      ));
                     b1_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(b_raw >> 32));
+#endif
                 } else {
                     const uint32_t soff = static_cast<uint32_t>(k_pair) << 8;
                     a0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(a0p0_srsrc, lane_scale_byte_offset, soff, 0));
