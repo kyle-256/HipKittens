@@ -1130,13 +1130,14 @@ claimed this was landed, but the file shipped at MID=4; P8 corrects it.
 
 ### BF16 — 🚧 Closer but still below 1.0x
 
-Measured on GPU2 with the new per-shape NUM_XCDS autotune:
+Measured on GPU2 with per-shape NUM_XCDS autotune (refreshed 2026-04-19,
+commit `0b700a34` — xcd=32 across the board, +0.7pp avg vs pre-refresh):
 
-| Layout | Geo-mean vs torch.mm | Wins | Δ vs pre-P8 |
+| Layout | Geo-mean vs torch.mm | Wins | Δ vs pre-refresh |
 |---|---|---|---|
-| RCR | 0.984x | 6/48 | +1.0pp |
-| RRR | 0.980x | 9/48 | +1.6pp |
-| CRR | 0.953x | 3/48 | +1.7pp |
+| RCR | 0.991x | — | +0.7pp |
+| RRR | 0.989x | — | +0.9pp |
+| CRR | 0.957x | — | +0.4pp |
 
 torch.mm = hipBLASLt under the hood. Targets are still ≥ 1.00x for each
 layout; no layout regressed.
