@@ -1,0 +1,85 @@
+=== MXFP8 GEMM Layout Benchmark (preshuffle-quant): M=4096, N=28672, K=8192 ===
+Warmup=100, iters=200, correctness=on
+SNR threshold=48.0 dB, determinism_runs=3
+Layouts=crr
+
+--- CRR Layout: C = A^T @ B ---
+  Avg time: 0.7605 ms, TFLOPS: 2529.95
+  [CRR] Correctness (rtol=0.1000, atol=3.0):
+    Max  abs error: 0.0312, Mean abs error: 0.0022
+    Max  rel error: 0.0078, Mean rel error: 0.0017
+    SNR: 49.60 dB (threshold 48.0 dB)
+    Pass rate: 117440512/117440512 (100.00%)
+    Result: PASS
+  [CRR] Determinism (3 runs): PASS
+
+Results saved to mxfp8_layout_results_4096x28672x8192_pq.json
+----- end run 1 -----
+=== MXFP8 GEMM Layout Benchmark (preshuffle-quant): M=4096, N=28672, K=8192 ===
+Warmup=100, iters=200, correctness=on
+SNR threshold=48.0 dB, determinism_runs=3
+Layouts=crr
+
+--- CRR Layout: C = A^T @ B ---
+  Avg time: 0.7606 ms, TFLOPS: 2529.61
+  [CRR] Correctness (rtol=0.1000, atol=3.0):
+    Max  abs error: 0.0312, Mean abs error: 0.0022
+    Max  rel error: 0.0078, Mean rel error: 0.0017
+    SNR: 49.60 dB (threshold 48.0 dB)
+    Pass rate: 117440512/117440512 (100.00%)
+    Result: PASS
+  [CRR] Determinism (3 runs): PASS
+
+Results saved to mxfp8_layout_results_4096x28672x8192_pq.json
+----- end run 2 -----
+=== MXFP8 GEMM Layout Benchmark (preshuffle-quant): M=4096, N=28672, K=8192 ===
+Warmup=100, iters=200, correctness=on
+SNR threshold=48.0 dB, determinism_runs=3
+Layouts=crr
+
+--- CRR Layout: C = A^T @ B ---
+  Avg time: 0.7616 ms, TFLOPS: 2526.61
+  [CRR] Correctness (rtol=0.1000, atol=3.0):
+    Max  abs error: 0.0312, Mean abs error: 0.0022
+    Max  rel error: 0.0078, Mean rel error: 0.0017
+    SNR: 49.60 dB (threshold 48.0 dB)
+    Pass rate: 117440512/117440512 (100.00%)
+    Result: PASS
+  [CRR] Determinism (3 runs): PASS
+
+Results saved to mxfp8_layout_results_4096x28672x8192_pq.json
+----- end run 3 -----
+=== MXFP8 GEMM Layout Benchmark (preshuffle-quant): M=4096, N=28672, K=8192 ===
+Warmup=100, iters=200, correctness=on
+SNR threshold=48.0 dB, determinism_runs=3
+Layouts=crr
+
+--- CRR Layout: C = A^T @ B ---
+  Avg time: 0.7608 ms, TFLOPS: 2529.21
+  [CRR] Correctness (rtol=0.1000, atol=3.0):
+    Max  abs error: 0.0312, Mean abs error: 0.0022
+    Max  rel error: 0.0078, Mean rel error: 0.0017
+    SNR: 49.60 dB (threshold 48.0 dB)
+    Pass rate: 117440512/117440512 (100.00%)
+    Result: PASS
+  [CRR] Determinism (3 runs): PASS
+
+Results saved to mxfp8_layout_results_4096x28672x8192_pq.json
+----- end run 4 -----
+=== MXFP8 GEMM Layout Benchmark (preshuffle-quant): M=4096, N=28672, K=8192 ===
+Warmup=100, iters=200, correctness=on
+SNR threshold=48.0 dB, determinism_runs=3
+Layouts=crr
+
+--- CRR Layout: C = A^T @ B ---
+  Avg time: 0.7612 ms, TFLOPS: 2527.65
+  [CRR] Correctness (rtol=0.1000, atol=3.0):
+    Max  abs error: 0.0312, Mean abs error: 0.0022
+    Max  rel error: 0.0078, Mean rel error: 0.0017
+    SNR: 49.60 dB (threshold 48.0 dB)
+    Pass rate: 117440512/117440512 (100.00%)
+    Result: PASS
+  [CRR] Determinism (3 runs): PASS
+
+Results saved to mxfp8_layout_results_4096x28672x8192_pq.json
+----- end run 5 -----

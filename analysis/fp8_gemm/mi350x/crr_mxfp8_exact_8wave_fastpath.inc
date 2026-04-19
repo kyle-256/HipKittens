@@ -214,6 +214,69 @@
 #error "MXFP8_CRR_LDS_SCALE_LAYOUT mutually exclusive with V2 / LEAD scale levers"
 #endif
 
+// R54 Dev I: branchless unconditional shift block lever.
+// Hypothesis: R53C diagnosed that the compiler refuses to unroll the MXFP8 CRR
+// K-loop body across the `s_bitcmp0_b32 / s_cbranch_scc1 / 6× v_lshrrev_b32`
+// conditional shift block on alternate K-pairs, locking the body to 1 K-pair /
+// 32 MFMA. FP8 CRR (which has no shift block) unrolls 3-deep at K=28672
+// (96 MFMA / iter). Removing the *control-flow* obstacle (the s_bitcmp/cbranch
+// pair) — but not the shifts themselves — should unblock the compiler unroller
+// and let MXFP8 CRR amortize prologue/barrier overhead similarly to FP8.
+//
+// Approach (option a — always-shift): keep the LOAD as a one-arm conditional
+// (`if ((k & 1) == 0) load_raw_scales(k >> 1);`) but emit the 6 v_lshrrev_b32
+// UNCONDITIONALLY using a runtime-computed shift amount = `((k & 1) << 4)`.
+// On even K the shift is by 0 (semantic no-op, but real V-pipe issue); on odd
+// K the shift is by 16 (correct hi→lo move). Net: 6 wasted v_lshrrev / even
+// K-pair (cost: +6 VALU / K-pair); reward: the conditional shift block is
+// gone, so the compiler may unroll across K-pairs.
+//
+// Distinct from sibling R54 levers:
+//   * R54 Dev A (LDS-resident pre-shifted, REFUTED-EMPIRICAL): tried to remove
+//     the shifts entirely via LDS double-buffer. Overflowed LDS budget.
+//   * R54 Dev E (v_pk_lshrrev_b32 packed shift): replaces the shift INSTRUCTION
+//     (6 v_lshrrev → 3 v_pk_lshrrev). Still leaves the s_bitcmp/cbranch.
+//   * R54 Dev F (XCD swizzle granularity): index-math-side, unrelated to shift.
+//   * Dev I (this lever): changes the CONTROL FLOW (conditional → unconditional).
+//
+// Trade-off: 2× shift V-pipe work (6 v_lshrrev / K-pair instead of 3 averaged).
+// Net win iff (extra shift cost) < (MMA overlap gain from compiler unroll).
+// Per R53C §3.3 analytical model, gaining a 2-deep body unroll would lift
+// MfmaUtil from ~60% to ~67% (-30→-23 cycles overhead per K-pair); +6 VALU/K-pair
+// fits comfortably in current pipe slack (V-pipe utilization 26.4% on CRR).
+//
+// Resource expectation: NO new live state across K-pairs (shift is in-place on
+// scale-pack VGPRs that already have their existing live range). VGPR ≤ 227
+// (no new VGPRs introduced). LDS unchanged. No host-side change.
+//
+// Falsifiable predictions (verify in Phase 1 ISA scan):
+//   P1: `s_bitcmp0_b32 s##, 0` and `s_cbranch_scc1 .L##` GONE from the K-loop
+//       body (the shift conditional block is structurally absent).
+//   P2: 6× `v_lshrrev_b32_e32 v##, [shift_reg], v##` PRESENT unconditionally
+//       (shift_reg holds (k & 1) << 4 — runtime-computed, not immediate).
+//   P3: K-loop body MFMA count RISES from 32 → 64 or 96 (compiler unrolls
+//       2-3 K-pairs deep, like FP8 CRR at K=28672).
+//   P4: VGPR ≤ 227, no spill, LDS = 139264 B (no resource regression).
+//   P5: SNR ≥ 48 dB, det 3/3 PASS (semantically identical: shift-by-0 is a
+//       true no-op).
+//
+// Refutation modes:
+//   F1 — Compiler still refuses to unroll: even with shift unconditional, the
+//        compiler may keep the load conditional and refuse to unroll across
+//        the load. Phase 1 MFMA count would remain 32. → REFUTED-DIAGNOSTIC.
+//   F2 — VGPR pressure rises from unrolling: if the compiler unrolls the body
+//        2-3 deep, more scale packs may become live concurrently → spill.
+//        → REFUTED-EMPIRICAL.
+//   F3 — Extra shift cost dominates: if the body unrolls but the +6 VALU/K-pair
+//        offsets the amortization gain, perf regresses. → REFUTED-EMPIRICAL.
+#ifndef MXFP8_CRR_BRANCHLESS_SHIFT
+#define MXFP8_CRR_BRANCHLESS_SHIFT 0
+#endif
+
+#if MXFP8_CRR_BRANCHLESS_SHIFT && (MXFP8_CRR_SCALE_LAYOUT_V2 || MXFP8_CRR_SCALE_LEAD || MXFP8_CRR_LDS_SCALE_LAYOUT)
+#error "MXFP8_CRR_BRANCHLESS_SHIFT mutually exclusive with V2 / LEAD / LDS scale levers"
+#endif
+
 #ifndef CRR_USE_EXACT_8WAVE_FASTPATH
 #define CRR_USE_EXACT_8WAVE_FASTPATH 1
 #endif
@@ -1162,6 +1225,37 @@ void crr_exact_8wave_scaled_kernel(const layout_globals g)
             for (int g = 0; g < crr_b_pack_count; g++) {
                 b0_scale_packs[g] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(b0_scale_packs[g]) >> 16);
                 b1_scale_packs[g] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(b1_scale_packs[g]) >> 16);
+            }
+        }
+#elif MXFP8_CRR_BRANCHLESS_SHIFT
+        // R54 Dev I: branchless unconditional shift (option a — always-shift).
+        // The LOAD remains a one-arm conditional (only on even K). The 6
+        // v_lshrrev_b32 are emitted UNCONDITIONALLY using a runtime-computed
+        // shift amount = ((k & 1) << 4): 0 on even K (semantic no-op, real
+        // V-pipe issue), 16 on odd K (correct hi→lo move).
+        //
+        // Goal: eliminate the s_bitcmp0_b32 / s_cbranch_scc1 control-flow
+        // obstacle so the compiler can unroll the K-loop body across multiple
+        // K-pairs (FP8 CRR achieves 3-deep unroll; MXFP8 currently locked to 1).
+        if ((k & 1) == 0) {
+            load_raw_scales(k >> 1);
+        }
+        {
+            const uint32_t mxfp8_crr_branchless_shift_amt =
+                static_cast<uint32_t>(k & 1) << 4;
+            #pragma unroll
+            for (int g = 0; g < crr_a_pack_count; g++) {
+                a0_scale_packs[g] = std::bit_cast<fp8e8m0_4>(
+                    std::bit_cast<uint32_t>(a0_scale_packs[g]) >> mxfp8_crr_branchless_shift_amt);
+                a1_scale_packs[g] = std::bit_cast<fp8e8m0_4>(
+                    std::bit_cast<uint32_t>(a1_scale_packs[g]) >> mxfp8_crr_branchless_shift_amt);
+            }
+            #pragma unroll
+            for (int g = 0; g < crr_b_pack_count; g++) {
+                b0_scale_packs[g] = std::bit_cast<fp8e8m0_4>(
+                    std::bit_cast<uint32_t>(b0_scale_packs[g]) >> mxfp8_crr_branchless_shift_amt);
+                b1_scale_packs[g] = std::bit_cast<fp8e8m0_4>(
+                    std::bit_cast<uint32_t>(b1_scale_packs[g]) >> mxfp8_crr_branchless_shift_amt);
             }
         }
 #else
