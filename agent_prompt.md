@@ -183,6 +183,64 @@ BF16 work is paused unless a clean structural restructure is on the table
 
 ## Session Log
 
+### 2026-04-19 — P25 Dev A (1 Dev; GPU 1; CLOSE — **H1 ROUTE 1 Q5-FORM DEAD**; full BL port (write swizzle + b128 + v_perm) DEFERRED pending P26 Path A scout; production single-warp st_16x32_s = 0 bank conflicts → multi-warp interaction is the actual source of production 1.5/MFMA pressure)
+
+**Outcome: P25 dispatched a single Dev to empirically validate P22
+Dev A's Q5 row-pair-interleave swizzle (H1 Route 1 Session 1) per
+the `feedback_lds_probe_validates_write_only.md` guard rail. Dev
+built a combined LDS write+read probe + rocprofv3 PMC. Three
+dispositive findings closed Q5 within the session.**
+
+**Probe results (all under `/tmp/p25_dev_a/`):**
+
+| Variant                              | SQ_LDS_BANK_CONFLICT (per 65,537 reads) | Conf/inst |
+|--------------------------------------|----------------------------------------:|----------:|
+| **st_16x32_s** (production CRR base) | **0**                                   | 0.000     |
+| st_16x32_swizzled (Q5)               | 0                                       | 0.000     |
+| st_32x16_s (baseline)                | 131,074                                 | 2.000     |
+| st_32x16_swizzled (Q5)               | 131,074                                 | 2.000     |
+
+**Three dispositive findings:**
+
+1. Q5's swizzle breaks col_l b64_tr_b16 payload: Lane 0 receives
+   `(0,0)(2,0)(0,4)(2,4)` (cross-column), no intra-lane v_perm
+   recovers col_l (P21's 0/64 lanes constraint applies).
+2. Single-warp st_16x32_s baseline = 0 conflicts → P22 Q4's
+   100%-conflict prediction was wrong; production 1.5/MFMA must
+   come from multi-warp interaction.
+3. BL uses `ds_read_b128`, NOT `ds_read_b64_tr_b16` (verified in
+   `/tmp/p19_dev_b/bl_main_loop.s`). BL's selectors `0x05040100`,
+   `0x07060302` de-interleave bf16 pairs from BL's deliberate write
+   swizzle. Q5's "keep b64_tr_b16" premise is structurally
+   incompatible with BL.
+
+**The Dev (1 GPU):**
+
+- **Dev A (GPU 1, P25 H1 Route 1 swizzle empirical validation,
+  opus, fresh worktree `agent-a3dc93cd`)** — built standalone
+  gfx950 probe (`probe_swizzle_v1.cpp`) running 6 variants (Q5 /
+  baseline / natural × 32x16 / 16x32) with 65,537 b64_tr_b16 reads
+  each. PMC via rocprofv3. Per-lane payload dump: 414 lines. BL
+  cross-check via `/tmp/p19_dev_b/bl_main_loop.s`. NO source edits
+  (Strategy 3 not executed — adding st_*_swizzled would mislead
+  future sessions that the lever was viable). Verdict:
+  ROUTE-1-DEAD as designed in Q5; full BL port (write + b128 +
+  v_perm) is theoretically viable but structurally larger surgery.
+
+**P26 direction (decided):**
+
+- **Dispatch P26 Path A scout** (1 Dev, low cost, no source edits)
+  to rocprofv3 production CRR worst shape (M=4096, N=10240, K=8192,
+  KI=128) with single-issued vs standard configurations.
+- If single-issued shows ~33 M conflicts → BL port is justified
+  (multi-session restructure: `st_shape.cuh` + `shared_to_register.cuh`
+  + autotuner).
+- If single-issued ~0 → bottleneck is multi-warp; all known
+  multi-warp levers (s_setprio, barrier reduction) already CLOSED
+  → BF16 CRR weak shape marked **CLOSED at ceiling**.
+- Either way, P27 pivots based on verdict (full BL port multi-session
+  arc OR FP8 RCR weak-shape investigation OR accept BF16 status quo).
+
 ### 2026-04-18 — P24 Scout (1 Dev; GPU 4; CLOSE — **H6 BARRIER-REDUCTION CLOSED**; absolute wait-budget ceiling 3pp, realistic 0.3-1.0pp; barriers are CONSEQUENCE of LDS-issue rate, not independent lever; H1 (b64_tr_b16 → b128 + v_perm) implicitly closes H6 "for free")
 
 **Outcome: P24 dispatched a single feasibility scout BEFORE launching

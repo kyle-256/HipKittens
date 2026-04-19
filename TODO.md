@@ -7,7 +7,68 @@
 - SNR ≥ 48 dB (FP8) / ≥ 47 dB (BF16 vs torch.mm), bit-exact determinism are hard gates.
 - Never commit `*.so`, `.autotune_cache.json` is OK to keep (it's text), logs are not.
 
-## Current Status (2026-04-18, post-P24 scout — **H6 BARRIER-REDUCTION CLOSED**; absolute wait-budget ceiling 3pp, realistic 0.3-1.0pp; barriers are CONSEQUENCE of LDS-issue rate, not independent lever; H1 (b64_tr_b16 → b128+v_perm) implicitly closes H6 "for free"; only OPEN BF16 lever is H1 probe-kernel pre-work)
+## Current Status (2026-04-19, post-P25 Dev A — **H1 ROUTE 1 Q5-FORM DEAD**; full BL port (write swizzle + b128 + v_perm) is structurally larger than Q5 anticipated and DEFERRED pending P26 Path A scout; production single-warp st_16x32_s = 0 bank conflicts → multi-warp interaction is the actual source of the 1.5/MFMA production pressure; if P26 Path A scout confirms multi-warp, BF16 CRR worst-shape may be at practical ceiling)
+
+P25 dispatched a single Dev (GPU 1, fresh worktree `agent-a3dc93cd`)
+to empirically validate P22 Dev A's Q5 row-pair-interleave swizzle as
+H1 Route 1 Session 1. Per the `feedback_lds_probe_validates_write_only.md`
+guard rail, the Dev built a combined write+read probe + rocprofv3 PMC.
+**Three dispositive findings closed Q5 within the session.**
+
+### Why Q5 is dead
+
+1. **Q5's swizzle breaks col_l b64_tr_b16 payload semantic.** Lane 0
+   gets `(0,0)(2,0)(0,4)(2,4)` (cross-column data) instead of
+   expected `(0,0)(1,0)(2,0)(3,0)`. No intra-lane v_perm can recover
+   col_l from cross-column data — same hardware constraint that
+   killed P21 Dev A's Route 2 (0/64 lanes feasible).
+2. **st_16x32_s baseline = 0 bank conflicts in single-warp
+   isolation** (PMC: 65,537 reads × 0 conflicts). P22 Dev A's Q4
+   analytical derivation predicting 100% conflict was wrong by ∞.
+   Production CRR's 1.5 conflicts/MFMA (P19 Dev B) MUST come from
+   multi-warp interaction, not the intrinsic single-warp pattern.
+3. **BL uses `ds_read_b128`, NOT `ds_read_b64_tr_b16`.** Verified in
+   `/tmp/p19_dev_b/bl_main_loop.s`. BL's selectors `0x05040100`,
+   `0x07060302` de-interleave bf16 pairs that BL deliberately wrote
+   into LDS via its DTL swizzle. Q5's premise (write swizzle + KEEP
+   b64_tr_b16) is structurally incompatible with BL.
+
+### Updated H1 lever taxonomy
+
+| Sub-variant | Status | Why |
+|---|---|---|
+| H1 R1 Q5 form (write swizzle + b64_tr_b16) | **DEAD (P25)** | Cross-column data + BL doesn't even use b64_tr_b16 |
+| H1 R1 full BL port (write swizzle + b128 + v_perm) | **DEFERRED — needs P26 Path A scout** | 3+ session restructure; touches `st_shape.cuh` + `shared_to_register.cuh` + autotuner; only worth it if production single-warp is the bottleneck (currently NOT — multi-warp is) |
+| H1 R2 (intra-lane v_perm only)             | DEAD (P21)     | 0/64 lanes feasible |
+| H4 (s_setprio)                             | CLOSED (P20)   | Zero cycle cost |
+| H5 (spill / unroll)                        | CLOSED (P19)   | Pseudo-spill, 1% |
+| H6 (barrier reduction)                     | CLOSED (P24)   | Wait-budget 4.2% GRBM cap |
+
+### P26 Path A scout — what it will tell us
+
+Procedure: rocprofv3 `SQ_LDS_BANK_CONFLICT` on production CRR worst
+shape (M=4096, N=10240, K=8192, KI=128) with two configurations:
+(1) standard, (2) "single-issued" — one warp active per WG, no row_l
+reads, no DTL pipelining.
+
+| Outcome                     | Verdict                                                    |
+|-----------------------------|------------------------------------------------------------|
+| Single-issued ~ 33 M conflicts | Multi-session BL port is justified                       |
+| Single-issued ~ 0 conflicts | Multi-warp pressure; all multi-warp levers already closed → **BF16 CRR weak shape CLOSED at ceiling** |
+
+P26 dispatch scope: **scout only**, NO source edits, NO commits,
+single-session. After verdict, pivot decision (FP8 RCR weak shapes
+or accept BF16 CRR ceiling).
+
+### Realistic outlook
+
+With H6 closed (P24) and H1 R1 Q5-form dead (P25), the BF16 CRR
+worst-shape gap (currently 0.917× vs torch.mm) may already be at the
+practical ceiling absent a 3+ session BL-port restructure with
+uncertain payoff. P26 Path A scout (1 Dev, low cost) gates that
+decision.
+
+## [P24 archive] Earlier Status (2026-04-18, post-P24 scout — **H6 BARRIER-REDUCTION CLOSED**; absolute wait-budget ceiling 3pp, realistic 0.3-1.0pp; barriers are CONSEQUENCE of LDS-issue rate, not independent lever; H1 (b64_tr_b16 → b128+v_perm) implicitly closes H6 "for free"; only OPEN BF16 lever is H1 probe-kernel pre-work)
 
 P24 dispatched a single feasibility scout (GPU 4) before launching any
 Devs — applying the `feedback_feasibility_check.md` lesson from P23.
