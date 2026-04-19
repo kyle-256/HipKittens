@@ -47,6 +47,68 @@
 
 **baseline 建立**：首次需在每个 LLaMA shape 上跑 FP8 per-tensor + MXFP8 V2 baseline 各 5x，记录 median TFLOPS 作为后续对照。
 
+## R53 cycle 完结 (2026-04-19, 3 devs + 1 reviewer) ★ 0 new SHIP + 0 CONFIRM-SHIPPED + 3 REFUTATIONS + 1 DIAGNOSTIC + 9-cell baseline holds (5/9 PASS) — closes K-loop body restructure family (triply ceiling-bound at 254 VGPR); 70B Down CRR ruled out as recoverable; **R52 ships re-validated**
+
+R53 派 3 devs (A CRR opsel-keyed K-phase MMA dispatch, B K-superblock persistent CTA, C 70B Down CRR vs RRR PMC+ISA diagnostic) + 1 Reviewer (R52 audit + 9-cell baseline + R52O/R52G ship re-validation). All 3 devs delivered REFUTED-or-DIAGNOSTIC, 0 new SHIP, but Reviewer re-confirmed all R52 ships and 9-cell baseline holds bit-identically post R53.
+
+### R53 commits on `feat/mxfp8-only`
+- `562eeeb5` R53 Dev A — CRR opsel-keyed K-phase MMA dispatch REFUTED (70 VGPR spill / -63% to -69%)
+- `b4e521e8` R53 Dev C — 70B Down CRR vs RRR PMC+ISA DIAGNOSTIC-COMPLETE (FP8-baseline-asymmetry, not MXFP8 regression)
+- `d5a6b22e` R53 Dev B — K-superblock persistent CTA REFUTED-EMPIRICAL (228 B/lane spill + SNR 26.5 dB + 6× perf regression)
+- `1cd080b5` R53 Reviewer — V2-RRR + CRR XCD swizzle re-confirmed + 9-cell baseline holds (5/9 PASS, zero R53 regressions)
+
+### R53 Dev results
+- **Dev A** (`562eeeb5`) REFUTED: opsel-keyed K-phase MMA dispatch in `crr_mxfp8_exact_8wave_fastpath.inc` via `crr_mma_scaled_phase<K_PHASE>` reading bytes 2/3 directly via opsel<2,2>..<3,3>. Body-duplication forces 70 VGPR spill / 144 byte scratch. **70B Gate/Up CRR**: 2509 → 797 TFLOPS (**-68.2%**). **70B Q/O CRR**: 2572 → 938 (-63.5%). **8192³ CRR**: 2702 → 824 (-69.5%). Macro `MXFP8_CRR_SCALE_LAYOUT_V2` kept default-OFF in tree as documented dead-end with `#error` guard against `MXFP8_CRR_SCALE_LEAD`. Confirms CRR ~92% structural floor: kernel-side opsel rewrite cannot beat it.
+- **Dev B** (`d5a6b22e`) REFUTED-EMPIRICAL: K-superblock persistent CTA in `rrr_mxfp8_exact_8wave_fastpath.inc` (per R52P §5.2). K=2/K=4 outer K-stripe loop pushes V2 RRR `_Z29rrr_exact_8wave_scaled_kernelILb1ELi2EE` from 254 VGPR / 0 spill / 0 scratch to 256 VGPR / **228 B/lane spill** / **916 B/lane scratch**. Numerics fail SNR 49.61 → 26.5 dB (21.5 dB below threshold), determinism FAIL with max abs diff 2.95. Perf 2528 → 428 TFLOPS (**6.0× slower at K=2**). Macro `MXFP8_RRR_K_SUPERBLOCK` kept default-1 (byte-identical no-op) with `static_assert` and host abort() guard. Confirms V2 RRR is at 254/256 VGPR ceiling — any inter-iteration live state spills catastrophically.
+- **Dev C** (`b4e521e8`) DIAGNOSTIC-COMPLETE: 70B Down CRR's "88.0% gap" is **NOT recoverable headroom**. Cross-shape MfmaUtil PMC scan: FP8 CRR climbs +7.8pp from K=8192 to K=28672 (compiler unrolls 3-deep, 96 MFMA per body iter); MXFP8 CRR flat (compiler refuses to unroll across `s_bitcmp0_b32 / 6× v_lshrrev_b32` conditional shift block on alternate K-pairs, locking body to 1 K-pair / 32 MFMA). 8.1pp differential explains 6.6pp ratio drop (94.6% → 88.0%) within noise. TC backpressure RULED OUT (TA_DATA_STALL_TC/GRBM 0.116 LOWER than RRR's 0.160). LDS bank conflicts 0, L2 hit 81% identical. **R54 recommendation: RETIRE 70B Down CRR from open-headroom list.**
+
+### R53 Reviewer audit (`1cd080b5`)
+**§1 V2-RRR spotcheck (R52 Dev O re-validation)**: 8B Gate/Up RRR V1 med=2372.5 → V2 med=2510.4 = **+5.81%**; 70B Q/O RRR V1=2825.7 → V2=2928.5 = **+3.64%**. Both within R52O's claimed range (+2.10% to +6.80%). SNR 49.61/49.59 dB, det 3/3 PASS. **R52 Dev O CONFIRM-SHIPPED stands.**
+**§2 CRR XCD swizzle confirm (R52G re-validation at 70B Gate/Up CRR)**: ON med=2491.8 (range 2480-2507), OFF med=2373.1 (range 2356-2379), Δ = **+5.00%**. <1% spread on both arms (vs R49 Reviewer's 10.27% noise). **R52G stands. R47 Dev B's CRR XCD swizzle ship across all 7 CRR cells holds.**
+**§3 9-cell baseline post R53A/B/C (5/9 PASS, 4/9 HEADROOM)** — IDENTICAL to R52 within noise; **zero R53 regressions** (K-superblock + opsel-V2 macros default-OFF byte-identical):
+
+| Shape | Layout | FP8 | MX | MX/FP8 | Verdict |
+|---|---|---:|---:|---:|---:|
+| 8B Down | RCR | 3154.7 | 3037.2 | 96.3% | PASS |
+| 8B Down | RRR | 2757.6 | 3011.5 | 109.2% | PASS |
+| 8B Down | CRR | 2922.3 | 2805.3 | 96.0% | PASS |
+| 8B Gate/Up | RRR | 2666.8 | 2507.4 | 94.0% | HR -1.0pp |
+| 70B Gate/Up | RCR | 2995.5 | 2856.6 | 95.4% | PASS |
+| 70B Gate/Up | CRR | 2807.1 | 2506.3 | 89.3% | HR -5.7pp |
+| 70B Down | RCR | 3238.0 | 2966.1 | 91.6% | HR -3.4pp |
+| 70B Down | RRR | 2752.7 | 2987.4 | 108.5% | PASS |
+| 70B Down | CRR | 3030.0 | 2663.8 | 87.9% | HR -7.1pp |
+
+GPU 3 isolated throughout (no sibling reviewer contamination, vs R52 Reviewer's GPU 7 incident).
+
+### R53 cycle outcome
+**0 new SHIP + 3 REFUTATIONS + 1 DIAGNOSTIC + 9-cell baseline holds**. Cumulative deliverable:
+1. **K-loop body restructure family TRIPLY CLOSED** against V2 RRR's 254/256 VGPR ceiling: R49A (host-side scale re-pack — v_perm penalty), R53A (kernel-side opsel dispatch — 70 VGPR spill), R53B (K-superblock persistent CTA — 228 B/lane spill). Any source restructure that adds inter-iteration live state spills catastrophically.
+2. **70B Down CRR ruled out as R54+ target** (R53C: structural FP8 baseline asymmetry, not MXFP8 waste).
+3. **R52 ships all re-confirmed by Reviewer**: V2-RRR (+5.81%/+3.64%), CRR XCD swizzle (+5.00%).
+4. **9-cell baseline holds bit-identically post R53** — proves default-OFF macro discipline works (K-superblock K=1 + CRR scale layout V2 OFF both no-op at production defaults).
+
+### R54+ candidate levers (post-R53 ranking)
+1. **70B Gate/Up CRR (-5.7pp)** — primary R54 target. Same 6× shift mechanism as 70B Down but at K=8192 the FP8 baseline does NOT unroll either, so the gap is "real CRR waste" not baseline asymmetry. Try **LDS-resident scale layout** (avoid K-loop body changes that hit VGPR ceiling).
+2. **70B Down RCR (-3.4pp)** — open. RCR has 0 scale-pack shifts; new bottleneck class. Worth a PMC profile.
+3. **Compiler-flag exploration** — scheduler tuning (`-mllvm -amdgpu-...`), VGPR mode toggles, scratch-disable hints. K-loop body source changes are exhausted; only allocator-side levers remain.
+4. **8B Q/O RRR/CRR small-shape wave-tail** (256 CTA, 0.42 wave) — R49C REFUTED; R53 didn't address. R54 may need a 2-CTA-per-tile cooperative framing.
+5. ~~CRR opsel-encoding rewrite~~ — CLOSED by R49A + R53A.
+6. ~~K-superblock persistent CTA~~ — CLOSED by R53B.
+7. ~~70B Down CRR optimization~~ — CLOSED by R53C (structural).
+8. ~~Cachepolicy lever for V2 RRR~~ — CLOSED by R52Q.
+9. ~~N-tile shrink~~ — CLOSED by R52R (multi-day plumbing).
+
+### R53 baseline (5/9 PASS — Reviewer §3, supersedes R52 5/21 in overlap)
+| Shape | RCR% | RRR% | CRR% |
+|---|---:|---:|---:|
+| 8B Down | **96.3** | **109.2** | **96.0** |
+| 8B Gate/Up | — | (94.0 HR -1.0) | — |
+| 70B Gate/Up | **95.4** | — | (89.3 HR -5.7) |
+| 70B Down | (91.6 HR -3.4) | **108.5** | (87.9 HR -7.1) |
+
+PASS in **bold**. HR = HEADROOM. R53 baseline matches R52 within noise — ships are stable, no regressions from R53 source changes.
+
 ## R52 cycle 完结 (2026-04-19, 6 devs + 1 reviewer) ★ 0 new SHIP + 1 CONFIRM-SHIPPED + 4 REFUTATIONS + 1 DIAGNOSTIC + R52 baseline refresh (5/21 PASS) — closes cachepolicy/N-tile/CRR-un-ship levers; identifies TC-backpressure as dominant 8B Gate/Up RRR gap; **3 R49 verdict flips + V2-is-default correction**
 
 R52 派 6 devs (G/N/O/P/Q/R) + 1 Reviewer (R49–R52 cycle audit + 21-cell baseline). Outcome: 0 new SHIP commits, 1 SHIP **re-confirmed** (V2-RRR via R52O — was already shipped at R22-A but R52N's framing erroneously suggested it was unwired), 4 levers REFUTED, 1 diagnostic complete, plus a 21-cell strict-SCLK baseline refresh that flipped 3 R49 verdicts.
