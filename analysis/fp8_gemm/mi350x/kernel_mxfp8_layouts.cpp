@@ -389,6 +389,21 @@ constexpr int RBN_RECT  = BLK_N / WARPS_N / 2;  // 32 default, 16 rect
 #ifndef MXFP8_RCR_V2_SCALE_CACHEPOLICY
 #define MXFP8_RCR_V2_SCALE_CACHEPOLICY 0
 #endif
+// R48 Dev F: A-scale-only cachepolicy override for V2 RCR. The A-scale
+// b128 load (PC=4, 16 bytes/lane/k_pair) is 2× the per-lane bytes of the
+// B-scale b64 (8 bytes), and on 70B Down (M=4096,N=8192,K=28672) the A-scale
+// working set (3.67 MB) fits in L2 per XCD while B-scale (7.34 MB) does not.
+// R47C swept the unified MXFP8_RCR_V2_SCALE_CACHEPOLICY (both A and B) and
+// found p=0 best. This macro lets us test biasing only A's policy (e.g.
+// SLC=2 to keep A out of L2 so B can dominate L2 residency).
+// If left undefined, falls through to MXFP8_RCR_V2_SCALE_CACHEPOLICY (no
+// behaviour change vs baseline). Default OFF (-1 sentinel = inherit).
+#ifndef MXFP8_RCR_ASCALE_CACHEPOLICY
+#define MXFP8_RCR_ASCALE_CACHEPOLICY (-1)
+#endif
+// Resolved A-scale policy: if user-set (>=0), use it; else inherit unified.
+#define MXFP8_RCR_ASCALE_CACHEPOLICY_RESOLVED \
+    ((MXFP8_RCR_ASCALE_CACHEPOLICY) >= 0 ? (MXFP8_RCR_ASCALE_CACHEPOLICY) : (MXFP8_RCR_V2_SCALE_CACHEPOLICY))
 #ifndef MXFP8_RCR_EXACT_PQ_SCALAR_PHASE_PACKS_ENABLE
 #define MXFP8_RCR_EXACT_PQ_SCALAR_PHASE_PACKS_ENABLE 0
 #endif
@@ -425,6 +440,18 @@ constexpr int RBN_RECT  = BLK_N / WARPS_N / 2;  // 32 default, 16 rect
 // Default OFF.
 #ifndef MXFP8_RCR_COOPERATIVE_BSCALE
 #define MXFP8_RCR_COOPERATIVE_BSCALE 0
+#endif
+// R48 Dev F: A-first issue-order pin — symmetric inverse of Dev B's
+// MXFP8_RCR_COOPERATIVE_BSCALE. Insert sched_barrier(0) AFTER the A-scale
+// b128 issue so the LLVM scheduler cannot re-float B b64 ahead of it.
+// Hypothesis: A-scale (16 B/lane) is the larger / hot-path scale load;
+// pinning it strictly first gives MMA-dispatch the earliest possible
+// scale-pack residency. Default OFF (mutually exclusive with COOP_BSCALE).
+#ifndef MXFP8_RCR_ASCALE_FIRST
+#define MXFP8_RCR_ASCALE_FIRST 0
+#endif
+#if MXFP8_RCR_ASCALE_FIRST && MXFP8_RCR_COOPERATIVE_BSCALE
+#error "MXFP8_RCR_ASCALE_FIRST and MXFP8_RCR_COOPERATIVE_BSCALE are mutually exclusive"
 #endif
 #ifndef MXFP8_RCR_EXACT_PQ_HOIST_HI_ENABLE
 #define MXFP8_RCR_EXACT_PQ_HOIST_HI_ENABLE 1
@@ -2861,7 +2888,11 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
                 __builtin_amdgcn_sched_barrier(0);
 #endif
                 const __uint128_t a_raw =
-                    llvm_amdgcn_raw_buffer_load_b128(a_v2_srsrc, a_voff, a_soff, MXFP8_RCR_V2_SCALE_CACHEPOLICY);
+                    llvm_amdgcn_raw_buffer_load_b128(a_v2_srsrc, a_voff, a_soff, MXFP8_RCR_ASCALE_CACHEPOLICY_RESOLVED);
+#if MXFP8_RCR_ASCALE_FIRST
+                // R48 Dev F: pin A-scale issue ahead of B-scale b64 (below).
+                __builtin_amdgcn_sched_barrier(0);
+#endif
                 const uint32_t a_w0 = static_cast<uint32_t>(a_raw      );
                 const uint32_t a_w1 = static_cast<uint32_t>(a_raw >> 32);
                 const uint32_t a_w2 = static_cast<uint32_t>(a_raw >> 64);
@@ -3356,7 +3387,7 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
                         llvm_amdgcn_raw_buffer_load_b64(b_v2_srsrc, b_voff, b_soff, MXFP8_RCR_V2_SCALE_CACHEPOLICY);
                     __builtin_amdgcn_sched_barrier(0);
                     const __uint128_t a_raw =
-                        llvm_amdgcn_raw_buffer_load_b128(a_v2_srsrc, a_voff, a_soff, MXFP8_RCR_V2_SCALE_CACHEPOLICY);
+                        llvm_amdgcn_raw_buffer_load_b128(a_v2_srsrc, a_voff, a_soff, MXFP8_RCR_ASCALE_CACHEPOLICY_RESOLVED);
                     b0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(b_raw      ));
                     b1_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(b_raw >> 32));
                     a0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw      ));
@@ -3367,7 +3398,11 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
                     }
 #else
                     const __uint128_t a_raw =
-                        llvm_amdgcn_raw_buffer_load_b128(a_v2_srsrc, a_voff, a_soff, MXFP8_RCR_V2_SCALE_CACHEPOLICY);
+                        llvm_amdgcn_raw_buffer_load_b128(a_v2_srsrc, a_voff, a_soff, MXFP8_RCR_ASCALE_CACHEPOLICY_RESOLVED);
+#if MXFP8_RCR_ASCALE_FIRST
+                    // R48 Dev F: pin A-scale issue ahead of B-scale b64 (below).
+                    __builtin_amdgcn_sched_barrier(0);
+#endif
                     a0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw      ));
                     a1_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw >> 32));
                     if constexpr (RBM / 32 > 1) {
@@ -3410,7 +3445,7 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
                         (static_cast<uint32_t>(lane_nonk) << 4);
                     const uint32_t a_soff = static_cast<uint32_t>(k_pair) << 10;
                     const __uint128_t a_raw =
-                        llvm_amdgcn_raw_buffer_load_b128(a_v2_srsrc, a_voff, a_soff, MXFP8_RCR_V2_SCALE_CACHEPOLICY);
+                        llvm_amdgcn_raw_buffer_load_b128(a_v2_srsrc, a_voff, a_soff, MXFP8_RCR_ASCALE_CACHEPOLICY_RESOLVED);
                     a0_scale_packs_next[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw      ));
                     a1_scale_packs_next[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw >> 32));
                     if constexpr (RBM / 32 > 1) {
