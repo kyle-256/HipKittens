@@ -1,0 +1,38 @@
+{
+  "cohort": "R55_OPT_D5B",
+  "candidate_idx": 3,
+  "shape": "32768x6144x2048",
+  "dim": [32768, 6144, 2048],
+  "tile": [256, 256],
+  "verdict": "PROMOTE",
+  "reason": "AITER pct_comp 107.23 > HK pct_comp 103.27 (+3.96pp); 10/10 PASS; gates met (wcf_max=0, wcf_std=0, fin_min=1.0).",
+  "smoke": {
+    "aiter_tflops": 3472.5,
+    "aiter_pct_comp": 107.18
+  },
+  "ten_run": {
+    "n_OK": 10,
+    "n_OK_5": 10,
+    "wcf_min": 0.0,
+    "wcf_max": 0.0,
+    "wcf_std": 0.0,
+    "fin_min": 1.0,
+    "fin_max": 1.0,
+    "snr_min": 55.52,
+    "snr_max": 55.55551741928064,
+    "snr_med": 55.54231431729303,
+    "tflops_first": 3474.1,
+    "pct_comp_first": 107.23,
+    "passes_10run_gate": true,
+    "delta_pp_vs_hk": 3.96
+  },
+  "competitor_tflops": 3239.9,
+  "hk_pct_comp_baseline": 103.27,
+  "promote_gate_pp": 0.5,
+  "kernel": "AITER_SHIM_256x256",
+  "shim_so": "build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so",
+  "aiter_co": "/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co",
+  "kernel_name": "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E",
+  "grid": {"gdx": 24, "gdy": 128, "gdz": 1, "bdx": 256},
+  "seeds": [101, 202, 303, 404, 505, 606, 707, 808, 909, 1010]
+}
