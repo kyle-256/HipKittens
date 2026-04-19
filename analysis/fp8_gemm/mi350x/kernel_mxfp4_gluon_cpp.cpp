@@ -50,6 +50,15 @@ using namespace kittens;
 #ifndef NONVOLATILE_SCALE_X2_POC
 #define NONVOLATILE_SCALE_X2_POC 1
 #endif
+// R34-A Finding C: scale-load granularity reduction — replace 2× buffer_load_dwordx2
+// per K-iter with 4× single buffer_load_dword (same call sites, different asm).
+// When SCALE_LOAD_X1=1, load_pq_scale_x2_async issues two single-dword loads (offset
+// 0 and offset +4) instead of one dwordx2. This matches aiter's pattern that decouples
+// scale-arrival latency from the iter-boundary stall by feeding the LSU smaller, more
+// frequent loads. Default 0 → bit-for-bit identical to current 41/42 incumbent.
+#ifndef SCALE_LOAD_X1
+#define SCALE_LOAD_X1 0
+#endif
 #ifndef STEP4_EXTERNAL_BR_PREFETCH
 #define STEP4_EXTERNAL_BR_PREFETCH 0
 #endif
@@ -73,6 +82,18 @@ using namespace kittens;
 
 #ifndef FUSED_STEP34
 #define FUSED_STEP34 0
+#endif
+
+// R37 Fix B (2026-04-19): the non-fused step3+step4 path emits 4 separate
+// `asm volatile` blocks; the compiler is free to interleave clobbering moves
+// between them which corrupts the upper-left 128x128 quadrant of every 256x256
+// output tile (acc_A0Bl). Fix: on the default (non-FUSED_STEP34) path, fuse
+// step3+step4 into a single asm block via kpair_64mfma_step34 — preserving the
+// R25-C tail-pf-off, BARRIER_TO_WAITCNT_ALL, and K_EXACT branching that the
+// original FUSED_STEP34=1 path bypassed. Defaults ON; set R37_FIX_B=0 to revert
+// to the legacy buggy code path (for comparison only).
+#ifndef R37_FIX_B
+#define R37_FIX_B 1
 #endif
 
 // R25-C: K-loop tail epilogue specialization. When set to N>0, the last N
@@ -437,6 +458,18 @@ using namespace kittens;
 #ifndef BARRIER_TO_WAITCNT_STEP3_S1
 #define BARRIER_TO_WAITCNT_STEP3_S1 (BARRIER_TO_WAITCNT_STEP3)
 #endif
+
+// R37 Fix B (and FUSED_STEP34): the fused kpair_64mfma_step34 reads from LDS
+// double-buffer slots that the previous iteration's buffer_load_to_lds writes.
+// Cross-warp synchronization REQUIRES an actual s_barrier — converting the S1
+// barrier to a waitcnt-only causes ~10-30% non-finite output (R36 _f34 builds
+// with BARRIER_TO_WAITCNT_ALL=1 produced finite_frac ≈ 0.87 for that reason).
+// Force S1 back to s_barrier whenever the fused path is active, regardless of
+// BARRIER_TO_WAITCNT_ALL / BARRIER_TO_WAITCNT_STEP3 / explicit S1 override.
+#if (R37_FIX_B || FUSED_STEP34) && BARRIER_TO_WAITCNT_STEP3_S1
+#undef BARRIER_TO_WAITCNT_STEP3_S1
+#define BARRIER_TO_WAITCNT_STEP3_S1 0
+#endif
 #ifndef BARRIER_TO_WAITCNT_STEP3_S2
 #define BARRIER_TO_WAITCNT_STEP3_S2 (BARRIER_TO_WAITCNT_STEP3)
 #endif
@@ -688,9 +721,43 @@ __device__ __forceinline__ fp8e8m0_4 load_pq_scale_srd(
 
 // Load two consecutive scale dwords via buffer_load_dwordx2 (merged preshuffle format).
 // Non-volatile asm allows compiler scheduling flexibility while preserving dwordx2.
+//
+// R34-A: when SCALE_LOAD_X1=1, replace dwordx2 with 2× single dword loads (lo at
+// soffset, hi at soffset+4). Aiter's pattern uses dword-granularity scale loads
+// that interleave better with the MFMA chain than 8-byte dwordx2 loads pinching
+// the LSU at the iter boundary. Per-iter byte budget is identical (8 bytes/SRD)
+// but issue count doubles (2 issues/SRD vs 1).
 __device__ __forceinline__ void load_pq_scale_x2_async(
     i32x4 srsrc, uint32_t voffset, uint32_t soffset,
     fp8e8m0_4 &out_lo, fp8e8m0_4 &out_hi) {
+#if SCALE_LOAD_X1
+    uint32_t lo, hi;
+#if NONVOLATILE_SCALE_X2_POC
+    asm(
+        "buffer_load_dword %0, %1, %2, %3 offen"
+        : "=v"(lo)
+        : "v"(voffset), "s"(srsrc), "s"(soffset)
+    );
+    asm(
+        "buffer_load_dword %0, %1, %2, %3 offen offset:4"
+        : "=v"(hi)
+        : "v"(voffset), "s"(srsrc), "s"(soffset)
+    );
+#else
+    asm volatile(
+        "buffer_load_dword %0, %1, %2, %3 offen"
+        : "=v"(lo)
+        : "v"(voffset), "s"(srsrc), "s"(soffset)
+    );
+    asm volatile(
+        "buffer_load_dword %0, %1, %2, %3 offen offset:4"
+        : "=v"(hi)
+        : "v"(voffset), "s"(srsrc), "s"(soffset)
+    );
+#endif
+    out_lo = std::bit_cast<fp8e8m0_4>(lo);
+    out_hi = std::bit_cast<fp8e8m0_4>(hi);
+#else
     uint64_t pair;
 #if NONVOLATILE_SCALE_X2_POC
     asm(
@@ -707,6 +774,7 @@ __device__ __forceinline__ void load_pq_scale_x2_async(
 #endif
     out_lo = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(pair));
     out_hi = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(pair >> 32));
+#endif
 }
 
 // ── Half-direct Bl loading from preshuffled global memory ──
@@ -2792,7 +2860,42 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
             sel_a0_p0, sel_a0_p1, sel_bl_p0, sel_bl_p1);
         emit_pf_tail<0>(pf_a0_p, pf_a1_p);
         emit_pf_tail<0>(pf_bl_p, pf_br_p);
+#elif R37_FIX_B
+        // R37 Fix B (default): use fused step3+step4 (correctness fix) while
+        // preserving R25-C tail-pf-off + STEP4_EXTERNAL_BR_PREFETCH branching
+        // that the FUSED_STEP34=1 path otherwise bypasses.
+        float4 nxt_a0_d[8];
+        float4 nxt_bl_d[8];
+        kpair_64mfma_step34(acc_A1Bl, acc_A1Br, tA1, tBl, tBr,
+            a1_raw, bl_raw, br_raw, nxt_a0_d, nxt_bl_d,
+            sel_a0_p0, sel_a0_p1, sel_bl_p0, sel_bl_p1);
+        // R37: fence the scheduler — `-mllvm -amdgpu-sched-strategy=max-memory-clause`
+        // is otherwise free to hoist the upcoming buffer_load_to_lds prefetches across
+        // iteration boundaries (these intrinsics aren't asm volatile), which corrupts
+        // the LDS double-buffer state because the next iter's s_barrier vmcnt count
+        // is now wrong. Plain memory clobber asm volatile prevents the hoist.
+        asm volatile("" ::: "memory");
+
+        // R25-C: in the last R25C_TAIL_PF_OFF_ITERS iters, drop global prefetch.
+        // Branch folds to compile-time when K-loop fully unrolls (R25C_ACTIVE
+        // gates K_DIM ≤ R25C_K_LIMIT); becomes constexpr false otherwise.
+#if R25C_ACTIVE
+        const bool _r25c_tail_no_pf = (bt >= k_byte_iters - 1 - R25C_TAIL_PF_OFF_ITERS);
 #else
+        constexpr bool _r25c_tail_no_pf = false;
+#endif
+        if (!_r25c_tail_no_pf) {
+            // Issue full A0 + A1 prefetches (would have come from STEP3_PF_N).
+            emit_pf_tail<0>(pf_a0_p, pf_a1_p);
+            // Issue Bl + Br prefetches (would have come from STEP4_PF_N).
+            // STEP4_EXTERNAL_BR_PREFETCH=1 reorders Br to fire as a separate
+            // emit_one_pf burst after Bl; semantically the SAME loads — so we
+            // emit both pf groups here uniformly.
+            emit_pf_tail<0>(pf_bl_p, pf_br_p);
+        }
+        // R37: fence again post-prefetch so the next iter's barrier vmcnt is correct.
+        asm volatile("" ::: "memory");
+#else // R37_FIX_B == 0 → legacy buggy non-fused step3+step4 path
 #if !STEP3_EMBED_BARRIER
         // R19B: site _S6 (TAIL_SPLIT outer !STEP3_EMBED_BARRIER, dead w/ default STEP3_EMBED_BARRIER=1)
         asm volatile(MXFP4_STEP3_BARRIER_INST_S6 ::: "memory");
@@ -2900,7 +3003,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 #endif
         } // end !_r25c_tail_no_pf (Step4)
 #endif // DIRECT_BL
-#endif // FUSED_STEP34
+#endif // FUSED_STEP34 / R37_FIX_B / legacy
 
 #if DIRECT_BL
         asm volatile("s_waitcnt vmcnt(0) lgkmcnt(0)");
@@ -3051,7 +3154,19 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         // All prefetches emitted after the fused block
         emit_pf_tail<0>(pf_a0_p, pf_a1_p);
         emit_pf_tail<0>(pf_bl_p, pf_br_p);
-#else
+#elif R37_FIX_B && !DIRECT_BL
+        // R37 Fix B (default, no-TAIL_SPLIT): use fused step3+step4 (correctness
+        // fix). The no-TAIL_SPLIT path has no R25-C tail-pf-off branching, so we
+        // unconditionally emit all prefetches after the fused block (matches the
+        // FUSED_STEP34=1 emission shape).
+        float4 nxt_a0_d[8];
+        // (nxt_bl_d already declared above)
+        kpair_64mfma_step34(acc_A1Bl, acc_A1Br, tA1, tBl, tBr,
+            a1_raw, bl_raw, br_raw, nxt_a0_d, nxt_bl_d,
+            sel_a0_p0, sel_a0_p1, sel_bl_p0, sel_bl_p1);
+        emit_pf_tail<0>(pf_a0_p, pf_a1_p);
+        emit_pf_tail<0>(pf_bl_p, pf_br_p);
+#else // R37_FIX_B == 0 OR DIRECT_BL → legacy non-fused path
 #if !STEP3_EMBED_BARRIER
         // R19B: site _S7 (no-TAIL_SPLIT outer !STEP3_EMBED_BARRIER, dead w/ default STEP3_EMBED_BARRIER=1)
         asm volatile(MXFP4_STEP3_BARRIER_INST_S7 ::: "memory");
@@ -3103,7 +3218,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         emit_pf_tail<STEP4_PF_N>(pf_bl_p, pf_br_p);
 #endif
 #endif // DIRECT_BL
-#endif // FUSED_STEP34
+#endif // FUSED_STEP34 / R37_FIX_B / legacy
 
 #if DIRECT_BL
         asm volatile("s_waitcnt vmcnt(0) lgkmcnt(0)");
