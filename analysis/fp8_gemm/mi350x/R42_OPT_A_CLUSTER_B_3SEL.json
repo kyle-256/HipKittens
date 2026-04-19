@@ -1,0 +1,29 @@
+[
+  {
+    "shape": "32768x4096x2048",
+    "verdict": "FLAKE_2/5",
+    "wcf_max": 0.011167,
+    "wcf_std": 0.001680529202364541,
+    "fin_min": 0.988652,
+    "source": "R41B",
+    "so_path": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R41B/tk_mxfp4_gluon_cpp_n4096_k2048_ts_lgk2_gm6_v12_pfoff4_R41B_v3.cpython-310-x86_64-linux-gnu.so"
+  },
+  {
+    "shape": "4096x32768x4096",
+    "verdict": "FLAKE_1/5",
+    "wcf_max": 0.008626,
+    "wcf_std": 0.0010020356480684705,
+    "fin_min": 0.983052,
+    "source": "R40B",
+    "so_path": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R40B/tk_mxfp4_gluon_cpp_n32768_k4096_lgk2_v16_R40B_safe.cpython-310-x86_64-linux-gnu.so"
+  },
+  {
+    "shape": "16384x4096x14336",
+    "verdict": "FLAKE_2/5",
+    "wcf_max": 0.010381,
+    "wcf_std": 0.0010904820952221084,
+    "fin_min": 0.98563,
+    "source": "R41B",
+    "so_path": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R41B/tk_mxfp4_gluon_cpp_n4096_k14336_ts_gm8_v12_btw_all_R41B_v0b.cpython-310-x86_64-linux-gnu.so"
+  }
+]

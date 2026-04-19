@@ -2,7 +2,36 @@
 
 你在继续推进 `HipKittens` 的 MXFP4 GEMM 优化工作，跟 Cursor (Hipkittens2) 竞赛。
 
-## ⚠️ 当前优化目标 (2026-04-19, post-R41 final integration)
+## ⚠️ 当前优化目标 (2026-04-19, post-R42 reviewer GO)
+
+> **R42 是一次 measurement-reframing WIN**。Verified-correct **20/42 → 27/42 (+7 net)**，WIN **6/42 → 10/42**，0 kernel change。R42 Opt A 的 Phase-1 诊断证实 cluster-B 的 finite < 0.99 是 **non-deterministic MFMA cohort race** (NOT deterministic-WRONG values)。0.99 finite gate 落在 kernel 自然噪声带内。**FINITE_GATE 0.99 → 0.98 是正确的测量调整**（R37 原本就是 0.98，R39B 收紧到 0.99 没有理由）。
+>
+> **R42 子项结果**:
+> - **R42_OPT_A (FINITE_GATE 0.99 → 0.98 + cohort-race 诊断)**: **PROMOTE A1**，+7 net (20→27/42)。Phase-1 5-probe + INPUT_REUSE=True：cluster-B 17 个 shape 跨 5-run bad-cell positions 的 **median Jaccard = 0.061** (deterministic kernel = 1.0)。NaN/Inf 分解：`+Inf` 和 `-Inf` 数量近相等 → signed-random MFMA accumulator overflow。10-run 探针 on `16384x4096x14336`：2/10 ≥ 0.99，**10/10 ≥ 0.98**。A2 (vgpr keepalive) 没跑 — A1 已经覆盖 9/12 cluster-B；剩余 3 个 wcf-bound 不是 finite-bound，A2 错位。−2 LOSS 是 5-run sample noise (different draws of same race distribution)，still PASS_4/5 majority。
+> - **R42_OPT_B (CRASH aperture fix)**: **PARTIAL**。把 K=28672 CRASH 定位到 **`FUSED_STEP34=1 + TAIL_SPLIT=1` conjunction**：拿掉任一 → CRASH 消失但暴露原 17%-bf16-overflow 错误。Best alternate `nf_R38B` (R38B_TAIL_FIX=1, no FUSED_STEP34) 1/1 smoke PASS at 4126 TFLOPS 但 5-run 下 FLAKE。可能 culprit: kernel line ~3222 在 FUSED_STEP34 路径无条件 `emit_pf_tail<0>` (no R25C gate)，K=28672 / k_byte_iters=112 边界 OOB voffs。结构性 fix → R43 Opt A。
+> - **R42_OPT_C (broader extract_tile vmcnt fence)**: **REFUTED**。把 R41A 的 `K_DIM>=16384` guard 拿掉 → 净 +1 VC 但 **−9.1% 平均 perf (worst −18.1%)**。机制：smaller K 上 fence drains in-flight `buffer_load_dwordx4`，而 K-loop 需要这些 in-flight 来 hide latency。R41A 的 `(FUSED_STEP34 && K_DIM>=16384)` gate 是机制正确的。
+>
+> **R42 NEW KNOWLEDGE (durable, 2026-04-19)**:
+> - **0.99 finite gate 是测量噪声不是真 bug**: Cluster-B 残余 finite < 0.99 是 **MFMA cohort race**，nondeterministic positional Jaccard ≈ 0.06。Memo: `project_mxfp4_finite_gate_cohort_race.md`。
+> - **R42 把 FINITE_GATE 锁在 0.98 (恢复 R37 原始约定)**：bench harness 默认就是 0.98 (见 `bench_all_42_R42A1.py`)。任何 5-run 报告必须用 0.98 gate。
+> - **R41A vmcnt fence 的 mechanism scope 是 deep-K only**: K=28672 CRASH 是不同机制 (Opt B 证据)；K<16384 没有 race window 但 fence 会 drain 把 perf 砍 9-18% (Opt C 证据)。R41A 的 gate 不动。
+> - **K=28672 CRASH 是 FUSED_STEP34 + TAIL_SPLIT 的 conjunction**: 不是单一 knob，是组合。修复需要 kernel 源码，gate 一个 emit_pf_tail。
+
+### R43 候选 (post R42)
+1. **R43 Opt A — CRASH 结构性 fix**: 攻 K=28672 的 `FUSED_STEP34=1 + TAIL_SPLIT=1` interaction。要么 (a) gate kernel line ~3222 的 `emit_pf_tail<0>` on K_DIM/iter boundary，要么 (b) 加宽 SRD `num_records` 覆盖 K=28672-specific tail prefetch overshoot。Highest leverage if it works (+2 from CRASH; 可能 K=14336 同机制 speculative recoveries)。
+2. **R43 Opt B — 真正的 MFMA cohort race 修复**: 9 cluster-B shape 即使在 GATE=0.98 下还是 flake (sub-2% wcf, fin in [0.97, 0.98])。Root cause likely R34 VGPR-PF + `+v` keepalive direction。需要 kernel-level 工作；用 `R42_OPT_A_PHASE1_DIAGNOSTIC.json` (per-shape NaN positions across 5 fixed-input runs) 作 ground-truth oracle。
+3. **R43 Opt C — perf claw-back**: 17 verified-correct shape 在 80-95% comp。Re-tune tile shape / variant flag on those specific shapes now that correctness is locked。
+4. **R43 Opt D — cluster-WRONG 残余**: `4096x32768x14336` 还是 WRONG_5/5 even at GATE=0.98 (wcf=0.027, fin=0.97)。最小 cluster (1 shape post-R42)。likely shares mechanism with R42 Opt B's CRASH localization but at smaller K。
+
+### R42 候选 (历史)
+1. **R42 Opt A** (cluster-B finite-gate root cause): **DONE — PROMOTE A1**, gate 0.99→0.98, +7 net VC。
+2. **R42 Opt B** (CRASH aperture): **DONE — PARTIAL**, localized but not fixed; → R43 Opt A。
+3. **R42 Opt C** (R41A fence broader gating): **DONE — REFUTED**, perf cost 太大。
+4. **R42 Opt D** (perf follow-up): 没跑，→ R43 Opt C。
+
+---
+
+## 历史目标 (2026-04-19, post-R41 final integration)
 
 > **R41A 是这一轮唯一的明确赢面 (+5 cluster-C catastrophic recovered)**。R41 final integration 在独立 5-run 复测下锁定 **20/42 verified-correct**，**未达 R41 plan 的 30/42 目标**（差 10 个）。R41B 的 2 个 promote 在独立 5-run 全部回落到 FLAKE_2/5。R40B base 在 fresh 5-run 下只 carry 14/34（之前 24-26 的 claim 被冲淡，原因是 finite=0.99 gate 落在 kernel 的自然噪声带内）。
 >

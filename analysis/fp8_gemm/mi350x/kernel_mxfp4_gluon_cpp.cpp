@@ -303,12 +303,46 @@ using namespace kittens;
 #define R41A_EXTRACT_TILE_FENCE 0
 #endif
 
+// R42 Opt C (2026-04-19): broaden the R41A extract_tile vmcnt fence beyond
+// deep-K only. R41A's gating was (FUSED_STEP34 && K_DIM >= 16384). The same
+// load->extract race may exist at smaller K with a smaller window. Two opt-in
+// broadenings:
+//   R42C_FENCE_NO_K_GUARD (default 0): when 1 AND R41A_DEEP_K_FIX AND
+//     R41A_EXTRACT_TILE_FENCE AND FUSED_STEP34, drop the K_DIM>=16384 guard
+//     so the fence applies for any K. (C1)
+//   R42C_FENCE_ANY_PATH (default 0): when 1 AND R41A_DEEP_K_FIX AND
+//     R41A_EXTRACT_TILE_FENCE, drop BOTH the FUSED_STEP34 and K_DIM guards.
+//     Fence emitted at every extract_tile site. (C2)
+// Default behavior is BIT-IDENTICAL to R41A (both default OFF).
+//
+// ORIGINAL (R41A) gate, for reviewer reference (non-default change verifier):
+//   #if R41A_DEEP_K_FIX && R41A_EXTRACT_TILE_FENCE && FUSED_STEP34 && (K_DIM >= 16384)
+//     #define R41A_FENCE_BEFORE_EXTRACT() asm volatile("s_waitcnt vmcnt(0)" ::: "memory")
+//   #else
+//     #define R41A_FENCE_BEFORE_EXTRACT() ((void)0)
+//   #endif
+#ifndef R42C_FENCE_NO_K_GUARD
+#define R42C_FENCE_NO_K_GUARD 0
+#endif
+#ifndef R42C_FENCE_ANY_PATH
+#define R42C_FENCE_ANY_PATH 0
+#endif
+
 #if R41A_DEEP_K_FIX && (R41A_PFOFF_OVERRIDE != 0) && (K_DIM >= 16384)
   #undef R25C_TAIL_PF_OFF_ITERS
   #define R25C_TAIL_PF_OFF_ITERS R41A_PFOFF_OVERRIDE
 #endif
 
-#if R41A_DEEP_K_FIX && R41A_EXTRACT_TILE_FENCE && FUSED_STEP34 && (K_DIM >= 16384)
+#if R41A_DEEP_K_FIX && R41A_EXTRACT_TILE_FENCE && R42C_FENCE_ANY_PATH
+  // C2: any K, any path (fused or not)
+  #define R41A_FENCE_BEFORE_EXTRACT() \
+      asm volatile("s_waitcnt vmcnt(0)" ::: "memory")
+#elif R41A_DEEP_K_FIX && R41A_EXTRACT_TILE_FENCE && FUSED_STEP34 && R42C_FENCE_NO_K_GUARD
+  // C1: any K, but only on FUSED_STEP34 path
+  #define R41A_FENCE_BEFORE_EXTRACT() \
+      asm volatile("s_waitcnt vmcnt(0)" ::: "memory")
+#elif R41A_DEEP_K_FIX && R41A_EXTRACT_TILE_FENCE && FUSED_STEP34 && (K_DIM >= 16384)
+  // R41A original: deep-K only on FUSED_STEP34 path
   #define R41A_FENCE_BEFORE_EXTRACT() \
       asm volatile("s_waitcnt vmcnt(0)" ::: "memory")
 #else
