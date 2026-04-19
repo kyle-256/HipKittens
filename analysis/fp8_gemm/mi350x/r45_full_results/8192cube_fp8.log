@@ -3,24 +3,24 @@ Warmup=100, iters=200, correctness=off
 Layouts=crr,rcr,rrr
 
 --- RCR Layout: C = A @ B^T ---
-  Avg time: 0.3552 ms, TFLOPS: 3095.82
+  Avg time: 0.3485 ms, TFLOPS: 3154.54
 
 --- RRR Layout: C = A @ B ---
-  Avg time: 0.3556 ms, TFLOPS: 3092.03
+  Avg time: 0.3483 ms, TFLOPS: 3157.07
 
 --- CRR Layout: C = A^T @ B ---
-  Avg time: 0.3809 ms, TFLOPS: 2886.33
+  Avg time: 0.3728 ms, TFLOPS: 2949.56
 
 ============================================================
 Layout     Time (ms)    TFLOPS     % of RCR  
 ------------------------------------------------------------
-RCR        0.3552       3095.82    100.00%   
-RRR        0.3556       3092.03    99.88%
-CRR        0.3809       2886.33    93.23%
+RCR        0.3485       3154.54    100.00%   
+RRR        0.3483       3157.07    100.08%
+CRR        0.3728       2949.56    93.50%
 ============================================================
 
 95% target: NOT MET
-  RRR: 99.88% of RCR
-  CRR: 93.23% of RCR
+  RRR: 100.08% of RCR
+  CRR: 93.50% of RCR
 
 Results saved to fp8_layout_results_8192.json

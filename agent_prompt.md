@@ -54,6 +54,37 @@ python3 test_mxfp8_python.py 4096 14336 4096
 5. 禁止提交 `*.so`、`*.s`、`*_layout_results_*.json`、`.bak*`、`gpucore.*`、`__pycache__` 等（`.gitignore` 已覆盖）
 6. 每个子 agent 使用不同 `HIP_VISIBLE_DEVICES` 以免 GPU 冲突：Dev A → 0，Dev B → 1，Dev C → 2，Reviewer/formal → 7
 
+## R47 cycle 完结 (2026-04-19) ★★ 3 SHIP (RCR + CRR XCD swizzle + R28 stale-conditional removed) + 1 HARDWARE-CEILING PROOF (Dev D ISA byte-level: scaled MFMA 16B vs unscaled 8B = 2× front-end slot) + 1 REFUTATION (Dev C cachepolicy SLC sweep) — baseline 5/21 stable (peak 7/21)
+
+R47 派 4 dev (全员存活). **70B Gate/Up RCR 90.5% → 95.6% (+5.4pp NEW PASS) via Dev A 移植 RRR swizzle 到 RCR**.
+
+- **Dev A** (`6edb05f9`) ★ SHIP: 移植 R46 Dev D's XCD swizzle 到 RCR fastpath. `MXFP8_RCR_BLOCK_SWIZZLE` 默认 ON. Sweep (3-run cooldown medians): 70B Gate/Up RCR +8.46%★, 8B Q/O +2.85%, 70B Down RCR +2.90%, 8B Down +1.21%, 70B Q/O -0.56%, 8B Gate/Up -0.58%, 8192³ -0.22% (worst -0.58%). **METHODOLOGY 教训: 初始 back-to-back sweep SCLK-contaminated (-48% 70B Gate/Up reported) — 3-run cooldown re-bench 才稳定. R44/R45 SCLK 模式 recurring**.
+- **Dev B** (`0b2f19ae`) ★ SHIP: 移植 XCD swizzle 到 CRR fastpath. `MXFP8_CRR_BLOCK_SWIZZLE` 默认 ON. Sweep (3-run avg): 70B Down CRR +3.35%★, 8B Q/O +2.70%★, 70B Gate/Up CRR +2.21%★, 8B Down +1.13%, 8B Gate/Up +0.01%, 8192³ -0.03%, 70B Q/O -1.02% (worst, within envelope).
+- **Dev C** (`9315a0bf`) PARADIGM CORRECTION + REFUTATION: 84-cell cachepolicy sweep (3 layouts × 4 policies × 7 shapes, 3-run median). RCR/RRR keep p=0 (p2/p3 lose 2-4% 5-7/7 shapes). ★ **REMOVED R28-era CRR conditional `SLC=2 if (N>=28672 && K>=8192)`** — on 70B Gate/Up CRR cp0=2502 vs cp2=2464 = SLC LOSES 1.52%. R28's +2.6% win FLIPPED post R44/R45/R46. Closes R46 Dev A open-opportunity #2.
+- **Dev D** (`c1319949`) ★ HARDWARE-CEILING PROOF: ISA-level MFMA gap verification. **Smoking gun (hex byte encoding)**: FP8 unscaled MFMA `D3AD008E 063A05BC` = 8B (1 dword pair) vs MXFP8 scaled `D3AC0000 00038112 D3AD0892 064A05C6` = 16B (2 dword pairs). 2× front-end slot per MFMA → predicted 32 MFMA × 5% = 5-6% per K-iter. **Measured 8192³ RCR 95.2% (gap 4.8%) matches within noise**. K-loop bodies structurally identical (FP8 234 vs MXFP8 250 instructions/K-pair) apart from scaled-MFMA encoding + 2 well-hidden scale loads. **R48+ guidance: STOP RCR MFMA-level optimization on K=8192 (at hardware ceiling). Headroom only on K/N=28672 shapes.**
+
+### R47 全量 baseline (GPU4, 4 R47 commits, all SNR=49.6dB + det 3/3 PASS)
+| Shape | RCR% | RRR% | CRR% |
+|---|---:|---:|---:|
+| 8192³ | 94.4 | 91.1 | 94.1 |
+| 8B Q/O | **95.3** | 91.2 | 89.7 |
+| 8B Gate/Up | 93.9 | 90.4 | 90.5 |
+| 8B Down | **95.6** | **105.1** | 94.6 |
+| 70B Q/O | 94.9 | 93.4 | 93.6 |
+| 70B Gate/Up | **95.6** | 93.7 | 88.5 |
+| 70B Down | 90.9 | **108.2** | 88.2 |
+
+**PASS 5/21 stable** (peak 7/21 mid-cycle). 3 NEW PASSES vs R46: 8B Q/O RCR (was 91.8%), 8B Down RCR (was 94.4%), **70B Gate/Up RCR (was 90.5%, +5.4pp)**.
+
+### R47 paradigm corrections (3 closed + 1 refuted → cumulative 49 closed + 5 refuted; R32-R46:46+4 + R47:3+1)
+
+### R48+ priority list
+1. **8192³ RRR slip 91.1%** (was 97.0% R46) — RRR XCD swizzle 在 cube shapes 上微负, investigate per-shape gating
+2. **70B Down RCR/CRR 90.9%/88.2%** — K=28672 VMEM contention. Try Dev D R48 lever: cooperative B-scale loading across CTAs
+3. **8B Q/O RRR/CRR 91.2%/89.7%** — verify hardware ceiling on 4096³ via Dev D ISA approach
+4. **8B/70B Gate/Up CRR 90.5%/88.5%** — CRR transpose structural floor, try LDS swizzle for A^T fetch
+5. **STOP RCR opt on K=8192 shapes** — Dev D proved hardware ceiling, don't waste cycles
+
 ## R46 cycle 完结 (2026-04-19) ★ 1 SHIP (Dev D RRR XCD swizzle DEFAULT ON, +6.5%/+3.0% production wins) + 1 REFUTATION (Dev C CRR k-pair -7~-11% universal) + 1 PROFILING (Dev A: scaled-MFMA 3-7% irreducible) — baseline 5/21 PASS (R45 was 3/21)
 
 R46 派 4 dev (A profiling, B/C/D crashed). Dev D 工作在 main-worktree uncommitted 残留被救援并验证 ship-quality；Dev C 验证为 universal 回归丢弃。

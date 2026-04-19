@@ -4,7 +4,7 @@ SNR threshold=45.0 dB, determinism_runs=3
 Layouts=crr,rcr,rrr
 
 --- RCR Layout: C = A @ B^T ---
-  Avg time: 0.3740 ms, TFLOPS: 2939.84
+  Avg time: 0.3693 ms, TFLOPS: 2977.64
   [RCR] Correctness (rtol=0.1000, atol=3.0):
     Max  abs error: 0.0312, Mean abs error: 0.0021
     Max  rel error: 0.0078, Mean rel error: 0.0017
@@ -14,7 +14,7 @@ Layouts=crr,rcr,rrr
   [RCR] Determinism (3 runs): PASS
 
 --- RRR Layout: C = A @ B ---
-  Avg time: 0.3785 ms, TFLOPS: 2904.65
+  Avg time: 0.3822 ms, TFLOPS: 2876.54
   [RRR] Correctness (rtol=0.1000, atol=3.0):
     Max  abs error: 0.0312, Mean abs error: 0.0022
     Max  rel error: 0.0078, Mean rel error: 0.0017
@@ -24,7 +24,7 @@ Layouts=crr,rcr,rrr
   [RRR] Determinism (3 runs): PASS
 
 --- CRR Layout: C = A^T @ B ---
-  Avg time: 0.4040 ms, TFLOPS: 2721.86
+  Avg time: 0.3960 ms, TFLOPS: 2776.29
   [CRR] Correctness (rtol=0.1000, atol=3.0):
     Max  abs error: 0.0312, Mean abs error: 0.0022
     Max  rel error: 0.0078, Mean rel error: 0.0017
