@@ -1,0 +1,13 @@
+=== Phase 1 baseline GM=4 ===
+Sleeping 60s for rebuild cooldown...
+=== Phase 1 treatment GM=8 ===
+
+========== R49 Dev D Phase 1: 8B Gate/Up CRR (5-run) ==========
+GM=4 runs : ['2277.6', '2287.7', '2272.5', '2289.4', '2274.9']
+  median=2277.64 min=2272.50 max=2289.38 mean=2280.43 spread=0.74%
+GM=8 runs : ['2307.7', '2274.6', '2282.3', '2287.9', '2286.7']
+  median=2286.66 min=2274.56 max=2307.69 mean=2287.82 spread=1.45%
+
+Δ median GM=8 vs GM=4: +0.40%
+Δ mean   GM=8 vs GM=4: +0.32%
+Phase 1 verdict: REFUTED
