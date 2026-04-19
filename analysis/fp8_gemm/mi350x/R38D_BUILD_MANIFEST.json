@@ -1,0 +1,1338 @@
+{
+  "ts": "2026-04-19 05:07:41",
+  "shapes_to_R38D": [
+    {
+      "M": 4096,
+      "N": 4096,
+      "K": 32768,
+      "tag": "ts_gm8_v12_btw_all",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k32768_ts_gm8_v12_btw_all_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 4096,
+      "K": 32768,
+      "tag": "ts_no_embed_tv16",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k32768_ts_no_embed_tv16_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 4096,
+      "K": 32768,
+      "tag": "ts_pf6_6_lgk2",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k32768_ts_pf6_6_lgk2_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 4096,
+      "K": 32768,
+      "tag": "ts_gm8",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k32768_ts_gm8_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 4096,
+      "K": 32768,
+      "tag": "ts_lgk2_btw_step3",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k32768_ts_lgk2_btw_step3_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 4096,
+      "K": 32768,
+      "tag": "ts_gm8_v12_btw_step3",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k32768_ts_gm8_v12_btw_step3_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 4096,
+      "K": 32768,
+      "tag": "ts_lgk4",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k32768_ts_lgk4_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 4096,
+      "K": 32768,
+      "tag": "ts",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k32768_ts_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 4096,
+      "K": 32768,
+      "tag": "ts_pf6_6_lgk2_v12",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k32768_ts_pf6_6_lgk2_v12_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 4096,
+      "K": 32768,
+      "tag": "p1_btw_all",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k32768_p1_btw_all_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 6144,
+      "K": 32768,
+      "tag": "ts_gm8_v12_btw_all",
+      "module": "tk_mxfp4_gluon_cpp_n6144_k32768_ts_gm8_v12_btw_all_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 6144,
+      "K": 32768,
+      "tag": "ts_gm8_v12_btw_step3",
+      "module": "tk_mxfp4_gluon_cpp_n6144_k32768_ts_gm8_v12_btw_step3_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 6144,
+      "K": 32768,
+      "tag": "p1_btw_all",
+      "module": "tk_mxfp4_gluon_cpp_n6144_k32768_p1_btw_all_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 6144,
+      "K": 32768,
+      "tag": "ts_lgk2_btw_step3",
+      "module": "tk_mxfp4_gluon_cpp_n6144_k32768_ts_lgk2_btw_step3_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 6144,
+      "K": 32768,
+      "tag": "default",
+      "module": "tk_mxfp4_gluon_cpp_n6144_k32768_default_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 6144,
+      "K": 32768,
+      "tag": "u16",
+      "module": "tk_mxfp4_gluon_cpp_n6144_k32768_u16_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 6144,
+      "K": 32768,
+      "tag": "no_embed",
+      "module": "tk_mxfp4_gluon_cpp_n6144_k32768_no_embed_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 6144,
+      "K": 32768,
+      "tag": "lgk4_v16",
+      "module": "tk_mxfp4_gluon_cpp_n6144_k32768_lgk4_v16_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 6144,
+      "K": 32768,
+      "tag": "lgk2_v4",
+      "module": "tk_mxfp4_gluon_cpp_n6144_k32768_lgk2_v4_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 6144,
+      "K": 32768,
+      "tag": "u8",
+      "module": "tk_mxfp4_gluon_cpp_n6144_k32768_u8_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 28672,
+      "K": 32768,
+      "tag": "ts_lgk2_btw_step3",
+      "module": "tk_mxfp4_gluon_cpp_n28672_k32768_ts_lgk2_btw_step3_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 28672,
+      "K": 32768,
+      "tag": "ts_gm8_v12_btw_step3",
+      "module": "tk_mxfp4_gluon_cpp_n28672_k32768_ts_gm8_v12_btw_step3_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 28672,
+      "K": 32768,
+      "tag": "p1_btw_all",
+      "module": "tk_mxfp4_gluon_cpp_n28672_k32768_p1_btw_all_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 28672,
+      "K": 32768,
+      "tag": "ts_gm8_v12_btw_all",
+      "module": "tk_mxfp4_gluon_cpp_n28672_k32768_ts_gm8_v12_btw_all_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 28672,
+      "K": 32768,
+      "tag": "pf6_6",
+      "module": "tk_mxfp4_gluon_cpp_n28672_k32768_pf6_6_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 28672,
+      "K": 32768,
+      "tag": "no_embed_v16",
+      "module": "tk_mxfp4_gluon_cpp_n28672_k32768_no_embed_v16_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 28672,
+      "K": 32768,
+      "tag": "lgk2_v12",
+      "module": "tk_mxfp4_gluon_cpp_n28672_k32768_lgk2_v12_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 28672,
+      "K": 32768,
+      "tag": "v12",
+      "module": "tk_mxfp4_gluon_cpp_n28672_k32768_v12_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 28672,
+      "K": 32768,
+      "tag": "v24",
+      "module": "tk_mxfp4_gluon_cpp_n28672_k32768_v24_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 28672,
+      "K": 32768,
+      "tag": "v16",
+      "module": "tk_mxfp4_gluon_cpp_n28672_k32768_v16_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 4096,
+      "tag": "ts_lgk2_btw_step3",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k4096_ts_lgk2_btw_step3_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 4096,
+      "tag": "u32_btw_all",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k4096_u32_btw_all_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 4096,
+      "tag": "ts_no_embed_v12",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k4096_ts_no_embed_v12_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 4096,
+      "tag": "lgk2_v16",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k4096_lgk2_v16_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 4096,
+      "tag": "ts_gm2_lgk2_v12",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k4096_ts_gm2_lgk2_v12_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 4096,
+      "tag": "ts_pf6_6_lgk2_v12",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k4096_ts_pf6_6_lgk2_v12_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 4096,
+      "tag": "ts_u16",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k4096_ts_u16_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 4096,
+      "tag": "ts_v16",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k4096_ts_v16_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 4096,
+      "tag": "pf6_4",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k4096_pf6_4_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 4096,
+      "tag": "gm2",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k4096_gm2_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 14336,
+      "tag": "ts_pf6_6_lgk2_v12",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k14336_ts_pf6_6_lgk2_v12_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 14336,
+      "tag": "ts_lgk2_v20",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k14336_ts_lgk2_v20_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 14336,
+      "tag": "ts_lgk2_tv16",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k14336_ts_lgk2_tv16_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 14336,
+      "tag": "ts_v24",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k14336_ts_v24_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 14336,
+      "tag": "ts_lgk2_v24",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k14336_ts_lgk2_v24_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 14336,
+      "tag": "ts_v12_tv16",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k14336_ts_v12_tv16_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 14336,
+      "tag": "ts_v20",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k14336_ts_v20_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 14336,
+      "tag": "p1_btw_all",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k14336_p1_btw_all_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 14336,
+      "tag": "ts_pf6_6_lgk2",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k14336_ts_pf6_6_lgk2_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 14336,
+      "tag": "ts_no_embed_tv16",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k14336_ts_no_embed_tv16_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 28672,
+      "tag": "ts_gm8_v12_btw_all",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k28672_ts_gm8_v12_btw_all_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 28672,
+      "tag": "ts_lgk2_btw_step3",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k28672_ts_lgk2_btw_step3_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 28672,
+      "tag": "p1_btw_all",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k28672_p1_btw_all_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 28672,
+      "tag": "ts_gm8_v12_btw_step3",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k28672_ts_gm8_v12_btw_step3_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 28672,
+      "tag": "u32_btw_all",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k28672_u32_btw_all_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 28672,
+      "tag": "ts_lgk2_v12",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k28672_ts_lgk2_v12_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 28672,
+      "tag": "lgk2_v12",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k28672_lgk2_v12_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 28672,
+      "tag": "ts_v12",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k28672_ts_v12_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 28672,
+      "tag": "ts_v24",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k28672_ts_v24_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 28672,
+      "tag": "default",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k28672_default_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 128256,
+      "tag": "ts_gm8_v12_btw_step3",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k128256_ts_gm8_v12_btw_step3_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 128256,
+      "tag": "ts_gm8_v12_btw_all",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k128256_ts_gm8_v12_btw_all_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 128256,
+      "tag": "p1_btw_all",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k128256_p1_btw_all_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 128256,
+      "tag": "ts_lgk2_btw_step3",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k128256_ts_lgk2_btw_step3_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 128256,
+      "tag": "u32_btw_all",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k128256_u32_btw_all_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 128256,
+      "tag": "ts_gm8_ext_br",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k128256_ts_gm8_ext_br_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 128256,
+      "tag": "swap_gm8",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k128256_swap_gm8_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 128256,
+      "tag": "ts_lgk2_v20",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k128256_ts_lgk2_v20_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 128256,
+      "tag": "ts_no_embed_tv16",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k128256_ts_no_embed_tv16_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 128256,
+      "tag": "ts_lgk2_v24",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k128256_ts_lgk2_v24_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 128256,
+      "K": 32768,
+      "tag": "ts_lgk2_btw_step3",
+      "module": "tk_mxfp4_gluon_cpp_n128256_k32768_ts_lgk2_btw_step3_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 128256,
+      "K": 32768,
+      "tag": "u16",
+      "module": "tk_mxfp4_gluon_cpp_n128256_k32768_u16_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 128256,
+      "K": 32768,
+      "tag": "v32",
+      "module": "tk_mxfp4_gluon_cpp_n128256_k32768_v32_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 128256,
+      "K": 32768,
+      "tag": "lgk4_v12",
+      "module": "tk_mxfp4_gluon_cpp_n128256_k32768_lgk4_v12_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 128256,
+      "K": 32768,
+      "tag": "no_embed_v16",
+      "module": "tk_mxfp4_gluon_cpp_n128256_k32768_no_embed_v16_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 128256,
+      "K": 32768,
+      "tag": "lgk2_v16",
+      "module": "tk_mxfp4_gluon_cpp_n128256_k32768_lgk2_v16_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 128256,
+      "K": 32768,
+      "tag": "lgk2_no_embed",
+      "module": "tk_mxfp4_gluon_cpp_n128256_k32768_lgk2_no_embed_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 128256,
+      "K": 32768,
+      "tag": "lgk2_v12",
+      "module": "tk_mxfp4_gluon_cpp_n128256_k32768_lgk2_v12_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 128256,
+      "K": 32768,
+      "tag": "v20",
+      "module": "tk_mxfp4_gluon_cpp_n128256_k32768_v20_R38D"
+    },
+    {
+      "M": 4096,
+      "N": 128256,
+      "K": 32768,
+      "tag": "no_embed_v20",
+      "module": "tk_mxfp4_gluon_cpp_n128256_k32768_no_embed_v20_R38D"
+    },
+    {
+      "M": 6144,
+      "N": 32768,
+      "K": 4096,
+      "tag": "ts_lgk2_btw_step3",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k4096_ts_lgk2_btw_step3_R38D"
+    },
+    {
+      "M": 6144,
+      "N": 32768,
+      "K": 4096,
+      "tag": "ts_v4_tv16",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k4096_ts_v4_tv16_R38D"
+    },
+    {
+      "M": 6144,
+      "N": 32768,
+      "K": 4096,
+      "tag": "ts_lgk2_tv16",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k4096_ts_lgk2_tv16_R38D"
+    },
+    {
+      "M": 6144,
+      "N": 32768,
+      "K": 4096,
+      "tag": "ts_lgk2_v24",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k4096_ts_lgk2_v24_R38D"
+    },
+    {
+      "M": 6144,
+      "N": 32768,
+      "K": 4096,
+      "tag": "u32_btw_all",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k4096_u32_btw_all_R38D"
+    },
+    {
+      "M": 6144,
+      "N": 32768,
+      "K": 4096,
+      "tag": "ts_lgk2_v16",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k4096_ts_lgk2_v16_R38D"
+    },
+    {
+      "M": 6144,
+      "N": 32768,
+      "K": 4096,
+      "tag": "ts_v20",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k4096_ts_v20_R38D"
+    },
+    {
+      "M": 6144,
+      "N": 32768,
+      "K": 4096,
+      "tag": "ts_pf6_6_lgk2_v12",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k4096_ts_pf6_6_lgk2_v12_R38D"
+    },
+    {
+      "M": 6144,
+      "N": 32768,
+      "K": 4096,
+      "tag": "ts_v12_tv16",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k4096_ts_v12_tv16_R38D"
+    },
+    {
+      "M": 6144,
+      "N": 32768,
+      "K": 4096,
+      "tag": "p1_btw_all",
+      "module": "tk_mxfp4_gluon_cpp_n32768_k4096_p1_btw_all_R38D"
+    },
+    {
+      "M": 14336,
+      "N": 4096,
+      "K": 32768,
+      "tag": "ts_lgk2_btw_step3",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k32768_ts_lgk2_btw_step3_R38D"
+    },
+    {
+      "M": 14336,
+      "N": 4096,
+      "K": 32768,
+      "tag": "ts_gm8_v12_btw_all",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k32768_ts_gm8_v12_btw_all_R38D"
+    },
+    {
+      "M": 14336,
+      "N": 4096,
+      "K": 32768,
+      "tag": "ts_gm8_v12_btw_step3",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k32768_ts_gm8_v12_btw_step3_R38D"
+    },
+    {
+      "M": 14336,
+      "N": 4096,
+      "K": 32768,
+      "tag": "p1_btw_all",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k32768_p1_btw_all_R38D"
+    },
+    {
+      "M": 14336,
+      "N": 4096,
+      "K": 32768,
+      "tag": "u32_btw_all",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k32768_u32_btw_all_R38D"
+    },
+    {
+      "M": 14336,
+      "N": 4096,
+      "K": 32768,
+      "tag": "v24",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k32768_v24_R38D"
+    },
+    {
+      "M": 14336,
+      "N": 4096,
+      "K": 32768,
+      "tag": "lgk4_v4",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k32768_lgk4_v4_R38D"
+    },
+    {
+      "M": 14336,
+      "N": 4096,
+      "K": 32768,
+      "tag": "lgk2_v12",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k32768_lgk2_v12_R38D"
+    },
+    {
+      "M": 14336,
+      "N": 4096,
+      "K": 32768,
+      "tag": "no_embed_v20",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k32768_no_embed_v20_R38D"
+    },
+    {
+      "M": 14336,
+      "N": 4096,
+      "K": 32768,
+      "tag": "lgk2",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k32768_lgk2_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 14336,
+      "tag": "ts_gm8_v12_btw_all",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k14336_ts_gm8_v12_btw_all_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 14336,
+      "tag": "p1_btw_all",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k14336_p1_btw_all_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 14336,
+      "tag": "ts_lgk2_btw_step3",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k14336_ts_lgk2_btw_step3_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 14336,
+      "tag": "ts_gm8_v12_btw_step3",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k14336_ts_gm8_v12_btw_step3_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 14336,
+      "tag": "ts_lgk2_v20",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k14336_ts_lgk2_v20_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 14336,
+      "tag": "ts_pf6_6_lgk2_v12",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k14336_ts_pf6_6_lgk2_v12_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 14336,
+      "tag": "ts_no_embed_tv16",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k14336_ts_no_embed_tv16_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 14336,
+      "tag": "ts_lgk2_v16",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k14336_ts_lgk2_v16_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 14336,
+      "tag": "ts_no_embed_v12",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k14336_ts_no_embed_v12_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 14336,
+      "tag": "ts_lgk2_tv16",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k14336_ts_lgk2_tv16_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 28672,
+      "tag": "ts_lgk2_btw_step3",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k28672_ts_lgk2_btw_step3_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 28672,
+      "tag": "u32_btw_all",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k28672_u32_btw_all_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 28672,
+      "tag": "ts_gm8_v12_btw_all",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k28672_ts_gm8_v12_btw_all_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 28672,
+      "tag": "p1_btw_all",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k28672_p1_btw_all_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 28672,
+      "tag": "ts_gm8_v12_btw_step3",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k28672_ts_gm8_v12_btw_step3_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 28672,
+      "tag": "u16",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k28672_u16_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 28672,
+      "tag": "v32",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k28672_v32_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 28672,
+      "tag": "u8",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k28672_u8_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 28672,
+      "tag": "no_embed_v20",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k28672_no_embed_v20_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 28672,
+      "tag": "no_embed_v16",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k28672_no_embed_v16_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 14336,
+      "K": 2048,
+      "tag": "ts_lgk2_v12",
+      "module": "tk_mxfp4_gluon_cpp_n14336_k2048_ts_lgk2_v12_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 14336,
+      "K": 2048,
+      "tag": "ts_lgk4_v12",
+      "module": "tk_mxfp4_gluon_cpp_n14336_k2048_ts_lgk4_v12_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 14336,
+      "K": 2048,
+      "tag": "ts_pf6_6",
+      "module": "tk_mxfp4_gluon_cpp_n14336_k2048_ts_pf6_6_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 14336,
+      "K": 2048,
+      "tag": "ts_no_embed",
+      "module": "tk_mxfp4_gluon_cpp_n14336_k2048_ts_no_embed_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 14336,
+      "K": 2048,
+      "tag": "ts_lgk4_v4",
+      "module": "tk_mxfp4_gluon_cpp_n14336_k2048_ts_lgk4_v4_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 14336,
+      "K": 2048,
+      "tag": "ts_v16",
+      "module": "tk_mxfp4_gluon_cpp_n14336_k2048_ts_v16_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 14336,
+      "K": 2048,
+      "tag": "ts",
+      "module": "tk_mxfp4_gluon_cpp_n14336_k2048_ts_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 14336,
+      "K": 2048,
+      "tag": "u32_btw_all",
+      "module": "tk_mxfp4_gluon_cpp_n14336_k2048_u32_btw_all_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 14336,
+      "K": 2048,
+      "tag": "ts_tv16",
+      "module": "tk_mxfp4_gluon_cpp_n14336_k2048_ts_tv16_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 14336,
+      "K": 2048,
+      "tag": "ts_lgk2_v24",
+      "module": "tk_mxfp4_gluon_cpp_n14336_k2048_ts_lgk2_v24_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 14336,
+      "K": 4096,
+      "tag": "ts_lgk2_btw_step3",
+      "module": "tk_mxfp4_gluon_cpp_n14336_k4096_ts_lgk2_btw_step3_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 14336,
+      "K": 4096,
+      "tag": "u32_btw_all",
+      "module": "tk_mxfp4_gluon_cpp_n14336_k4096_u32_btw_all_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 14336,
+      "K": 4096,
+      "tag": "ts_lgk2_v20",
+      "module": "tk_mxfp4_gluon_cpp_n14336_k4096_ts_lgk2_v20_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 14336,
+      "K": 4096,
+      "tag": "v12",
+      "module": "tk_mxfp4_gluon_cpp_n14336_k4096_v12_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 14336,
+      "K": 4096,
+      "tag": "ts_lgk2_v16",
+      "module": "tk_mxfp4_gluon_cpp_n14336_k4096_ts_lgk2_v16_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 14336,
+      "K": 4096,
+      "tag": "ts_lgk4_v16",
+      "module": "tk_mxfp4_gluon_cpp_n14336_k4096_ts_lgk4_v16_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 14336,
+      "K": 4096,
+      "tag": "ts_pf6_6_lgk2",
+      "module": "tk_mxfp4_gluon_cpp_n14336_k4096_ts_pf6_6_lgk2_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 14336,
+      "K": 4096,
+      "tag": "ts_pf6_6_lgk2_v12",
+      "module": "tk_mxfp4_gluon_cpp_n14336_k4096_ts_pf6_6_lgk2_v12_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 14336,
+      "K": 4096,
+      "tag": "ts_v4",
+      "module": "tk_mxfp4_gluon_cpp_n14336_k4096_ts_v4_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 14336,
+      "K": 4096,
+      "tag": "no_embed_v16",
+      "module": "tk_mxfp4_gluon_cpp_n14336_k4096_no_embed_v16_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 28672,
+      "K": 4096,
+      "tag": "ts_gm8_v12_btw_all",
+      "module": "tk_mxfp4_gluon_cpp_n28672_k4096_ts_gm8_v12_btw_all_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 28672,
+      "K": 4096,
+      "tag": "ts_gm2_ext_br",
+      "module": "tk_mxfp4_gluon_cpp_n28672_k4096_ts_gm2_ext_br_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 28672,
+      "K": 4096,
+      "tag": "u32_btw_all",
+      "module": "tk_mxfp4_gluon_cpp_n28672_k4096_u32_btw_all_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 28672,
+      "K": 4096,
+      "tag": "ts_gm2_v20",
+      "module": "tk_mxfp4_gluon_cpp_n28672_k4096_ts_gm2_v20_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 28672,
+      "K": 4096,
+      "tag": "p1_btw_all",
+      "module": "tk_mxfp4_gluon_cpp_n28672_k4096_p1_btw_all_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 28672,
+      "K": 4096,
+      "tag": "ts_lgk2_btw_step3",
+      "module": "tk_mxfp4_gluon_cpp_n28672_k4096_ts_lgk2_btw_step3_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 28672,
+      "K": 4096,
+      "tag": "ts_gm2u8",
+      "module": "tk_mxfp4_gluon_cpp_n28672_k4096_ts_gm2u8_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 28672,
+      "K": 4096,
+      "tag": "ts_gm2",
+      "module": "tk_mxfp4_gluon_cpp_n28672_k4096_ts_gm2_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 28672,
+      "K": 4096,
+      "tag": "ts_gm8_v12_btw_step3",
+      "module": "tk_mxfp4_gluon_cpp_n28672_k4096_ts_gm8_v12_btw_step3_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 28672,
+      "K": 4096,
+      "tag": "ts_gm2_v12",
+      "module": "tk_mxfp4_gluon_cpp_n28672_k4096_ts_gm2_v12_R38D"
+    },
+    {
+      "M": 32768,
+      "N": 4096,
+      "K": 3072,
+      "tag": "ts_lgk2_btw_step3",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k3072_ts_lgk2_btw_step3_R38D"
+    },
+    {
+      "M": 32768,
+      "N": 4096,
+      "K": 3072,
+      "tag": "ts_no_embed_tv16",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k3072_ts_no_embed_tv16_R38D"
+    },
+    {
+      "M": 32768,
+      "N": 4096,
+      "K": 3072,
+      "tag": "v32",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k3072_v32_R38D"
+    },
+    {
+      "M": 32768,
+      "N": 4096,
+      "K": 3072,
+      "tag": "ts_pf4_tv16",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k3072_ts_pf4_tv16_R38D"
+    },
+    {
+      "M": 32768,
+      "N": 4096,
+      "K": 3072,
+      "tag": "no_embed_v4",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k3072_no_embed_v4_R38D"
+    },
+    {
+      "M": 32768,
+      "N": 4096,
+      "K": 3072,
+      "tag": "pf4_6",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k3072_pf4_6_R38D"
+    },
+    {
+      "M": 32768,
+      "N": 4096,
+      "K": 3072,
+      "tag": "u32_btw_all",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k3072_u32_btw_all_R38D"
+    },
+    {
+      "M": 32768,
+      "N": 4096,
+      "K": 3072,
+      "tag": "ts_gm8_v12_btw_all",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k3072_ts_gm8_v12_btw_all_R38D"
+    },
+    {
+      "M": 32768,
+      "N": 4096,
+      "K": 3072,
+      "tag": "ts_lgk2_v16",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k3072_ts_lgk2_v16_R38D"
+    },
+    {
+      "M": 32768,
+      "N": 4096,
+      "K": 3072,
+      "tag": "p1_btw_all",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k3072_p1_btw_all_R38D"
+    },
+    {
+      "M": 32768,
+      "N": 4096,
+      "K": 14336,
+      "tag": "p1_btw_all",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k14336_p1_btw_all_R38D"
+    },
+    {
+      "M": 32768,
+      "N": 4096,
+      "K": 14336,
+      "tag": "ts_gm8_v12_btw_step3",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k14336_ts_gm8_v12_btw_step3_R38D"
+    },
+    {
+      "M": 32768,
+      "N": 4096,
+      "K": 14336,
+      "tag": "ts_gm8_v12_btw_all",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k14336_ts_gm8_v12_btw_all_R38D"
+    },
+    {
+      "M": 32768,
+      "N": 4096,
+      "K": 14336,
+      "tag": "ts_lgk2_btw_step3",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k14336_ts_lgk2_btw_step3_R38D"
+    },
+    {
+      "M": 32768,
+      "N": 4096,
+      "K": 14336,
+      "tag": "u32_btw_all",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k14336_u32_btw_all_R38D"
+    },
+    {
+      "M": 32768,
+      "N": 4096,
+      "K": 14336,
+      "tag": "ts_gm8_v12",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k14336_ts_gm8_v12_R38D"
+    },
+    {
+      "M": 32768,
+      "N": 4096,
+      "K": 14336,
+      "tag": "ts_lgk2_v24",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k14336_ts_lgk2_v24_R38D"
+    },
+    {
+      "M": 32768,
+      "N": 4096,
+      "K": 14336,
+      "tag": "ts_v12",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k14336_ts_v12_R38D"
+    },
+    {
+      "M": 32768,
+      "N": 4096,
+      "K": 14336,
+      "tag": "ts_v24",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k14336_ts_v24_R38D"
+    },
+    {
+      "M": 32768,
+      "N": 4096,
+      "K": 14336,
+      "tag": "ts_lgk4_v16",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k14336_ts_lgk4_v16_R38D"
+    },
+    {
+      "M": 32768,
+      "N": 14336,
+      "K": 2048,
+      "tag": "ts_gm2_v20",
+      "module": "tk_mxfp4_gluon_cpp_n14336_k2048_ts_gm2_v20_R38D"
+    },
+    {
+      "M": 32768,
+      "N": 14336,
+      "K": 2048,
+      "tag": "ts_lgk2_btw_step3",
+      "module": "tk_mxfp4_gluon_cpp_n14336_k2048_ts_lgk2_btw_step3_R38D"
+    },
+    {
+      "M": 32768,
+      "N": 14336,
+      "K": 2048,
+      "tag": "ts_lgk2_v24",
+      "module": "tk_mxfp4_gluon_cpp_n14336_k2048_ts_lgk2_v24_R38D"
+    },
+    {
+      "M": 32768,
+      "N": 14336,
+      "K": 2048,
+      "tag": "ts_lgk4_v4",
+      "module": "tk_mxfp4_gluon_cpp_n14336_k2048_ts_lgk4_v4_R38D"
+    },
+    {
+      "M": 32768,
+      "N": 14336,
+      "K": 2048,
+      "tag": "ts_gm2_lgk2",
+      "module": "tk_mxfp4_gluon_cpp_n14336_k2048_ts_gm2_lgk2_R38D"
+    },
+    {
+      "M": 32768,
+      "N": 14336,
+      "K": 2048,
+      "tag": "ts_tv16",
+      "module": "tk_mxfp4_gluon_cpp_n14336_k2048_ts_tv16_R38D"
+    },
+    {
+      "M": 32768,
+      "N": 14336,
+      "K": 2048,
+      "tag": "ts_u16",
+      "module": "tk_mxfp4_gluon_cpp_n14336_k2048_ts_u16_R38D"
+    },
+    {
+      "M": 32768,
+      "N": 14336,
+      "K": 2048,
+      "tag": "ts_gm2_lgk2_v12",
+      "module": "tk_mxfp4_gluon_cpp_n14336_k2048_ts_gm2_lgk2_v12_R38D"
+    },
+    {
+      "M": 32768,
+      "N": 14336,
+      "K": 2048,
+      "tag": "ts_no_embed_tv16",
+      "module": "tk_mxfp4_gluon_cpp_n14336_k2048_ts_no_embed_tv16_R38D"
+    },
+    {
+      "M": 32768,
+      "N": 14336,
+      "K": 2048,
+      "tag": "ts_ext_br_v12",
+      "module": "tk_mxfp4_gluon_cpp_n14336_k2048_ts_ext_br_v12_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 2048,
+      "tag": "ts_v12_tv16",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k2048_ts_v12_tv16_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 2048,
+      "tag": "ts_lgk2_v24",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k2048_ts_lgk2_v24_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 2048,
+      "tag": "ts_lgk2_v16",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k2048_ts_lgk2_v16_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 2048,
+      "tag": "ts_u16",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k2048_ts_u16_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 2048,
+      "tag": "ts",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k2048_ts_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 2048,
+      "tag": "ts_v16",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k2048_ts_v16_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 2048,
+      "tag": "ts_lgk2_no_embed",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k2048_ts_lgk2_no_embed_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 2048,
+      "tag": "ts_lgk2_v20",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k2048_ts_lgk2_v20_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 2048,
+      "tag": "ts_v4_tv16",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k2048_ts_v4_tv16_R38D"
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 2048,
+      "tag": "ts_lgk2_tv16",
+      "module": "tk_mxfp4_gluon_cpp_n4096_k2048_ts_lgk2_tv16_R38D"
+    }
+  ],
+  "built": 176,
+  "cached": 0,
+  "failed": 0
+}

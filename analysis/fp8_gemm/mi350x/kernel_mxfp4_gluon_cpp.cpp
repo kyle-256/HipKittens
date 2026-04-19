@@ -127,6 +127,28 @@ using namespace kittens;
 #define R38B_TAIL_FIX 0
 #endif
 
+// R38 Opt C (2026-04-19): Fix B3 — route tail-iter prefetches through the
+// L2-only path (`emit_full_pf_l2only<>`), instead of either skipping (R37
+// default = crash) or always-emitting LDS-bound prefetches (R38B = perf
+// regression). The L2-only path issues the SAME `buffer_load_dwordx4` GMEM
+// fetches (so the compiler-tracked vmcnt remains consistent with the iter's
+// scheduler footprint) but discards the result into a scratch VGPR (no LDS
+// write, no double-buffer slot collision). This should:
+//   - eliminate CRASH (the wait-count metadata stays in sync, no in-flight
+//     buffer-load-to-LDS racing the next iter's s_barrier);
+//   - preserve R37's WINs (no extra LDS write traffic, the tail iter's MFMAs
+//     still consume the SAME stale data they did under R25-C/R37, plus the
+//     new L2 fetches warm the cache for the prologue/epilogue Bl direct-load).
+// The scope of the change is the same `R37_FIX_B && !FUSED_STEP34` branch
+// that R38B targets. R38C must NOT be enabled together with R38B.
+// Default OFF; the R38C builder sets R38C_TAIL_L2ONLY=1 explicitly.
+#ifndef R38C_TAIL_L2ONLY
+#define R38C_TAIL_L2ONLY 0
+#endif
+#if R38C_TAIL_L2ONLY && R38B_TAIL_FIX
+#error "R38C_TAIL_L2ONLY and R38B_TAIL_FIX are mutually exclusive"
+#endif
+
 // R38 Opt A (2026-04-19): replace the `__builtin_amdgcn_raw_buffer_load_lds`
 // intrinsic in emit_one_pf with an `asm volatile("buffer_load_dwordx4 ... lds")`
 // block carrying a "memory" clobber. The intrinsic, being a regular call, is
@@ -2993,6 +3015,29 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
             // emit both pf groups here uniformly.
             emit_pf_tail<0>(pf_bl_p, pf_br_p);
         }
+#if R38C_TAIL_L2ONLY
+        // R38C Fix B3: when R25-C says "skip" the tail prefetches, instead of
+        // dropping them entirely (which leaves the compiler-tracked vmcnt out
+        // of sync with the in-flight buffer-load-to-LDS state and causes the
+        // next iter's s_barrier to fire while a load is still landing into a
+        // double-buffer slot about to be reallocated → CRASH), route the SAME
+        // GMEM addresses through `emit_full_pf_l2only<PF_MPT>`. That issues
+        // identical buffer_load_dwordx4 instructions but discards the result
+        // into a scratch VGPR (no `lds:1` modifier → no LDS write → no
+        // double-buffer slot collision). The data lands in L2/L1 and warms
+        // the cache for the prologue/epilogue Bl direct-load. Crucially the
+        // compiler-tracked vmcnt now stays consistent with the iter's
+        // scheduler footprint (the loads are emitted as inline-asm volatile
+        // with a "memory" clobber, so they cannot be reordered or DCE'd).
+        if (_r25c_tail_no_pf) {
+            emit_full_pf_l2only<PF_MPT>(pf_a0_p);
+            emit_full_pf_l2only<PF_MPT>(pf_a1_p);
+#if !DIRECT_BL
+            emit_full_pf_l2only<PF_MPT>(pf_bl_p);
+#endif
+            emit_full_pf_l2only<PF_MPT>(pf_br_p);
+        }
+#endif // R38C_TAIL_L2ONLY
 #endif // R38B_TAIL_FIX
         // R37: fence again post-prefetch so the next iter's barrier vmcnt is correct.
         asm volatile("" ::: "memory");
