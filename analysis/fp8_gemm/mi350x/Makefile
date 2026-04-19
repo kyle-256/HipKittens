@@ -12,8 +12,7 @@ HIPCXX ?= /opt/rocm/bin/hipcc
 
 # Compiler flags based on GPU target
 ifeq ($(GPU_TARGET),CDNA4)
-HIPFLAGS+= -DKITTENS_CDNA4 --offload-arch=gfx950 -DHIP_ENABLE_WARP_SYNC_BUILTINS -ffast-math -I/opt/rocm/include/rocrand \
-	-DGEMM_BLOCK_SWIZZLE=1 -DGEMM_BLOCK_SWIZZLE_NUM_XCDS=8
+HIPFLAGS+= -DKITTENS_CDNA4 --offload-arch=gfx950 -DHIP_ENABLE_WARP_SYNC_BUILTINS -ffast-math -I/opt/rocm/include/rocrand
 endif
 
 # Common variables and flags
