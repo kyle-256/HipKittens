@@ -1,0 +1,32 @@
+{
+  "ts": "2026-04-19 05:39:42",
+  "variant": 3,
+  "shapes_to_R38F": {
+    "4096x4096x16384": "tk_mxfp4_gluon_cpp_n4096_k16384_ts_lgk2_gm7_memc_pfoff56_kx16384_btw_all_R38F3",
+    "28672x32768x4096": "tk_mxfp4_gluon_cpp_n32768_k4096_ts_gm7_v12_memc_dc_pfoff14_R38F3",
+    "16384x6144x2048": "tk_mxfp4_gluon_cpp_n6144_k2048_ts_lgk2_gm6_v12_memc_pfoff4_R38F3",
+    "4096x32768x6144": "tk_mxfp4_gluon_cpp_n32768_k6144_ts_v12_gm7_memc_pfoff19_kx6144_btw_all_R38F3",
+    "16384x4096x4096": "tk_mxfp4_gluon_cpp_n4096_k4096_ts_gm7_v12_memc_dc_pfoff14_R38F3",
+    "32768x6144x2048": "tk_mxfp4_gluon_cpp_n6144_k2048_ts_lgk2_gm6_v12_memc_pfoff4_R38F3",
+    "4096x4096x8192": "tk_mxfp4_gluon_cpp_n4096_k8192_ts_v12_tv0_gm7_memc_pfoff28_kx8192_btw_all_R38F3",
+    "16384x4096x7168": "tk_mxfp4_gluon_cpp_n4096_k7168_ts_v12_tv0_gm7_memc_pfoff24_kx7168_btw_all_R38F3",
+    "16384x28672x2048": "tk_mxfp4_gluon_cpp_n28672_k2048_ts_lgk2_gm6_v12_memc_pfoff4_R38F3",
+    "4096x14336x16384": "tk_mxfp4_gluon_cpp_n14336_k16384_ts_lgk2_gm7_memc_pfoff56_kx16384_btw_all_R38F3",
+    "32768x4096x7168": "tk_mxfp4_gluon_cpp_n4096_k7168_ts_v12_tv0_gm7_memc_pfoff24_kx7168_btw_all_R38F3",
+    "32768x28672x2048": "tk_mxfp4_gluon_cpp_n28672_k2048_ts_lgk2_gm6_v12_memc_pfoff4_R38F3",
+    "4096x14336x8192": "tk_mxfp4_gluon_cpp_n14336_k8192_ts_v12_tv0_gm7_memc_pfoff28_kx8192_btw_all_R38F3",
+    "14336x32768x4096": "tk_mxfp4_gluon_cpp_n32768_k4096_ts_lgk2_gm7_v12_memc_pfoff14_R38F3",
+    "128256x32768x4096": "tk_mxfp4_gluon_cpp_n32768_k4096_ts_lgk2_gm7_v12_memc_pfoff14_R38F3",
+    "32768x4096x2048": "tk_mxfp4_gluon_cpp_n4096_k2048_ts_lgk2_gm6_v12_memc_pfoff4_R38F3",
+    "6144x4096x16384": "tk_mxfp4_gluon_cpp_n4096_k16384_ts_lgk2_gm7_memc_pfoff56_kx16384_btw_all_R38F3",
+    "28672x4096x16384": "tk_mxfp4_gluon_cpp_n4096_k16384_ts_lgk2_gm7_memc_pfoff56_kx16384_btw_all_R38F3",
+    "16384x6144x4096": "tk_mxfp4_gluon_cpp_n6144_k4096_ts_lgk2_gm7_v12_memc_pfoff14_R38F3",
+    "16384x4096x3072": "tk_mxfp4_gluon_cpp_n4096_k3072_ts_gm6_v12_memc_dc_pfoff4_R38F3",
+    "28672x4096x8192": "tk_mxfp4_gluon_cpp_n4096_k8192_ts_v12_tv0_gm7_memc_pfoff28_kx8192_btw_all_R38F3",
+    "6144x4096x8192": "tk_mxfp4_gluon_cpp_n4096_k8192_ts_v12_tv0_gm7_memc_pfoff28_kx8192_btw_all_R38F3",
+    "16384x4096x6144": "tk_mxfp4_gluon_cpp_n4096_k6144_ts_v12_gm7_memc_pfoff19_kx6144_btw_all_R38F3"
+  },
+  "built": 14,
+  "cached": 1,
+  "failed": 0
+}

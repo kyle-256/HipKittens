@@ -149,6 +149,41 @@ using namespace kittens;
 #error "R38C_TAIL_L2ONLY and R38B_TAIL_FIX are mutually exclusive"
 #endif
 
+// R38 Opt F (2026-04-19): explicit tail-iter LDS-write drain. Per R38C verdict,
+// the structural fix for the 6 WIN→WRONG_OUTPUT and 6 CRASH→WRONG_OUTPUT demotions
+// is in the R37_FIX_B fused-step34 path's tail iters: the next iter's MFMA reads
+// from an LDS double-buffer slot whose write from the prior iter's
+// buffer_load_to_lds prefetch hasn't fully drained (the in-flight load lands
+// AFTER the next iter's s_barrier already released the slot for reuse). Without
+// fixing this, R37_FIX_B + R25-C produces stale-LDS reads → WRONG_OUTPUT.
+//
+// R38F inserts an explicit `s_waitcnt vmcnt(N) [+ s_barrier]` at the END of
+// each tail iter (after both step12 and step34/prefetch emission), guaranteeing
+// all outstanding GMEM→LDS loads land before the next iter's s_barrier releases
+// the LDS slot. Three variants:
+//   F1 (R38F_VARIANT=1): `s_waitcnt vmcnt(0)` only — drain GMEM, no WG sync.
+//   F2 (R38F_VARIANT=2): `s_waitcnt vmcnt(0)` + `s_barrier` — drain + sync.
+//   F3 (R38F_VARIANT=3): `s_waitcnt 0` (vmcnt+lgkmcnt+expcnt) — most conservative.
+//   F4 (R38F_VARIANT=4): `s_waitcnt vmcnt(0) lgkmcnt(0)` — drain GMEM + LDS.
+// Default OFF (R38F_TAIL_DRAIN=0); the R38F builder sets it explicitly.
+// Drain fires ONLY on the same tail iters R25-C identifies (when
+// _r25c_tail_no_pf is true), AND only on the R37_FIX_B path. No effect on
+// FUSED_STEP34 or on legacy paths. INDEPENDENT of R38B/R38C — those should
+// remain default OFF when testing R38F.
+#ifndef R38F_TAIL_DRAIN
+#define R38F_TAIL_DRAIN 0
+#endif
+#ifndef R38F_VARIANT
+#define R38F_VARIANT 2  // default to F2 (drain + barrier) when ON
+#endif
+// R38F may be combined with R38B (always-emit) — in fact it must be, to close
+// the underlying CRASH first; R38F then fixes the stale-LDS WRONG_OUTPUT that
+// R38B reveals. Keep mutex only with R38C (L2-only path takes a different
+// emit_full_pf_l2only target).
+#if R38F_TAIL_DRAIN && R38C_TAIL_L2ONLY
+#error "R38F_TAIL_DRAIN and R38C_TAIL_L2ONLY are mutually exclusive (different prefetch targets)"
+#endif
+
 // R38 Opt A (2026-04-19): replace the `__builtin_amdgcn_raw_buffer_load_lds`
 // intrinsic in emit_one_pf with an `asm volatile("buffer_load_dwordx4 ... lds")`
 // block carrying a "memory" clobber. The intrinsic, being a regular call, is
@@ -2833,6 +2868,31 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     for (int bt = 0; bt + 1 < k_byte_iters; ++bt) {
         const int cur = bt & 1;
         const int nxt = 1 - cur;
+
+#if R38F_TAIL_DRAIN && R37_FIX_B && !FUSED_STEP34
+        // R38F Fix B4: drain in-flight buffer_load_to_lds loads at the TOP of
+        // each iter that R25-C identified as a "tail" iter. Designed to be
+        // combined with R38B (always-emit) — R38B closes the CRASH; R38F then
+        // ensures the always-emitted prefetches drain before the next iter's
+        // ds_reads consume them, fixing the stale-LDS-read WRONG_OUTPUT.
+        // R25C_ACTIVE folds at compile-time when K-loop fully unrolls.
+#if R25C_ACTIVE
+        const bool _r38f_in_tail = (bt >= k_byte_iters - 1 - R25C_TAIL_PF_OFF_ITERS);
+        if (_r38f_in_tail) {
+#if R38F_VARIANT == 1
+            asm volatile("s_waitcnt vmcnt(0)\n" ::: "memory");
+#elif R38F_VARIANT == 2
+            asm volatile("s_waitcnt vmcnt(0)\ns_barrier\n" ::: "memory");
+#elif R38F_VARIANT == 3
+            asm volatile("s_waitcnt 0\n" ::: "memory");
+#elif R38F_VARIANT == 4
+            asm volatile("s_waitcnt vmcnt(0) lgkmcnt(0)\n" ::: "memory");
+#else
+#error "R38F_VARIANT must be 1, 2, 3, or 4"
+#endif
+        }
+#endif // R25C_ACTIVE
+#endif // R38F_TAIL_DRAIN
 
         const uint32_t sel_br_p0 = cur ? br_1_p0 : br_0_p0;
         const uint32_t sel_br_p1 = cur ? br_1_p1 : br_0_p1;

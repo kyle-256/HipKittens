@@ -1,0 +1,50 @@
+R38 Opt E Correctness-Gated Bench - GPUs: [0, 1, 2, 3, 4, 5, 6, 7]
+Shapes: 42, warmup=200, iters=500, trim=0.1, gate kernel_finite>=0.995
+==============================================================================================================
+  [ 2/42]  16384x  4096x  3072   3516.5 vs  3492.3 (100.7%) finite=0.9978  WIN  GPU1
+  [ 1/42]  16384x  4096x  2048   3184.3 vs  2995.0 (106.3%) finite=0.9998  WIN  GPU0
+  [ 4/42]  32768x  4096x  2048  WRONG_OUTPUT  finite=0.9929  GPU3
+  [ 6/42]  32768x  6144x  2048  WRONG_OUTPUT  finite=0.9935  GPU5
+  [ 5/42]  32768x  4096x  3072   3599.6 vs  3630.6 ( 99.1%) finite=0.9950  LOSE  GPU4
+  [14/42]   4096x  4096x  8192   4371.4 vs  3959.9 (110.4%) finite=1.0000  WIN  GPU5
+  [13/42]   6144x  4096x 16384   4626.7 vs  4428.1 (104.5%) finite=0.9996  WIN  GPU4
+  [12/42]   4096x 14336x 16384   5251.7 vs  5013.0 (104.8%) finite=0.9962  WIN  GPU3
+  [22/42]   4096x 32768x 28672  WRONG_OUTPUT  finite=0.6180  GPU5
+  [21/42]   4096x 32768x 14336  WRONG_OUTPUT  finite=0.9851  GPU4
+  [ 8/42]  16384x 28672x  2048  CRASH  finite=N/A  GPU7
+  [ 9/42]  32768x 14336x  2048  CRASH  finite=N/A  GPU0
+  [29/42]  16384x  4096x  4096  WRONG_OUTPUT  finite=0.9786  GPU4
+  [10/42]  32768x 28672x  2048  CRASH  finite=N/A  GPU1
+  [16/42]   4096x  6144x 32768  WRONG_OUTPUT  finite=0.6590  GPU7
+  [ 3/42]  16384x  6144x  2048  CRASH  finite=N/A  GPU2
+  [37/42]  28672x  4096x  8192  WRONG_OUTPUT  finite=0.9856  GPU4
+  [17/42]   4096x 14336x  8192   4800.1 vs  4345.8 (110.5%) finite=0.9985  WIN  GPU0
+  [18/42]   4096x 28672x 32768  WRONG_OUTPUT  finite=0.6125  GPU1
+  [24/42]   4096x128256x 32768  WRONG_OUTPUT  finite=0.6392  GPU7
+  [11/42]   4096x  4096x 16384   5128.1 vs  4642.1 (110.5%) finite=0.9991  WIN  GPU2
+  [25/42]   6144x  4096x  8192   4249.4 vs  3822.0 (111.2%) finite=0.9990  WIN  GPU0
+  [26/42]   6144x 32768x  4096  WRONG_OUTPUT  finite=0.9883  GPU1
+  [19/42]   4096x 32768x  4096  WRONG_OUTPUT  finite=0.9819  GPU2
+  [33/42]  16384x  4096x 28672  WRONG_OUTPUT  finite=0.6646  GPU0
+  [32/42]  16384x  4096x 14336   4456.6 vs  5142.1 ( 86.7%) finite=0.9957  LOSE  GPU7
+  [34/42]  16384x  6144x  4096   4665.0 vs  4042.5 (115.4%) finite=0.9957  WIN  GPU1
+  [40/42]  32768x  4096x  7168  WRONG_OUTPUT  finite=0.9947  GPU7
+  [41/42]  32768x  4096x 14336  WRONG_OUTPUT  finite=0.9759  GPU0
+  [27/42]  14336x  4096x 32768  WRONG_OUTPUT  finite=0.6637  GPU2
+  [30/42]  16384x  4096x  6144  CRASH  finite=N/A  GPU5
+  [38/42]  28672x  4096x 16384   5749.8 vs  5350.6 (107.5%) finite=0.9955  WIN  GPU5
+  [42/42] 128256x 32768x  4096   3929.3 vs  4536.4 ( 86.6%) finite=0.9970  LOSE  GPU1
+  [20/42]   4096x 32768x  6144  CRASH  finite=N/A  GPU3
+  [28/42]  14336x 32768x  4096  CRASH  finite=N/A  GPU3
+  [ 7/42]  16384x 14336x  2048  CRASH  finite=N/A  GPU6
+  [36/42]  16384x 28672x  4096  WRONG_OUTPUT  finite=0.9896  GPU3
+  [15/42]   4096x  4096x 32768  WRONG_OUTPUT  finite=0.7275  GPU6
+  [23/42]   4096x 32768x128256  WRONG_OUTPUT  finite=0.7792  GPU6
+  [31/42]  16384x  4096x  7168   4976.3 vs  4443.2 (112.0%) finite=0.9989  WIN  GPU6
+  [35/42]  16384x 14336x  4096  CRASH  finite=N/A  GPU2
+  [39/42]  28672x 32768x  4096  CRASH  finite=N/A  GPU6
+
+==============================================================================================================
+WIN: 11/42  LOSE: 3/42  WRONG_OUTPUT: 18/42  ERR: 10/42  (2.8 min)
+
+Results saved to /shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/bench_all42_results_R38_optE.json
