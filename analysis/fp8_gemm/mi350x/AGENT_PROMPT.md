@@ -2,7 +2,36 @@
 
 你在继续推进 `HipKittens` 的 MXFP4 GEMM 优化工作，跟 Cursor (Hipkittens2) 竞赛。
 
-## ⚠️ 当前优化目标 (2026-04-19, post-R40 reviewer GO)
+## ⚠️ 当前优化目标 (2026-04-19, post-R41 final integration)
+
+> **R41A 是这一轮唯一的明确赢面 (+5 cluster-C catastrophic recovered)**。R41 final integration 在独立 5-run 复测下锁定 **20/42 verified-correct**，**未达 R41 plan 的 30/42 目标**（差 10 个）。R41B 的 2 个 promote 在独立 5-run 全部回落到 FLAKE_2/5。R40B base 在 fresh 5-run 下只 carry 14/34（之前 24-26 的 claim 被冲淡，原因是 finite=0.99 gate 落在 kernel 的自然噪声带内）。
+>
+> **R41 子项结果**:
+> - **R41_OPT_A (cluster-C `extract_tile` vmcnt fence)**: **MAJOR WIN, 5/5**。`extract_tile(nxt_a0_d, tA0)` / `extract_tile(nxt_bl_d, tBl)` 消费 VMEM-prefetch 数据，但 K-loop 只 `s_waitcnt lgkmcnt(0)`（LDS 计分板），没等 VMEM。K=32768 + `R25C_TAIL_PF_OFF_ITERS=120` 下，最后 120/128 iter 的 prefetch 被压制 → kernel 跑在 extract_tile staged register 上 → 编译器把 tile 读到 VMEM 完成前 → ~120 iter bf16-overflow garbage。**单行修复**: `asm volatile("s_waitcnt vmcnt(0)" ::: "memory")` 在 extract_tile 前。救回 5 catastrophic K=32768 shape (`4096x4096x32768`, `4096x6144x32768`, `4096x28672x32768`, `4096x128256x32768`, `14336x4096x32768`)。Memo: `project_mxfp4_R41A_extract_tile_vmcnt.md`。在 `R41A_DEEP_K_FIX` + `R41A_EXTRACT_TILE_FENCE` 后面，default OFF；per-shape integration 在 `K_DIM >= 16384` 启用。
+> - **R41_OPT_B (cluster-B variant retune)**: PARTIAL → 在 integration 中 REJECTED。11 cluster-B shape × 7 variant × 5-run consensus → 只 2 个 promote (`(16384,4096,14336)` v0b、`(32768,4096,2048)` v3)，**两个在 integration fresh 5-run 都掉到 FLAKE_2/5**。主要 blocker 是 `finite < 0.99` 不是 `wrong_cell_frac`；variant 改的是 race **何时** 触发，不是 **是否** 能触发。证实 R35 hypothesis 3 (MFMA vgpr cohort race) 在 cluster-B 还活着。
+> - **R41_OPT_D (R41 reviewer)**: R40A K=128256 PASS_5/5 (PROMOTE)；R40C K=14336 REJECTED (1/5 PASS — 3-run 是 gate-flake)；R40B 5-run 锁 22/42 (vs projected 26)。
+>
+> **R41 NEW KNOWLEDGE (durable, 2026-04-19)**:
+> - **R41A `extract_tile` vmcnt fence 是 R35 以来最大的 mechanism finding**: 消费 VMEM-prefetched data 的任何 `nxt_*_d` 消费者必须等 `vmcnt`，不只 `lgkmcnt`。这条经验通用 — VMEM prefetch + LDS-only 等待 = 数据竞赛。
+> - **R41B 证伪 "variant 轴能修 cluster-B"**: 11 shape × 7 variant 全 sweep 只 firmly +0 (PROMOTE 在独立 5-run 撤回)。下轮不要再做 variant 重 sweep；目标转向 finite-gate root cause。
+> - **R40B 真实 5-run 是 14/34 不是 24/34**: R40B 的 "24/42 stable" claim 在 fresh probe 下被打折扣，12 cluster-B shape 是 gate-boundary flake-only 而非 deterministic-PASS。0.99 finite gate 在 kernel 自然噪声带内。**5-run 不一定够；可能要 10-run 或 relax gate 到 0.98。**
+> - **per-shape integration manifest pattern 已成 R42 模板**: `R41_INTEGRATION_MANIFEST.json` (R40B base + per-shape R40A/R41A/R41B overrides) + `bench_all_42_R41_INTEGRATION.py` (manifest-driven, 8-GPU parallel, 5-run consensus)。复用即可。
+
+### R42 候选 (post R41)
+1. **R42 Opt A (HIGHEST LEVERAGE) — Cluster-B finite-gate root-cause / MFMA vgpr cohort race**: 12 cluster-B shape 是 gate-boundary flake (1-2/5 PASS, finite = 0.97-0.99)。Variant 不救。需要 (a) kernel-level vgpr keepalive barrier (R34 VGPR-PF 路径 + `+v` keepalives，参见 `project_mxfp4_vgprpf_compiler_bug.md`)，或 (b) 重排 MFMA issue 消除 race window。也可以试 **relax FINITE_GATE 0.99 → 0.98** (R37 convention)，看这些 shape 是否实际 compute 正确只是恒定有几个 NaN cell — 这是测量调整不是修复。
+2. **R42 Opt B — 2 个 CRASH aperture 修**: `(16384, 4096, 28672)` + `(4096, 32768, 28672)` 要么 SRD bound 加宽要么 tile-stride decomposition。R37+ 时代一直 crash，结构性工作。
+3. **R42 Opt C — R41A `extract_tile` vmcnt fence 推广**: 试 `R41A_EXTRACT_TILE_FENCE=1` 在 FUSED_STEP34=1 整路径无条件开。perf 代价 ±1%/iter；deep-K 之外的 shape 上 fence 退化为 no-op。可能救回更多有同样 race 的 shape。
+4. **R42 Opt D — perf follow-up on 14 R40B PASS shape (80-95% comp)**: correctness-first 阶段已锁 ~20 shape；稳定后转 perf 回 comp 之上。
+
+### R41 候选 (历史)
+1. **R41 Opt A** (cluster-C MFMA register-file 审计): **DONE — MAJOR WIN**，发现根本原因不是 register-file race 而是 extract_tile 的 VMEM scoreboard wait 缺失。
+2. **R41 Opt B** (cluster-B variant 重 sweep): **DONE — REJECTED**，variant 轴太粗。
+3. **R41 Opt C** (CRASH aperture): 未跑，deferred 到 R42。
+4. **R41 Opt D** (perf follow-up): 部分跑了 R41 reviewer，perf 优化 deferred。
+
+---
+
+## 历史目标 (2026-04-19, post-R40 reviewer GO)
 
 > **R40 是 R37+ 时代最大的一次 correctness 跃迁**: R39B 6/42 → R40B 24/42 (5-run consensus, 0 regressions, -0.74% avg perf cost)。+ R40A/R40C per-shape overrides 投影到 26/42。
 >

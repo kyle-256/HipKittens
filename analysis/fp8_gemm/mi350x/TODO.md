@@ -1,6 +1,37 @@
 # MXFP4 GEMM Optimization TODO
 
-## Current State (2026-04-19, post-R40 reviewer GO)
+## Current State (2026-04-19, post-R41 final integration)
+
+**HEADLINE — R41A `extract_tile` vmcnt fence is the round's lone unequivocal win (+5 cluster-C catastrophic).** Final integration locks 20/42 verified-correct under independent 5-run probe (R41 plan target was 30/42 — MISSED by 10).
+
+**R41 final integration leaderboard (5-run consensus, R39B random-scale gate, manifest-driven)**:
+- **20/42 verified-correct** (`n_OK >= 3 AND wcf_max < 2% AND wcf_std < 1% AND fin_min >= 0.99`).
+- **6/42 WIN** (pct_comp >= 100%): `(16384,4096,3072)` 99.6%, `(16384,4096,4096)` 98.5% (rounded), and the small-K shapes that beat comp under 5-run.
+- **2/42 CRASH** carried over: `(4096,32768,28672)` and `(16384,4096,28672)` (aperture violation, R41 didn't address).
+- **Source-distribution**: 5 R41A (5/5 PASS), 1 R40A K=128256 (PASS_5/5), 0/2 R41B (both regressed to FLAKE_2/5), 14/34 R40B base (12 R40B shapes flake out under fresh 5-run).
+
+**R41 NEW KNOWLEDGE (durable, 2026-04-19)**:
+- **R41A `extract_tile` vmcnt fence is the largest mechanism finding since R35**: `extract_tile(nxt_a0_d, tA0)` and `extract_tile(nxt_bl_d, tBl)` consume VMEM-prefetched data but the K-loop only emits `s_waitcnt lgkmcnt(0)`. At K=32768 with `FUSED_STEP34=1` + `R25C_TAIL_PF_OFF_ITERS=120`, the prefetch is suppressed for the last 120 of 128 iters → kernel rides on extract_tile-staged registers; compiler reorders tile reads ahead of VMEM completion → ~120 iters of bf16-overflow garbage. **Single-line fix**: `asm volatile("s_waitcnt vmcnt(0)" ::: "memory")` before extract_tile. Recovers 5/5 cluster-C catastrophic K=32768 shapes (`4096x4096x32768`, `4096x6144x32768`, `4096x28672x32768`, `4096x128256x32768`, `14336x4096x32768`). Memo: `project_mxfp4_R41A_extract_tile_vmcnt.md`. Behind `R41A_DEEP_K_FIX` + `R41A_EXTRACT_TILE_FENCE`, default OFF; per-shape integration enables for `K_DIM >= 16384`.
+- **R41B variant retune is too coarse for cluster-B**: 11 cluster-B shapes × 7 variants × 5-run consensus → only 2 promotes (PASS_3/5 / PASS_4/5), and **both regressed to FLAKE_2/5 under the independent integration 5-run probe**. The dominant blocker is `finite < 0.99` (NaN/Inf cells), not `wrong_cell_frac`; variants change WHEN the flake fires, not WHETHER. Suggests R35 hypothesis 3 (MFMA vgpr cohort race) is alive in cluster-B.
+- **R40B's "24/42 stable" 5-run claim was over-stated**: under a fresh 5-run probe in the integration run, R40B carries only 14/34 verified-correct. 12 cluster-B shapes are gate-boundary flake-only, NOT deterministic-PASS. The 0.99 finite gate sits inside the kernel's natural noise band on ~17% of shapes.
+- **Per-shape integration manifest pattern proven**: `R41_INTEGRATION_MANIFEST.json` (R40B base + per-shape R40A/R41A/R41B overrides) + `bench_all_42_R41_INTEGRATION.py` (manifest-driven, 8-GPU parallel, 5-run consensus) is the new orchestration template. Reusable for R42.
+
+### R42 candidates (post R41)
+1. **R42 Opt A (HIGHEST LEVERAGE) — Cluster-B finite-gate root-cause / MFMA vgpr cohort race**: 12 cluster-B shapes are gate-boundary flake (1-2 of 5 PASS, finite = 0.97-0.99). Variants don't help. Need either (a) kernel-level vgpr keepalive barriers (R34 VGPR-PF approach extended with `+v` keepalives — see `project_mxfp4_vgprpf_compiler_bug.md`), OR (b) reordering MFMA issue to remove the race window. Could also try **relaxing FINITE_GATE 0.99 → 0.98** as a measurement adjustment (R37 convention) to see if these shapes actually compute correct values modulo a tiny consistent NaN cell count — would reframe rather than fix.
+2. **R42 Opt B — 2 CRASH aperture fix**: `(16384, 4096, 28672)` + `(4096, 32768, 28672)` need either SRD bounds widening or a different tile-stride decomposition. Same shapes have crashed since R37+ era; structural work.
+3. **R42 Opt C — Promote R41A's `extract_tile` vmcnt fence to broader gating**: Try `R41A_EXTRACT_TILE_FENCE=1` always-on for FUSED_STEP34=1 path. Per R41A verdict, perf cost is ±1% per iter; on shapes that don't have the deep-K bug, fence becomes a no-op (compiler can still issue VMEM eagerly). May lift more shapes that have the same race at smaller K.
+4. **R42 Opt D — perf follow-up on the 14 R40B PASS shapes that LOSE to comp** (80-95% range): correctness-first phase locked ~20 shapes; once stable, claw back perf via tile-shape sweep on those specific shapes.
+
+### R41 attempts summary
+- **R41 Opt A** (cluster-C `extract_tile` vmcnt fence): **CONFIRMED MAJOR WIN** — 5/5 catastrophic K=32768 shapes recovered. Single-line fix. Survived integration 5-run probe (drift -1.0% to +0.1%).
+- **R41 Opt B** (cluster-B variant retune): PARTIAL → REJECTED in integration. R41B's own 5-run found 2 promotes; integration 5-run dropped both to FLAKE_2/5. Variant axis is 2nd-order vs the underlying race.
+- **R41 Opt C** (CRASH aperture): not run this round (deferred to R42).
+- **R41 Opt D** (R41D reviewer): R40A K=128256 confirmed PASS_5/5 (PROMOTE); R40C K=14336 rejected (1/5 PASS, 3-run was gate-flake); R40B locked at 22/42 (vs projected 26).
+- **Files**: `R41_DECIDER_PLAN.md`, `R41_OPT_{A,B,D}_VERDICT.md`, `R41_INTEGRATION_VERDICT.md`, `R41_INTEGRATION_MANIFEST.json`, `R41_INTEGRATION_5RUN.{json,log}`, `bench_all_42_R41{A,B,_INTEGRATION}.py`, `build_R41{A,B}.py`, `R41{A,B}_BUILD_MANIFEST.json`, `R41D_R40{A,B,C}_5RUN_*.{json,log}`. Kernel: `kernel_mxfp4_gluon_cpp.cpp` adds R41A macros (default OFF).
+
+---
+
+## Previous State (2026-04-19, post-R40 reviewer GO)
 
 **HEADLINE — R40 Opt B is the largest correctness gain in the R37+ era.**
 

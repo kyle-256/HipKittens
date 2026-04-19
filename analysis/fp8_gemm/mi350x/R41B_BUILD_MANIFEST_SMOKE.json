@@ -1,0 +1,241 @@
+{
+  "ts": "2026-04-19 07:35:26",
+  "round": "R41B",
+  "mode": "SMOKE",
+  "forced_base_macros": {
+    "FUSED_STEP34": 1
+  },
+  "cluster_b_shapes": [
+    "16384x28672x2048",
+    "32768x28672x2048",
+    "4096x32768x6144",
+    "4096x32768x14336",
+    "4096x32768x128256",
+    "14336x32768x4096",
+    "16384x14336x4096",
+    "16384x4096x14336",
+    "28672x4096x8192",
+    "28672x4096x16384",
+    "32768x4096x2048"
+  ],
+  "variant_ids": [
+    "v0a",
+    "v0b",
+    "v0c",
+    "v0d",
+    "v1",
+    "v2",
+    "v3"
+  ],
+  "shape_variants": {
+    "16384x28672x2048": {
+      "parent_variant": "ts_lgk2_gm6_v12_memc_pfoff4",
+      "variants": {
+        "v0a": {
+          "status": "built",
+          "module": "tk_mxfp4_gluon_cpp_n28672_k2048_ts_lgk2_gm6_v12_pfoff4_R41B_v0a",
+          "extra_macros": {
+            "FUSED_STEP34": 1,
+            "R25C_TAIL_PF_OFF_ITERS": 0
+          },
+          "description": "pfoff=0 (full PF)"
+        },
+        "v0b": {
+          "status": "built",
+          "module": "tk_mxfp4_gluon_cpp_n28672_k2048_ts_lgk2_gm6_v12_pfoff4_R41B_v0b",
+          "extra_macros": {
+            "FUSED_STEP34": 1,
+            "R25C_TAIL_PF_OFF_ITERS": 1,
+            "R25C_K_LIMIT": 32768,
+            "R25C_K_EXACT": 2048
+          },
+          "description": "pfoff=k/8=1"
+        },
+        "v0c": {
+          "status": "built",
+          "module": "tk_mxfp4_gluon_cpp_n28672_k2048_ts_lgk2_gm6_v12_pfoff4_R41B_v0c",
+          "extra_macros": {
+            "FUSED_STEP34": 1,
+            "R25C_TAIL_PF_OFF_ITERS": 2,
+            "R25C_K_LIMIT": 32768,
+            "R25C_K_EXACT": 2048
+          },
+          "description": "pfoff=k/4=2"
+        },
+        "v0d": {
+          "status": "built",
+          "module": "tk_mxfp4_gluon_cpp_n28672_k2048_ts_lgk2_gm6_v12_pfoff4_R41B_v0d",
+          "extra_macros": {
+            "FUSED_STEP34": 1,
+            "R25C_TAIL_PF_OFF_ITERS": 4,
+            "R25C_K_LIMIT": 32768,
+            "R25C_K_EXACT": 2048
+          },
+          "description": "pfoff=k/2=4"
+        },
+        "v1": {
+          "status": "skipped",
+          "reason": "no _btw_all to drop"
+        },
+        "v2": {
+          "status": "built",
+          "module": "tk_mxfp4_gluon_cpp_n28672_k2048_ts_lgk2_gm6_v12_pfoff4_R41B_v2",
+          "extra_macros": {
+            "FUSED_STEP34": 1
+          },
+          "description": "v12->v32"
+        },
+        "v3": {
+          "status": "built",
+          "module": "tk_mxfp4_gluon_cpp_n28672_k2048_ts_lgk2_gm6_v12_pfoff4_R41B_v3",
+          "extra_macros": {
+            "FUSED_STEP34": 1
+          },
+          "description": "lgk2->lgk1"
+        }
+      }
+    },
+    "4096x32768x128256": {
+      "parent_variant": "ts_lgk2_v12_memc_btw_all",
+      "variants": {
+        "v0a": {
+          "status": "built",
+          "module": "tk_mxfp4_gluon_cpp_n32768_k128256_ts_lgk2_v12_btw_all_R41B_v0a",
+          "extra_macros": {
+            "FUSED_STEP34": 1,
+            "R25C_TAIL_PF_OFF_ITERS": 0
+          },
+          "description": "pfoff=0 (full PF)"
+        },
+        "v0b": {
+          "status": "built",
+          "module": "tk_mxfp4_gluon_cpp_n32768_k128256_ts_lgk2_v12_btw_all_R41B_v0b",
+          "extra_macros": {
+            "FUSED_STEP34": 1,
+            "R25C_TAIL_PF_OFF_ITERS": 62,
+            "R25C_K_LIMIT": 32768,
+            "R25C_K_EXACT": 128256
+          },
+          "description": "pfoff=k/8=62"
+        },
+        "v0c": {
+          "status": "built",
+          "module": "tk_mxfp4_gluon_cpp_n32768_k128256_ts_lgk2_v12_btw_all_R41B_v0c",
+          "extra_macros": {
+            "FUSED_STEP34": 1,
+            "R25C_TAIL_PF_OFF_ITERS": 125,
+            "R25C_K_LIMIT": 32768,
+            "R25C_K_EXACT": 128256
+          },
+          "description": "pfoff=k/4=125"
+        },
+        "v0d": {
+          "status": "built",
+          "module": "tk_mxfp4_gluon_cpp_n32768_k128256_ts_lgk2_v12_btw_all_R41B_v0d",
+          "extra_macros": {
+            "FUSED_STEP34": 1,
+            "R25C_TAIL_PF_OFF_ITERS": 250,
+            "R25C_K_LIMIT": 32768,
+            "R25C_K_EXACT": 128256
+          },
+          "description": "pfoff=k/2=250"
+        },
+        "v1": {
+          "status": "built",
+          "module": "tk_mxfp4_gluon_cpp_n32768_k128256_ts_lgk2_v12_btw_all_R41B_v1",
+          "extra_macros": {
+            "FUSED_STEP34": 1
+          },
+          "description": "drop _btw_all"
+        },
+        "v2": {
+          "status": "built",
+          "module": "tk_mxfp4_gluon_cpp_n32768_k128256_ts_lgk2_v12_btw_all_R41B_v2",
+          "extra_macros": {
+            "FUSED_STEP34": 1
+          },
+          "description": "v12->v32"
+        },
+        "v3": {
+          "status": "built",
+          "module": "tk_mxfp4_gluon_cpp_n32768_k128256_ts_lgk2_v12_btw_all_R41B_v3",
+          "extra_macros": {
+            "FUSED_STEP34": 1
+          },
+          "description": "lgk2->lgk1"
+        }
+      }
+    },
+    "28672x4096x8192": {
+      "parent_variant": "ts_v12_tv0_gm7_memc_pfoff28_kx8192_btw_all",
+      "variants": {
+        "v0a": {
+          "status": "built",
+          "module": "tk_mxfp4_gluon_cpp_n4096_k8192_ts_v12_tv0_gm7_pfoff28_kx8192_btw_all_R41B_v0a",
+          "extra_macros": {
+            "FUSED_STEP34": 1,
+            "R25C_TAIL_PF_OFF_ITERS": 0
+          },
+          "description": "pfoff=0 (full PF)"
+        },
+        "v0b": {
+          "status": "built",
+          "module": "tk_mxfp4_gluon_cpp_n4096_k8192_ts_v12_tv0_gm7_pfoff28_kx8192_btw_all_R41B_v0b",
+          "extra_macros": {
+            "FUSED_STEP34": 1,
+            "R25C_TAIL_PF_OFF_ITERS": 4,
+            "R25C_K_LIMIT": 32768,
+            "R25C_K_EXACT": 8192
+          },
+          "description": "pfoff=k/8=4"
+        },
+        "v0c": {
+          "status": "built",
+          "module": "tk_mxfp4_gluon_cpp_n4096_k8192_ts_v12_tv0_gm7_pfoff28_kx8192_btw_all_R41B_v0c",
+          "extra_macros": {
+            "FUSED_STEP34": 1,
+            "R25C_TAIL_PF_OFF_ITERS": 8,
+            "R25C_K_LIMIT": 32768,
+            "R25C_K_EXACT": 8192
+          },
+          "description": "pfoff=k/4=8"
+        },
+        "v0d": {
+          "status": "built",
+          "module": "tk_mxfp4_gluon_cpp_n4096_k8192_ts_v12_tv0_gm7_pfoff28_kx8192_btw_all_R41B_v0d",
+          "extra_macros": {
+            "FUSED_STEP34": 1,
+            "R25C_TAIL_PF_OFF_ITERS": 16,
+            "R25C_K_LIMIT": 32768,
+            "R25C_K_EXACT": 8192
+          },
+          "description": "pfoff=k/2=16"
+        },
+        "v1": {
+          "status": "built",
+          "module": "tk_mxfp4_gluon_cpp_n4096_k8192_ts_v12_tv0_gm7_pfoff28_kx8192_btw_all_R41B_v1",
+          "extra_macros": {
+            "FUSED_STEP34": 1
+          },
+          "description": "drop _btw_all"
+        },
+        "v2": {
+          "status": "built",
+          "module": "tk_mxfp4_gluon_cpp_n4096_k8192_ts_v12_tv0_gm7_pfoff28_kx8192_btw_all_R41B_v2",
+          "extra_macros": {
+            "FUSED_STEP34": 1
+          },
+          "description": "v12->v32"
+        },
+        "v3": {
+          "status": "skipped",
+          "reason": "no lgk2 to swap"
+        }
+      }
+    }
+  },
+  "built": 19,
+  "cached": 0,
+  "skipped": 2,
+  "failed": 0
+}

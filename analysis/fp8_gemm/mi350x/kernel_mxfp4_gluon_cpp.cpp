@@ -276,6 +276,45 @@ using namespace kittens;
 #ifndef R25C_TAIL_PF_OFF_ITERS
 #define R25C_TAIL_PF_OFF_ITERS 0
 #endif
+
+// R41 Opt A (2026-04-19): Cluster C deep-K tail-pf-off SWEEP + extract_tile fence.
+// Targets the 5 catastrophic K=32768 shapes (~97% wrong cells, ~10% finite under R40B).
+// Hypothesis: R25C_TAIL_PF_OFF_ITERS=120 with K_DIM=32768 (k_byte_iters=128) means PF
+// runs only on first 8 iters, then kernel rides on extract_tile-staged registers for
+// >100 iters. Combined with FUSED_STEP34=1's fewer iter-boundary fences, the
+// tile-register liveness across deep K is the dominant corruption vector.
+// R40D's data (no-prefetch IMPROVES 4 of 5 cluster-C shapes) supports this.
+//
+// R41A_DEEP_K_FIX (master gate, default 0): when 0, behavior is bit-identical to R40B.
+// R41A_PFOFF_OVERRIDE (int, default 0): when nonzero AND R41A_DEEP_K_FIX AND
+//   K_DIM >= 16384, OVERRIDES the variant-supplied R25C_TAIL_PF_OFF_ITERS at
+//   compile time (via #undef + #define).
+// R41A_EXTRACT_TILE_FENCE (bool, default 0): when 1 AND R41A_DEEP_K_FIX AND
+//   FUSED_STEP34 AND K_DIM >= 16384, inserts s_waitcnt vmcnt(0) immediately
+//   BEFORE every extract_tile(nxt_a0_d, tA0) and extract_tile(nxt_bl_d, tBl)
+//   call in the K-loop body (3 sites: lines ~2851, ~3364, ~3598).
+#ifndef R41A_DEEP_K_FIX
+#define R41A_DEEP_K_FIX 0
+#endif
+#ifndef R41A_PFOFF_OVERRIDE
+#define R41A_PFOFF_OVERRIDE 0
+#endif
+#ifndef R41A_EXTRACT_TILE_FENCE
+#define R41A_EXTRACT_TILE_FENCE 0
+#endif
+
+#if R41A_DEEP_K_FIX && (R41A_PFOFF_OVERRIDE != 0) && (K_DIM >= 16384)
+  #undef R25C_TAIL_PF_OFF_ITERS
+  #define R25C_TAIL_PF_OFF_ITERS R41A_PFOFF_OVERRIDE
+#endif
+
+#if R41A_DEEP_K_FIX && R41A_EXTRACT_TILE_FENCE && FUSED_STEP34 && (K_DIM >= 16384)
+  #define R41A_FENCE_BEFORE_EXTRACT() \
+      asm volatile("s_waitcnt vmcnt(0)" ::: "memory")
+#else
+  #define R41A_FENCE_BEFORE_EXTRACT() ((void)0)
+#endif
+
 #ifndef R25C_K_LIMIT
 #define R25C_K_LIMIT 32768
 #endif
@@ -2848,7 +2887,9 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 #else
         asm volatile("s_waitcnt lgkmcnt(0)");
 #endif
+        R41A_FENCE_BEFORE_EXTRACT();
         extract_tile(nxt_a0_d, tA0);
+        R41A_FENCE_BEFORE_EXTRACT();
         extract_tile(nxt_bl_d, tBl);
         // R21B/R22C: opt-in scheduling hooks (no-op at defaults). Site 0.
         MXFP4_R22C_ITER_END_HOOK_0;
@@ -3361,7 +3402,9 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 #else
         asm volatile("s_waitcnt lgkmcnt(0)");
 #endif
+        R41A_FENCE_BEFORE_EXTRACT();
         extract_tile(nxt_a0_d, tA0);
+        R41A_FENCE_BEFORE_EXTRACT();
         extract_tile(nxt_bl_d, tBl);
         // R21B/R22C: opt-in scheduling hooks (no-op at defaults). Site 1.
         MXFP4_R22C_ITER_END_HOOK_1;
@@ -3595,7 +3638,9 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 #else
         asm volatile("s_waitcnt lgkmcnt(0)");
 #endif
+        R41A_FENCE_BEFORE_EXTRACT();
         extract_tile(nxt_a0_d, tA0);
+        R41A_FENCE_BEFORE_EXTRACT();
         extract_tile(nxt_bl_d, tBl);
         // R21B/R22C: opt-in scheduling hooks (no-op at defaults). Site 2.
         MXFP4_R22C_ITER_END_HOOK_2;
