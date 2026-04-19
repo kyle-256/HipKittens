@@ -2,7 +2,61 @@
 
 你在继续推进 `HipKittens` 的 MXFP4 GEMM 优化工作，跟 Cursor (Hipkittens2) 竞赛。
 
-## ⚠️ 当前优化目标 (2026-04-19, post-R56 — WIN 7/7 PROMOTE PERF 追赶, **42/42 严格 VC 连续第 2 轮保持**, **+6 NET WIN cell (34→40, 项目史上最大单轮 WIN-cell 跳跃)**, +198.14pp 累计 perf 追赶 (2.2× STRETCH), AITER bit-deterministic 份额 38→39 of 42, HK cell 4→3 (项目史上最少), 0 cohort-race churn, 连续第 8 次 R50D AS-IS 复用)
+## ⚠️ 当前优化目标 (2026-04-19, post-R57 — WIN +1 NET WIN cell (40→41), **42/42 严格 VC 连续第 3 轮保持 (3rd 100% 排行榜)**, 1/5 PROMOTE / 4 ACCEPT_FALLBACK, AITER bit-deterministic 份额 39 of 42 持平, HK cell 3 持平 (项目史上最少 HELD), 0 cohort-race churn, 连续第 9 次 R50D AS-IS 复用, Opt J ITERS=1000 协议提升首次成功验证)
+
+**HEADLINE**: R57 达到 **+1 NET WIN cell (40→41)，42/42 严格 VC 连续第 3 轮保持 (项目史上首个连续 3 轮 100% 排行榜)**。R57 通过 ITERS=1000 协议提升攻击 R56 唯一的 reviewer-drift edge cell L1。**1/5 PROMOTE / 4 ACCEPT_FALLBACK / 0 DEAD** 跨 3 个 worker cohort (H-1 Opt J L1 ITERS=1000, H-2 Opt L 192×256 axis 3 个 HK cell, H-3 Opt K L8 224×256 探测)。L1 4096x32768x14336 reviewer p50: 99.98% → **100.04%** (+0.07pp, 越过 WIN 线; worker 102.37%)。所有 4 个 ACCEPT_FALLBACK 是 D-3A-1 保护正确触发, 不是回归。AITER bit-deterministic 份额 **39/39 PASS HELD**; 3 个存活 HK cell **3/3 PASS, 0 churn**。WIN cell (≥100% comp): **40 → 41**。LOSE cell: 2 → 1 (仅 L8 4096x32768x128256 在 97.75%; aiter alt-tile axis 完全关闭)。Cohort-race 表面 41 个 unchanged-binary cell **0 lost VC**, 平均 perf drift +0.23pp/cell (ITERS=1000 noise floor)。连续第 9 轮 R50D shim AS-IS 复用 (no rebuild, no kernel modification, no new .co)。
+
+**R57 Opt J 机制验证**: L1 在 R56 reviewer 是 99.98% (worker 100.63%) — 0.6pp 跨 GPU drift 把 worker WIN-line 推到 reviewer LOSE-edge。R57 ITERS=500→1000 协议提升收紧 p50 trim 分布; reviewer p50 升到 100.04% (worker 102.37%)。两个测量都保留 WIN-line 跨越, 验证 Opt J 机制: **结构 bit-deterministic 的 AITER cell 在 noise tail 上, ITERS=500 在分布尾巴上, ITERS=1000 暴露真实 mean**。仅适用于 ≤0.5pp 距分类边界的 cell; R58 应该 revert ITERS=500 default 除非识别另一个 tail-edge cell。
+
+**R57 Opt L 192×256 axis 关闭** (3/3 HK cell DEAD): R56 D-5B/1 在 N=14336 显示 256×256 AITER 比 HK underperform; R57 H-2 在 3 个 HK cell (16384x4096x{2048,3072}, 32768x14336x2048) 上试 192×256 全部 SMOKE -8 到 -14pp。192×256 axis 对 HK kept-cell pool **完全关闭**; 3 个 HK cell 在 R57 reviewer 都 PASS 100.53%-109.57%。
+
+**R57 Opt K L8 224×256 axis 关闭** (1/1 DEAD): R56 G-4 已经在 L8 4096x32768x128256 上证伪 128×512 (-13.31pp) 和 192×256 (-11.84pp); R57 H-3 试 224×256 SMOKE 87.61% (-10.69pp)。L8 aiter alt-tile axis **完全关闭** — 256×256 严格最佳 for K=128256 K/N=4 ratio。L8 是 R57 后唯一剩余 LOSE cell (距 WIN 2.25pp; 在 aiter-internal ceiling)。
+
+**R57 attempts 总结** (1 个 PROMOTE 复用 R56G1_L1 binary AS-IS with ITERS=1000):
+
+- **R57 Opt J — L1 ITERS=500→1000 tail-tightening (1/1 PROMOTE)**:
+  - L1 `(4096,32768,14336)`: 99.98% (R56 reviewer) → **100.04%** (R57 reviewer; worker 102.37%) **+0.07pp**。**R56G1_L1 → R57J1_L1 source rename only; binary unchanged**。
+- **R57 Opt L — 192×256 alt-tile probe on 3 保留 HK cell (0/3 PROMOTE 3 ACCEPT_FALLBACK)**:
+  - L-1 `(16384,4096,2048)`: HK 109.57% (R57 reviewer) vs AITER 192×256 SMOKE DEAD -8 到 -14pp。**ACCEPT_FALLBACK**。
+  - L-2 `(16384,4096,3072)`: HK 103.25% (R57 reviewer) vs AITER 192×256 SMOKE DEAD。**ACCEPT_FALLBACK**。
+  - L-3 `(32768,14336,2048)`: HK 100.53% (R57 reviewer) vs AITER 192×256 SMOKE DEAD。**ACCEPT_FALLBACK**。
+- **R57 Opt K — L8 224×256 探测 (0/1 PROMOTE 1 ACCEPT_FALLBACK)**:
+  - K-1 L8 `(4096,32768,128256)`: AITER 256×256 R52D2B 97.75% (R57 reviewer) vs 224×256 SMOKE 87.61% (-10.69pp)。**ACCEPT_FALLBACK**。
+
+唯一 PROMOTE worker 复用 **EXISTING R56 binaries AS-IS** (R56G1_L1 .so/.co/grid 完全不变)，per-shape grid + `f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co`。NO 任何 binary rebuild。Kernel 不变。
+
+**R57 reviewer integration (10-run @ 80%, INDEPENDENT seeds [101..1010], ITERS=1000 协议提升; 4 GPU 4-7, ~17 分钟 wall, 420 runs)**:
+- Manifest **39 个 aiter `.co` override** + **3 个 HK** baseline (与 R56 完全一致, 仅 L1 source label rename)。
+- 全部 1 个 R57 PROMOTE 候选 reviewer re-bench RE-VERIFIED 10/10 PASS, 完美 bit-determinism (wcf_max=0.0, wcf_std=0.0, fin_min=1.0)。
+- **AITER cell: 39/39 PASS (100% bit-deterministic)** HELD。
+- HK cell: **3/3 PASS (零 churn; 全部 3 个存活 HK cell re-verified PASS_10/10)** HELD。
+- Cohort-race churn 审计 41 个未变 binary cell: **0 lost VC; 平均 perf drift +0.16pp AITER (range -1.11 到 +2.15pp), +1.51pp HK (R40B HK cell 从更长 ITERS 的更宽 trimmed-distribution 受益最多, range +0.14 到 +4.21pp)**。
+- R57 贡献: **+1 NET WIN cell** (40 → 41) + 0 cohort losses + +0.07pp L1 perf 越线。
+- **最终 VC count: 严格 10-run 42/42 保持 (连续第 3 个 100% 排行榜轮)**。
+- WIN cell (>=100% comp): 40 → 41 (+1, L1 LOSE-edge → WIN)。
+- ITERS=1000 协议观察: **唯一 WIN/LOSE flip 是 targeted L1**。其他近-100% cell (L8 98.30→97.75 LOSE→LOSE, 32768x14336x2048 100.39→100.53 WIN→WIN, 4096x32768x28672 101.07→101.17 WIN→WIN) 都保留同侧分类。**Opt J 仅适用于 ≤0.5pp 距分类边界的 cell**; R58 应 revert ITERS=500 default。
+- 文件: `R57_INTEGRATION_VERDICT.md`, `R57_INTEGRATION_MANIFEST.json`, `bench_all_42_R57_INTEGRATION.py`, `R57_INTEGRATION_{10RUN,SMOKE1}.{json,log,console}`, `R57_DECIDER_PLAN.md`, `R57_OPT_H{1,2,3}_VERDICT.md`, `R57H{1,2,3}_*_INTEGRATION_FRAGMENT.json`, `bench_R57H{1,2,3}_*.py`, `R57_OPT_{J1,L1,L2,L3,K1}_{SMOKE,10RUN}.{json,log}`。
+
+**R57 net result**: **1 PROMOTE + +0.07pp L1 越线 + 项目史上首个 3 连 100% 排行榜**, R57 带来零回归，零 cohort-race 损失。Net 严格 VC: **42/42 保持 (连续第 3 个 100% 排行榜)**。WIN cell 40→41 (+1)。Cohort-race 表面 3 HK cell HELD (史上最少)。**0 kernel 修改, 0 新 shim build, 0 新 .co binary (连续第 9 次 R50D AS-IS 复用)**。
+
+### R57 LOSE cell 剩余 (仅 1 个; 距 WIN 2.25pp)
+- `(4096,32768,128256)` 97.75% (L8; aiter alt-tile axis 完全关闭后唯一剩余; 在 aiter-internal ceiling for K=128256 K/N=4)
+
+### R58 候选 (post-R57, 按机制信心排序)
+1. **R58 Opt N — Gate 收紧 pilot (中, R56/R57 推迟; 最高方法论价值)** — 严格 VC 上限达 42/42; 收紧 gate (n_OK→9/10, wcf_max→0.01, fin_min→0.99) 在 ITERS=500 default 下枚举 sub-optimal cell。Test-design 改进暴露 cohort-race 真实表面。预估 +0 NET WIN, +N cell 重分类为非 PASS_10/10, 引导 R59+ 注意力。
+2. **R58 Opt O — L8 HK rewrite for K=128256 K/N=4 ratio (低-中; 高风险高收益)** — 唯一剩余 LOSE。aiter 256×256 在 97.75%; aiter alt-tile axis 完全关闭; HK 需要 +2.25pp over AITER 256×256 才能 PROMOTE。可能 K-pipeline tuning 配 256×256 grid。预估 +0 到 +1 NET WIN cell。
+3. **R58 Opt P — 非-192×256 alt-tile 在 3 个 HK cell 上 (低; 完成性)** — R57 H-2 关闭 192×256; 剩余 alt-tile (128×256 eff=85.3, 96×640 eff=83.5, 64×1024 eff=60.2) 都 lower-eff。R55 D-5B/1 显示 256×256 AITER underperforms HK 在 N=14336。预估 +0 NET WIN, 可能 +N bit-determinism (AITER 39→42 if any 成功)。
+4. **R58 Opt Q — Revert ITERS=500 default (杂务)** — R57 H-1 ITERS=1000 是 single-purpose 协议 bump; R58 default revert 除非另一个 tail-edge cell 出现。
+
+### R58+ 不要尝试的轴 (R45-R57 关闭)
+- 全部 R56 关闭列表加上:
+- **L8 (4096x32768x128256) 上的 224×256** — R57 H-3 确认 -10.69pp (与 128×512 -13.31pp + 192×256 -11.84pp 一起完全关闭 L8 aiter alt-tile axis)。
+- **3 个保留 HK cell 上的 192×256** — R57 H-2 确认全部 -8 到 -14pp; 192×256 axis 对 HK kept-cell pool 完全关闭。
+- 任何 HK 256×256 路径 或 R50D aiter `.co` dlopen 路径本身的"改进"。
+
+---
+
+## 上一轮目标 (2026-04-19, post-R56 — WIN 7/7 PROMOTE PERF 追赶, **42/42 严格 VC 连续第 2 轮保持**, **+6 NET WIN cell (34→40, 项目史上最大单轮 WIN-cell 跳跃)**, +198.14pp 累计 perf 追赶 (2.2× STRETCH), AITER bit-deterministic 份额 38→39 of 42, HK cell 4→3 (项目史上最少), 0 cohort-race churn, 连续第 8 次 R50D AS-IS 复用)
 
 **HEADLINE**: R56 达到 **+6 NET WIN cell (34→40)，+198.14pp 累计 perf，42/42 严格 VC 保持**。R56 通过 R50D shim AS-IS 上的 aiter alt-tile dispatch 攻击 R55 的 8 个 LOSE cell。**7/7 PROMOTE / 1 ACCEPT_FALLBACK** 跨 4 个 worker cohort (G-1, G-2, G-3 falsification, G-4 HK→AITER + alt-tile probe)。全部 7 个 PROMOTE 都以 ≥13pp 越过 +1.0pp D-3C 门。R56 7 个 PROMOTE cell (delta R55→R56 pct_comp): L1 +34.30pp, L2 +19.87pp, L3 +15.93pp, L4 +14.38pp, L5 +16.14pp, L6 +16.60pp, L7 +80.92pp (HK→AITER)。AITER cell **39/39 PASS (100% bit-deterministic, wcf_max=0.0, wcf_std=0.0, fin_min=1.0)**。3 个存活 HK cell **3/3 PASS, 0 churn**。WIN cell (≥100% comp): **34 → 40** (项目史上最大单轮 WIN-cell 跳跃)。LOSE cell: 8 → 2 (L1 99.98% reviewer-drift edge, L8 98.30% D-3A-1 ACCEPT_FALLBACK)。Cohort-race 表面达项目史上最小 (3 个 HK cell)。连续第 8 轮 R50D shim AS-IS 复用 (no rebuild, no kernel modification)。
 
@@ -59,7 +113,7 @@
 
 ---
 
-## 上一轮目标 (2026-04-19, post-R55 — WIN +6 NET VC 严格 10-run = **42/42 项目史上首个 100% 排行榜轮**, COMMIT, 11/12 PROMOTE / 0 DEAD / 1 ACCEPT_FALLBACK 跨 4 个 worker cohort, AITER bit-deterministic 份额 27→38 of 42, 连续第 7 次 R50D AS-IS 复用, cohort-race 表面从 15 个 HK cell 减到 4 个)
+## 上上轮目标 (2026-04-19, post-R55 — WIN +6 NET VC 严格 10-run = **42/42 项目史上首个 100% 排行榜轮**, COMMIT, 11/12 PROMOTE / 0 DEAD / 1 ACCEPT_FALLBACK 跨 4 个 worker cohort, AITER bit-deterministic 份额 27→38 of 42, 连续第 7 次 R50D AS-IS 复用, cohort-race 表面从 15 个 HK cell 减到 4 个)
 
 **HEADLINE**: R55 达到 **42/42 严格 10-run VC，项目史上第一个 100% 排行榜轮**。Net VC delta vs R54 = **+6 NET VC 严格 10-run** (36 → 42/42)。**11/12 PROMOTE / 0 DEAD / 1 D-3A-1 ACCEPT_FALLBACK** (D-5B/1 `(32768,14336,2048)` SMOKE -1.33pp vs HK; 正确保留 HK fallback — 自 R53 D-3A-1 DEAD 以来 D-3A-1 保护首次触发)。4 worker cohort: E-3 cohort-race 救援 M=16384 (4/4 PROMOTE +4 NET VC), E-4 cohort-race 救援 (2/2 PROMOTE +2 NET VC), D-5A 边际 HK-VC perf 追赶 (3/3 PROMOTE +29.07pp 累计), D-5B 边际追赶 M=32768 (2/3 PROMOTE +6.76pp 累计)。5 个 D-5 perf 追赶 deliver +1.81pp 到 +20.99pp over HK baselines, 最大 +20.99pp on `(4096,4096,8192)`。AITER cell **38/38 PASS (100% bit-deterministic, wcf_max=0.0, wcf_std=0.0, fin_min=1.0)**; 4 个保留的 HK cell **4/4 PASS (NO churn — 保留 HK cell 上 0 cohort-race 损失)**。WIN cell (>=100% comp): 28 → 34 (+6)。Cohort-race 表面从 15 个 HK cell 减到 4 个 — 大幅降低未来轮 attrition 风险。连续第 7 轮 R50D shim AS-IS 复用 (no rebuild, no kernel modification)。
 

@@ -1,0 +1,33 @@
+{
+  "round": "R57",
+  "cohort": "H-3",
+  "candidate": "K-1",
+  "shape": [4096, 32768, 128256],
+  "shape_label": "L8",
+  "alt_tile": [224, 256],
+  "mechanism": "R50D shim AS-IS, aiter .co dlopen, tile_M=224 (eff=119.5)",
+  "co_path": "/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_224x256.co",
+  "kernel_name": "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_224x256E",
+  "co_exists": true,
+  "shim_accepts_tile_M_224": true,
+  "smoke": {
+    "n_runs": 1,
+    "n_OK": 1,
+    "fin_min": 1.0,
+    "wcf_max": 0.0,
+    "snr_med": 55.63,
+    "tflops_first": 5064.8,
+    "pct_comp_first": 87.61,
+    "competitor_tflops": 5781.1
+  },
+  "smoke_first_gate_threshold_pct": 99.30,
+  "current_baseline_pct_comp": 98.30,
+  "smoke_passes_gate": false,
+  "verdict": "ACCEPT_FALLBACK",
+  "rationale": "224x256 alt-tile correct (SNR 55.63 dB, fin=1.0, wcf=0.0) but underperforms baseline by ~10.7pp (87.61% vs 98.30% AITER 256x256). D-3A-1 protection holds R52D2B 256x256 baseline. No 10-run escalation per smoke-first gate.",
+  "action": "KEEP R52D2B AITER 256x256 on L8; abandon 224x256 alt-tile",
+  "promote": false,
+  "dead": false,
+  "no_kernel_changes": true,
+  "shim_changes": false
+}

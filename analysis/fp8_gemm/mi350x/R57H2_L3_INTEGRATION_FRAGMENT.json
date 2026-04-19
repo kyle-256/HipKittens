@@ -1,0 +1,34 @@
+{
+  "round": "R57",
+  "opt": "L (H-2)",
+  "cell_label": "L-3",
+  "shape": [32768, 14336, 2048],
+  "current_baseline": {
+    "source": "R40B_HK",
+    "tile": "HK",
+    "pct_comp": 100.39
+  },
+  "alt_tile": [192, 256],
+  "co_path": "/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_192x256.co",
+  "kernel_name": "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_192x256E",
+  "shim_so": "build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so",
+  "shim_rebuild_required": false,
+  "grid": {"gdx": 56, "gdy": 171, "gdz": 1, "bdx": 256, "note": "shim computes gdx=ceil(N/tile_N)=56, gdy=ceil(M/tile_M)=171"},
+  "kernel_args": [32768, 14336, 2048],
+  "smoke_pass": true,
+  "ten_run": null,
+  "smoke_only": {
+    "seed": 101,
+    "warmup": 200,
+    "iters": 500,
+    "trim_frac": 0.10,
+    "fin": 1.0,
+    "wcf": 0.0,
+    "snr_med_db": 55.52,
+    "tflops": 2882.5,
+    "pct_comp": 86.01
+  },
+  "perf_delta_pp": -14.38,
+  "verdict": "ACCEPT_FALLBACK",
+  "verdict_reason": "Smoke pct_comp=86.01% << HK 100.39% (delta -14.38pp); falls 15.38pp below D-3A-1 PROMOTE gate of 101.39%. Correctness clean (bit-deterministic, snr_med 55.52dB, fin=1.0, wcf=0). 10-run skipped per STOP rule (>2pp shortfall). Keep R40B_HK baseline; do NOT swap. 192x256 alt-tile DEAD on N=14336 cell, falsifying the R57 plan hypothesis that 192x256 (eff=109.7) would beat 256x256 (which itself underperformed HK by 1.33pp per R55 D-5B/1)."
+}

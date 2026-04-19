@@ -1,0 +1,14 @@
+R57 Opt J-1 L1 bench - mode=10run, gpu=[0], shape=(4096,32768,14336), tile=256x256, warmup=200, iters=1000, trim=0.1
+====================================================================================================
+  seed=  101 gpu=0 status=OK                     fin=1.0      wcf=0.0        snr_med=55.61    tflops=5417.9     pct=102.3   (8.7s)
+  seed=  202 gpu=0 status=OK                     fin=1.0      wcf=0.0        snr_med=55.62    tflops=5441.0     pct=102.74  (8.6s)
+  seed=  303 gpu=0 status=OK                     fin=1.0      wcf=0.0        snr_med=55.59    tflops=5421.1     pct=102.36  (8.5s)
+  seed=  404 gpu=0 status=OK                     fin=1.0      wcf=0.0        snr_med=55.6     tflops=5422.2     pct=102.38  (8.7s)
+  seed=  505 gpu=0 status=OK                     fin=1.0      wcf=0.0        snr_med=55.6     tflops=5415.4     pct=102.25  (8.6s)
+  seed=  606 gpu=0 status=OK                     fin=1.0      wcf=0.0        snr_med=55.59    tflops=5432.9     pct=102.58  (8.6s)
+  seed=  707 gpu=0 status=OK                     fin=1.0      wcf=0.0        snr_med=55.59    tflops=5412.4     pct=102.2   (8.8s)
+  seed=  808 gpu=0 status=OK                     fin=1.0      wcf=0.0        snr_med=55.6     tflops=5428.5     pct=102.5   (8.6s)
+  seed=  909 gpu=0 status=OK                     fin=1.0      wcf=0.0        snr_med=55.63    tflops=5411.8     pct=102.18  (8.7s)
+  seed= 1010 gpu=0 status=OK                     fin=1.0      wcf=0.0        snr_med=55.59    tflops=5443.5     pct=102.78  (8.7s)
+----------------------------------------------------------------------------------------------------
+SUMMARY: {"round": "R57", "opt": "J", "cohort": "H-1", "cell_label": "J-1", "mode": "10run", "shape": [4096, 32768, 14336], "tile": [256, 256], "competitor_tflops": 5296.1, "warmup": 200, "iters": 1000, "trim_frac": 0.1, "iters_protocol": "R57_OPT_J_LONG_BENCH", "n_runs": 10, "n_OK": 10, "fin_min": 1.0, "fin_max": 1.0, "wcf_min": 0.0, "wcf_max": 0.0, "wcf_std": 0.0, "snr_min": 55.59, "snr_max": 55.63, "snr_med": 55.6, "tflops_first": 5411.8, "tflops_min": 5411.8, "tflops_max": 5443.5, "tflops_p25": 5416.025, "tflops_p50": 5421.65, "tflops_p75": 5431.799999999999, "pct_comp_p25": 102.2644, "pct_comp_p50": 102.3706, "pct_comp_p75": 102.56225, "pct_comp_min": 102.1846, "pct_comp_max": 102.7832, "pct_comp_first": 102.1846, "r56_pct_comp": 99.98, "perf_delta_pp": 2.3906, "passes_10run_gate": true, "win_line_crossed": true}

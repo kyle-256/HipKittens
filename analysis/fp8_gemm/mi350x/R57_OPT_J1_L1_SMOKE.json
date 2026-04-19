@@ -1,0 +1,68 @@
+{
+  "summary": {
+    "round": "R57",
+    "opt": "J",
+    "cohort": "H-1",
+    "cell_label": "J-1",
+    "mode": "smoke",
+    "shape": [
+      4096,
+      32768,
+      14336
+    ],
+    "tile": [
+      256,
+      256
+    ],
+    "competitor_tflops": 5296.1,
+    "warmup": 200,
+    "iters": 1000,
+    "trim_frac": 0.1,
+    "iters_protocol": "R57_OPT_J_LONG_BENCH",
+    "n_runs": 1,
+    "n_OK": 1,
+    "fin_min": 1.0,
+    "fin_max": 1.0,
+    "wcf_min": 0.0,
+    "wcf_max": 0.0,
+    "wcf_std": 0.0,
+    "snr_min": 55.61,
+    "snr_max": 55.61,
+    "snr_med": 55.61,
+    "tflops_first": 5435.4,
+    "tflops_min": 5435.4,
+    "tflops_max": 5435.4,
+    "tflops_p25": 5435.4,
+    "tflops_p50": 5435.4,
+    "tflops_p75": 5435.4,
+    "pct_comp_p25": 102.6302,
+    "pct_comp_p50": 102.6302,
+    "pct_comp_p75": 102.6302,
+    "pct_comp_min": 102.6302,
+    "pct_comp_max": 102.6302,
+    "pct_comp_first": 102.6302,
+    "r56_pct_comp": 99.98,
+    "perf_delta_pp": 2.6502,
+    "passes_10run_gate": false,
+    "win_line_crossed": true
+  },
+  "results": [
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 14336,
+      "tflops": 5435.4,
+      "avg_ms": 0.708,
+      "comp": 5296.1,
+      "status": "OK",
+      "kernel_finite": 1.0,
+      "snr_db": 55.61,
+      "snr_med_db": 55.61,
+      "snr_n_valid": 1048576,
+      "wrong_cell_frac": 0.0,
+      "seed": 101,
+      "wall_s": 8.5,
+      "gpu_id": 0
+    }
+  ]
+}
