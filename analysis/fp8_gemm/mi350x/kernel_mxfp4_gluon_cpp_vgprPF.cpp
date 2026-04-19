@@ -941,19 +941,46 @@ __device__ __forceinline__ void emit_one_pf_vgpr(const tile_pf_params& p, int id
 // The previous code used M0 + lane*16 + {0, 4, 8, 12} which is WRONG.
 //
 // Reference: AMD ISA spec for BUFFER_LOAD_DWORDX4 with LDS flag on gfx9/gfx950.
-// R34-OptB-fix-v6: the VGPR-staged data deposit is correct in isolation
-// (verified via test_vgpr_vs_lds.py) but corrupts data in the full kernel,
-// likely due to compiler register-pressure-driven VGPR clobbering between
-// the buffer_load_dwordx4 (emit_one_pf_vgpr) and ds_write_b32 calls when
-// interleaved with 32 MFMA asm blocks at 219 VGPRs.
+// R35-OptA-fix-v1: prior R34 attempt (emit re-issue as LDS-direct) made the
+// VGPR data unused, defeating the purpose of the fork. The compiler clobber
+// between buffer_load (emit_one_pf_vgpr) and ds_write (here) is fixed by:
 //
-// Pragmatic fix: re-issue the prefetch as buffer_load_to_lds (LDS-direct),
-// discarding the VGPR data. The VGPR loads from emit_one_pf_vgpr still
-// execute (maintaining register pressure for vmcnt(15) hypothesis), but the
-// correct data path is the LDS-direct re-issue.
+//   (a) `+v` keepalive barriers inserted after each load slot in the kpair
+//       function, forcing the compiler to keep the VGPR live.
+//   (b) Folding the keepalive + ds_write_b32 quartet into a SINGLE asm
+//       volatile block here — so the compiler sees src as a hard input
+//       constraint at the moment of the writes (no opportunity to clobber
+//       between asm blocks).
+//
+// Per-lane LDS address for size=16 buffer_load_to_lds equivalence:
+//   each lane writes 16B to LDS at M0 + voff[lane], where voff is the SAME
+//   per-lane offset used to index GMEM. This matches the hardware semantics
+//   of `buffer_load_dwordx4 ... lds`: the lane's 16B payload from GMEM is
+//   deposited into LDS at the lane's own voffset relative to M0.
 __device__ __forceinline__ void emit_one_pf_dswrite(const tile_pf_params& p, int idx, const float4 &src) {
-    // Re-issue prefetch as LDS-direct. The VGPR data in src is unused.
-    emit_one_pf(p, idx);
+    // Per-lane LDS address: uniform M0 (lds_addrs) + per-lane voff (same as GMEM).
+    uint32_t addr = p.lds_addrs[idx] + p.voffs[idx];
+    // Issue 4 ds_write_b32 in the SAME asm block as the src input constraint
+    // — this prevents the compiler from clobbering src between separate asm
+    // blocks. The `v` constraint forces all 4 components to be in registers
+    // at this exact program point.
+    asm volatile(
+        "ds_write_b32 %0, %1 offset:0\n"
+        "ds_write_b32 %0, %2 offset:4\n"
+        "ds_write_b32 %0, %3 offset:8\n"
+        "ds_write_b32 %0, %4 offset:12\n"
+        :
+        : "v"(addr), "v"(src.x), "v"(src.y), "v"(src.z), "v"(src.w)
+        : "memory"
+    );
+}
+
+// Keepalive barrier — forces the compiler to materialize a VGPR at this
+// program point. Used between emit_one_pf_vgpr (the load) and the eventual
+// emit_one_pf_dswrite (the store) to defeat the CDNA4 register-allocator
+// clobber bug across separate asm blocks.
+__device__ __forceinline__ void vgpr_keepalive(float4 &v) {
+    asm volatile("" : "+v"(v.x), "+v"(v.y), "+v"(v.z), "+v"(v.w));
 }
 #endif
 
@@ -1894,12 +1921,12 @@ __device__ __forceinline__ void kpair_32mfma_with_lds_and_pf_vgprB(
     );
     // Slot 0 (pf0[0])
     if constexpr (PF_N > 0) {
-        if constexpr (VGPR_N > 0) emit_one_pf_vgpr(pf0, 0, b_scratch[0]);
+        if constexpr (VGPR_N > 0) { emit_one_pf_vgpr(pf0, 0, b_scratch[0]); vgpr_keepalive(b_scratch[0]); }
         else                      emit_one_pf(pf0, 0);
     }
     // Slot 1 (pf0[1])
     if constexpr (PF_N > 1) {
-        if constexpr (VGPR_N > 1) emit_one_pf_vgpr(pf0, 1, b_scratch[1]);
+        if constexpr (VGPR_N > 1) { emit_one_pf_vgpr(pf0, 1, b_scratch[1]); vgpr_keepalive(b_scratch[1]); }
         else                      emit_one_pf(pf0, 1);
     }
     asm volatile(
@@ -1914,12 +1941,12 @@ __device__ __forceinline__ void kpair_32mfma_with_lds_and_pf_vgprB(
         : KPAIR_ACC_CLOBBER : KPAIR_INPUTS);
     // Slot 2 (pf0[2])
     if constexpr (PF_N > 2) {
-        if constexpr (VGPR_N > 2) emit_one_pf_vgpr(pf0, 2, b_scratch[2]);
+        if constexpr (VGPR_N > 2) { emit_one_pf_vgpr(pf0, 2, b_scratch[2]); vgpr_keepalive(b_scratch[2]); }
         else                      emit_one_pf(pf0, 2);
     }
     // Slot 3 (pf0[3])
     if constexpr (PF_N > 3) {
-        if constexpr (VGPR_N > 3) emit_one_pf_vgpr(pf0, 3, b_scratch[3]);
+        if constexpr (VGPR_N > 3) { emit_one_pf_vgpr(pf0, 3, b_scratch[3]); vgpr_keepalive(b_scratch[3]); }
         else                      emit_one_pf(pf0, 3);
     }
     asm volatile(
@@ -1934,12 +1961,12 @@ __device__ __forceinline__ void kpair_32mfma_with_lds_and_pf_vgprB(
         : KPAIR_ACC_CLOBBER : KPAIR_INPUTS);
     // Slot 4 (pf1[0])
     if constexpr (PF_N > 4) {
-        if constexpr (VGPR_N > 4) emit_one_pf_vgpr(pf1, 0, b_scratch[4]);
+        if constexpr (VGPR_N > 4) { emit_one_pf_vgpr(pf1, 0, b_scratch[4]); vgpr_keepalive(b_scratch[4]); }
         else                      emit_one_pf(pf1, 0);
     }
     // Slot 5 (pf1[1])
     if constexpr (PF_N > 5) {
-        if constexpr (VGPR_N > 5) emit_one_pf_vgpr(pf1, 1, b_scratch[5]);
+        if constexpr (VGPR_N > 5) { emit_one_pf_vgpr(pf1, 1, b_scratch[5]); vgpr_keepalive(b_scratch[5]); }
         else                      emit_one_pf(pf1, 1);
     }
     asm volatile(
@@ -1954,12 +1981,12 @@ __device__ __forceinline__ void kpair_32mfma_with_lds_and_pf_vgprB(
         : KPAIR_ACC_CLOBBER : KPAIR_INPUTS);
     // Slot 6 (pf1[2])
     if constexpr (PF_N > 6) {
-        if constexpr (VGPR_N > 6) emit_one_pf_vgpr(pf1, 2, b_scratch[6]);
+        if constexpr (VGPR_N > 6) { emit_one_pf_vgpr(pf1, 2, b_scratch[6]); vgpr_keepalive(b_scratch[6]); }
         else                      emit_one_pf(pf1, 2);
     }
     // Slot 7 (pf1[3])
     if constexpr (PF_N > 7) {
-        if constexpr (VGPR_N > 7) emit_one_pf_vgpr(pf1, 3, b_scratch[7]);
+        if constexpr (VGPR_N > 7) { emit_one_pf_vgpr(pf1, 3, b_scratch[7]); vgpr_keepalive(b_scratch[7]); }
         else                      emit_one_pf(pf1, 3);
     }
 }
@@ -1969,16 +1996,19 @@ __device__ __forceinline__ void kpair_32mfma_with_lds_and_pf_vgprB(
 // the float4 values are valid. Pairs slot indices to (pf, idx) tuples.
 __device__ __forceinline__ void emit_b_scratch_dswrites(
     const tile_pf_params &pf0, const tile_pf_params &pf1,
-    const float4 (&b_scratch)[8], int vgpr_n)
+    float4 (&b_scratch)[8], int vgpr_n)
 {
-    if (vgpr_n > 0) emit_one_pf_dswrite(pf0, 0, b_scratch[0]);
-    if (vgpr_n > 1) emit_one_pf_dswrite(pf0, 1, b_scratch[1]);
-    if (vgpr_n > 2) emit_one_pf_dswrite(pf0, 2, b_scratch[2]);
-    if (vgpr_n > 3) emit_one_pf_dswrite(pf0, 3, b_scratch[3]);
-    if (vgpr_n > 4) emit_one_pf_dswrite(pf1, 0, b_scratch[4]);
-    if (vgpr_n > 5) emit_one_pf_dswrite(pf1, 1, b_scratch[5]);
-    if (vgpr_n > 6) emit_one_pf_dswrite(pf1, 2, b_scratch[6]);
-    if (vgpr_n > 7) emit_one_pf_dswrite(pf1, 3, b_scratch[7]);
+    // Re-assert keepalive on each scratch VGPR right before the ds_write,
+    // to defeat any clobber that might have happened across the long span
+    // since emit_one_pf_vgpr was issued.
+    if (vgpr_n > 0) { vgpr_keepalive(b_scratch[0]); emit_one_pf_dswrite(pf0, 0, b_scratch[0]); }
+    if (vgpr_n > 1) { vgpr_keepalive(b_scratch[1]); emit_one_pf_dswrite(pf0, 1, b_scratch[1]); }
+    if (vgpr_n > 2) { vgpr_keepalive(b_scratch[2]); emit_one_pf_dswrite(pf0, 2, b_scratch[2]); }
+    if (vgpr_n > 3) { vgpr_keepalive(b_scratch[3]); emit_one_pf_dswrite(pf0, 3, b_scratch[3]); }
+    if (vgpr_n > 4) { vgpr_keepalive(b_scratch[4]); emit_one_pf_dswrite(pf1, 0, b_scratch[4]); }
+    if (vgpr_n > 5) { vgpr_keepalive(b_scratch[5]); emit_one_pf_dswrite(pf1, 1, b_scratch[5]); }
+    if (vgpr_n > 6) { vgpr_keepalive(b_scratch[6]); emit_one_pf_dswrite(pf1, 2, b_scratch[6]); }
+    if (vgpr_n > 7) { vgpr_keepalive(b_scratch[7]); emit_one_pf_dswrite(pf1, 3, b_scratch[7]); }
 }
 
 #endif // VGPR_PF_MODE

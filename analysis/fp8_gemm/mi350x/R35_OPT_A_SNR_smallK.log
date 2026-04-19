@@ -1,0 +1,18 @@
+=== R35 Opt A SNR (KERNEL-vs-KERNEL) at M=4096 N=32768 K=4096 ===
+
+[reference=tk_mxfp4_gluon_cpp_n32768_k4096_R35A_v12_memc_btw_all_legacyfork]
+  ref: finite= 39.8%  det= 44.1%  max_abs=338953138925153547590470800371487866880.00
+
+[V0_vgprpf]
+  finite= 83.6% det= 23.9% valid=  6.7% bit_eq= 95.51% SNR=    nan dB max_abs=3.376e+38 -> FAIL
+
+[V1_vmcnt15]
+  finite= 84.4% det= 23.9% valid=  6.6% bit_eq= 95.74% SNR=    nan dB max_abs=3.376e+38 -> FAIL
+
+[V2_vmcnt15_n8]
+  finite= 77.9% det= 15.1% valid=  4.7% bit_eq= 30.56% SNR=    nan dB max_abs=3.283e+38 -> FAIL
+
+[V3_vmcnt12_n4]
+  finite= 87.9% det= 25.4% valid=  6.6% bit_eq= 95.24% SNR=    nan dB max_abs=3.39e+38 -> FAIL
+
+Results: /shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/R35_OPT_A_SNR_smallK_RESULTS.json
