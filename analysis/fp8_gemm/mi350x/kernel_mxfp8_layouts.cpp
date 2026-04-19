@@ -2349,6 +2349,31 @@ static_assert(WARPS_M == 2, "MXFP8 exact 8-wave fast path requires WARPS_M=2");
 static_assert(WARPS_N == 4, "MXFP8 exact 8-wave fast path requires WARPS_N=4");
 static_assert(std::is_same_v<RCR_B_reg, B_row_reg>, "MXFP8 exact RCR fast path assumes row-layout B registers");
 
+// R47 Dev A: XCD-aware block swizzle for the MXFP8 RCR exact 8-wave fastpath.
+// Direct port of R46 Dev D's RRR swizzle (rrr_mxfp8_exact_8wave_fastpath.inc
+// lines 13-91, 65-98). Same chiplet swizzle (8 XCDs) + grouped-M (group=4)
+// applied to the row-major (br, bc) mapping. R47A clean re-bench (3 of 3
+// per cell, cooldown between cells, median):
+//   70B Gate/Up +8.46% ★ (the headline win — same shape that won +6.5% on RRR),
+//   70B Down    +2.90% ★, 8B Q/O +2.85%, 8B Down +1.21%, 8B Gate/Up -0.58%,
+//   70B Q/O -0.56%, 8192³ -0.22% (all regressions within -1% noise band).
+// Net-positive (worst -0.58%, four shapes >= +1%) -> ENABLED BY DEFAULT.
+// SNR 49.59-49.60 dB and det 3/3 PASS on 70B Gate/Up + 8192³ gating shapes.
+// NOTE: not safe to combine with MXFP8_RCR_V2_PERSISTENT (the persistent
+// early-exit on `blockIdx.x >= total_tiles` runs before the swizzle remap;
+// with persistent grid > total_tiles, the swizzle could produce out-of-range
+// (br, bc). Default persistent=0 so this is a non-issue today. If persistent
+// is ever turned on, gate the swizzle on `bid < total_tiles_compile` first.)
+#ifndef MXFP8_RCR_BLOCK_SWIZZLE
+#define MXFP8_RCR_BLOCK_SWIZZLE 1
+#endif
+#ifndef MXFP8_RCR_BLOCK_SWIZZLE_NUM_XCDS
+#define MXFP8_RCR_BLOCK_SWIZZLE_NUM_XCDS 8
+#endif
+#ifndef MXFP8_RCR_BLOCK_SWIZZLE_GROUP_M
+#define MXFP8_RCR_BLOCK_SWIZZLE_GROUP_M 4
+#endif
+
 template<bool PRESHUFFLED_QUANT, int SCALE_VERSION = 1>
 __global__ __launch_bounds__(_NUM_THREADS, GEMM_MIN_BLOCKS_PER_CU)
 void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
@@ -2358,8 +2383,12 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
     //       buffer_load_b128 for A, buffer_load_b64 for B)
     static_assert(N_DIM % BLK == 0, "MXFP8 exact 8-wave fast path requires N_DIM divisible by BLK");
     static_assert(K_DIM % BK == 0, "MXFP8 exact 8-wave fast path requires K_DIM divisible by BK");
+    // R47 Dev A: constexpr-promote blocks_per_row and k_iters (mirrors R46 Dev D
+    // RRR fastpath change) to enable full unrolling and better compile-time
+    // scheduling now that the swizzle introduces extra integer math.
+    constexpr int blocks_per_row = M_DIM / BLK;
     constexpr int blocks_per_col = N_DIM / BLK;
-    const int k_iters = g.k / BK;
+    constexpr int k_iters = K_DIM / BK;
     constexpr int half_block_size_row = BLK / 2;
     constexpr int half_block_size_col = BLK / 2;
 
@@ -2406,9 +2435,42 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
         return;
     }
 #endif
-    const int bid = blockIdx.x;
+    int bid = blockIdx.x;
+#if MXFP8_RCR_BLOCK_SWIZZLE
+    // R47 Dev A: XCD-aware chiplet swizzle + grouped-M swizzle.
+    // Direct port of R46 Dev D's RRR swizzle. The bid → (br, bc) mapping is
+    // identical in both kernels (row-major blocks), so the same chiplet
+    // remap and group-M reorder applies.
+    {
+        const int num_wgs = gridDim.x;
+        if (num_wgs >= MXFP8_RCR_BLOCK_SWIZZLE_NUM_XCDS &&
+            (num_wgs % MXFP8_RCR_BLOCK_SWIZZLE_NUM_XCDS) == 0) {
+            bid =
+                (bid % MXFP8_RCR_BLOCK_SWIZZLE_NUM_XCDS) *
+                    (num_wgs / MXFP8_RCR_BLOCK_SWIZZLE_NUM_XCDS) +
+                (bid / MXFP8_RCR_BLOCK_SWIZZLE_NUM_XCDS);
+        }
+    }
+    // Grouped-M swizzle: group M-tiles so adjacent blocks share B-tiles.
+    const int num_wgid_in_group = MXFP8_RCR_BLOCK_SWIZZLE_GROUP_M * blocks_per_col;
+    const int group_id = bid / num_wgid_in_group;
+    const int first_pid_m = group_id * MXFP8_RCR_BLOCK_SWIZZLE_GROUP_M;
+    const int group_size_m =
+        (first_pid_m + MXFP8_RCR_BLOCK_SWIZZLE_GROUP_M <= blocks_per_row)
+            ? MXFP8_RCR_BLOCK_SWIZZLE_GROUP_M
+            : (blocks_per_row - first_pid_m);
+    int br, bc;
+    if (group_size_m <= 0) {
+        br = blocks_per_row;
+        bc = blocks_per_col;
+    } else {
+        br = first_pid_m + ((bid % num_wgid_in_group) % group_size_m);
+        bc = (bid % num_wgid_in_group) / group_size_m;
+    }
+#else
     const int br = bid / blocks_per_col;
     const int bc = bid % blocks_per_col;
+#endif
     const int wm = warpid() / WARPS_N;
     const int wn = warpid() % WARPS_N;
     const int lane_nonk = kittens::laneid() % 16;
