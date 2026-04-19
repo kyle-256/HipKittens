@@ -1,0 +1,14 @@
+R56 Opt G-2 / L5 — mode=10run, gpu=[2], shape=(14336,32768,4096), tile=256x256
+==========================================================================================
+  seed=  101 gpu=2 status=OK                     fin=1.0      wcf=0.0        snr_med=55.56    tflops=4641.3     (8.7s)
+  seed=  202 gpu=2 status=CORRECT_NO_PERF        fin=1.0      wcf=0.0        snr_med=55.55264640756599 tflops=None       (8.2s)
+  seed=  303 gpu=2 status=CORRECT_NO_PERF        fin=1.0      wcf=0.0        snr_med=55.57247780590555 tflops=None       (8.1s)
+  seed=  404 gpu=2 status=CORRECT_NO_PERF        fin=1.0      wcf=0.0        snr_med=55.548778239008634 tflops=None       (8.2s)
+  seed=  505 gpu=2 status=CORRECT_NO_PERF        fin=1.0      wcf=0.0        snr_med=55.556784004741154 tflops=None       (8.1s)
+  seed=  606 gpu=2 status=CORRECT_NO_PERF        fin=1.0      wcf=0.0        snr_med=55.57346566232364 tflops=None       (8.0s)
+  seed=  707 gpu=2 status=CORRECT_NO_PERF        fin=1.0      wcf=0.0        snr_med=55.545113004785605 tflops=None       (7.9s)
+  seed=  808 gpu=2 status=CORRECT_NO_PERF        fin=1.0      wcf=0.0        snr_med=55.55688853689449 tflops=None       (8.1s)
+  seed=  909 gpu=2 status=CORRECT_NO_PERF        fin=1.0      wcf=0.0        snr_med=55.55129166234134 tflops=None       (8.1s)
+  seed= 1010 gpu=2 status=CORRECT_NO_PERF        fin=1.0      wcf=0.0        snr_med=55.55071453047253 tflops=None       (8.1s)
+------------------------------------------------------------------------------------------
+SUMMARY: {"mode": "10run", "shape": [14336, 32768, 4096], "tile": [256, 256], "competitor_tflops": 4462.6, "n_runs": 10, "n_OK": 10, "n_OK_5": 10, "fin_min": 1.0, "fin_max": 1.0, "wcf_min": 0.0, "wcf_max": 0.0, "wcf_std": 0.0, "snr_min": 55.545113004785605, "snr_max": 55.57346566232364, "snr_med": 55.554715206153574, "tflops_first": 4641.3, "tflops_max": 4641.3, "pct_comp_first": 104.0, "passes_10run_gate": true}

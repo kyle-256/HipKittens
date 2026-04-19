@@ -1,0 +1,49 @@
+{
+  "summary": {
+    "mode": "smoke",
+    "shape": [
+      4096,
+      32768,
+      14336
+    ],
+    "tile": [
+      128,
+      512
+    ],
+    "competitor_tflops": 5296.1,
+    "n_runs": 1,
+    "n_OK": 1,
+    "n_OK_5": 1,
+    "fin_min": 1.0,
+    "fin_max": 1.0,
+    "wcf_min": 0.0,
+    "wcf_max": 0.0,
+    "wcf_std": 0.0,
+    "snr_min": 55.61,
+    "snr_max": 55.61,
+    "snr_med": 55.61,
+    "tflops_first": 4857.0,
+    "tflops_max": 4857.0,
+    "pct_comp_first": 91.71,
+    "passes_10run_gate": false
+  },
+  "results": [
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 14336,
+      "tflops": 4857.0,
+      "avg_ms": 0.7923,
+      "comp": 5296.1,
+      "status": "OK",
+      "kernel_finite": 1.0,
+      "snr_db": 55.61,
+      "snr_med_db": 55.61,
+      "snr_n_valid": 1048576,
+      "wrong_cell_frac": 0.0,
+      "seed": 101,
+      "wall_s": 9.3,
+      "gpu_id": 4
+    }
+  ]
+}

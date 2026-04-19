@@ -1,0 +1,35 @@
+{
+  "round": "R56",
+  "opt": "G-1",
+  "cell_label": "L6",
+  "shape": [16384, 4096, 14336],
+  "current_baseline": {
+    "source": "R53D3C_3_AITER",
+    "tile": [64, 1024],
+    "pct_comp": 90.28
+  },
+  "alt_tile": [256, 256],
+  "co_path": "/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co",
+  "kernel_name": "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E",
+  "shim_so": "build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so",
+  "shim_rebuild_required": false,
+  "grid": {"gdx": 16, "gdy": 64, "gdz": 1, "bdx": 256},
+  "kernel_args": [16384, 4096, 14336],
+  "smoke_pass": true,
+  "smoke_tflops": 5658.0,
+  "smoke_pct_comp": 110.03,
+  "ten_run": {
+    "seeds": [101, 202, 303, 404, 505, 606, 707, 808, 909, 1010],
+    "warmup": 200, "iters": 500, "trim_frac": 0.10,
+    "n_OK": 10, "wcf_max": 0.0, "wcf_std": 0.0, "fin_min": 1.0,
+    "snr_med": 55.598,
+    "tflops_p50": 5666.4,
+    "tflops_first": 5666.4,
+    "pct_comp": 110.20,
+    "competitor_tflops": 5142.1,
+    "passes_10run_gate": true
+  },
+  "perf_delta_pp": 19.92,
+  "verdict": "PROMOTE",
+  "verdict_reason": "10-run gate PASS (n_OK=10/10, wcf_max=0, fin_min=1.0, bit-deterministic AITER); pct_comp 90.28 -> 110.20 (+19.92pp), exceeds 1.0pp PROMOTE threshold by 18.92pp. Sub-100% LOSE -> WIN. Sister to R55 D-5A 16384x4096x* cluster — mechanism-validated."
+}

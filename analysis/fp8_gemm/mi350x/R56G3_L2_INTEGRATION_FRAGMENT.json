@@ -1,0 +1,34 @@
+{
+  "round": "R56",
+  "opt": "G-3",
+  "cell_label": "L2",
+  "shape": [32768, 4096, 14336],
+  "current_baseline": {
+    "source": "R53D3B_2_AITER",
+    "tile": [64, 1024],
+    "pct_comp": 84.13
+  },
+  "alt_tile": [128, 512],
+  "co_path": "/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_128x512.co",
+  "kernel_name": "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_128x512E",
+  "shim_so": "build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so",
+  "shim_rebuild_required": false,
+  "grid": {"gdx": 8, "gdy": 256, "gdz": 1, "bdx": 256},
+  "kernel_args": [32768, 4096, 14336],
+  "smoke_pass": true,
+  "ten_run": {
+    "seeds": [101, 202, 303, 404, 505, 606, 707, 808, 909, 1010],
+    "warmup": 200,
+    "iters": 500,
+    "trim_frac": 0.10,
+    "n_OK": 10,
+    "wcf_max": 0.0,
+    "wcf_std": 0.0,
+    "fin_min": 1.0,
+    "tflops_p50": 5468.7,
+    "pct_comp": 104.70
+  },
+  "perf_delta_pp": 20.57,
+  "verdict": "PROMOTE",
+  "verdict_reason": "10/10 n_OK, bit-deterministic; pct_comp 84.13 -> 104.70 (+20.57pp), exceeds competitor TFLOPS by 4.7pp. PROMOTE gate (>85.13) cleared by wide margin. 128x512 ALSO promotes on L2."
+}
