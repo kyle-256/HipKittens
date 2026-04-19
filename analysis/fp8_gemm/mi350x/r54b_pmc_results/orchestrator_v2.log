@@ -1,0 +1,69 @@
+=== 70B_Down 4096x8192x28672 ===
+  running fp8 70B_Down set1
+  running fp8 70B_Down set3
+  running mxfp8 70B_Down set1
+    ABORT mxfp8 70B_Down set1 rc=1
+W20260419 19:25:54.523803 139794012466688 simple_timer.cpp:55] [rocprofv3] tool initialization ::     0.143277 sec
+W20260419 19:25:54.524067 139794012466688 simple_timer.cpp:55] [rocprofv3] 'python3 test_mxfp8_python.py 4096 8192 28672' ::     0.000000 sec
+Traceback (most recent call last):
+  File "/shared_nfs/kyle/test/Hipkittens2/analysis/fp8_gemm/mi350x/r54b_workspace/builds/70B_Down/test_mxfp8_python.py", line 12, in <module>
+    import tk_mxfp8_layouts
+ModuleNotFoundError: No module named 'tk_mxfp8_layouts'
+W20260419 19:25:55.563663 139794012466688 simple_timer.cpp:55] [rocprofv3] 'python3 test_mxfp8_python.py 4096 8192 28672' ::     1.039596 sec
+W20260419 19:25:55.565621 139794012466688 simple_timer.cpp:55] [rocprofv3] output generation ::     0.001772 sec
+W20260419 19:25:55.565784 139794012466688 simple_timer.cpp:55] [rocprofv3] tool finalization ::     0.001942 sec
+[rocprofv3] Fatal error: Command '['python3', 'test_mxfp8_python.py', '4096', '8192', '28672']' returned non-zero exit status 1.
+  running mxfp8 70B_Down set3
+    ABORT mxfp8 70B_Down set3 rc=1
+W20260419 19:26:01.219608 140635828522496 simple_timer.cpp:55] [rocprofv3] tool initialization ::     0.147253 sec
+W20260419 19:26:01.219825 140635828522496 simple_timer.cpp:55] [rocprofv3] 'python3 test_mxfp8_python.py 4096 8192 28672' ::     0.000000 sec
+Traceback (most recent call last):
+  File "/shared_nfs/kyle/test/Hipkittens2/analysis/fp8_gemm/mi350x/r54b_workspace/builds/70B_Down/test_mxfp8_python.py", line 12, in <module>
+    import tk_mxfp8_layouts
+ModuleNotFoundError: No module named 'tk_mxfp8_layouts'
+W20260419 19:26:02.125996 140635828522496 simple_timer.cpp:55] [rocprofv3] 'python3 test_mxfp8_python.py 4096 8192 28672' ::     0.906171 sec
+W20260419 19:26:02.127803 140635828522496 simple_timer.cpp:55] [rocprofv3] output generation ::     0.001647 sec
+W20260419 19:26:02.127945 140635828522496 simple_timer.cpp:55] [rocprofv3] tool finalization ::     0.001794 sec
+[rocprofv3] Fatal error: Command '['python3', 'test_mxfp8_python.py', '4096', '8192', '28672']' returned non-zero exit status 1.
+=== 8B_Down 4096x4096x14336 ===
+  running fp8 8B_Down set1
+  running fp8 8B_Down set3
+  running mxfp8 8B_Down set1
+    ABORT mxfp8 8B_Down set1 rc=1
+W20260419 19:27:16.137908 140261044338176 simple_timer.cpp:55] [rocprofv3] tool initialization ::     0.151953 sec
+W20260419 19:27:16.138140 140261044338176 simple_timer.cpp:55] [rocprofv3] 'python3 test_mxfp8_python.py 4096 4096 14336' ::     0.000000 sec
+Traceback (most recent call last):
+  File "/shared_nfs/kyle/test/Hipkittens2/analysis/fp8_gemm/mi350x/r54b_workspace/builds/8B_Down/test_mxfp8_python.py", line 12, in <module>
+    import tk_mxfp8_layouts
+ModuleNotFoundError: No module named 'tk_mxfp8_layouts'
+W20260419 19:27:17.036002 140261044338176 simple_timer.cpp:55] [rocprofv3] 'python3 test_mxfp8_python.py 4096 4096 14336' ::     0.897863 sec
+W20260419 19:27:17.037969 140261044338176 simple_timer.cpp:55] [rocprofv3] output generation ::     0.001759 sec
+W20260419 19:27:17.038136 140261044338176 simple_timer.cpp:55] [rocprofv3] tool finalization ::     0.001932 sec
+[rocprofv3] Fatal error: Command '['python3', 'test_mxfp8_python.py', '4096', '4096', '14336']' returned non-zero exit status 1.
+  running mxfp8 8B_Down set3
+    ABORT mxfp8 8B_Down set3 rc=1
+W20260419 19:27:22.672282 140479652158976 simple_timer.cpp:55] [rocprofv3] tool initialization ::     0.147019 sec
+W20260419 19:27:22.672538 140479652158976 simple_timer.cpp:55] [rocprofv3] 'python3 test_mxfp8_python.py 4096 4096 14336' ::     0.000000 sec
+Traceback (most recent call last):
+  File "/shared_nfs/kyle/test/Hipkittens2/analysis/fp8_gemm/mi350x/r54b_workspace/builds/8B_Down/test_mxfp8_python.py", line 12, in <module>
+    import tk_mxfp8_layouts
+ModuleNotFoundError: No module named 'tk_mxfp8_layouts'
+W20260419 19:27:23.581661 140479652158976 simple_timer.cpp:55] [rocprofv3] 'python3 test_mxfp8_python.py 4096 4096 14336' ::     0.909123 sec
+W20260419 19:27:23.583559 140479652158976 simple_timer.cpp:55] [rocprofv3] output generation ::     0.001718 sec
+W20260419 19:27:23.583709 140479652158976 simple_timer.cpp:55] [rocprofv3] tool finalization ::     0.001874 sec
+[rocprofv3] Fatal error: Command '['python3', 'test_mxfp8_python.py', '4096', '4096', '14336']' returned non-zero exit status 1.
+=== 70B_QO 4096x8192x8192 ===
+  running fp8 70B_QO set1
+  running fp8 70B_QO set3
+  running mxfp8 70B_QO set1
+    ABORT mxfp8 70B_QO set1 rc=1
+W20260419 19:28:19.795196 140300885712384 simple_timer.cpp:55] [rocprofv3] tool initialization ::     0.144950 sec
+W20260419 19:28:19.795430 140300885712384 simple_timer.cpp:55] [rocprofv3] 'python3 test_mxfp8_python.py 4096 8192 8192' ::     0.000000 sec
+Traceback (most recent call last):
+  File "/shared_nfs/kyle/test/Hipkittens2/analysis/fp8_gemm/mi350x/r54b_workspace/builds/70B_QO/test_mxfp8_python.py", line 12, in <module>
+    import tk_mxfp8_layouts
+ModuleNotFoundError: No module named 'tk_mxfp8_layouts'
+W20260419 19:28:20.669557 140300885712384 simple_timer.cpp:55] [rocprofv3] 'python3 test_mxfp8_python.py 4096 8192 8192' ::     0.874127 sec
+W20260419 19:28:20.671508 140300885712384 simple_timer.cpp:55] [rocprofv3] output generation ::     0.001770 sec
+W20260419 19:28:20.671671 140300885712384 simple_timer.cpp:55] [rocprofv3] tool finalization ::     0.001938 sec
+[rocprofv3] Fatal error: Command '['python3', 'test_mxfp8_python.py', '4096', '8192', '8192']' returned non-zero exit status 1.
