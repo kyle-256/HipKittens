@@ -54,6 +54,36 @@ python3 test_mxfp8_python.py 4096 14336 4096
 5. 禁止提交 `*.so`、`*.s`、`*_layout_results_*.json`、`.bak*`、`gpucore.*`、`__pycache__` 等（`.gitignore` 已覆盖）
 6. 每个子 agent 使用不同 `HIP_VISIBLE_DEVICES` 以免 GPU 冲突：Dev A → 0，Dev B → 1，Dev C → 2，Reviewer/formal → 7
 
+## R46 cycle 完结 (2026-04-19) ★ 1 SHIP (Dev D RRR XCD swizzle DEFAULT ON, +6.5%/+3.0% production wins) + 1 REFUTATION (Dev C CRR k-pair -7~-11% universal) + 1 PROFILING (Dev A: scaled-MFMA 3-7% irreducible) — baseline 5/21 PASS (R45 was 3/21)
+
+R46 派 4 dev (A profiling, B/C/D crashed). Dev D 工作在 main-worktree uncommitted 残留被救援并验证 ship-quality；Dev C 验证为 universal 回归丢弃。
+
+- **Dev A** (`927c898f`) PROFILING: gap 由 3 部分组成 — `v_mfma_scale_f32_16x16x128_f8f6f4` vs unscaled MFMA = 3-7% **largely irreducible**; L2 scale cache 0-3% (worst large-N: 70B Gate/Up B-scale 工作集 7.3 MB / 1792 CTAs); VMEM contention 0-3% (worst large-K: 70B Down 224 K-iter × 112 scale load pair). 6 closed levers + 3 open opportunities (XCD swizzle ✓, scale cachepolicy SLC, prefetch overlap).
+- **Dev B** (RCR K-loop) — agent crashed, no work
+- **Dev C** (CRR k-pair) ★ REFUTED: 替换 fixed_phase + scale shift 为 k-pair loop with `crr_mma_scaled_from_raw_packs`. Sweep 全部 7 shapes: 8192³ -9.88%, 8B Q/O -10.60%, 8B Gate/Up -10.12%, 8B Down -11.50%, 70B Q/O -10.92%, 70B Gate/Up -7.81%, 70B Down -6.55%. Root cause: runtime k_phase branch 击败预测器 + raw-packs register pressure. **代码丢弃**.
+- **Dev D** (`ad6cb5ab`) ★ SHIP: XCD-aware chiplet swizzle (8 XCDs) + grouped-M (group=4) for `rrr_exact_8wave_scaled_kernel`. `MXFP8_RRR_BLOCK_SWIZZLE` **默认 ON**. Sweep 全部 7 shapes: 70B Gate/Up RRR +6.51%★, 70B Down RRR +2.99%★, 8B Q/O +1.43%, 8B Down +1.14%, 70B Q/O +0.19%, 8192³ -0.25%, 8B Gate/Up -0.74% (within ±2% within-GPU envelope). 全 21 cells SNR 49.6 dB + det 3/3 PASS. constexpr promotion of blocks_per_row/col + k_iters 启用 full unroll.
+
+### R46 全量 baseline (GPU2, swizzle ON, all SNR=49.6dB + det 3/3 PASS)
+| Shape | RCR% | RRR% | CRR% |
+|---|---:|---:|---:|
+| 8192³ | **95.2** | **97.0** | 94.3 |
+| 8B Q/O | 91.8 | 90.1 | 88.4 |
+| 8B Gate/Up | 93.1 | 91.9 | 91.4 |
+| 8B Down | 94.4 | **105.3** | 94.6 |
+| 70B Q/O | **95.1** | 94.3 | 94.9 |
+| 70B Gate/Up | 90.5 | 94.3 | 86.3 |
+| 70B Down | 90.5 | **107.2** | 85.3 |
+
+**PASS 5/21** (R45 was 3/21): 8192³ RCR/RRR + 8B Down RRR + 70B Q/O RCR + 70B Down RRR. Worst still: 70B Down CRR 85.3%, 70B Gate/Up CRR 86.3%.
+
+### R46 paradigm corrections (1 → cumulative 46; R32-R45=45 + R46:1)
+
+### R47+ priority list
+1. **CRR fastpath structural gap** — 6/7 CRR cells 85-95%; CRR k-pair refuted, need different angle (A-transpose fetch? scale prefetch overlap?)
+2. **8B shapes universally below gate** — 91-93% RCR; Dev A profiling suggests scaled-MFMA 3-7% overhead is largely irreducible (verify via assembly compare)
+3. **70B Gate/Up RCR 90.5%** + **70B Down RCR 90.5%** — try porting Dev D's XCD swizzle to RCR fastpath
+4. **Scale cachepolicy SLC tuning** — try `MXFP8_RCR_V2_SCALE_CACHEPOLICY=2` for SLC on large-N
+
 ## R45 cycle 完结 (2026-04-19) ★ STRATEGY PIVOT — compute-bound prefill focus + 1 REFUTATION (45th lever) + baseline established 3/21 PASS
 
 - **Dev A** (salvaged) SCLK-CONTAMINATED: M=2..16 4-GPU sweep, 30/48 cells R36 3-gate exhausted. Dispatch trace confirms R44A kernel hits. DEPRIORITIZED (decode = memory-bound).

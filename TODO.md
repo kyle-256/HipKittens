@@ -47,6 +47,44 @@
 
 **baseline 建立**：首次需在每个 LLaMA shape 上跑 FP8 per-tensor + MXFP8 V2 baseline 各 5x，记录 median TFLOPS 作为后续对照。
 
+## R46 cycle 完结 (2026-04-19, 4 devs派出 — A profiling, B/C/D crashed或被 main-worktree 救援) ★ 1 SHIP (Dev D RRR XCD swizzle, +6.5% 70B Gate/Up, +3.0% 70B Down, DEFAULT ON) + 1 REFUTATION (Dev C CRR k-pair loop, -7~-11% universal) + 1 PROFILING ANALYSIS (Dev A: scaled-MFMA 3-7% irreducible, L2 scale-cache 0-3%, VMEM contention 0-3%) — baseline 5/21 PASS (R45 was 3/21)
+
+R46 派 4 dev (A profiling, B RCR K-loop scale optimization, C CRR fastpath, D RRR N>K swizzle) + Reviewer (skipped). Dev B/C/D agents crashed; Dev D 工作在 main-worktree 残留 uncommitted 被救援并验证 ship-quality；Dev C k-pair loop 被验证为 universal 回归并丢弃。**★ SHIP: RRR XCD-aware block swizzle 默认 ON，70B Gate/Up RRR 87.9%→94.3% (+6.4pp), 70B Down RRR 105.5%→107.2% (+1.7pp)，无 net 回归。**
+
+### R46 Dev results
+- **Dev A** (`927c898f`) PROFILING: MXFP8 vs FP8 RCR 8-wave fastpath 全面对比。Gap 由 3 部分组成 — (1) `v_mfma_scale_f32_16x16x128_f8f6f4` vs unscaled MFMA issue throughput 差 = 3-7% **largely irreducible**; (2) L2 scale cache pressure 0-3%, 最严重在 large-N (70B Gate/Up B-scale 工作集 ~7.3 MB across 1792 CTAs); (3) VMEM contention 0-3%, 最严重在 large-K (70B Down 224 K-iter 生成 112 scale load pair). Resource usage 几乎一致（occupancy 2 waves/SIMD）, 6 closed levers 已确认, 3 open opportunities (XCD swizzle, scale cachepolicy SLC, scale prefetch overlap).
+- **Dev B** — agent crashed, no work salvageable. RCR K-loop scale optimization 未完成。
+- **Dev C** (worktree clean, uncommitted prototype 在 main worktree, REFUTED+丢弃) CRR k-pair main loop 替换 fixed_phase + scale shift。Hypothesis: 消除 odd-k iteration 的 6 个 scale-shift ops 应该 +3-7%。Sweep 全部 7 shapes: **-7% 到 -11% 通用回归** (8192³ -9.88%, 8B Q/O -10.60%, 8B Gate/Up -10.12%, 8B Down -11.50%, 70B Q/O -10.92%, 70B Gate/Up -7.81%, 70B Down -6.55%)。Root cause: `crr_mma_scaled_from_raw_packs` 的 runtime k_phase branch 击败预测器 + raw-packs 路径 register pressure 增大. **代码丢弃**, sweep 数据保留为 refutation evidence (`r46_kpair_results/`).
+- **Dev D** (`ad6cb5ab`, salvaged from main-worktree uncommitted) ★ SHIP: XCD-aware chiplet swizzle (8 XCDs) + grouped-M (group=4) tile mapping for `rrr_exact_8wave_scaled_kernel`. Sweep 全部 7 shapes: 70B Gate/Up RRR +6.51%★, 70B Down RRR +2.99%★, 8B Q/O +1.43%, 8B Down +1.14%, 70B Q/O +0.19%, 8192³ -0.25%, 8B Gate/Up -0.74%（worst, 在 R44D ±2% within-GPU envelope 内）。`MXFP8_RRR_BLOCK_SWIZZLE` 默认 ON. Correctness: 全 21 cells SNR 49.6 dB + det 3/3 PASS. constexpr promotion of blocks_per_row/col + k_iters 启用 full unroll.
+
+### R46 全量 compute-bound baseline (GPU2, swizzle ON, warmup=100, iters=200, SNR>45 + det 3/3 PASS on all)
+| Shape | FP8 RCR | MX RCR | RCR% | FP8 RRR | MX RRR | RRR% | FP8 CRR | MX CRR | CRR% |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 8192³ | 3089 | 2940 | **95.2%** | 3018 | 2927 | **97.0%** | 2882 | 2719 | 94.3% |
+| 8B Q/O (4096³) | 2449 | 2249 | 91.8% | 2520 | 2272 | 90.1% | 2390 | 2113 | 88.4% |
+| 8B Gate/Up | 2725 | 2538 | 93.1% | 2760 | 2537 | 91.9% | 2574 | 2353 | 91.4% |
+| 8B Down | 3062 | 2890 | 94.4% | 2756 | 2903 | **105.3%** | 2850 | 2696 | 94.6% |
+| 70B Q/O | 3018 | 2869 | **95.1%** | 3029 | 2856 | 94.3% | 2821 | 2677 | 94.9% |
+| 70B Gate/Up | 2931 | 2652 | 90.5% | 2942 | 2775 | 94.3% | 2796 | 2411 | 86.3% |
+| 70B Down | 3214 | 2910 | 90.5% | 2764 | 2964 | **107.2%** | 2990 | 2551 | 85.3% |
+
+**PASS 5/21** (R45 was 3/21): 8192³ RCR (95.2%) + 8192³ RRR (97.0%) + 8B Down RRR (105.3%) + 70B Q/O RCR (95.1%) + 70B Down RRR (107.2%). Correctness: all 21 cells SNR=49.6 dB, det 3/3 PASS.
+
+### R46 paradigm corrections (1 closed + 1 refuted → cumulative 46 closed + 4 refuted; R32:21 + R33:5 + R34:4 + R35:1 + R36:2 + R37:2 + R38:2 + R39:1 + R40:1 + R41:3 + R42:1 + R43:0 + R44:1 + R45:1 + R46:1)
+
+### R46 Cherry-pick status (1/4 on `feat/mxfp8-only`, 3 agent crashes)
+- `927c898f` Dev A — profiling findings (6 closed levers confirmed, 3 open opportunities documented)
+- `ad6cb5ab` Dev D — RRR XCD-aware block swizzle (DEFAULT ON, +6.5% / +3.0% production wins)
+- Dev B (RCR K-loop) — agent crashed, no work
+- Dev C (CRR k-pair) — REFUTED, code discarded, sweep data committed as evidence
+
+### R47+ priority list (gap focus)
+1. **CRR fastpath structural gap** — 6/7 CRR cells at 85-95%, worst 70B Down 85.3% / 70B Gate/Up 86.3%. CRR k-pair refuted; need different angle (A-transpose fetch pattern? scale prefetch overlap?).
+2. **8B shapes universally below gate** — 8B Q/O / Gate/Up RCR all 91-93%. Dev A finding suggests scaled-MFMA 3-7% overhead is **largely irreducible**, so most of remaining 5-7pp gap may be hardware ceiling. Verify via assembly compare.
+3. **70B Gate/Up RCR 90.5%** — Dev D swizzle helped RRR (+6.5%) but RCR same path doesn't have the swizzle. Try RCR XCD swizzle next.
+4. **70B Down RCR 90.5%** — Same, RCR variant of RRR's +3% gain.
+5. **Scale cachepolicy SLC tuning** — Dev A's 3 open opportunities: try `MXFP8_RCR_V2_SCALE_CACHEPOLICY=2` for SLC on large-N shapes.
+
 ## R45 cycle 完结 (2026-04-19, 4 devs, reviewer crashed) ★ STRATEGY PIVOT — memory-bound decode DEPRIORITIZED, focus compute-bound prefill + 1 REFUTATION (45th lever) + 1 methodology advance (within-GPU variance baseline) + 1 NEW kernel prototype (B-side vectorization BVEC, bitwise-correct +543-817% preliminary)
 
 R45 派 4 dev (A M=2..16 SHIP retry, B Gate/Up BLK_N=256, C B-side vectorization, D within-GPU variance + split-K scoping) + Reviewer (crashed — no work). **★ STRATEGY PIVOT: memory-bound decode shapes DEPRIORITIZED (M=1/2..16/32/128 all AI<300). R46+ focus on compute-bound prefill (M=4096). Baseline established: 3/21 cells PASS ≥95%, worst gap 14% on CRR large-K/N shapes.**
