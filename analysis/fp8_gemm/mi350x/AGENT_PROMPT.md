@@ -78,6 +78,12 @@ R25-G 之前各类已知 dead (history): `iterative-ilp` 编译器 bug, BK=256 L
 | ~~V5 — MFMA_32X32X64_TILING 重构~~ | — | 死 | R33 archaeology 证实 aiter 用相同 16×16 MFMA shape 撞到 5781 ceiling. V5 upper bound ≤ aiter. 不要再考虑. |
 | ~~V6 — split-K~~ | — | 死 | R32 Opt B (`52b8d54c`): POC 干净实现但 grid-saturated shape 上 mechanically dead. K_SPLIT=2 −11.53%, K_SPLIT=4 −23.37%. 不要重试. |
 
+### R34 — 未完成但有 durable knowledge (不要重试除非有 keepalive fix)
+- ~~Scale-load granularity (R33 Finding #3)~~ — 5325 TFLOPS = -0.5%. Dead.
+- **VGPR-PF prefetch fork** — 架构可行 (219 VGPR/0 spills) 但 **compiler clobbers scratch VGPRs** 跨大 MFMA asm blocks. 这是 CDNA4 clang 的 register-allocator bug. Fix (re-issue LDS-direct) 通过 correctness 但消除 VGPR pressure → vmcnt(15) 无法测试.
+- **下一步**: 需要 `asm volatile("" : "+v"(b_scratch[i]))` keepalive barriers 或 单个巨型 asm block 包含整个 load→MFMA→ds_write. 估计 4-8 小时.
+- **SNR 方法论**: K=128256 上所有 SNR 测试都坏了 (ALL kernels produce ~50% NaN/inf). **必须用 K=4096 + torch reference 验证, SNR > 40 dB**.
+
 DEAD post-R33 (不要再尝试 — 已 reproduce 过):
 - ~~BARRIER_TO_WAITCNT_RELAXED_VMCNT≥15 on L6~~ — `R33_OPT_A_VERDICT.md` + `R33_OPT_D_VERDICT.md`. RELAXED_VMCNT=15/25 全 HSA aperture viol (50-100% crash), with OR without aiter SRD swap. Crash 机制在 prefetch pipeline / R22B coherency, 不在 SRD bounds.
 - ~~SRD config swap 到 aiter pattern~~ — `R33_OPT_D_VERDICT.md` + fork `kernel_mxfp4_gluon_cpp_aiterSRD.cpp`. swap `(0xFFFFFFFFu, 0x00110000u)` → `(-16, 0x00020000, word1|=0x40000)` 干净 build (212 VGPR/0 spill) 但 perf NEUTRAL (-0.15% noise) 且不解锁 vmcnt(15). R33_AITER_ARCHAEOLOGY.md Finding #1 REFUTED.

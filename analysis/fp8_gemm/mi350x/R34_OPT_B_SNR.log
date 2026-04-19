@@ -1,0 +1,28 @@
+Generating shared inputs (DETERMINISTIC scales=0)...
+
+[incumbent] running...
+  incumbent: finite_frac=0.5074  small_frac=0.4692  max|small|=999424.00
+
+[V0_legacyfork] running...
+  small_frac=0.5306 both_small=0.4397 cov=0.9371 snr=-0.92 dB n_diff=13962514 (23.657% of both) max_abs=1695744.0000 mean_abs=544.305237
+
+[V0_vgprpf] running...
+  small_frac=0.4463 both_small=0.4052 cov=0.8636 snr=-2.42 dB n_diff=33297261 (61.219% of both) max_abs=1214464.0000 mean_abs=1967.422607
+
+[V1_vmcnt15] running...
+  small_frac=0.4430 both_small=0.4023 cov=0.8574 snr=-3.29 dB n_diff=32165401 (59.565% of both) max_abs=1437696.0000 mean_abs=2041.046509
+
+[V2_vmcnt15_snop] running...
+  small_frac=0.4527 both_small=0.4100 cov=0.8737 snr=-2.52 dB n_diff=33979483 (61.750% of both) max_abs=1470464.0000 mean_abs=1999.781128
+
+[V3_vmcnt20] running...
+  small_frac=0.4371 both_small=0.3990 cov=0.8503 snr=-2.82 dB n_diff=31676375 (59.154% of both) max_abs=1474560.0000 mean_abs=1939.559692
+
+Results: /shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/R34_OPT_B_SNR_RESULTS.json
+
+=== VERDICT (diff_frac <= V0_legacyfork + 5pp AND no-crash) ===
+  V0_legacyfork        diff_frac=0.2366 (base+0.05=0.2866) -> PASS
+  V0_vgprpf            diff_frac=0.6122 (base+0.05=0.2866) -> FAIL
+  V1_vmcnt15           diff_frac=0.5957 (base+0.05=0.2866) -> FAIL
+  V2_vmcnt15_snop      diff_frac=0.6175 (base+0.05=0.2866) -> FAIL
+  V3_vmcnt20           diff_frac=0.5915 (base+0.05=0.2866) -> FAIL
