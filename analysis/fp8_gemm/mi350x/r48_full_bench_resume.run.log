@@ -1,0 +1,110 @@
+=== [3/7] 8B_GateUp (4096x14336x4096) ===
+  FP8 built
+    skip 8B_GateUp fp8 rcr run1 (already valid)
+    skip 8B_GateUp fp8 rcr run2 (already valid)
+    skip 8B_GateUp fp8 rcr run3 (already valid)
+    skip 8B_GateUp fp8 rcr run4 (already valid)
+    skip 8B_GateUp fp8 rcr run5 (already valid)
+    skip 8B_GateUp fp8 rrr run1 (already valid)
+    skip 8B_GateUp fp8 rrr run2 (already valid)
+    skip 8B_GateUp fp8 rrr run3 (already valid)
+    skip 8B_GateUp fp8 rrr run4 (already valid)
+    skip 8B_GateUp fp8 rrr run5 (already valid)
+    skip 8B_GateUp fp8 crr run1 (already valid)
+    skip 8B_GateUp fp8 crr run2 (already valid)
+    skip 8B_GateUp fp8 crr run3 (already valid)
+    skip 8B_GateUp fp8 crr run4 (already valid)
+    skip 8B_GateUp fp8 crr run5 (already valid)
+  FP8 benched
+  MXFP8 built
+    skip 8B_GateUp mxfp8 rcr run1 (already valid)
+r48_full_bench_resume.sh: line 31: 1776708 Aborted                 (core dumped) HIP_VISIBLE_DEVICES=$GPU MXFP8_BUILD_M=$M MXFP8_BUILD_N=$N MXFP8_BUILD_K=$K MXFP8_WARMUP=$WARMUP MXFP8_ITERS=$ITERS MXFP8_CHECK=0 MXFP8_LAYOUTS=$LAY MXFP8_PRESHUFFLE_QUANT=1 python3 test_mxfp8_python.py $M $N $K > "${OUTBASE}_run${r}.log" 2>&1
+    ABORT 8B_GateUp mxfp8 rrr run4 rc=134 (continuing)
+r48_full_bench_resume.sh: line 31: 1780598 Aborted                 (core dumped) HIP_VISIBLE_DEVICES=$GPU MXFP8_BUILD_M=$M MXFP8_BUILD_N=$N MXFP8_BUILD_K=$K MXFP8_WARMUP=$WARMUP MXFP8_ITERS=$ITERS MXFP8_CHECK=0 MXFP8_LAYOUTS=$LAY MXFP8_PRESHUFFLE_QUANT=1 python3 test_mxfp8_python.py $M $N $K > "${OUTBASE}_run${r}.log" 2>&1
+    ABORT 8B_GateUp mxfp8 rrr run5 rc=134 (continuing)
+r48_full_bench_resume.sh: line 31: 1783084 Aborted                 (core dumped) HIP_VISIBLE_DEVICES=$GPU MXFP8_BUILD_M=$M MXFP8_BUILD_N=$N MXFP8_BUILD_K=$K MXFP8_WARMUP=$WARMUP MXFP8_ITERS=$ITERS MXFP8_CHECK=0 MXFP8_LAYOUTS=$LAY MXFP8_PRESHUFFLE_QUANT=1 python3 test_mxfp8_python.py $M $N $K > "${OUTBASE}_run${r}.log" 2>&1
+    ABORT 8B_GateUp mxfp8 crr run1 rc=134 (continuing)
+r48_full_bench_resume.sh: line 31: 1785466 Aborted                 (core dumped) HIP_VISIBLE_DEVICES=$GPU MXFP8_BUILD_M=$M MXFP8_BUILD_N=$N MXFP8_BUILD_K=$K MXFP8_WARMUP=$WARMUP MXFP8_ITERS=$ITERS MXFP8_CHECK=0 MXFP8_LAYOUTS=$LAY MXFP8_PRESHUFFLE_QUANT=1 python3 test_mxfp8_python.py $M $N $K > "${OUTBASE}_run${r}.log" 2>&1
+    ABORT 8B_GateUp mxfp8 crr run2 rc=134 (continuing)
+r48_full_bench_resume.sh: line 31: 1788075 Aborted                 (core dumped) HIP_VISIBLE_DEVICES=$GPU MXFP8_BUILD_M=$M MXFP8_BUILD_N=$N MXFP8_BUILD_K=$K MXFP8_WARMUP=$WARMUP MXFP8_ITERS=$ITERS MXFP8_CHECK=0 MXFP8_LAYOUTS=$LAY MXFP8_PRESHUFFLE_QUANT=1 python3 test_mxfp8_python.py $M $N $K > "${OUTBASE}_run${r}.log" 2>&1
+    ABORT 8B_GateUp mxfp8 crr run3 rc=134 (continuing)
+r48_full_bench_resume.sh: line 31: 1790130 Aborted                 (core dumped) HIP_VISIBLE_DEVICES=$GPU MXFP8_BUILD_M=$M MXFP8_BUILD_N=$N MXFP8_BUILD_K=$K MXFP8_WARMUP=$WARMUP MXFP8_ITERS=$ITERS MXFP8_CHECK=0 MXFP8_LAYOUTS=$LAY MXFP8_PRESHUFFLE_QUANT=1 python3 test_mxfp8_python.py $M $N $K > "${OUTBASE}_run${r}.log" 2>&1
+    ABORT 8B_GateUp mxfp8 crr run4 rc=134 (continuing)
+r48_full_bench_resume.sh: line 31: 1792147 Aborted                 (core dumped) HIP_VISIBLE_DEVICES=$GPU MXFP8_BUILD_M=$M MXFP8_BUILD_N=$N MXFP8_BUILD_K=$K MXFP8_WARMUP=$WARMUP MXFP8_ITERS=$ITERS MXFP8_CHECK=0 MXFP8_LAYOUTS=$LAY MXFP8_PRESHUFFLE_QUANT=1 python3 test_mxfp8_python.py $M $N $K > "${OUTBASE}_run${r}.log" 2>&1
+    ABORT 8B_GateUp mxfp8 crr run5 rc=134 (continuing)
+  MXFP8 benched
+r48_full_bench_resume.sh: line 59: 1794361 Aborted                 (core dumped) HIP_VISIBLE_DEVICES=$GPU MXFP8_BUILD_M=$M MXFP8_BUILD_N=$N MXFP8_BUILD_K=$K MXFP8_WARMUP=20 MXFP8_ITERS=20 MXFP8_CHECK=1 MXFP8_DETERMINISM_RUNS=3 MXFP8_SNR_THRESHOLD_DB=45 MXFP8_LAYOUTS=$LAY MXFP8_PRESHUFFLE_QUANT=1 python3 test_mxfp8_python.py $M $N $K > "${OUTBASE}.log" 2>&1
+    ABORT 8B_GateUp check rcr rc=134 (continuing)
+r48_full_bench_resume.sh: line 59: 1795292 Aborted                 (core dumped) HIP_VISIBLE_DEVICES=$GPU MXFP8_BUILD_M=$M MXFP8_BUILD_N=$N MXFP8_BUILD_K=$K MXFP8_WARMUP=20 MXFP8_ITERS=20 MXFP8_CHECK=1 MXFP8_DETERMINISM_RUNS=3 MXFP8_SNR_THRESHOLD_DB=45 MXFP8_LAYOUTS=$LAY MXFP8_PRESHUFFLE_QUANT=1 python3 test_mxfp8_python.py $M $N $K > "${OUTBASE}.log" 2>&1
+    ABORT 8B_GateUp check rrr rc=134 (continuing)
+r48_full_bench_resume.sh: line 59: 1797115 Aborted                 (core dumped) HIP_VISIBLE_DEVICES=$GPU MXFP8_BUILD_M=$M MXFP8_BUILD_N=$N MXFP8_BUILD_K=$K MXFP8_WARMUP=20 MXFP8_ITERS=20 MXFP8_CHECK=1 MXFP8_DETERMINISM_RUNS=3 MXFP8_SNR_THRESHOLD_DB=45 MXFP8_LAYOUTS=$LAY MXFP8_PRESHUFFLE_QUANT=1 python3 test_mxfp8_python.py $M $N $K > "${OUTBASE}.log" 2>&1
+    ABORT 8B_GateUp check crr rc=134 (continuing)
+  MXFP8 corr/det checked
+=== [4/7] 8B_Down (4096x4096x14336) ===
+  FP8 built
+    ABORT 8B_Down fp8 crr run4 rc=1 (continuing)
+  FP8 benched
+  MXFP8 built
+    skip 8B_Down mxfp8 rcr run3 (already valid)
+    skip 8B_Down mxfp8 rcr run4 (already valid)
+    skip 8B_Down mxfp8 rcr run5 (already valid)
+    skip 8B_Down mxfp8 rrr run1 (already valid)
+    skip 8B_Down mxfp8 rrr run2 (already valid)
+    skip 8B_Down mxfp8 rrr run4 (already valid)
+    skip 8B_Down mxfp8 crr run2 (already valid)
+    skip 8B_Down mxfp8 crr run4 (already valid)
+  MXFP8 benched
+  MXFP8 corr/det checked
+=== [5/7] 70B_QO (4096x8192x8192) ===
+  FP8 built
+  FP8 benched
+  MXFP8 built
+  MXFP8 benched
+  MXFP8 corr/det checked
+=== [6/7] 70B_GateUp (4096x28672x8192) ===
+  FP8 built
+  FP8 benched
+  MXFP8 built
+  MXFP8 benched
+  MXFP8 corr/det checked
+=== [7/7] 70B_Down (4096x8192x28672) ===
+  FP8 built
+  FP8 benched
+  MXFP8 built
+  MXFP8 benched
+  MXFP8 corr/det checked
+
+========== R48 SUMMARY ==========
+
+Shape                | Layout |  FP8 med   MX med  MX/FP8 | MX spread |    SNR  Det | Status |   N runs
+-------------------------------------------------------------------------------------------------------
+8192³                |    RCR |   3149.7   2963.4   94.1% |     0.42% |   49.6   OK |   FAIL |    f5/m5
+8192³                |    RRR |   2912.5   2961.5  101.7% |     1.26% |   49.6   OK |   PASS |    f5/m5
+8192³                |    CRR |   1303.9   2757.8  211.5% |     2.09% |   49.6   OK |   PASS |    f5/m5
+
+8B Q/O (4096³)       |    RCR |   2458.4   2324.1   94.5% |     0.91% |   49.6   OK |   FAIL |    f5/m5
+8B Q/O (4096³)       |    RRR |   2464.5   2296.8   93.2% |     1.17% |   49.6   OK |   FAIL |    f5/m5
+8B Q/O (4096³)       |    CRR |   2327.3   2159.8   92.8% |     6.31% |   49.6   OK |   FAIL |    f5/m5
+
+8B Gate/Up           |    RCR |   2655.2   2493.9   93.9% |     0.88% |    N/A FAIL |   FAIL |    f5/m5
+8B Gate/Up           |    RRR |   2644.8   2464.2   93.2% |     1.61% |    N/A FAIL |   FAIL |    f5/m5
+8B Gate/Up           |    CRR |   2485.1   2338.6   94.1% |     3.86% |    N/A FAIL |   FAIL |    f5/m5
+
+8B Down              |    RCR |   3074.9   2947.8   95.9% |   101.57% |   49.6   OK |   PASS |    f5/m5
+8B Down              |    RRR |   2717.1   2910.9  107.1% |     1.53% |   49.6   OK |   PASS |    f5/m5
+8B Down              |    CRR |   2854.4   2723.9   95.4% |     0.33% |   49.6   OK |   PASS |    f5/m5
+
+70B Q/O              |    RCR |   3073.0   2888.2   94.0% |    41.70% |   49.6   OK |   FAIL |    f5/m5
+70B Q/O              |    RRR |   3035.7   2868.0   94.5% |     2.59% |   49.6   OK |   FAIL |    f5/m5
+70B Q/O              |    CRR |   2847.8   2686.8   94.3% |    21.55% |   49.6   OK |   FAIL |    f5/m5
+
+70B Gate/Up          |    RCR |   2961.1   2847.6   96.2% |     0.72% |   49.6   OK |   PASS |    f5/m5
+70B Gate/Up          |    RRR |   2944.8   2773.8   94.2% |     0.55% |   49.6   OK |   FAIL |    f5/m5
+70B Gate/Up          |    CRR |   2787.4   2482.3   89.1% |     1.12% |   49.6   OK |   FAIL |    f5/m5
+
+70B Down             |    RCR |   3235.8   2929.8   90.5% |     1.62% |   49.6   OK |   FAIL |    f5/m5
+70B Down             |    RRR |   2733.3   2965.1  108.5% |     0.82% |   49.6   OK |   PASS |    f5/m5
+70B Down             |    CRR |   2999.2   2642.0   88.1% |     0.57% |   49.6   OK |   FAIL |    f5/m5
+
+
+Written to r48_full_results/SUMMARY.txt

@@ -1,0 +1,1 @@
+R44A_RESULT module=tk_mxfp8_r44a_decode_4x8kx8k kind=mxfp8 impl=decode_m2_16 layout=rcr shape=4x8192x8192 avg_ms=1.161193 tflops=0.4623 snr_db=NA

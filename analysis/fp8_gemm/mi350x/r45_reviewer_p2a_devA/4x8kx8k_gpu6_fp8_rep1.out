@@ -1,0 +1,1 @@
+R44A_RESULT module=tk_fp8_r44a_4x8kx8k kind=fp8 impl=fp8_pertensor layout=rcr shape=4x8192x8192 avg_ms=0.796649 tflops=0.6739 snr_db=NA
