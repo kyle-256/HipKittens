@@ -1,0 +1,27 @@
+====================================
+## R54 Dev C Phase 2A: 8B Gate/Up RRR flag screen
+====================================
+=== [baseline] ===
+  benched (3 runs)
+=== [sched_max_occ] ===
+  benched (3 runs)
+=== [sched_max_ilp] ===
+  benched (3 runs)
+=== [sched_iter_max_occ] ===
+  benched (3 runs)
+=== [sched_metric_bias_100] ===
+  benched (3 runs)
+=== [sched_relaxed_occ] ===
+  benched (3 runs)
+=== [amdgpu_trackers] ===
+  benched (3 runs)
+=== [loop_align_off] ===
+  benched (3 runs)
+=== [loop_prefetch] ===
+  benched (3 runs)
+=== [wave_priority] ===
+  benched (3 runs)
+=== [max_occ_plus_trackers] ===
+  benched (3 runs)
+
+=== Phase 2A complete. Inspect r54c_results/phase2 ===

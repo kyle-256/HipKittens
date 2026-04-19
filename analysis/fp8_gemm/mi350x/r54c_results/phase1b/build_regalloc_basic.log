@@ -1,0 +1,12 @@
+/opt/rocm/bin/hipcc kernel_mxfp8_layouts.cpp -DKITTENS_CDNA4 --offload-arch=gfx950 -DHIP_ENABLE_WARP_SYNC_BUILTINS -ffast-math -I/opt/rocm/include/rocrand -std=c++20 -w -DM_DIM=4096 -DN_DIM=14336 -DK_DIM=4096 -mllvm -regalloc=basic  -L/usr/lib/python3.10/config-3.10-x86_64-linux-gnu -L/usr/lib/x86_64-linux-gnu   -ldl  -lm -lm  -I/shared_nfs/kyle/test/Hipkittens2/include -I/shared_nfs/kyle/test/Hipkittens2/prototype -I/usr/include/python3.10 -I/opt/venv/lib/python3.10/site-packages/pybind11/include -shared -fPIC -Rpass-analysis=kernel-resource-usage -I/shared_nfs/kyle/test/Hipkittens2/include -I/opt/rocm/include/hip  \
+    -o tk_mxfp8_layouts.cpython-310-x86_64-linux-gnu.so 
+fatal error: error in backend: -regalloc not supported with amdgcn. Use -sgpr-regalloc, -wwm-regalloc, and -vgpr-regalloc
+clang++: error: clang frontend command failed with exit code 70 (use -v to see invocation)
+clang version 20.0.0git (https://github.com/ROCm/llvm-project.git 27682a16360e33e37c4f3cc6adf9a620733f8fe1)
+Target: x86_64-unknown-linux-gnu
+Thread model: posix
+InstalledDir: /opt/rocm-7.1.0/lib/llvm/bin
+Configuration file: /opt/rocm-7.1.0/lib/llvm/bin/clang++.cfg
+clang++: note: diagnostic msg: Error generating preprocessed source(s).
+failed to execute:/opt/rocm/lib/llvm/bin/clang++  --offload-arch=gfx950 -O3 --driver-mode=g++ -O3 --hip-link  -x hip kernel_mxfp8_layouts.cpp -DKITTENS_CDNA4 -DHIP_ENABLE_WARP_SYNC_BUILTINS -ffast-math -I/opt/rocm/include/rocrand -std=c++20 -w -DM_DIM=4096 -DN_DIM=14336 -DK_DIM=4096 -mllvm -regalloc=basic -L/usr/lib/python3.10/config-3.10-x86_64-linux-gnu -L/usr/lib/x86_64-linux-gnu -ldl -lm -lm -I/shared_nfs/kyle/test/Hipkittens2/include -I/shared_nfs/kyle/test/Hipkittens2/prototype -I/usr/include/python3.10 -I/opt/venv/lib/python3.10/site-packages/pybind11/include -shared -fPIC -Rpass-analysis=kernel-resource-usage -I/shared_nfs/kyle/test/Hipkittens2/include -I/opt/rocm/include/hip -o "tk_mxfp8_layouts.cpython-310-x86_64-linux-gnu.so"
+make: *** [Makefile:42: tk_mxfp8_layouts] Error 1
