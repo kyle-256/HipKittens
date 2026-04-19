@@ -1,0 +1,6 @@
+Layouts=rrr
+--- RRR Layout: C = A @ B ---
+  Avg time: 0.3512 ms, TFLOPS: 3130.64
+Layout     Time (ms)    TFLOPS     % of RCR  
+RRR        0.3512       3130.64    0.00%
+  RRR: 0.00% of RCR
