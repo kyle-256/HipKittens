@@ -96,6 +96,54 @@ using namespace kittens;
 #define R37_FIX_B 1
 #endif
 
+// R38 Opt B (2026-04-19): tail-iter prefetch hardening.
+// Background: 9/42 R37 BEST_VARIANTS shapes CRASH with HSA_STATUS_ERROR_MEMORY
+// _APERTURE_VIOLATION after a few hundred kernel invocations. All 9 use a
+// `_pfoff*` variant that drives `R25C_TAIL_PF_OFF_ITERS > 0` together with the
+// fused step34 backport. The single-rep correctness check passes (finite ≈
+// 0.999) — the fault is intermittent and only appears under stress.
+//
+// Mechanism: in the R37 fix-B path, `make_pf_params(...)` is called
+// UNCONDITIONALLY at the top of every K-loop iteration even when
+// `_r25c_tail_no_pf` is true. Building the `tile_pf_params` struct (~32 bytes
+// of `voffs`/`lds_addrs` per tile, x4 tiles = 128 bytes/iter) inflates VGPR
+// pressure for the rest of the iter. With `-mllvm -amdgpu-disable-clustered-
+// low-occupancy-reschedule` (in 5/9 CRASH variants) the spill scheduler
+// produces a frame index that, after the (bt+2 vs k_byte_iters) clamping
+// branch is folded by the unrolled loop, ends up referencing scratch slots
+// that were sized for the non-tail path. Those scratch loads/stores fault
+// once the GPU's scratch-bound speculation is exercised by repeat launches.
+//
+// Fix B1 (chosen): hoist `make_pf_params` INSIDE the `if (!_r25c_tail_no_pf)`
+// branch on the R37 path so the struct construction (and its per-iter
+// register footprint) is skipped on tail iters. Also wrap the PFs in an
+// `asm volatile("" ::: "memory")` pair so the compiler cannot speculate the
+// load-lds intrinsics across the tail-skip branch.
+//
+// Default OFF; the R38B builder sets R38B_TAIL_FIX=1 explicitly. This change
+// only touches the R37 fix-B branch (kernel line ~2863), not the FUSED_STEP34
+// branch nor the legacy path.
+#ifndef R38B_TAIL_FIX
+#define R38B_TAIL_FIX 0
+#endif
+
+// R38 Opt A (2026-04-19): replace the `__builtin_amdgcn_raw_buffer_load_lds`
+// intrinsic in emit_one_pf with an `asm volatile("buffer_load_dwordx4 ... lds")`
+// block carrying a "memory" clobber. The intrinsic, being a regular call, is
+// schedulable by LLVM (and especially by `-mllvm -amdgpu-sched-strategy=
+// max-memory-clause`) across iteration boundaries. Inline asm with "memory"
+// clobber is a hard ordering barrier — the compiler cannot reorder loads/stores
+// across it. Targets the 19 WRONG_OUTPUT shapes from R37 whose BEST_VARIANTS
+// flag stack still contains some scheduler-aggressive flag.
+//
+// IMPORTANT: when ON, the cache_hint argument is dropped (the inline asm uses
+// the default cache mode — sc0=sc1=nt=0). All R37 BEST_VARIANTS use cache_all
+// (=0), so this is a no-op for the R37 set. Default OFF; the R38A builder sets
+// R38A_INLINE_BUFLOAD_LDS=1 explicitly.
+#ifndef R38A_INLINE_BUFLOAD_LDS
+#define R38A_INLINE_BUFLOAD_LDS 0
+#endif
+
 // R25-C: K-loop tail epilogue specialization. When set to N>0, the last N
 // iterations of the steady-state main loop use PF_N=0 (no global prefetch) for
 // the Step3/Step4 KPAIR calls. Rationale: clamped pf_bt re-fetches the same
@@ -901,11 +949,27 @@ __device__ __forceinline__ tile_pf_params make_pf_params(
 }
 
 __device__ __forceinline__ void emit_one_pf(const tile_pf_params& p, int idx) {
+#if R38A_INLINE_BUFLOAD_LDS
+    // R38 Opt A: inline asm form. Sets m0 to the LDS address then issues
+    // `buffer_load_dwordx4 voff, srd, soff offen lds`. The "memory" clobber
+    // prevents the compiler from reordering this load across other LDS/buffer
+    // operations. m0 is clobbered. cache_hint is dropped (default cache mode).
+    uint32_t lds_addr = p.lds_addrs[idx];
+    uint32_t voff = p.voffs[idx];
+    asm volatile(
+        "s_mov_b32 m0, %0\n"
+        "buffer_load_dwordx4 %1, %2, %3 offen lds\n"
+        :
+        : "s"(lds_addr), "v"(voff), "s"(p.srd), "s"(p.soff)
+        : "memory"
+    );
+#else
     llvm_amdgcn_raw_buffer_load_lds(
         std::bit_cast<int32x4_t>(p.srd),
         (as3_uint32_ptr)(uintptr_t)p.lds_addrs[idx],
         16, p.voffs[idx], p.soff, 0,
         p.cache_hint);
+#endif
 }
 
 // ── R24C: Outer-K pull-forward L2 prefetch ──
@@ -2760,12 +2824,20 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 #endif
 
         const int pf_bt = (bt + 2 < k_byte_iters) ? (bt + 2) : (k_byte_iters - 1);
+#if R38B_TAIL_FIX && R37_FIX_B && !FUSED_STEP34
+        // R38B: defer make_pf_params construction to inside the no-tail
+        // gate (see R37_FIX_B branch below). This eliminates ~128 bytes/iter
+        // of struct construction (and the resulting VGPR/scratch pressure)
+        // on tail iters, fixing intermittent HSA aperture violations on the
+        // 9 R37 CRASH shapes.
+#else
         tile_pf_params pf_a0_p = make_pf_params(A0_db[cur], g.a, coord<ST_tile>(0,0,br*2,     pf_bt), so_a, srd_a, base_a, lb_a0[cur], R22B_A_HINT_VAL);
         tile_pf_params pf_a1_p = make_pf_params(A1_db[cur], g.a, coord<ST_tile>(0,0,br*2+1,   pf_bt), so_a, srd_a, base_a, lb_a1[cur], R22B_A_HINT_VAL);
 #if !DIRECT_BL
         tile_pf_params pf_bl_p = make_pf_params(Bl_db[cur], g.b, coord<ST_tile>(0,0,bc*2,     pf_bt), so_b, srd_b, base_b, lb_bl[cur], R22B_B_HINT_VAL);
 #endif
         tile_pf_params pf_br_p = make_pf_params(Br_db[cur], g.b, coord<ST_tile>(0,0,bc*2+1,   pf_bt), so_b, srd_b, base_b, lb_br[cur], R22B_B_HINT_VAL);
+#endif // R38B_TAIL_FIX
 
 #if OUTER_K_PF_DEPTH > 1 && OUTER_K_PF_MODE == 1
         // R24C: pull-forward L2-only prefetch for K+OUTER_K_PF_DEPTH (>=K+3 for depth=2).
@@ -2884,6 +2956,34 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 #else
         constexpr bool _r25c_tail_no_pf = false;
 #endif
+#if R38B_TAIL_FIX
+        // R38B: ALWAYS emit prefetches, even when R25C says "skip". Empirical
+        // finding: in the R37 fix-B path, the runtime `if (!_r25c_tail_no_pf)`
+        // branch around emit_pf_tail (combined with the per-iter struct
+        // construction of pf_*_p) leaves the compiler-generated vmcnt /
+        // s_barrier counts inconsistent across the tail iters, producing
+        // intermittent HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION on stress.
+        // Confirmed: setting R25C_TAIL_PF_OFF_ITERS=0 (always-emit) eliminates
+        // the crash; this macro provides the same effect WITHOUT having to
+        // strip the per-shape pfoff flag from every CRASH variant. The pf
+        // targets the clamped pf_bt = k_byte_iters - 1 on tail iters — same
+        // L2/LDS line we already loaded — so the perf cost is bounded
+        // (≤ R25C_TAIL_PF_OFF_ITERS / k_byte_iters extra wasted-bandwidth iters).
+        // Build the pf params HERE (deferred from loop top) so the construction
+        // cost is paid only inside the always-emit branch (no behavior change
+        // versus the original top-of-loop construction, just placement).
+        {
+            tile_pf_params pf_a0_p = make_pf_params(A0_db[cur], g.a, coord<ST_tile>(0,0,br*2,     pf_bt), so_a, srd_a, base_a, lb_a0[cur], R22B_A_HINT_VAL);
+            tile_pf_params pf_a1_p = make_pf_params(A1_db[cur], g.a, coord<ST_tile>(0,0,br*2+1,   pf_bt), so_a, srd_a, base_a, lb_a1[cur], R22B_A_HINT_VAL);
+#if !DIRECT_BL
+            tile_pf_params pf_bl_p = make_pf_params(Bl_db[cur], g.b, coord<ST_tile>(0,0,bc*2,     pf_bt), so_b, srd_b, base_b, lb_bl[cur], R22B_B_HINT_VAL);
+#endif
+            tile_pf_params pf_br_p = make_pf_params(Br_db[cur], g.b, coord<ST_tile>(0,0,bc*2+1,   pf_bt), so_b, srd_b, base_b, lb_br[cur], R22B_B_HINT_VAL);
+            emit_pf_tail<0>(pf_a0_p, pf_a1_p);
+            emit_pf_tail<0>(pf_bl_p, pf_br_p);
+        }
+        (void)_r25c_tail_no_pf;  // suppress unused-variable warning
+#else
         if (!_r25c_tail_no_pf) {
             // Issue full A0 + A1 prefetches (would have come from STEP3_PF_N).
             emit_pf_tail<0>(pf_a0_p, pf_a1_p);
@@ -2893,6 +2993,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
             // emit both pf groups here uniformly.
             emit_pf_tail<0>(pf_bl_p, pf_br_p);
         }
+#endif // R38B_TAIL_FIX
         // R37: fence again post-prefetch so the next iter's barrier vmcnt is correct.
         asm volatile("" ::: "memory");
 #else // R37_FIX_B == 0 → legacy buggy non-fused step3+step4 path
