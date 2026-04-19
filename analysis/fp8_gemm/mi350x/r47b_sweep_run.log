@@ -1,0 +1,29 @@
+=== [1/7] 8192cube (8192x8192x8192) ===
+  CRR baseline: 2787.72 TF | +SWIZZLE: 2720.54 TF
+=== [2/7] 8B_QO (4096x4096x4096) ===
+  CRR baseline: 2131.26 TF | +SWIZZLE: 2211.02 TF
+=== [3/7] 8B_GateUp (4096x14336x4096) ===
+  CRR baseline: 2335.65 TF | +SWIZZLE: 2336.78 TF
+=== [4/7] 8B_Down (4096x4096x14336) ===
+  CRR baseline: 2685.00 TF | +SWIZZLE: 2757.93 TF
+=== [5/7] 70B_QO (4096x8192x8192) ===
+  CRR baseline: 2708.14 TF | +SWIZZLE: 2660.27 TF
+=== [6/7] 70B_GateUp (4096x28672x8192) ===
+  CRR baseline: 2381.33 TF | +SWIZZLE: 2456.89 TF
+=== [7/7] 70B_Down (4096x8192x28672) ===
+  CRR baseline: 2531.00 TF | +SWIZZLE: 2648.74 TF
+
+========== R47 Dev B CRR SWIZZLE SUMMARY ==========
+Shape           |  Baseline |  +Swizzle |      Δ%
+--------------------------------------------------
+8192³           |    2787.7 |    2720.5 |  -2.41% XX
+8B Q/O          |    2131.3 |    2211.0 |  +3.74% ★
+8B Gate/Up      |    2335.7 |    2336.8 |  +0.05%
+8B Down         |    2685.0 |    2757.9 |  +2.72% ★
+70B Q/O         |    2708.1 |    2660.3 |  -1.77%
+70B Gate/Up     |    2381.3 |    2456.9 |  +3.17% ★
+70B Down        |    2531.0 |    2648.7 |  +4.65% ★
+
+Decision criteria: ≥2 shapes with ≥+1%, worst ≥-1%
+  shapes ≥+1%: 4, worst Δ%: -2.41%
+  Verdict: REFUTED

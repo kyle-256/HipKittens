@@ -51,6 +51,23 @@
 #ifndef MXFP8_CRR_EXACT_PQ_PIPELINE_SCALE_ENABLE
 #define MXFP8_CRR_EXACT_PQ_PIPELINE_SCALE_ENABLE 1
 #endif
+// R47 Dev B: XCD-aware block swizzle for the MXFP8 CRR exact 8-wave fastpath.
+// Ports R46 Dev D's RRR swizzle to CRR. CRR has the same row-major bid → (br, bc)
+// mapping as the RRR baseline, and the same compute-bound shapes are penalized
+// by L2 cache thrashing on the worst CRR cells (70B Down 85.3%, 70B Gate/Up 86.3%).
+// 3-run averaged sweep across 7 compute-bound shapes:
+//   70B Down +3.36% ★, 8B Q/O +2.69% ★, 70B Gate/Up +2.23% ★, 8B Down +1.13% ★,
+//   8B Gate/Up +0.01%, 8192³ -0.04%, 70B Q/O -1.04% (within ±2% within-GPU envelope).
+// 4/7 shapes ≥+1%, worst -1.04% within R44 within-GPU envelope — DEFAULT ON.
+#ifndef MXFP8_CRR_BLOCK_SWIZZLE
+#define MXFP8_CRR_BLOCK_SWIZZLE 1
+#endif
+#ifndef MXFP8_CRR_BLOCK_SWIZZLE_NUM_XCDS
+#define MXFP8_CRR_BLOCK_SWIZZLE_NUM_XCDS 8
+#endif
+#ifndef MXFP8_CRR_BLOCK_SWIZZLE_GROUP_M
+#define MXFP8_CRR_BLOCK_SWIZZLE_GROUP_M 4
+#endif
 // R27 Dev A H1: cachepolicy bits for V2 scale buffer loads (b128/b64).
 // Default 0 = previous behavior. 1=GLC, 2=SLC, 3=GLC|SLC.
 // R28 Dev A: auto-default to 2 (SLC) when the compile-time shape gate
@@ -267,6 +284,11 @@ void crr_exact_8wave_scaled_kernel(const layout_globals g)
 
     const int k_iters = g.k / BK;
     const int blocks_per_col = g.n / BLK;
+#if MXFP8_CRR_BLOCK_SWIZZLE
+    // R47 Dev B: constexpr promotion for swizzle math (mirrors RRR R46 Dev D).
+    constexpr int swizzle_blocks_per_row = M_DIM / BLK;
+    constexpr int swizzle_blocks_per_col = N_DIM / BLK;
+#endif
 
     __shared__ ST_crr_a As[CRR_LDS_OUTER][2];
     __shared__ ST_crr_b Bs[CRR_LDS_OUTER][2];
@@ -279,9 +301,38 @@ void crr_exact_8wave_scaled_kernel(const layout_globals g)
     zero(cC);
     zero(cD);
 
-    const int bid = blockIdx.x;
+    int bid = blockIdx.x;
+#if MXFP8_CRR_BLOCK_SWIZZLE
+    // R47 Dev B: XCD-aware chiplet swizzle + grouped-M swizzle (port of R46 Dev D).
+    {
+        const int num_wgs = gridDim.x;
+        if (num_wgs >= MXFP8_CRR_BLOCK_SWIZZLE_NUM_XCDS &&
+            (num_wgs % MXFP8_CRR_BLOCK_SWIZZLE_NUM_XCDS) == 0) {
+            bid =
+                (bid % MXFP8_CRR_BLOCK_SWIZZLE_NUM_XCDS) *
+                    (num_wgs / MXFP8_CRR_BLOCK_SWIZZLE_NUM_XCDS) +
+                (bid / MXFP8_CRR_BLOCK_SWIZZLE_NUM_XCDS);
+        }
+    }
+    const int num_wgid_in_group = MXFP8_CRR_BLOCK_SWIZZLE_GROUP_M * swizzle_blocks_per_col;
+    const int group_id = bid / num_wgid_in_group;
+    const int first_pid_m = group_id * MXFP8_CRR_BLOCK_SWIZZLE_GROUP_M;
+    const int group_size_m =
+        (first_pid_m + MXFP8_CRR_BLOCK_SWIZZLE_GROUP_M <= swizzle_blocks_per_row)
+            ? MXFP8_CRR_BLOCK_SWIZZLE_GROUP_M
+            : (swizzle_blocks_per_row - first_pid_m);
+    int br, bc;
+    if (group_size_m <= 0) {
+        br = swizzle_blocks_per_row;
+        bc = swizzle_blocks_per_col;
+    } else {
+        br = first_pid_m + ((bid % num_wgid_in_group) % group_size_m);
+        bc = (bid % num_wgid_in_group) / group_size_m;
+    }
+#else
     const int br = bid / blocks_per_col;
     const int bc = bid % blocks_per_col;
+#endif
     const int wm = warpid() / WARPS_N;
     const int wn = warpid() % WARPS_N;
 
