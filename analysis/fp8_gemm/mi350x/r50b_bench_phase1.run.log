@@ -1,0 +1,26 @@
+######################################################
+## R50 Dev B PHASE 1: 8B Gate/Up U-sweep            ##
+######################################################
+Target: 8B_GateUp (4096x14336x4096)
+=== [U=0] ===
+  built (U=0)
+  benched (5 runs)
+  corr/det checked
+=== [U=1] ===
+  built (U=1)
+  benched (5 runs)
+  corr/det checked
+=== [U=2] ===
+  built (U=2)
+  benched (5 runs)
+  corr/det checked
+=== [U=4] ===
+  built (U=4)
+  benched (5 runs)
+  corr/det checked
+=== [U=8] ===
+  built (U=8)
+  benched (5 runs)
+  corr/det checked
+
+Phase 1 complete. Inspect r50b_results for results.
