@@ -1,0 +1,8 @@
+{
+  "round": "R50_optD",
+  "src": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/R50D_aiter_dlopen.cpp",
+  "out": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so",
+  "rc": 0,
+  "elapsed_s": 19.5,
+  "exists": true
+}

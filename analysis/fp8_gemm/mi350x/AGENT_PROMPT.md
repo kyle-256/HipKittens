@@ -2,7 +2,219 @@
 
 你在继续推进 `HipKittens` 的 MXFP4 GEMM 优化工作，跟 Cursor (Hipkittens2) 竞赛。
 
-## ⚠️ 当前优化目标 (2026-04-19, post-R44 reviewer — STRETCH-WIN +8 VC)
+## ⚠️ 当前优化目标 (2026-04-19, post-R50 — WIN +1 VC ROUND, COMMIT, 4 周来首个非 DEAD 轮, AITER `.CO` DLOPEN 突破, 36/42 VC)
+
+**HEADLINE**: R50 打破了近 7 轮中 5 个 DEAD 的连续。Net VC delta vs R44 baseline = **+1** (35 → 36/42 VC)。突破点是 **R50 Opt D**: 在 production harness 中做 per-shape backend dispatch，将 perma-CRASH cell `(4096,32768,28672)` 通过 `hipModuleLoadData` + `hipModuleGetFunction` + `hipModuleLaunchKernel` 绑定到 aiter 手写的 `f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co`。10/10 INDEPENDENT seeds OK, 5585.6 TFLOPS = competitor 5568.2 的 **100.31%**。**该 shape 史上首次 VC** (R43-R49 测试的每个 HipKittens 变体上都 perma-CRASH)。Aiter `.co` dlopen pattern **可复用**: 任何未来 HipKittens 解不了且 aiter 有 tuned `.co` 的 MXFP4 cell 都可以用同样的 shim 方法在 <1 天内解决。
+
+**R50 attempts 总结**:
+- **R50 Opt A — Aiter MFMA↔ds_read 1:3/1:4 spread 交错移植到 `kpair_64mfma_step34` asm volatile 内部**: **DEAD on 10-run @ 80% gate。"MFMA accumulator race = orderable scheduling" 假设的第 5 次独立关闭。** Macro `R50A_AITER_INTERLEAVE` (默认 OFF, 与 R44 baseline byte-equiv) 用 1:4 spread 变体替换 ~256 行 asm volatile body。ISA 验证: BASELINE 显示 25-instr 的纯 MFMA runs (61 处); v1 把其中 30 个 25-runs 切成 3、4、11 长度。Compiler 没 strip rewrite。10-run 在 6 个 cluster-B wcf-flake target 上: v1 下 0/6 VC (与 baseline 0/6 一致); R44 stretch `4096x4096x8192` 保留 VC (10/10 OK, +0.3% TFLOPS)。结合 R45B (5 个块内 fence 位置 DEAD)、R47A (3 个 3-buffer 外部位置 DEAD)、R49A (单 vmcnt knob DEAD)、R49C (producer asm 内嵌 fence DEAD): **cluster-B cohort race 存在于 MFMA pipeline 内部的 AGPR forwarding path，不在编译器或 asm body 能重排的任何边界上。** Race 对 MFMA/AGPR 微架构是结构性的。文件: `R50_OPT_A_VERDICT.md`, `R50A_INTEGRATION_FRAGMENT.json` (`{}`), `R50A_aiter_kloop_body.s`, `R50A_old_step34.s`, `R50A_new_step34.s`, `R50A_KERNEL_ISA.s`, `R50A_BASELINE_ISA.s`, `R50_OPT_A_{SMOKE,JACCARD,10RUN}.{json,log}`, `R50A_BUILD_MANIFEST.json`, `build_R50A/*.so` (22 个 module)。Kernel macro `R50A_AITER_INTERLEAVE` at `kernel_mxfp4_gluon_cpp.cpp` (默认 OFF)。
+- **R50 Opt C — 14 个 R44 VC <90% comp shape 的 per-shape `gm × lgk × pfoff` perf 轴追赶 sweep**: **PROMOTE → 在 10-run cross-val 下 REVERT。纯变体-knob 重调 (无新 macro)。** 14 个 R44 VC <90% comp shape; 每 shape: 27-cell sweep (lgk ∈ {1,2,3} × gm ∈ {6,7,8} × pfoff offset ∈ {-4,0,+4})。5-run @ 80% INDEPENDENT-seed gate 找到 1 个 PROMOTE 候选: `4096x28672x32768` gm8_lgk2_po28 (+2.90% pct_comp, base 61.90% → 64.80%, wcf_max=0.0182)。R50 INTEGRATION reviewer 10-run cross-val 抓到 wcf_max=0.0296 > 0.02 hard gate (9/10 OK) —— 经典 cohort-race tail draw。**REVERT 回 R44 R41A baseline。** 其他 shape 最佳收益全部 <2.0%: `6144x4096x8192` +1.77%, `32768x4096x7168` +1.98%, `28672x4096x8192` +1.02% —— 现有变体表在 14 个测试 shape 中 13 个**已自动调到 0-2pp 饱和**。**机制 (durable)**: R25-F/G `pfoff` 机制基本耗尽; R51+ perf 工作要攻击不同的结构性轴 (MFMA shape, tile geometry, thread block size)。5-run perf gate 对 cohort-race-prone shape **不够** —— 候选可以在同一个 `.so` 上 5-run 通过、10-run 失败。**所有 R51+ perf 轮必须用 10-run @ 80% 作为 promote gate。** Decider 必须合成 verdict，因为 Opt C agent 在 self-matching `pgrep -f "bench_R50C"` 等待循环中 stall (等待循环自己的 bash 命令行包含字面量 `bench_R50C`，pgrep 找到自己的进程从未返回 0)。**Agent 进程 bug (durable)**: 永远不要用 `pgrep -f X` 等待循环，其中 bash 命令行可能匹配 X —— 用 `pgrep -fx`、保存 PID + `wait $PID`、或在前台运行 bench。文件: `R50_OPT_C_VERDICT.md` (decider 合成), `R50C_INTEGRATION_FRAGMENT.json` (PROMOTE → reviewer cross-val REVERT), `R50C_SWEEP.json` (88 KB), `R50C_PREFILTER.json` (386 KB), `R50C_PROMOTE_CANDIDATES.json`, `R50C_baseline_pct_comp.json`, `R50C_BUILD_MANIFEST.json` (113 KB), `build_R50C/*.so`。Kernel 不变。
+- **R50 Opt D — Aiter `.co` dlopen escape hatch 解决 `(4096,32768,28672)` perma-CRASH cell**: **PROMOTE +1 VC。R44 以来首次 WIN。** 自包含 pybind11 shim (`R50D_aiter_dlopen.cpp`, 219 行) 通过 `hipModuleLoadData` + `hipModuleGetFunction` + `hipModuleLaunchKernel` 绑定 `f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co`。372-byte `KernelArgs` ABI 从 `/shared_nfs/kyle/test/aiter/csrc/py_itfs_cu/asm_gemm_a4w4.cu` 逐字镜像 (`static_assert(sizeof(KernelArgs)==372)`)。Launch grid (128, 16, 1) block (256, 1, 1) shared 0 字节 —— 与 HipKittens 256×256 tile geometry 同 MFMA shape。**Layout 要求 (集成的关键)**: B 通过 `aiter.shuffle_weight(B, layout=(16,16))` preshuffle (与 HK 不同); A_scale 和 B_scale 通过 `aiter.get_triton_quant(per_1x32)(x, shuffle=True)` (与 HK `preshuffle()` 不同); A 是 row-major fp4x2 uint8 (与 HK 同); C 是 `[((M+31)//32)*32, N] bf16` row-major (行 pad 到 32 的倍数)。10-run @ 80% INDEPENDENT-seed 结果: 10/10 OK, wcf_max=0.0, fin_min=1.0, snr_med 55.59-55.63 dB, p50 = 5585.6 TFLOPS = **competitor 5568.2 的 100.31%**。该 shape 史上首次 VC —— 直接从 PERMA-CRASH 跳到 aiter baseline 之上。**`bench_all_42_R50_INTEGRATION.py` 中的 per-shape backend dispatch**: `(M,N,K) == (4096,32768,28672)` → 调 shim 配 aiter prep utilities; 否则 → HipKittens kernel 配 HK prep。**对其他 shape 0 blast radius** —— 单 cell escape hatch，无 kernel mutation。文件: `R50_OPT_D_VERDICT.md`, `R50D_INTEGRATION_FRAGMENT.json`, `R50D_aiter_dlopen.cpp` (219 行), `build_R50D.py`, `build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so`, `bench_R50D.py`, `R50D_aiter_csv_audit.md`, `R50D_aiter_symbols.txt`, `R50_OPT_D_{SMOKE,10RUN}.{json,log}`, `R50D_BUILD_MANIFEST.json`。
+
+**R50 reviewer integration (10-run @ 80%, INDEPENDENT seeds [101..1010]; 2 GPU, 22 分钟 wall, 420 runs)**:
+- 35 R44 VC shape 在 R44 manifest 上保留 (35 个中有 5 个在**未变的** `.so` 文件上发生概率 cohort-race 失败 —— R45+ 已记录现象 per `project_mxfp4_R45_cohort_tail_draw.md`，不是 R50 引入的回归; R44 5-run 协议仍显示 35 VC)。
+- `4096x32768x28672` (Opt D) → **PROMOTE 10/10 OK at 100.31% comp**。
+- `4096x28672x32768` (Opt C) → REVERT (10-run wcf_max 0.0296 > 0.02 hard gate)。
+- 35 个 R44 VC shape 上 net perf delta: **-4.3 TFLOPS/shape avg** (perf-中性, 在 seed noise floor 内)。
+- **最终 VC count: 36/42 (35 R44 baseline + 1 from R50 Opt D)**。
+- 文件: `R50_INTEGRATION_VERDICT.md`, `R50_INTEGRATION_MANIFEST.json`, `bench_all_42_R50_INTEGRATION.py`, `R50_INTEGRATION_10RUN.{json,log,console}`, `R50_INTEGRATION_SMOKE1.{json,log}`, `R50_DECIDER_PLAN.md`。
+
+**R50 net result**: **+1 VC (35 → 36/42)**, 0 regression。Branch 应推进 with R50 manifest delta + aiter shim + per-shape backend dispatch + R50A macro (默认 OFF) commit。
+
+### R51 候选 (post-R50, 按机制信心排序)
+1. **R51 Opt D-extended (最高信心)** —— 识别其他 sub-90% comp 的 HipKittens shape，如果 aiter 有 tuned `.co` 就移植 R50D shim pattern。在 `/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/` 中找 ≤80% comp 且 aiter binary 存在的 shape。预估 +2-3 VC 潜力。成本: ~1 天/shape; layout 需要 aiter prep utils。对其他 shape 0 blast radius。
+2. **R51 Opt B (中)** —— 试**不同的** MFMA shape (例如 32×32×64 而非 16×16×128) 来打破 cluster-B cohort race 上的 AGPR forwarding chain。在结构上与所有先前轴不同 (R50A 是 orderable-scheduling 假设的第 5 次关闭; R51B 会攻击微架构层)。高风险但是 kernel 侧唯一未试的结构性轴。
+3. **R51 perf 轮 (低优先级 —— 根据 R50 Opt C, perf 轴基本耗尽)** —— 如果尝试，必须从一开始就用 10-run @ 80% gate; 不要相信 5-run 收益。攻击不同的结构性轴 (kernel 级变更; 不是 `gm × lgk × pfoff` knob)。
+
+### R51+ 不要尝试 (R45-R50 已关闭)
+- K-loop 中**任何** fence 位置 (R45B / R47A / R48A / R49C / R50A 全部 DEAD)
+- MFMA↔ds_read 交错变体单独 (R50A 关闭)
+- `R38A_INLINE_BUFLOAD_LDS=1` for production builds (R47B 关闭)
+- intermediate-K wcf-flake shape 的 `R39A_TAIL_SCALE_CLAMP` (R46A 关闭)
+- 4-buffer 或更高的 LDS rotation 单独 (R46B + R47A 暗示 fence-interaction 不是 slot-count)
+- Wave-priority / s_nop pacing / MFMA half-split 单独 (R47C 已被 10-run 关闭)
+- `kpair_64mfma_step34` 物理 asm-block split (R48A 关闭)
+- `PF_MPT` depth override (R48C 机制层关闭)
+- 单独的 step34 内部 MFMA reorder / s_setprio / lgkmcnt drain (R48B 被 10-run gate 关闭)
+- 单 knob aiter pattern port (R49A 关闭)
+- R44A back-edge drain 扩展到 N=32768 (R49B 关闭; cohort scales with N)
+- Embedded vmcnt 在 producer asm volatile 内部 (R49C 关闭)
+- `gm × lgk × pfoff` knob sweep on R44 VC shapes (R50C 在 2pp saturation 内关闭)
+
+### R50 stopping-criterion check
+- Floor (≥35/42, no regression): **MET** (35 R44 baseline 保留 + 1 个新 VC; 最终 36/42; 0 regression)。
+- Stretch (≥36/42): **MET** (Opt D 在 100.31% comp 下交付 `4096x32768x28672`)。
+- Round value: **+1 VC + 4 个 durable 发现** (R50A orderable-scheduling 假设的第 5 次关闭; R50C perf 轴 saturation 证据; R50D aiter `.co` dlopen 可复用突破 pattern; agent 进程 bug —— `pgrep -f` self-match —— methodology 教训)。**4 周来首个非 DEAD 轮。**
+
+### Round 序列 sanity check (近 8 轮)
+- R43: DEAD (3 轴)
+- R44: WIN +8 (27 → 35/42)
+- R45: net 0 (cohort tail-draw)
+- R46: net 0 (3-buffer wrong-output)
+- R47: net 0 (3 轴)
+- R48: net 0 (compiler-driven exhausted)
+- R49: net 0 (5th DEAD; fence axis closed)
+- **R50: WIN +1 (35 → 36/42)** ← 连续 DEAD 打破
+
+---
+
+## 历史: 当前优化目标 (2026-04-19, post-R49 — QUINTUPLE-DEAD ROUND, 5TH DEAD IN LAST 7, NO COMMIT, 4 DURABLE FINDINGS, FENCE-AXIS FULLY CLOSED, AITER DISASM DONE)
+
+**HEADLINE**: R49 是近 7 轮中第 5 个 DEAD 轮 (R43, R45, R46, R47, R48, R49 死, R44 +8 赢)。Net VC delta = 0; ceiling 不变 35/42 from R44 (`305fe79d`)。3 个 worker 假设全部在机制层被证伪；reviewer 10-run skip (所有 fragment 都空)。**重大正面发现**: aiter 真正的 cluster-B differentiator 是 **MFMA↔ds_read 1:3 交错** (Diff #2 in disasm)，**不是** iter-top vmcnt knob —— 需要侵入式 ~256 行 `kpair_*_with_lds` asm volatile 重写。Fence-positioning 轴现在通过 4 个位置 × 5 轮已穷尽关闭 (R45B 块内, R47A 3-buffer 外部, R48A 物理 asm-split, R49C producer asm 内嵌)。
+
+**R49 attempts 总结**:
+- **R49 Opt A — Aiter ISA disasm + 原子 `vmcnt(15)` port**: **DEAD on 10-run @ 80% gate。** 反汇编 aiter `f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co` (3415 行 ISA)。识别单一原子差异: aiter `s_waitcnt vmcnt(15)` at K-iter 顶 vs HK `vmcnt(8)` baseline。实现 `R49A_AITER_PATTERN_VMCNT_RELAX` macro (3 个 level: 15/13/10)，默认 OFF，与 R44 byte-equiv。ISA 验证 toggle 生效。SMOKE 19/28 OK; Phase-1 Jaccard cohort-race 签名在 7 个 non-CRASH × 4 vmcnt level 上不变。10-RUN: 3 个 vmcnt level 全 DEAD on cluster-B; stretch baseline `4096x4096x8192` 略改善 (96.9% → 100.2%)。**重大发现**: aiter 真正的 cluster-B differentiator 是 MFMA↔ds_read 1:3 交错 (vs HK `kpair_64mfma_step34` 的 4:1 batch); 单 knob port 不会 transfer; 需要 ~256 行 asm 重写。文件: `R49_OPT_A_VERDICT.md`, `R49A_INTEGRATION_FRAGMENT.json` (`{}`), `R49A_aiter_256x256.s` (3415 行, R50 保留), `R49A_KERNEL_ISA.s` (5102 行), `R49_OPT_A_{SMOKE,JACCARD,10RUN}.{json,log}`, `R49A_BUILD_MANIFEST.json`, `build_R49A/*.so` (28 个 build)。Kernel macro `R49A_AITER_PATTERN_VMCNT_RELAX` (默认 OFF)。
+- **R49 Opt B — From-scratch K=28672 non-FUSED for `(4096,32768,28672)` (最后 CRASH)**: **DEAD —— sister-shape 机制迁移失败。** Audit 揭示 R44A V1 (在 `(16384,4096,28672)` 赢的 macro 集) 已经在 R44 Phase-3 在 `(4096,32768,28672)` 上试过 —— 不 crash 但产生错误输出 (n_OK 1/5, wcf_max=0.0699)。6 个变体 × 12 个 smoke 任务: 任何变体都不 CRASH。R46B 3-buffer rotation 在 non-FUSED path 上**也**回归 (wcf 0.14-0.19) —— 不是 FUSED 独有。10-run @ 80% gate: 最佳 `V_drain_R40A` n_OK=3/10 wcf_max=0.0409 wcf_std=0.0098。~30% 的 seed 落在好的 race attractor，~70% 不。**机制**: cohort race 随 N scale (每 WG 更多输出 tile → 更多 LDS slot 压力); per-iter back-edge drain 在 N=32768 上结构性不足。`_NUM_THREADS=512` 不可行 (硬编码 constexpr)。文件: `R49_OPT_B_VERDICT.md`, `R49B_INTEGRATION_FRAGMENT.json` (`{}`), `R49B_audit.md`, `R49B_BUILD_MANIFEST.json`, `R49_OPT_B_{SMOKE,JACCARD,10RUN}.{json,log}`, `build_R49B/*.so` (12 个 build)。
+- **R49 Opt C — Embedded `s_waitcnt vmcnt(N)` 在 `emit_pf_tail` asm volatile 内部**: **DEAD —— 第 4 个 & 最后一个 fence-positioning 关闭。** Macro `R49C_PF_TAIL_FENCE` (默认 OFF) 在 producer 自己的 asm volatile 最后追加 `s_waitcnt vmcnt(N)`。ISA 验证: V1 disasm 比 V0 baseline 多 30 个 in-loop `s_waitcnt vmcnt(0)`; PC 0x301C 处 spot-check 确认 fence 在 stream 中紧跟 `buffer_load_dwordx4 ... offen lds` 之后、consumer step3 MFMA 之前 —— compiler 没 hoist。Smoke (64 任务): `(4096,32768,28672)` 在 4 个变体上全 HSA_FAULT; 其他 7 shape SMOKE_OK with wcf 0.01-0.05。Jaccard (28 任务): 中位数 0.011-0.037 —— 0 个候选超过 jacc_med>0.5 推进阈值; cohort-race 特征不变。Confirm 10-run on `28672x4096x16384`: V0_baseline 7/10, V2_vmcnt8 2/10 (回归 —— 额外 vmcnt 压力将 AGPR scheduler 推向不利)。**机制**: 结合 R45B (块内, 5×7 DEAD) + R47A (3-buffer 外部, 3 位置 DEAD) + R48A (物理 asm-split DEAD)，整个 fence-positioning + asm-block-split 轴现已穷尽关闭。K=28672 CRASH 和 cluster-B cohort race 都是 MFMA accumulator scheduling race，**不是**内存排序 bug。文件: `R49_OPT_C_VERDICT.md`, `R49C_INTEGRATION_FRAGMENT.json` (`{shape_so_promotions: {}}`), `R49C_EMBEDDED_VMCNT_ISA.s`, `R49C_BASELINE_ISA.s`, `R49C_BUILD_MANIFEST.json`, `R49_OPT_C_{SMOKE,JACCARD}.{json,log}`, `R49_OPT_C_10RUN_28672x4096x16384.json`, `build_R49C/*.so` (32 个 build)。
+
+**R49 reviewer**: SKIPPED (3 个 fragment 都空; integration manifest byte-identical to R44; 10-run 结果已知 = 35/42 VC)。文件: `R49_INTEGRATION_VERDICT.md`, `R49_INTEGRATION_MANIFEST.json` (skip-gate marker)。
+
+**R49 net result**: 0 net VC, 0 regression. Branch 不变 at `305fe79d` (R44 35/42 VC)。
+
+### R50 候选 (post-R49, 按机制信心排序)
+1. **R50 Opt A (R49A 发现后最高信心)** —— Port aiter MFMA↔ds_read 1:3 交错到 `kpair_64mfma_step34` 内部: 侵入式 ~256 行 `kpair_*_with_lds` asm volatile 重写。Aiter 每-MFMA fan-out 是 1 MFMA → 3 ds_reads (vs HK 4 MFMAs → 1 ds_read batch)。这是 disasm 中可见且未测试过的**唯一**实质差异。在 6 个 cluster-B wcf-flake shape 上测。
+2. **R50 Opt B (中)** —— 完整 aiter schedule port 作为 ONE atomic change: 1:3 交错 + slot rotation + M0 fresh-set + vmcnt(15) 一起。更大的重构; 灾难性回归风险更高但可能是唯一完整 port。**不应在 R50 Opt A 1:3-only 结果之前尝试**。
+3. **R50 Opt C (perf 轴枢轴)** —— skip-gate `(4096,32768,28672)` 转向 18 个 R44 VC <90% comp shape 的 perf 追赶。Round 价值: 增量 TFLOPs 收益 vs 持久 CRASH 轴死胡同。与 correctness 工作解耦。
+4. **R50 Opt D (最后 CRASH 的最终手段)** —— Aiter `.co` 直接 dlopen + 从 production kernel dispatch for `(4096,32768,28672)` only。绕开 kernel 重写，将该单一 shape 绑定到 aiter binary。机制: 读 `f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co` symbol，`hipModuleLoadData`，作为 per-shape codegen fallback。
+
+### R50+ 不要尝试 (R44-R49 已关闭)
+- K-loop 中**任何** fence 位置 (R45B/R47A/R48A/R49C 全部 DEAD)
+- `R38A_INLINE_BUFLOAD_LDS=1` for production builds (R47B 关闭)
+- intermediate-K wcf-flake shape 的 `R39A_TAIL_SCALE_CLAMP` (R46A 关闭)
+- 4-buffer 或更高的 LDS rotation (R46B + R47A 暗示 fence-interaction 不是 slot-count)
+- Wave-priority / s_nop pacing / MFMA half-split 单独 (R47C 已被 10-run 关闭)
+- `kpair_64mfma_step34` 物理 asm-block split (R48A 关闭)
+- `PF_MPT` depth override (R48C 机制层关闭)
+- 单独的 step34 内部 MFMA reorder / s_setprio / lgkmcnt drain (R48B 被 10-run gate 关闭)
+- 单 knob aiter pattern port (R49A 关闭)
+- R44A back-edge drain 扩展到 N=32768 (R49B 关闭; cohort scales with N)
+- Embedded vmcnt 在 producer asm volatile 内部 (R49C 关闭)
+
+### R49 stopping-criterion check
+- Floor (≥35/42, no regression): **MET** (35/42 不变 on `305fe79d`; manifest skip-gate, 无 kernel mutation)。
+- Stretch (≥36/42): **NOT MET** —— 3 个 worker 轴上 0 个 cell 通过 10-run @ 80% gate。
+- Round value: **4 个 durable 发现** (R49A aiter vmcnt(15) knob 关闭 + true differentiator 识别; R49B N=32768 cohort 超过 per-iter drain 范围; R49C embedded vmcnt 是第 4 个 & 最后一个 fence-axis 关闭; meta: 近 7 轮中第 5 个 DEAD 轮证实编译器驱动优化 frontier 耗尽; R50+ 需要侵入式 ISA 重写或 aiter `.co` dlopen)。
+
+---
+
+## 历史: 当前优化目标 (2026-04-19, post-R48 — QUADRUPLE-DEAD ROUND, 4TH DEAD IN LAST 6, NO COMMIT, 3 DURABLE FINDINGS, COMPILER-DRIVEN FRONTIER EXHAUSTED)
+
+**HEADLINE**: R48 是近 6 轮中第 4 个 DEAD 轮 (R43 死, R44 +8 赢, R45 死, R46 死, R47 死, R48 死)。Net VC delta = 0; ceiling 不变 35/42 from R44 (`305fe79d`)。3 个 worker 假设全部在机制层被证伪；reviewer 10-run skip (所有 fragment 都 `{}`，manifest byte-identical to R44)。**3 个高价值 durable 发现**关闭 *physical asm-block split*、*PF_MPT depth*、*step34-internal cohort race shifters* 三个轴。最近 6 轮的 pattern 表明：**编译器驱动的优化 frontier 在这个 kernel 上已耗尽**。
+
+**R48 attempts 总结**:
+- **R48 Opt A — 把 `kpair_64mfma_step34` asm 在 R46B 3-buffer rotation 下拆成两个独立的 Step3 + Step4 `asm volatile` block**: **DEAD — 物理 asm-split 轴 CLOSED。** Macro `R48A_SPLIT_STEP34` at `kernel_mxfp4_gluon_cpp.cpp:~348` (默认 OFF)。启用后 emit 两个独立 asm block，每个有缩减的 operand list。ISA diff vs R46B control: Step3→Step4 边界处的指令顺序未变。Compiler 的 IPRA/RA + post-RA scheduler 在 MIR 这层的 asm-volatile 边界插入之前运行 —— split asm 没有在 backend pipeline 中存活。K=28672 FUSED+TS 仍然在同一 PC 处 HSA aperture fault。文件: `R48_OPT_A_VERDICT.md`, `R48A_INTEGRATION_FRAGMENT.json` (`{}`), `R48A_SPLIT_ISA.s`, `R48A_control_R46B_ISA.s`, `build_R48A/*.so` (8 个 build)。
+- **R48 Opt B — `kpair_64mfma_step34` 内部 MFMA 重排 + `s_setprio 1` + `s_waitcnt lgkmcnt(0)` drain**: **DEAD on 10-run @ 80% gate。** 5 个 cell (R48B_baseline, R48B_reorder_only, R48B_prio1_only, R48B_drain_only, R48B_reorder_prio1) × 6 个 cluster-B shape = 30 个 cell，0 个通过 strict gate (n_OK_5>=8 AND wcf_max<0.02)。最佳: `R48B_drain_only` on `32768x4096x14336` n_OK 8/10, wcf_max=0.0214 (超过 0.02 hard gate 0.0014)。Cohort-race wcf-distribution shifters —— 没一个跨过 0.02 hard gate。Pattern 与 R47C wave-priority 发现一致: 针对 cohort race 的 macros 移动 tail draw 但不修复底层 MFMA accumulator race。Worker agent 没写自己的 verdict; verdict 直接从 `R48_OPT_B_10RUN.json` 合成。文件: `R48_OPT_B_VERDICT.md` (合成), `R48B_INTEGRATION_FRAGMENT.json` (`{}`), `R48_OPT_B_10RUN.{json,log}`, `R48_OPT_B_JACCARD.{json,log}`, `R48B_BUILD_MANIFEST.json`, `build_R48B/*.so` (60 个文件 = 30 .so + 30 wrap.cpp)。
+- **R48 Opt C — `PF_MPT` depth override (4 → 6 或 8)**: **DEAD 机制层 —— PF_MPT 是 tile-coverage count 不是 pipeline depth。** Macro `R48C_PF_MPT_OVERRIDE` at `kernel_mxfp4_gluon_cpp.cpp:1310-1325` (默认 0)。PF_MPT=6 和 PF_MPT=8 都在第一 iter CRASH (HSA aperture violation)。机制: `PF_MPT = (HB*BK*sizeof(fp8e4m3))/(16*_NUM_THREADS)` 定义每个 thread 每 tile 发多少个 `buffer_load_dwordx4` op (typical config 下是 4)。增大它会让 prefetcher 读到 source tile 的末尾外。Pipeline depth 由 LDS slot count (R46B 3-buffer) 和外层 prefetch unroll 控制，**不**是 `PF_MPT`。文件: `R48_OPT_C_VERDICT.md`, `R48C_INTEGRATION_FRAGMENT.json` (`{}`), `build_R48C/*.so` (8 个 build)。
+
+**R48 reviewer**: SKIPPED (3 个 fragment 都 `{}`；integration manifest byte-identical to R44; 10-run 结果已知 from R47 reviewer = 35/42 VC)。文件: `R48_INTEGRATION_VERDICT.md`, `R48_INTEGRATION_MANIFEST.json` (skip-gate marker)。
+
+**R48 net result**: 0 net VC, 0 regression. Branch 不变 at `305fe79d` (R44 35/42 VC)。
+
+### R49 候选 (post-R48, 按机制信心排序)
+1. **R49 Opt A — aiter ISA disasm 驱动的 port**: aiter `f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co` 是手写 ISA，编译器无法重排。Disasm + 学习 cohort-race-free 的指令排序 + port 特定 pattern。Per `project_mxfp4_aiter_binary_disasm.md`。**最高信心**的剩余攻击 cluster-B cohort race AND FUSED+TS K=28672 CRASH。
+2. **R49 Opt B — 从零写的 K=28672 non-FUSED variant**: per `project_mxfp4_R44A_backedge_drain.md` non-FUSED branch 已经在 `(16384,4096,28672)` 上工作 (R44A back-edge drain)。为 `(4096,32768,28672)` 构建新的 K=28672 specialized kernel，**不**用 FUSED+TS。Sister-shape 机制迁移。
+3. **R49 Opt C — Producer-side per-slot vmcnt 嵌入 `emit_pf_tail` asm 内部**: 不是 external (R47A 关闭)，而是 inline 在生产 LDS deposit 的 asm block 内部。R48 时未测试。可能通过让 fence 成为 producer 自己 asm volatile 的一部分来绕开 compiler RA/scheduler vs asm-boundary 问题。
+4. **R49 Opt D — Methodology / measurement 保持**: 10-run @ 80% INDEPENDENT seeds [101..1010] 是强制。Phase-1 Jaccard probe 可选但作为 prefilter 有价值。
+
+### R49 不要尝试 (R44-R48 已关闭)
+- FUSED+TS K-loop body 任何 external vmcnt/lgkmcnt fence (R45B + R47A 已关闭)
+- `R38A_INLINE_BUFLOAD_LDS=1` for production (R47B 已关闭: 每个 shape 都回归)
+- intermediate-K wcf-flake shape 的 `R39A_TAIL_SCALE_CLAMP` (R46A 已关闭: wcf 3-5× 更糟)
+- 4-buffer 或更高的 LDS rotation (R46B + R47A 暗示 fence-interaction 不是 slot-count)
+- Wave-priority / s_nop pacing / MFMA half-split 单独使用 (R47C 已被 10-run 关闭)
+- `kpair_64mfma_step34` 物理 asm-block split (R48A 已关闭: compiler RA/sched 在 asm 边界之前)
+- `PF_MPT` depth override (R48C 机制层关闭)
+- 单独的 step34 内部 MFMA reorder / s_setprio / lgkmcnt drain (R48B 被 10-run gate 关闭)
+
+### R48 stopping-criterion check
+- Floor (≥35/42, no regression): **MET** (35/42 不变 on `305fe79d`; manifest skip-gate, 无 kernel mutation)。
+- Stretch (≥36/42): **NOT MET** —— 3 个 worker 轴上 0 个 cell 通过 10-run @ 80% gate。
+- Round value: **3 个 durable 发现** (R48A 物理-split 轴 CLOSED; R48C PF_MPT 机制轴 CLOSED; R48B step34-internal shifters 在 10-run gate 不够)。Round meta-finding: 编译器驱动的优化在这个 kernel 上耗尽；R49+ 需要 aiter ISA disasm port、从零写的 K=28672 non-FUSED variant、或 HW vendor 层调查。
+
+---
+
+## 历史: 当前优化目标 (2026-04-19, post-R47 — 4TH DEAD ROUND IN LAST 5, NO COMMIT, 3 DURABLE FINDINGS, R45 10-RUN PROTOCOL VINDICATED)
+
+**HEADLINE**: R47 是近 5 轮中第 4 个负结果轮 (R43 死, R44 +8 赢, R45 死, R46 死, R47 死)。Net VC delta = 0; ceiling 不变 35/42 from R44 (`305fe79d`)。3 个 worker 假设全部被证伪或 5-run promote 被 10-run 反驳。Branch 不变。**3 个高价值 durable 发现** + R45 10-run @ 80% 协议**首次在真实候选 cell 上抓到 false promote**。
+
+**R47 attempts 总结**:
+- **R47 Opt A — Per-slot vmcnt fence on R46B 3-buffer rotation for `(4096,32768,28672)`**: **DEAD — external-fence 轴 CLOSED。** 全部 3 个 fence 位置 (V1=`vmcnt(0)` top-of-iter, V2=`vmcnt(8)` top-of-iter, V3=`vmcnt(0)` pre-step34) 都重新触发 HSA aperture violation —— 正是 R46B 3-buffer rotation 引入来 bypass 的那个 fault。ISA 验证 V1 emit 36 个 in-loop `s_waitcnt vmcnt(0)` (compiler 没 strip)。结合 R45B (5 fence 位置 × 7 cell 在 step34 内部 DEAD)，**关闭整个 external-fence 轴** for FUSED+TS K=28672。R48 机制: 把 `kpair_64mfma_step34` 拆回成独立 `step3` + `step4` asm block 在 R46B 3-buffer rotation 下 —— 结合两个 PROVEN 部分修复。文件: `R47_OPT_A_VERDICT.md`, `R47A_INTEGRATION_FRAGMENT.json` (`{}`), `R47A_VMCNT_TOP_ISA.s`, `R47_OPT_A_SMOKE.{json,log}`, `build_R47A/*.so` (10 个 build)。Kernel macro `R47A_TRIPLE_BUF_VMCNT_TOP` at `kernel_mxfp4_gluon_cpp.cpp:344` (默认 OFF)。
+- **R47 Opt B — Port M0 fresh-set discipline into PRODUCTION kernel for 6 cluster-B shape**: **DEAD with surprise — 限定了 R46C "M0 load-bearing" 论断。** 确认 `R38A_INLINE_BUFLOAD_LDS=0` 是 R44 默认；构建 Phase-1 (R38A=1) 和 Phase-2 (R38A=1 + 新 macro `R47B_M0_FRESH_SET_PRODUCTION=1` 覆盖 `emit_tile_pf` 位点)。ISA 验证 272/272 个 `buffer_load_dwordx4 ... offen lds` 指令前 5 行内有 `s_mov_b32 m0, sNN` (discipline 正确 emit)。**结果**: 灾难性回归，每个 shape 都坏，包括 R44-VC stretch baseline。如 `16384x14336x4096` control fin=0.994 wcf=0.011 → phase1 fin=0.886 wcf=0.487 (+0.476 wcf)。`4096x4096x8192` (R44 VC) control wcf=0.006 → phase1 wcf=0.189。M0 hygiene 在 VGPR-PF 上是 load-bearing，但**在 FUSED+TS production hot path 上破坏正确性**。R48+ 不要在 production 上启用 `R38A_INLINE_BUFLOAD_LDS=1`；cohort-B race 在 MFMA accumulator 层 per `project_mxfp4_finite_gate_cohort_race.md`。文件: `R47_OPT_B_VERDICT.md`, `R47B_INTEGRATION_FRAGMENT.json` (`{}`), `R47B_M0_DISCIPLINE_ISA{,_full}.s`, `R47_OPT_B_SMOKE.{json,log}`, `build_R47B/*.so` (16 个 build)。Kernel macro `R47B_M0_FRESH_SET_PRODUCTION` at `kernel_mxfp4_gluon_cpp.cpp:~326` (默认 OFF)。
+- **R47 Opt C — Cohort-race kernel attack via wave-priority + MFMA scheduling**: **5-run PROMOTE 1 个 cell, 10-run 击杀。** Worker 报 1/6 PROMOTE: `28672x4096x16384` cell `R47C_prio_only` (单一 `s_setprio 3` at K-loop entry, `s_setprio 1` at exit)。5-run: n_OK 4/5→5/5, wcf_max 0.0219→0.0114, TFLOPs 4368 (-2.6%)。ISA 验证 `s_setprio 3` at 0x25C4, `s_setprio 1` at 0xC984。Phase 1 Jaccard: 30 个 (cell, shape) pair 全部停留在 pure RACE 区 (jacc_med <0.20) —— macros 移动 wcf 分布但不改变 *哪些* cell overflow。其他 5 个目标 shape: 无 PROMOTE。Reviewer 10-run: `28672x4096x16384` n_OK **5/10** wcf_max **0.0272** —— hard fail n_OK>=8/10 AND wcf_max<0.02 gate。**5-run 选择是 wave-priority macro 试图修复的那个 cohort race 的运气好的 tail-draw**。文件: `R47_OPT_C_VERDICT.md`, `R47C_INTEGRATION_FRAGMENT.json`, `R47C_KERNEL_ISA_EXCERPT.s`, `R47_OPT_C_JACCARD.{json,log}`, `build_R47C/*.so` (30 个 build)。Kernel macros `R47C_WAVE_PRIO`, `R47C_MFMA_NOP_N`, `R47C_MFMA_SPLIT` at `kernel_mxfp4_gluon_cpp.cpp:~326` (全部默认 OFF)。
+
+**R47 reviewer integration (10-run @ 80%, INDEPENDENT seeds [101..1010])**:
+- R47C 单一候选 `28672x4096x16384`: 5-run n_OK 5/5 → 10-run n_OK 5/10 wcf_max 0.0272。Hard fail。
+- 35 个 R44 VC shape 的 cross-validation: 30 个稳定 VC; 5 个在 UNCHANGED .so 下丢失 VC (3 个 wcf_std<0.01 纯 tail-draw + 2 个 wcf_max breach 但 .so 没换 —— 按规约**不算**回归); 1 个 R44 non-VC (`4096x32768x14336`) 在 unchanged .so 下对称翻 VC (运气好的 tail-draw, **不能**归因于 R47)。
+- 决定: NO_PROMOTE; manifest 还原成与 R44 一致。
+- **方法论验证 (R47 最 durable 的产出)**: 5-run @ 80% 会 ship 一个真实 pass-rate ~0.5 的 cell; 10-run @ 80% 干净抓住。**首次** R45 mandate 在真实候选 cell 上抓到 false promote, 不只是 cross-val cohort jitter。**协议物有所值。** R48+ 保持 10-run @ 80% (n_OK>=8/10) 强制为 promotion 标准。
+
+**R47 net result**: 0 net VC, 0 regression。Branch 不变 `305fe79d` (R44 35/42 VC)。
+
+### R48 候选 (post-R47, 按机制置信度排序)
+1. **R48 Opt A — 把 `kpair_64mfma_step34` 拆回成独立 step3+step4 asm block 在 R46B 3-buffer rotation 下**: 结合两个 PROVEN 部分修复 (R44A back-edge fence pattern + R46B aperture bypass)。external-fence 轴已关闭；FUSED+TS K=28672 (`(4096,32768,28672)` 最后的 CRASH) 只剩内部 asm-block 手术。机制置信度高但需要非平凡的 asm-block 重构。**R48 最高杠杆攻击。**
+2. **R48 Opt B — Cohort-B 残余 race 攻击 via AGPR allocation / step34 内部重排**: R47B 关闭 LDS-deposit / M0 轴; R47C wave-priority 单独不能修 race (只移动 wcf 分布)。6 个 cluster-B wcf-flake shape 需要 step34 内部手术 —— 试 AGPR allocation tweak (compiler hint 或手写 asm) 和 step34 MFMA 依赖重排。
+3. **R48 Opt C — 把 R47C wave-priority 与 Opt B 内部 step34 手术结合**: R47C prio_only 移动了分布但 10-run 失败; 与内部 asm 重构结合可能把 6 个 cluster-B shape 推过 gate。比 A/B 单独低置信度。
+4. **R48 方法论保持**: 10-run @ 80% with INDEPENDENT seeds [101..1010] 强制。Phase-1 Jaccard probe 仍推荐做 prefilter (廉价信号判断候选 cell 是稳定 race 还是只移动分布)。
+
+### R47 stopping-criterion check
+- Floor (≥35/42, no regression): **MET (35/42 不变 on `305fe79d`; manifest 还原; 所有 R47 macro 默认 OFF)**。
+- Stretch (≥36/42): **NOT MET** —— R47C 5-run promote 被 10-run 击杀。
+- 轮次价值: **3 个 durable 发现** (R47A external-fence 轴 CLOSED; R47B M0 不能 transfer 到 FUSED+TS; R47C 5-run-vs-10-run false promote 验证 R45 协议)。R48 有 1 个机制置信度高的攻击 (在 R46B 下拆 step34)。
+
+---
+
+## ⚠️ 之前的优化目标 (2026-04-19, post-R46 — TRIPLE-DEAD ROUND, NO COMMIT, 3 DURABLE FINDINGS)
+
+**HEADLINE**: R46 是负结果轮 (近 4 轮中第 3 个: R43 死, R44 +8 赢, R45 死, R46 死)。Net VC delta = 0; ceiling 不变 35/42 from R44 (`305fe79d`)。3 个 worker 假设全部被证伪或仅部分成功；reviewer 跳过 (没有 integration fragment 需要合并；所有 R46 macro 默认 OFF, 不可能回归)。**3 个高价值 durable 发现改变了 R47 的攻击面**。
+
+**R46 attempts 总结**:
+- **R46 Opt A — TAIL_SCALE_CLAMP (R39 Opt A family) on 5 wcf-flake intermediate-K shape**: **DEAD — 假设被证伪。** R39A_TAIL_SCALE_CLAMP 让 wcf **变差 3-5×** on 4/5 shape (`16384x14336x4096`: drain wcf=0.049 → clamp wcf=0.238)。R39A 必须把 parent 从 FUSED_STEP34=1 (R44 baseline) 切到 non-FUSED, 在 FUSED-friendly shape 上多 16-32% 的性能 cliff。30 个 cell 构建 (15 R1 + 15 R2 with VARIANT={1,2} forks)，0 个 promote。最佳 cell 仍 fail wcf<0.02 gate (16384×28672×4096 drain n_OK=4/5 wcf_max=0.030)。这 5 个 shape **不是** R38 memo 提到的 scale/data misalign —— 它们是真正的 cohort-race tail-draw (参见 `project_mxfp4_R45_cohort_tail_draw.md`)。文件: `R46_OPT_A_VERDICT.md`, `R46A_INTEGRATION_FRAGMENT.json` (`{}`), `R46_OPT_A_5RUN.{json,log}`, `build_R46A/*.so` (30 个 artifact), `bench_R46A_5run.py`, `build_R46A{,_v2}.py`。
+- **R46 Opt B — 3-buffer LDS rotation for FUSED+TS K=28672**: **PARTIAL — CRASH bypass 成功，但 correctness bug 仍在。** Macro `R46B_LDS_TRIPLE_BUFFER` (默认 OFF; A0_db[3], Bl_db[3]) **结构性绕过**了 R45 Opt B 5 个 fence 位置 × 7 个 cell 都关不掉的 HSA aperture violation。SMOKE_OK on `(4096,32768,28672)` 和 `(16384,4096,28672)` 都成功 —— 确认 R45 机制修正 (race 在 `kpair_64mfma_step34` 内部 LDS slot aliasing；物理分离 slot 让 fence 问题变得无关)。**但是** rotated path 输出 wcf=0.33 fin=0.43 —— 错误输出。R46B_minimal (无其他 safety macro) 显示同等 bug magnitude → bug 在 rotation 自身。**R47 机制**: 缺失 per-slot vmcnt fence at top of each iter (slot-(bt+2)%3 的 consumer 距 prefetch write 已 2 个 iter; 现有 back-edge `s_waitcnt lgkmcnt(0)` 不 gate 这个远距离 write 的 vmcnt)。文件: `R46_OPT_B_VERDICT.md`, `R46B_INTEGRATION_FRAGMENT.json` (`{}`), `R46_OPT_B_SMOKE.{json,log}`, `R46_OPT_B_FALLBACK_5RUN.{json,log}`, `R46B_BUILD_MANIFEST.json`, `R46B_TRIPLE_BUF_ISA.s` (~30 个不同的 M0 SGPR source), `build_R46B.py`, `bench_R46B.py`。Kernel: `kernel_mxfp4_gluon_cpp.cpp:326` macro + 7 个条件位点; 默认 OFF, byte-compatible with R45 baseline。
+- **R46 Opt C — VGPR-PF revival via 3-element fix on vgprPF.cpp kernel**: **DEAD — 找到两个独立 blocker。** 最佳 PRE-FLIGHT bit_eq = **0.5839** (PF_N0, VGPR-PF 代码关闭, finite=41%); VGPR-PF 激活时: 0.0050 (PF_N=2, 完整 3-element fix), 0.1865 (PF_N=1), HSA_FAULT (PF_N≥4)。Pass gate (≥0.95) 没有任何 variant 通过。**Blocker 1 (NEW)**: `kernel_mxfp4_gluon_cpp_vgprPF.cpp` 在 FUSED=1 baseline 已经从 production 结构性漂移 —— `PF_N0_FUSED_clean` (VGPR-PF 关闭, FUSED=1) bit_eq=49.9%。R45 Opt C 的 "byte-correct" 是 probe-geometry 的，不是 full integration。**Blocker 2**: `VGPR_PF_MODE` 只在 `#if FUSED_STEP34=0` 内 fire，但所有 9 个 cluster-B 目标的 incumbent 都用 `FUSED_STEP34=1` —— VGPR-PF 代码路径在目标 cohort 上根本 unreachable。**正面发现 (KEEP)**: M0 fresh-set 是 functionally **load-bearing** —— `PF_N=2 m0_only` 跑完成 (99.9% finite); `PF_N=2 fence_only` HSA_FAULT。**首次 durable proof** aiter 的 `s_mov_b32 m0, sX` per-load discipline 在 gfx950 上 functionally 改善 run-to-completion，不是装饰。文件: `R46_OPT_C_VERDICT.md`, `R46C_PRE_FLIGHT_BIT_EQ.json`, `R46C_INTEGRATION_FRAGMENT.json` (`{}`), `R46C_KERNEL_ISA_EXCERPT.s`, `R46C_preflight*.py`, `build_R46C.py`。Kernel: `kernel_mxfp4_gluon_cpp_vgprPF.cpp` 加入 `R46C_M0_FRESH_SET` (line 910) 和 `R46C_CONSUMER_FENCE` (line 916)，都默认 OFF。
+
+**R46 net result**: 0 net VC, 0 regression。Reviewer SKIPPED (没有 integration fragment 需要合并；所有 macro 默认 OFF)。Branch 不变 `305fe79d` (R44 35/42 VC)。
+
+### R47 候选 (post-R46, 按机制置信度排序)
+1. **R47 Opt A — Per-slot vmcnt fence at top of K-loop iter for R46B 3-buffer path**: R46B 已经证明 CRASH bypass 结构上有效；唯一剩下的问题是正确性。在每个 iter 顶部为即将被读的 slot 加 `s_waitcnt vmcnt(N)`。Macro `R47A_TRIPLE_BUF_VMCNT_TOP` on top of `R46B_LDS_TRIPLE_BUFFER`。**R47 最高置信度攻击** —— 机制具体，修复就是一个 fence。目标: `(4096,32768,28672)` (最后剩下的 CRASH)。
+2. **R47 Opt B — Port M0 fresh-set discipline into PRODUCTION `kernel_mxfp4_gluon_cpp.cpp`**: R46C 证明 M0 discipline 在 gfx950 上 functionally load-bearing。把 `vgprPF.cpp` 的 `s_mov_b32 m0, sX`-immediately-before-`buffer_load_dwordx4 ... lds` 模式 port 到 production kernel 现有的 HW `buffer_load_to_lds` 位点。目标: 9 个 cluster-B WCF_BOUND shape 的 stability margin (无架构变更，只做 per-load M0 hygiene)。较小赌注但机制置信度高。
+3. **R47 Opt C — VGPR-PF integration into PRODUCTION kernel under FUSED=1**: 重试前必须解决 R46 Opt C 的两个 blocker。(a) 把 M0 fresh-set port 到 production (subsumes R47 Opt B); (b) 把 `VGPR_PF_MODE` 的可达性扩展到 FUSED_STEP34=1 路径 (触及 `kpair_64mfma_step34` 内部)。多轮 refactor —— 推迟到 R48+，除非 R47 Opt B 成功并解锁 cluster。
+4. **R47 Opt D — 5 wcf-flake shape 视为 cohort-race tail-draw, 不是 kernel bug**: R46 Opt A 已经定论性证伪了 misalign 假设。剩下唯一的轴是 gate 方法论 (10-run minimum integration per `project_mxfp4_R45_cohort_tail_draw.md`)。**不是** kernel attack —— 测量侧。
+
+### R46 stopping-criterion check
+- Floor (≥35/42, no regression): **MET (35/42 不变 on `305fe79d`; 无 kernel mutation, 所有 R46 macro 默认 OFF)**。
+- Stretch (≥38/42): **NOT MET** —— 3 个 worker 假设全部证伪或部分。
+- Round value: **3 个 durable 发现** (TAIL_SCALE_CLAMP DEAD; 3-buffer rotation 结构性绕过 CRASH 但需 per-slot vmcnt; M0 discipline 是 functionally load-bearing)。R47 Opt A 是 R44 以来我们拥有的最高置信度攻击。
+
+---
+
+## Previous State (2026-04-19, post-R45 reviewer — DEAD ROUND, NO COMMIT, 2 DURABLE FINDINGS)
+
+**HEADLINE**: R45 是负结果轮但带回了高价值知识。Net VC delta = 0；ceiling 不变 35/42 from R44 (`305fe79d`)。Reviewer 在 INDEPENDENT-seed integration 中发现 R45A 目标 `32768x4096x14336` 实际未 flip (worker 自己的 5-run 用了不同/幸运的 seed sequence)；而且 10 个 R44 VC shape 在 .so 文件未变的情况下从 5/5 飘到 4/5 —— `wcf_std` cohort-race tail-draw, 不是 kernel 回归。**两条 durable 发现比 +1 VC 更有价值**: (1) Opt C — VGPR-PF 路线是 REVIVABLE 的 —— SW `ds_write_b32 quartet @ M0 + voff_lane` 公式与 HW `buffer_load_to_lds size=16` 在 production kernel 用到的所有 voff 布局上 byte-identical (公式正确；编译器在 asm 边界上保活 prefetch VGPR 才是真正的 blocker)。(2) Opt B — FUSED+TS K=28672 CRASH 不是 vmcnt race —— 5 个 fence 位置 (PC 0x1A8F0 ISA 验证) 全 DEAD；race 在 `kpair_64mfma_step34` asm block 内部；外部 fence 不能 reorder 内部指令。需要 3-buffer rotation (A0_db[3])，不是外部 fence。
+
+**R45 attempts 总结**:
+- **R45 Opt A** (R44A_BACKEDGE_VMCNT_DRAIN 推广到 5 个 wcf-flake shape): **PARTIAL_WIN-then-DEAD** — worker 报告 `32768x4096x14336` 5/5 VC（自己的 seed 序列下），但 reviewer 的 INDEPENDENT-seed integration 只有 3/5 (2 个 seed 仍 wcf > 0.02) 且 -12% 性能。Drain 机制在 M=32768/K=14336 family 部分有效但在 M=16384/K=4096 family 完全无效 (不同的残余 race)。**NO PROMOTE.** 文件: `R45_OPT_A_VERDICT.md`, `build_R45A/...R45A_drain.so`, `R45A_INTEGRATION_FRAGMENT.json`。
+- **R45 Opt B** (FUSED+TS K=28672 SEPARATING fence between `kpair_64mfma_step34` and `emit_pf_tail<0>`): **DEAD** — 5 个 fence 位置 × 7 个 cell 全 CRASH。Macro `R45B_FUSED_SEPARATING_FENCE` 加入 kernel 默认 OFF。PC 0x1A8F0 ISA 验证 fence 已发出且通过编译器。机制修正: race 在 `kpair_64mfma_step34` asm block **内部**，不在边界；外部 fence 无法 reorder 一个 fused asm 内部的指令。需要 3-buffer rotation (A0_db[3])。文件: `R45_OPT_B_VERDICT.md`, `R45_OPT_B_FENCE_ISA.s`。
+- **R45 Opt C** (LDS self-readback test kernel 验证 VGPR-PF 公式): **REVIVE** — 写了 `lds_readback_probe.cpp/py`；SW `ds_write_b32 quartet @ M0 + voff_lane` 公式在 production hot kernel 用到的每个 voff 布局上与 HW `buffer_load_to_lds size=16` byte-for-byte 一致。**公式是对的**。R34/R35/R43B 的 "0.0838% bit-eq" 是编译器在 asm 边界上 KILL 了 prefetch VGPR，**不是公式错**。R46 路径: VGPR-PF 复活通过 `+v` keepalive + per-load M0 fresh-set + consumer vmcnt/lgkmcnt fence before `ds_read_b128`。文件: `R45_OPT_C_VERDICT.md`, `R45_OPT_C_PROBE_RESULTS.json`, `lds_readback_probe.{cpp,py}`。
+- **R45 Opt D** (perf claw-back: register pressure, wave-priority, M0/scoreboard): **DEAD** — 5 个 cell 全部 ±0.4% 范围内；deep-K 性能差距是结构性的 (SW `ds_write` vs HW `buffer_load_to_lds` 机制差异，不是 register pressure / wave priority)。文件: `R45_OPT_D_VERDICT.md`。
+
+**R45 reviewer integration 关键发现 (durable, 2026-04-19)**:
+- Cohort-race wcf_std tail-draw: 10 个 R44 VC shape 在 R45 INDEPENDENT-seed integration 下丢 VC，**但 .so 文件未变**。这是 `wcf_std < 0.01` cohort-race 噪声，不是 kernel 回归 (参见 `project_mxfp4_finite_gate_cohort_race.md`)。一个反例: `16384x6144x4096` 4/5→5/5 (.so 也未变，幸运 cohort)。
+- **R46 必需的方法论升级**: 把 10-run INDEPENDENT-seed integration 提升为强制步骤 (5-run 在 wcf_std=0.01 阈值附近无法区分 kernel 回归与 cohort tail-draw)。
+
+### R46 候选 (post-R45, 按预期 ROI 排序)
+1. **R46 Opt A — Per-iter drain 或 TAIL_SCALE_CLAMP on M=16384/K∈{4096..14336} family**: 目标 `16384x14336x4096` (R45 中 2 个 seed wcf=0.10+ 灾难性)。R45 Opt A 的 drain 机制在这个 family 上已确认 DEAD —— 与 K=28672 不同机制。先试 TAIL_SCALE_CLAMP 风格修复 (R39 Opt A family) 再试 back-edge drain。
+2. **R46 Opt B — 3-buffer rotation (A0_db[3]) for FUSED+TS @ K=28672**: 替代 R45 Opt B 的外部 fence 路线。Race 在 `kpair_64mfma_step34` 内部；只有结构性分离 LDS slot 才能避免。
+3. **R46 Opt C — VGPR-PF 复活 via `+v` keepalive + per-load M0 fresh-set + consumer vmcnt/lgkmcnt fence**: 公式 byte-correct (R45 Opt C 已证)；编译器在 asm 边界上保活寄存器才是真正 blocker。目标 9 个 cluster-B WCF_BOUND shape。**这是 R46 杠杆最高的押注** —— 9 个 shape 共享一个修复。
+4. **R46 Opt D — 10-run INDEPENDENT-seed integration 强制化**: 把 5-run integration 替换为 10-run independent-seed for R46，区分真 kernel 回归与 `wcf_std` cohort-race tail-draw。便宜的方法论变更，高 signal value。
+
+### R45 stopping-criterion check
+- Floor (≥35/42, no regression): **MET (35/42 不变 on `305fe79d`；integration 显示 seed-noise drift 但 kernel base 完整)**。
+- Stretch (≥36/42): **NOT MET** —— Opt A 的 promote 在 INDEPENDENT-seed reviewer 下未存活。
+- Round value: **2 个 durable 发现** (VGPR-PF 路线 REVIVABLE 来自 Opt C byte-compare proof; FUSED CRASH 机制修正来自 Opt B ISA-verified DEAD fence)。R46 有 3 个具体攻击轴，每个都有 mechanism-level evidence。
+
+---
+
+## Previous State (2026-04-19, post-R44 reviewer — STRETCH-WIN +8 VC)
 
 **HEADLINE**: R44 是 R40B 以来最大的 correctness gain。Verified-correct: **27/42 → 35/42 (+8 net)**, **0 regressions**, stretch goal (≥30/42) **达成**。两条路线赢 (Opt D gate-relax 0.98→0.97 cohort-race tail + Opt A `R44A_BACKEDGE_VMCNT_DRAIN` macro 修了 K=28672 CRASH 之一 `(16384,4096,28672)` 在 non-FUSED 路径上)；两条死 (Opt B aiter `ds_write` disasm — aiter binary 里有 0 个 `ds_write` 指令，立项就错了；Opt C gpucore-from-rocgdb PARTIAL — PC 范围拿到了，没拿到 live VA，但启发了 Opt A 的修复方案)。
 

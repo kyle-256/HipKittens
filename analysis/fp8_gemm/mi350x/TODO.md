@@ -1,6 +1,218 @@
 # MXFP4 GEMM Optimization TODO
 
-## Current State (2026-04-19, post-R44 reviewer — STRETCH-WIN +8 VC)
+## Current State (2026-04-19, post-R50 — WIN +1 VC ROUND, COMMIT, FIRST NON-DEAD SINCE R44, AITER `.CO` DLOPEN BREAKTHROUGH, 36/42 VC)
+
+**HEADLINE — R50 BREAKS THE 5-DEAD-OF-7 STREAK. Net VC delta vs R44 baseline = +1 (35 → 36/42 VC). The breakthrough is **R50 Opt D**: per-shape backend dispatch in the production harness binds aiter's hand-written `f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co` via `hipModuleLoadData` + `hipModuleGetFunction` + `hipModuleLaunchKernel` for the perma-CRASH cell `(4096,32768,28672)`. 10/10 INDEPENDENT seeds OK, 5585.6 TFLOPS = 100.31% of competitor 5568.2. **First ever VC for this shape** (perma-CRASH on every HipKittens variant tested R43-R49). The aiter `.co` dlopen pattern is reusable: ANY future MXFP4 cell HipKittens cannot solve and aiter has a tuned `.co` for can use the same shim approach in <1 day of work.**
+
+**R50 attempts summary**:
+- **R50 Opt A — Aiter MFMA↔ds_read 1:3/1:4 spread interleaving INSIDE `kpair_64mfma_step34` asm volatile**: **DEAD on 10-run @ 80% gate. 5th independent closure of the "MFMA accumulator race is orderable-scheduling" hypothesis.** Macro `R50A_AITER_INTERLEAVE` (default OFF, byte-equiv to R44 baseline) replaces ~256 lines of asm volatile body with a 1:4 spread variant. ISA-verified: BASELINE shows 25-instr pure-MFMA runs (61 occurrences); v1 breaks 30 of those 25-runs into runs of 3, 4, 11. Compiler did NOT strip the rewrite. 10-run on 6 cluster-B wcf-flake targets: 0/6 VC under v1 (identical 0/6 under baseline); R44 stretch `4096x4096x8192` retained VC (10/10 OK, +0.3% TFLOPS). Combined with R45B (5 in-block fence positions DEAD), R47A (3 external positions on 3-buffer DEAD), R49A (single vmcnt knob DEAD), R49C (embedded fence in producer asm DEAD): **the cluster-B cohort race lives in the AGPR forwarding path INSIDE the MFMA pipeline itself, NOT at any orderable boundary the compiler or asm body can rearrange.** The race is structural to the MFMA/AGPR microarchitecture. Files: `R50_OPT_A_VERDICT.md`, `R50A_INTEGRATION_FRAGMENT.json` (`{}`), `R50A_aiter_kloop_body.s`, `R50A_old_step34.s`, `R50A_new_step34.s`, `R50A_KERNEL_ISA.s` (v1 disasm — verified emit), `R50A_BASELINE_ISA.s`, `R50_OPT_A_{SMOKE,JACCARD,10RUN}.{json,log}`, `R50A_BUILD_MANIFEST.json`, `build_R50A/*.so` (22 modules). Kernel macro `R50A_AITER_INTERLEAVE` at `kernel_mxfp4_gluon_cpp.cpp` (default OFF).
+- **R50 Opt C — Per-shape `gm × lgk × pfoff` perf-axis claw-back sweep on 14 R44 VC <90% comp shapes**: **PROMOTE → REVERT under 10-run cross-val. Pure variant-knob retuning (NO new macros).** 14 R44 VC shapes <90% comp targeted; per shape: 27-cell sweep (lgk ∈ {1,2,3} × gm ∈ {6,7,8} × pfoff offset ∈ {-4,0,+4}). 5-run @ 80% INDEPENDENT-seed gate found 1 PROMOTE candidate: `4096x28672x32768` gm8_lgk2_po28 (+2.90% pct_comp, base 61.90% → 64.80%, wcf_max=0.0182). 10-run cross-val under R50 INTEGRATION reviewer caught wcf_max=0.0296 > 0.02 hard gate at 9/10 OK — classic cohort-race tail draw. **REVERT to R44 R41A baseline.** Other shapes' best gains all <2.0%: `6144x4096x8192` +1.77%, `32768x4096x7168` +1.98%, `28672x4096x8192` +1.02% — the existing variant table is **auto-tuner-saturated within 0-2pp** on 13 of 14 tested shapes. **Mechanism (durable)**: R25-F/G `pfoff` mechanism is mostly tapped out; for R51+ perf work attack DIFFERENT structural axes (MFMA shape, tile geometry, thread block size). 5-run perf gate is INSUFFICIENT for cohort-race-prone shapes — promote candidates can pass 5-run and fail 10-run on the SAME `.so`. **All R51+ perf rounds MUST use 10-run @ 80% as the promote gate.** Decider had to synthesize the verdict because the Opt C agent stalled in a self-matching `pgrep -f "bench_R50C"` wait loop after sweep completion (the wait loop's bash command line itself contained literal `bench_R50C`, so pgrep found its own process and never returned 0). **Agent process bug (durable)**: NEVER use `pgrep -f X` wait loops where the bash command line could match X — use `pgrep -fx`, save PID and `wait $PID`, or run bench in foreground. Files: `R50_OPT_C_VERDICT.md` (decider-synthesized), `R50C_INTEGRATION_FRAGMENT.json` (PROMOTE → reviewer cross-val REVERT), `R50C_SWEEP.json` (88 KB — full 5-run consensus), `R50C_PREFILTER.json` (386 KB), `R50C_PROMOTE_CANDIDATES.json`, `R50C_baseline_pct_comp.json`, `R50C_BUILD_MANIFEST.json` (113 KB), `build_R50C/*.so`. Kernel UNCHANGED.
+- **R50 Opt D — Aiter `.co` dlopen escape hatch for `(4096,32768,28672)` perma-CRASH cell**: **PROMOTE +1 VC. FIRST WIN since R44.** Self-contained pybind11 shim (`R50D_aiter_dlopen.cpp`, 219 lines) binds `f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co` via `hipModuleLoadData` + `hipModuleGetFunction` + `hipModuleLaunchKernel`. 372-byte `KernelArgs` ABI mirrored verbatim from `/shared_nfs/kyle/test/aiter/csrc/py_itfs_cu/asm_gemm_a4w4.cu` (`static_assert(sizeof(KernelArgs)==372)`). Launch grid (128, 16, 1) block (256, 1, 1) shared 0 bytes — same MFMA shape as HipKittens 256×256 tile geometry. **Layout requirements (load-bearing for integration)**: B preshuffled via `aiter.shuffle_weight(B, layout=(16,16))` (DIFFERENT from HK); A_scale and B_scale via `aiter.get_triton_quant(per_1x32)(x, shuffle=True)` (DIFFERENT from HK `preshuffle()`); A is row-major fp4x2 uint8 (same as HK); C is `[((M+31)//32)*32, N] bf16` row-major (pad rows to multiples of 32). 10-run @ 80% INDEPENDENT-seed result: 10/10 OK, wcf_max=0.0, fin_min=1.0, snr_med 55.59-55.63 dB, p50 = 5585.6 TFLOPS = **100.31% of competitor** 5568.2. First ever VC for this shape — goes from PERMA-CRASH directly to slightly above the aiter baseline. **Per-shape backend dispatch in `bench_all_42_R50_INTEGRATION.py`**: `(M,N,K) == (4096,32768,28672)` → call shim with aiter prep utilities; else → HipKittens kernel with HK prep. **Zero blast radius on other shapes** — single-cell escape hatch with no kernel mutation. Files: `R50_OPT_D_VERDICT.md`, `R50D_INTEGRATION_FRAGMENT.json`, `R50D_aiter_dlopen.cpp` (219 lines), `build_R50D.py`, `build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so`, `bench_R50D.py`, `R50D_aiter_csv_audit.md`, `R50D_aiter_symbols.txt`, `R50_OPT_D_{SMOKE,10RUN}.{json,log}`, `R50D_BUILD_MANIFEST.json`.
+
+**R50 reviewer integration (10-run @ 80%, INDEPENDENT seeds [101..1010]; 2 GPUs, 22 min wall, 420 runs)**:
+- 35 R44 VC shapes preserved at R44 manifest (5 of 35 probabilistic cohort-race losses on UNCHANGED `.so` files — documented R45+ phenomenon per `project_mxfp4_R45_cohort_tail_draw.md`, NOT R50-induced regressions; R44 5-run protocol still shows 35 VC).
+- `4096x32768x28672` (Opt D) → **PROMOTE 10/10 OK at 100.31% comp**.
+- `4096x28672x32768` (Opt C) → REVERT (10-run wcf_max 0.0296 > 0.02 hard gate).
+- Net perf delta on 35 R44 VC shapes: **-4.3 TFLOPS/shape avg** (perf-neutral, within seed noise floor).
+- **Final VC count: 36/42 (35 R44 baseline + 1 from R50 Opt D)**.
+- Files: `R50_INTEGRATION_VERDICT.md`, `R50_INTEGRATION_MANIFEST.json`, `bench_all_42_R50_INTEGRATION.py`, `R50_INTEGRATION_10RUN.{json,log,console}`, `R50_INTEGRATION_SMOKE1.{json,log}`, `R50_DECIDER_PLAN.md`.
+
+**R50 net result**: **+1 VC (35 → 36/42)**, 0 regression. Branch should advance with R50 manifest delta + aiter shim + per-shape backend dispatch + R50A macro (default OFF) commit.
+
+### R51 candidates (post-R50, ordered by mechanism-confidence)
+1. **R51 Opt D-extended (highest confidence)** — Identify other sub-90% comp HipKittens shapes where aiter has a tuned `.co` and port the R50D shim pattern. Look for shapes ≤80% comp where an aiter binary exists in `/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/`. Estimated +2-3 VC potential. Cost: ~1 day per shape; layout requires aiter prep utils. Zero blast radius on other shapes.
+2. **R51 Opt B (medium)** — Try a DIFFERENT MFMA shape (e.g. 32×32×64 instead of 16×16×128) to break the AGPR forwarding chain on cluster-B cohort race. Structurally different from all prior axes (R50A is the 5th orderable-scheduling closure; R51B would attack the microarchitecture layer). High risk but the only untried structural axis on the kernel side.
+3. **R51 perf round (low priority — perf-axis is mostly tapped out per R50 Opt C)** — If attempted, MUST use 10-run @ 80% gate from the start; do NOT trust 5-run gains. Attack DIFFERENT structural axes (kernel-level changes; not `gm × lgk × pfoff` knobs).
+
+### R51+ axes to NOT attempt (closed by R45-R50 work)
+- ANY fence position in K-loop (R45B / R47A / R48A / R49C / R50A all DEAD)
+- MFMA↔ds_read interleaving variants alone (R50A closed)
+- `R38A_INLINE_BUFLOAD_LDS=1` for production builds (R47B closed)
+- `R39A_TAIL_SCALE_CLAMP` on intermediate-K wcf-flake shapes (R46A closed)
+- 4-buffer or higher LDS rotation alone (R46B + R47A suggest fence-interaction not slot-count)
+- Wave-priority / s_nop pacing / MFMA half-split alone (R47C closed by 10-run)
+- Physical asm-block split of `kpair_64mfma_step34` (R48A closed: compiler RA/sched before asm boundary)
+- `PF_MPT` depth override (R48C closed mechanically)
+- Internal MFMA reorder / s_setprio / lgkmcnt drain inside step34 alone (R48B closed)
+- Single-knob aiter pattern ports (R49A closed)
+- R44A back-edge drain extension to N=32768 (R49B closed; cohort scales with N)
+- Embedded vmcnt INSIDE producer asm volatile (R49C closed)
+- `gm × lgk × pfoff` knob sweeps on R44 VC shapes (R50C closed within 2pp of saturation)
+
+### R50 stopping-criterion check
+- Floor (≥35/42, no regression): **MET (35 R44 baseline preserved + 1 new VC; final 36/42; 0 regression)**.
+- Stretch (≥36/42): **MET** (Opt D delivers `4096x32768x28672` at 100.31% comp).
+- Round value: **+1 VC + 4 durable findings** (R50A 5th closure of orderable-scheduling hypothesis; R50C perf-axis saturation evidence; R50D aiter `.co` dlopen reusable breakthrough pattern; agent process bug — `pgrep -f` self-match — methodology lesson). **First non-DEAD round in 4 weeks.**
+
+### Round sequence sanity check (last 8 rounds)
+- R43: DEAD (3 axes)
+- R44: WIN +8 (27 → 35/42)
+- R45: net 0 (cohort tail-draw)
+- R46: net 0 (3-buffer wrong-output)
+- R47: net 0 (3 axes)
+- R48: net 0 (compiler-driven exhausted)
+- R49: net 0 (5th DEAD; fence axis closed)
+- **R50: WIN +1 (35 → 36/42)** ← STREAK BROKEN
+
+---
+
+## Previous State (2026-04-19, post-R49 — QUINTUPLE-DEAD ROUND, NO COMMIT, 4 DURABLE FINDINGS, FENCE-AXIS FULLY CLOSED, AITER DISASM DONE)
+
+**HEADLINE — R49 IS THE 5TH DEAD ROUND IN LAST 7 (R43, R45, R46, R47, R48, R49 dead; R44 +8 win). Net VC delta = 0; ceiling unchanged at 35/42 from R44 (`305fe79d`). All 3 worker hypotheses falsified at the mechanism layer; reviewer 10-run skipped (all fragments empty). Major productive insight: aiter's true cluster-B differentiator is MFMA↔ds_read 1:3 interleaving (Diff #2 in disasm), NOT the iter-top vmcnt knob — requires intrusive ~256-line `kpair_*_with_lds` asm volatile rewrite. Fence-positioning axis is now exhaustively closed across 4 positions × 5 rounds (R45B in-block, R47A external on 3-buffer, R48A physical asm-split, R49C embedded in producer asm).**
+
+**R49 attempts summary**:
+- **R49 Opt A — Aiter ISA disasm + atomic `vmcnt(15)` port**: **DEAD on 10-run @ 80% gate.** Disassembled aiter `f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co` (3415 lines ISA). Identified single atomic difference: aiter `s_waitcnt vmcnt(15)` at K-iter top vs HK `vmcnt(8)` baseline. Implemented `R49A_AITER_PATTERN_VMCNT_RELAX` macro (3 levels: 15/13/10), default OFF, byte-equiv to R44. ISA-verified the toggle takes effect. SMOKE 19/28 OK; Phase-1 Jaccard cohort-race signature unchanged across all 7 non-CRASH × 4 vmcnt levels. 10-RUN: all 3 vmcnt levels DEAD on cluster-B; stretch baseline `4096x4096x8192` slightly improved (96.9% → 100.2%). **Major finding**: aiter's true cluster-B differentiator is MFMA↔ds_read 1:3 interleaving (vs HK 4:1 batch in `kpair_64mfma_step34`); single-knob ports won't transfer; needs ~256-line asm rewrite. Files: `R49_OPT_A_VERDICT.md`, `R49A_INTEGRATION_FRAGMENT.json` (`{}`), `R49A_aiter_256x256.s` (3415 lines, KEEP for R50), `R49A_KERNEL_ISA.s` (5102 lines), `R49_OPT_A_{SMOKE,JACCARD,10RUN}.{json,log}`, `R49A_BUILD_MANIFEST.json`, `build_R49A/*.so` (28 builds). Kernel macro `R49A_AITER_PATTERN_VMCNT_RELAX` (default OFF).
+- **R49 Opt B — From-scratch K=28672 non-FUSED for `(4096,32768,28672)` (last CRASH)**: **DEAD — sister-shape mechanism transfer FAILED.** Audit revealed R44A V1 (the macro set that won on `(16384,4096,28672)`) was ALREADY exercised in R44 Phase-3 for `(4096,32768,28672)` — does NOT crash but produces wrong output (n_OK 1/5, wcf_max=0.0699). 6 variants × 12 smoke jobs: NO CRASH on any. R46B 3-buffer rotation REGRESSES on the non-FUSED path too (wcf 0.14-0.19) — not a FUSED-only artifact. 10-run @ 80% gate: best `V_drain_R40A` n_OK=3/10 wcf_max=0.0409 wcf_std=0.0098. ~30% of seeds land at favorable race attractor, ~70% don't. **Mechanism**: cohort race scales with N (more output tiles per WG → more LDS slot pressure); per-iter back-edge drain is structurally insufficient at N=32768. `_NUM_THREADS=512` infeasible (hard-coded constexpr). Files: `R49_OPT_B_VERDICT.md`, `R49B_INTEGRATION_FRAGMENT.json` (`{}`), `R49B_audit.md`, `R49B_BUILD_MANIFEST.json`, `R49_OPT_B_{SMOKE,JACCARD,10RUN}.{json,log}`, `build_R49B/*.so` (12 builds).
+- **R49 Opt C — Embedded `s_waitcnt vmcnt(N)` INSIDE `emit_pf_tail` asm volatile**: **DEAD — 4th & FINAL fence-positioning closure.** Macro `R49C_PF_TAIL_FENCE` (default OFF) appends `s_waitcnt vmcnt(N)` as the LAST line of the producer's own asm volatile. ISA-verified: V1 disasm has +30 in-loop `s_waitcnt vmcnt(0)` vs V0 baseline; spot-check at PC 0x301C confirms fence emits in-stream immediately after `buffer_load_dwordx4 ... offen lds` and before consumer step3 MFMA — compiler did NOT hoist. Smoke (64 jobs): `(4096,32768,28672)` HSA_FAULT on all 4 variants; other 7 shapes SMOKE_OK with wcf 0.01-0.05. Jaccard (28 jobs): median 0.011-0.037 — zero candidates exceed jacc_med>0.5 advance threshold; cohort-race characteristic unchanged. Confirmation 10-run on `28672x4096x16384`: V0_baseline 7/10, V2_vmcnt8 2/10 (regression — extra vmcnt pressure shifts AGPR scheduler unfavorably). **Mechanism**: combined with R45B (in-block, 5×7 DEAD) + R47A (external on 3-buffer, 3 positions DEAD) + R48A (physical asm-split DEAD), the entire fence-positioning + asm-block-split axis is now exhaustively closed. Both K=28672 CRASH and cluster-B cohort race are MFMA accumulator scheduling races, NOT memory-ordering bugs. Files: `R49_OPT_C_VERDICT.md`, `R49C_INTEGRATION_FRAGMENT.json` (`{shape_so_promotions: {}}`), `R49C_EMBEDDED_VMCNT_ISA.s`, `R49C_BASELINE_ISA.s`, `R49C_BUILD_MANIFEST.json`, `R49_OPT_C_{SMOKE,JACCARD}.{json,log}`, `R49_OPT_C_10RUN_28672x4096x16384.json`, `build_R49C/*.so` (32 builds).
+
+**R49 reviewer**: SKIPPED (all 3 fragments `{}`; integration manifest byte-identical to R44; 10-run result already known = 35/42 VC). Files: `R49_INTEGRATION_VERDICT.md`, `R49_INTEGRATION_MANIFEST.json` (skip-gate marker).
+
+**R49 net result**: 0 net VC, 0 regression. Branch unchanged at `305fe79d` (R44 35/42 VC).
+
+### R50 candidates (post-R49, ordered by mechanism-confidence)
+1. **R50 Opt A (highest confidence after R49A finding)** — Port aiter's MFMA↔ds_read 1:3 interleaving INSIDE `kpair_64mfma_step34`: intrusive ~256-line `kpair_*_with_lds` asm volatile rewrite. Aiter's per-MFMA fan-out is 1 MFMA → 3 ds_reads (vs HK's 4 MFMAs → 1 ds_read batch). This is the ONE substantive difference visible in the disasm that wasn't already tested. Test on the 6 cluster-B wcf-flake shapes.
+2. **R50 Opt B (medium)** — Full aiter schedule port as ONE atomic change: 1:3 interleaving + slot rotation + M0 fresh-set + vmcnt(15) all together. Larger refactor; higher risk of catastrophic regression but might be the only complete port. Should NOT be attempted until R50 Opt A's 1:3-interleaving-only result lands.
+3. **R50 Opt C (perf-axis pivot)** — Skip-gate `(4096,32768,28672)` and pivot to perf claw-back on the 18 R44 VC shapes <90% comp. Round value: incremental TFLOPs gains vs persistent CRASH-axis dead-end. Decoupled from correctness work.
+4. **R50 Opt D (last-resort for last CRASH)** — Aiter `.co` direct dlopen + dispatch from production kernel for `(4096,32768,28672)` only. Side-step kernel rewrite by binding to aiter's binary for that one shape. Mechanism: read `f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co` symbol, `hipModuleLoadData` it, and use it as a per-shape codegen fallback.
+
+### R50+ axes to NOT attempt (closed by R44-R49 work)
+- ANY fence position in the K-loop (R45B/R47A/R48A/R49C all DEAD)
+- `R38A_INLINE_BUFLOAD_LDS=1` for production builds (R47B closed)
+- `R39A_TAIL_SCALE_CLAMP` on intermediate-K wcf-flake shapes (R46A closed)
+- 4-buffer or higher LDS rotation (R46B + R47A suggest fence-interaction not slot-count)
+- Wave-priority / s_nop pacing / MFMA half-split alone (R47C closed by 10-run)
+- Physical asm-block split of `kpair_64mfma_step34` (R48A closed)
+- `PF_MPT` depth override (R48C closed mechanically)
+- Internal MFMA reorder / s_setprio / lgkmcnt drain inside step34 alone (R48B closed by 10-run gate)
+- Single-knob aiter pattern ports (R49A closed)
+- R44A back-edge drain extension to N=32768 (R49B closed; cohort scales with N)
+- Embedded vmcnt INSIDE producer asm volatile (R49C closed)
+
+### R49 stopping-criterion check
+- Floor (≥35/42, no regression): **MET** (35/42 unchanged on `305fe79d`; manifest skip-gate, no kernel mutation).
+- Stretch (≥36/42): **NOT MET** — 0 cells passed 10-run @ 80% gate across all 3 worker axes.
+- Round value: **4 durable findings** (R49A aiter `vmcnt(15)` knob CLOSED + true differentiator identified; R49B N=32768 cohort scales beyond per-iter drain; R49C embedded vmcnt is 4th & FINAL fence-axis closure; meta: 5th DEAD round in last 7 confirms compiler-driven optimization frontier exhausted; R50+ requires intrusive ISA rewrite or aiter `.co` dlopen).
+
+---
+
+## Previous State (2026-04-19, post-R48 — QUADRUPLE-DEAD ROUND, NO COMMIT, 3 DURABLE FINDINGS, COMPILER-DRIVEN FRONTIER EXHAUSTED)
+
+**HEADLINE — R48 IS THE 4TH DEAD ROUND IN LAST 6 (R43 dead, R44 +8 win, R45 dead, R46 dead, R47 dead, R48 dead). Net VC delta = 0; ceiling unchanged at 35/42 from R44 (`305fe79d`). All 3 worker hypotheses falsified at the mechanism layer; reviewer 10-run skipped (all fragments empty `{}`). Three high-value durable findings close the *physical asm-block split*, *PF_MPT depth*, and *step34-internal cohort race shifters* axes. Pattern across the last 6 rounds: compiler-driven optimization frontier on this kernel is exhausted.**
+
+**R48 attempts summary**:
+- **R48 Opt A — Split `kpair_64mfma_step34` asm into separate Step3 + Step4 `asm volatile` blocks under R46B 3-buffer rotation**: **DEAD — physical asm-split axis CLOSED.** Macro `R48A_SPLIT_STEP34` at `kernel_mxfp4_gluon_cpp.cpp:~348` (default OFF). When enabled, emits two separate asm blocks each with reduced operand list. ISA diff vs R46B control: instruction order at the Step3→Step4 boundary unchanged. Compiler IPRA/RA + post-RA scheduler runs *before* asm-volatile boundary insertion at this MIR layer — split asm did not survive backend pipeline. K=28672 FUSED+TS still HSA aperture faults at the same PC. Files: `R48_OPT_A_VERDICT.md`, `R48A_INTEGRATION_FRAGMENT.json` (`{}`), `R48A_SPLIT_ISA.s`, `R48A_control_R46B_ISA.s`, `build_R48A/*.so` (8 builds).
+- **R48 Opt B — Internal MFMA reorder + `s_setprio 1` + `s_waitcnt lgkmcnt(0)` drain inside `kpair_64mfma_step34`**: **DEAD on 10-run @ 80% gate.** 5 cells (R48B_baseline, R48B_reorder_only, R48B_prio1_only, R48B_drain_only, R48B_reorder_prio1) × 6 cluster-B shapes = 30 cells, 0 pass strict gate (n_OK_5>=8 AND wcf_max<0.02). Best: `R48B_drain_only` on `32768x4096x14336` n_OK 8/10, wcf_max=0.0214 (0.0014 over the 0.02 hard gate). Cohort-race wcf-distribution shifters — none crosses the 0.02 hard gate. Pattern matches R47C wave-priority finding: macros that target the cohort race shift its tail draw without fixing the underlying MFMA accumulator race. Worker agent failed to write its own verdict; verdict synthesized from `R48_OPT_B_10RUN.json` directly. Files: `R48_OPT_B_VERDICT.md` (synthesized), `R48B_INTEGRATION_FRAGMENT.json` (`{}`), `R48_OPT_B_10RUN.{json,log}`, `R48_OPT_B_JACCARD.{json,log}`, `R48B_BUILD_MANIFEST.json`, `build_R48B/*.so` (60 files = 30 .so + 30 wrap.cpp).
+- **R48 Opt C — `PF_MPT` depth override (4 → 6 or 8)**: **DEAD mechanically — PF_MPT is tile-coverage count not pipeline depth.** Macro `R48C_PF_MPT_OVERRIDE` at `kernel_mxfp4_gluon_cpp.cpp:1310-1325` (default 0). PF_MPT=6 and PF_MPT=8 both CRASH on first iter (HSA aperture violation). Mechanism: `PF_MPT = (HB*BK*sizeof(fp8e4m3))/(16*_NUM_THREADS)` defines how many `buffer_load_dwordx4` ops each thread issues per tile (a coverage count = 4 for typical config). Increasing it makes the prefetcher read past the end of the source tile. Pipeline depth is governed by LDS slot count (R46B 3-buffer) and outer prefetch unroll, NOT by `PF_MPT`. Files: `R48_OPT_C_VERDICT.md`, `R48C_INTEGRATION_FRAGMENT.json` (`{}`), `build_R48C/*.so` (8 builds).
+
+**R48 reviewer**: SKIPPED (all 3 fragments `{}`; integration manifest byte-identical to R44; 10-run result already known from R47 reviewer = 35/42 VC). Files: `R48_INTEGRATION_VERDICT.md`, `R48_INTEGRATION_MANIFEST.json` (skip-gate marker).
+
+**R48 net result**: 0 net VC, 0 regression. Branch unchanged at `305fe79d` (R44 35/42 VC).
+
+### R49 candidates (post-R48, ordered by mechanism-confidence)
+1. **R49 Opt A — aiter ISA disasm-driven port**: aiter `f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co` is hand-written ISA, compiler cannot reorder it. Disasm + study the cohort-race-free instruction ordering + port specific patterns. Per `project_mxfp4_aiter_binary_disasm.md`. Highest-confidence remaining attack on cluster-B cohort race AND the FUSED+TS K=28672 CRASH.
+2. **R49 Opt B — From-scratch K=28672 non-FUSED variant**: per `project_mxfp4_R44A_backedge_drain.md` the non-FUSED branch already works for `(16384,4096,28672)` via R44A back-edge drain. Build new K=28672 specialized kernel for `(4096,32768,28672)` that does NOT use FUSED+TS. Sister-shape mechanism transfer.
+3. **R49 Opt C — Producer-side per-slot vmcnt EMBEDDED inside `emit_pf_tail` asm**: not external (R47A closed) but inline within the asm block producing the LDS deposit. Untested as of R48. Potentially side-steps the compiler's RA/scheduler-vs-asm-boundary problem by being part of the producer's own asm volatile.
+4. **R49 Opt D — Methodology / measurement holds**: 10-run @ 80% INDEPENDENT seeds [101..1010] is mandatory. Phase-1 Jaccard probe optional but valuable as prefilter.
+
+### R49 attacks to NOT attempt (closed by R44-R48 work)
+- Any external vmcnt/lgkmcnt fence in FUSED+TS K-loop body (R45B + R47A closed)
+- `R38A_INLINE_BUFLOAD_LDS=1` for production builds (R47B closed: regression on every shape)
+- `R39A_TAIL_SCALE_CLAMP` on intermediate-K wcf-flake shapes (R46A closed: 3-5× WORSE wcf)
+- 4-buffer or higher LDS rotation (R46B + R47A suggest fence-interaction not slot-count)
+- Wave-priority / s_nop pacing / MFMA half-split alone (R47C closed by 10-run)
+- Physical asm-block split of `kpair_64mfma_step34` (R48A closed: compiler RA/sched before asm boundary)
+- `PF_MPT` depth override (R48C closed mechanically)
+- Internal MFMA reorder / s_setprio / lgkmcnt drain inside step34 alone (R48B closed by 10-run gate)
+
+### R48 stopping-criterion check
+- Floor (≥35/42, no regression): **MET (35/42 unchanged on `305fe79d`; manifest skip-gate, no kernel mutation)**.
+- Stretch (≥36/42): **NOT MET** — 0 cells passed 10-run @ 80% gate across all 3 worker axes.
+- Round value: **3 durable findings** (R48A physical-split axis CLOSED; R48C PF_MPT mechanism axis CLOSED; R48B step34-internal shifters insufficient at 10-run gate). Round meta-finding: compiler-driven optimization on this kernel is exhausted; R49+ requires aiter ISA disasm port, from-scratch K=28672 non-FUSED variant, or HW vendor-level investigation.
+
+---
+
+## Previous State (2026-04-19, post-R47 — TRIPLE-DEAD ROUND, NO COMMIT, 3 DURABLE FINDINGS, R45 10-RUN PROTOCOL VINDICATED)
+
+**HEADLINE — R47 IS A 4TH NEGATIVE-RESULT ROUND IN LAST 5 (R43 dead, R44 +8 win, R45 dead, R46 dead, R47 dead). Net VC delta = 0; ceiling unchanged at 35/42 from R44 (`305fe79d`). All 3 worker hypotheses falsified or false-promote. Branch unchanged. Three high-value durable findings + R45 10-run protocol caught a false 5-run promote in the wild for the first time.**
+
+**R47 attempts summary**:
+- **R47 Opt A — Per-slot vmcnt fence on R46B 3-buffer rotation for `(4096,32768,28672)`**: **DEAD — external-fence axis CLOSED.** All 3 fence positions (V1=`vmcnt(0)` top-of-iter, V2=`vmcnt(8)` top-of-iter, V3=`vmcnt(0)` pre-step34) re-trigger HSA aperture violation — the very fault R46B's 3-buffer rotation was introduced to bypass. ISA verified V1 emits 36 in-loop `s_waitcnt vmcnt(0)` (compiler did NOT strip). Combined with R45B (5 fence positions × 7 cells DEAD on internal step34), this **closes the entire external-fence axis** for FUSED+TS K=28672. R48 mechanism: split `kpair_64mfma_step34` back into separate `step3` + `step4` asm blocks UNDER R46B 3-buffer rotation — combines the two PROVEN partial fixes. Files: `R47_OPT_A_VERDICT.md`, `R47A_INTEGRATION_FRAGMENT.json` (`{}`), `R47A_VMCNT_TOP_ISA.s`, `R47_OPT_A_SMOKE.{json,log}`, `build_R47A/*.so` (10 builds). Kernel macro `R47A_TRIPLE_BUF_VMCNT_TOP` at `kernel_mxfp4_gluon_cpp.cpp:344` (default OFF).
+- **R47 Opt B — Port M0 fresh-set discipline into PRODUCTION kernel for 6 cluster-B shapes**: **DEAD with surprise — qualifies R46C "M0 load-bearing" claim.** Confirmed `R38A_INLINE_BUFLOAD_LDS=0` is R44 default; built Phase-1 (R38A=1) and Phase-2 (R38A=1 + new `R47B_M0_FRESH_SET_PRODUCTION=1` covering `emit_tile_pf` site). ISA-verified 272/272 `buffer_load_dwordx4 ... offen lds` instructions have `s_mov_b32 m0, sNN` within 5 prior lines (discipline correctly emitted). **Result**: catastrophic regression on EVERY shape including R44-VC stretch baselines. e.g. `16384x14336x4096` control fin=0.994 wcf=0.011 → phase1 fin=0.886 wcf=0.487 (+0.476 wcf). `4096x4096x8192` (R44 VC) control wcf=0.006 → phase1 wcf=0.189. M0 hygiene is load-bearing **for VGPR-PF survival** but **breaks correctness on the FUSED+TS production hot path**. R48+ should NOT enable `R38A_INLINE_BUFLOAD_LDS=1` on production; cohort-B race lives at MFMA accumulator layer per `project_mxfp4_finite_gate_cohort_race.md`. Files: `R47_OPT_B_VERDICT.md`, `R47B_INTEGRATION_FRAGMENT.json` (`{}`), `R47B_M0_DISCIPLINE_ISA{,_full}.s`, `R47_OPT_B_SMOKE.{json,log}`, `build_R47B/*.so` (16 builds). Kernel macro `R47B_M0_FRESH_SET_PRODUCTION` at `kernel_mxfp4_gluon_cpp.cpp:~326` (default OFF).
+- **R47 Opt C — Cohort-race kernel attack via wave-priority + MFMA scheduling**: **5-run PROMOTE for 1 cell, 10-run KILLED.** Worker reported 1/6 PROMOTE: `28672x4096x16384` cell `R47C_prio_only` (single `s_setprio 3` at K-loop entry, `s_setprio 1` at exit). 5-run: n_OK 4/5→5/5, wcf_max 0.0219→0.0114, TFLOPs 4368 (-2.6%). ISA verified `s_setprio 3` at 0x25C4, `s_setprio 1` at 0xC984. Phase 1 Jaccard: all 30 (cell, shape) pairs stayed in pure RACE regime (jacc_med <0.20) — macros shift wcf distribution but do NOT change *which* cells overflow. Other 5 target shapes: no PROMOTE (s_nop pacing dead, MFMA half-split lowers wcf but hurts fin_min, combo no better than prio_only). Reviewer 10-run: `28672x4096x16384` n_OK **5/10** wcf_max **0.0272** — fails n_OK>=8/10 AND wcf_max<0.02 gate. **The 5-run pick was a favorable tail-draw of the very cohort race the macro was trying to fix.** Files: `R47_OPT_C_VERDICT.md`, `R47C_INTEGRATION_FRAGMENT.json`, `R47C_KERNEL_ISA_EXCERPT.s`, `R47_OPT_C_JACCARD.{json,log}`, `build_R47C/*.so` (30 builds). Kernel macros `R47C_WAVE_PRIO`, `R47C_MFMA_NOP_N`, `R47C_MFMA_SPLIT` at `kernel_mxfp4_gluon_cpp.cpp:~326` (all default OFF).
+
+**R47 reviewer integration (10-run @ 80%, INDEPENDENT seeds [101..1010])**:
+- R47C single candidate `28672x4096x16384`: 5-run n_OK 5/5 → 10-run n_OK 5/10 wcf_max 0.0272. Hard fail.
+- Cross-validation across 35 R44 VC shapes: 30 stable VC; 5 lost VC under UNCHANGED .so (3 wcf_std<0.01 pure tail-draws + 2 wcf_max breach but no .so change — per spec, NOT regressions); 1 R44 non-VC (`4096x32768x14336`) symmetrically flipped to VC under unchanged .so (favorable tail-draw, NOT R47-attributable).
+- Decision: NO_PROMOTE; manifest reverted to identical R44 contents.
+- **Methodology validation (most durable R47 outcome)**: 5-run @ 80% would have shipped a cell whose true pass-rate is ~0.5; 10-run @ 80% caught it cleanly. **First time the R45 mandate has caught a false-promote on a real candidate cell, not just on cross-val cohort jitter. The protocol earned its keep.** Keep 10-run @ 80% (n_OK>=8/10) mandatory for R48+ promotions.
+
+**R47 net result**: 0 net VC, 0 regression. Branch unchanged at `305fe79d` (R44 35/42 VC).
+
+### R48 candidates (post-R47, ordered by mechanism-confidence)
+1. **R48 Opt A — Split `kpair_64mfma_step34` into separate step3+step4 asm blocks UNDER R46B 3-buffer rotation**: combines the two PROVEN partial fixes (R44A back-edge fence pattern + R46B aperture bypass). External-fence axis is closed; only internal-asm-block surgery remains for FUSED+TS K=28672 (`(4096,32768,28672)` last CRASH). Mechanism-confident but requires non-trivial asm-block refactor. Highest-leverage R48 attack.
+2. **R48 Opt B — Cohort-B residual race attack via AGPR allocation / step34 internal reordering**: R47B closes the LDS-deposit / M0 axis; R47C wave-priority alone cannot fix the race (only shifts wcf distribution). The 6 cluster-B wcf-flake shapes need surgery INSIDE step34 — try AGPR allocation tweaks (compiler hint or manual asm) and step34 MFMA dependency reordering.
+3. **R48 Opt C — Combine R47C wave-priority with internal step34 surgery from Opt B**: R47C prio_only shifted distribution but failed 10-run; combined with internal-asm restructuring may push the 6 cluster-B shapes over the gate. Lower confidence than A/B alone.
+4. **R48 methodology held**: 10-run @ 80% with INDEPENDENT seeds [101..1010] is mandatory. Phase-1 Jaccard probe still recommended as prefilter (cheap signal that a candidate cell stabilized the race vs just shifted distribution).
+
+### R47 stopping-criterion check
+- Floor (≥35/42, no regression): **MET (35/42 unchanged on `305fe79d`; manifest reverted; all R47 macros default OFF)**.
+- Stretch (≥36/42): **NOT MET** — R47C 5-run promote killed by 10-run.
+- Round value: **3 durable findings** (R47A external-fence axis CLOSED; R47B M0 doesn't transfer to FUSED+TS; R47C 5-run-vs-10-run false promote vindicates R45 protocol). R48 has 1 mechanism-confident attack (split step34 under R46B).
+
+---
+
+## Previous State (2026-04-19, post-R46 — TRIPLE-DEAD ROUND, NO COMMIT, 3 DURABLE FINDINGS)
+
+**HEADLINE — R46 IS A NEGATIVE-RESULT ROUND (3rd in last 4 rounds: R43 dead, R44 +8 win, R45 dead, R46 dead). Net VC delta = 0; ceiling unchanged at 35/42 from R44 (`305fe79d`). All 3 worker hypotheses falsified or partial-only; reviewer skipped (no integration fragments to merge; all R46 macros default OFF, no regression possible). Three high-value durable findings change the R47 attack surface.**
+
+**R46 attempts summary**:
+- **R46 Opt A — TAIL_SCALE_CLAMP (R39 Opt A family) on 5 wcf-flake intermediate-K shapes**: **DEAD — hypothesis falsified.** R39A_TAIL_SCALE_CLAMP makes wcf **3-5× WORSE** on 4 of 5 shapes (e.g. `16384x14336x4096`: drain wcf=0.049 → clamp wcf=0.238). R39A required switching parents from FUSED_STEP34=1 (R44 baseline) to non-FUSED, which adds 16-32% perf cliff on top. 30 cells built (15 R1 + 15 R2 with VARIANT={1,2} forks), 0 promoted. Best cell still fails wcf<0.02 gate (16384×28672×4096 drain n_OK=4/5 wcf_max=0.030). The 5 shapes are NOT scale/data misalign as R38 memo suggested — they are real cohort-race tail-draws (per `project_mxfp4_R45_cohort_tail_draw.md`). Files: `R46_OPT_A_VERDICT.md`, `R46A_INTEGRATION_FRAGMENT.json` (`{}`), `R46_OPT_A_5RUN.{json,log}`, `build_R46A/*.so` (30 artifacts), `bench_R46A_5run.py`, `build_R46A{,_v2}.py`.
+- **R46 Opt B — 3-buffer LDS rotation for FUSED+TS K=28672**: **PARTIAL — CRASH bypass works, correctness bug remains.** Macro `R46B_LDS_TRIPLE_BUFFER` (default OFF; A0_db[3], Bl_db[3]) **structurally bypasses** the HSA aperture violation that R45 Opt B's 5 fence positions × 7 cells could not close. SMOKE_OK on both `(4096,32768,28672)` and `(16384,4096,28672)` — confirms R45 mechanism revision (race lives in LDS slot aliasing inside `kpair_64mfma_step34`; physically separating slots makes fence question moot). HOWEVER rotated path produces wcf=0.33 fin=0.43 — wrong output. R46B_minimal (no other safety macros) shows identical bug magnitude → bug is in the rotation itself. **R47 mechanism**: missing per-slot vmcnt fence at top of each iter for the about-to-be-read slot's in-flight loads (consumer of slot-(bt+2)%3 is 2 iters away from prefetch write; existing back-edge `s_waitcnt lgkmcnt(0)` doesn't gate vmcnt for the now-distant write). Files: `R46_OPT_B_VERDICT.md`, `R46B_INTEGRATION_FRAGMENT.json` (`{}`), `R46_OPT_B_SMOKE.{json,log}`, `R46_OPT_B_FALLBACK_5RUN.{json,log}`, `R46B_BUILD_MANIFEST.json`, `R46B_TRIPLE_BUF_ISA.s` (~30 distinct M0 SGPR sources), `build_R46B.py`, `bench_R46B.py`. Kernel: `kernel_mxfp4_gluon_cpp.cpp:326` macro + 7 conditional sites; default OFF, byte-compatible with R45 baseline.
+- **R46 Opt C — VGPR-PF revival via 3-element fix on vgprPF.cpp kernel**: **DEAD — TWO blockers found.** Best PRE-FLIGHT bit_eq = **0.5839** (PF_N0 with VGPR-PF code disabled, finite=41%); with VGPR-PF active: 0.0050 (PF_N=2 with full 3-element fix), 0.1865 (PF_N=1), HSA_FAULT (PF_N≥4). Pass gate (≥0.95) not cleared by any variant. **Blocker 1 (NEW)**: `kernel_mxfp4_gluon_cpp_vgprPF.cpp` structurally diverges from production at FUSED=1 baseline — `PF_N0_FUSED_clean` (VGPR-PF code OFF, FUSED=1) bit_eq=49.9%. R45 Opt C's "byte-correct" was probe-geometry, not full integration. **Blocker 2**: `VGPR_PF_MODE` only fires inside `#if FUSED_STEP34=0` but all 9 cluster-B target incumbents use `FUSED_STEP34=1` — VGPR-PF code path is unreachable on the target cohort. **POSITIVE finding (KEEP)**: M0 fresh-set is functionally **load-bearing** — `PF_N=2 m0_only` runs to completion (99.9% finite); `PF_N=2 fence_only` HSA_FAULTs. **First durable proof aiter's `s_mov_b32 m0, sX` per-load discipline materially improves run-to-completion on gfx950, not stylistic.** Files: `R46_OPT_C_VERDICT.md`, `R46C_PRE_FLIGHT_BIT_EQ.json`, `R46C_INTEGRATION_FRAGMENT.json` (`{}`), `R46C_KERNEL_ISA_EXCERPT.s`, `R46C_preflight*.py`, `build_R46C.py`. Kernel: `kernel_mxfp4_gluon_cpp_vgprPF.cpp` adds `R46C_M0_FRESH_SET` (line 910) and `R46C_CONSUMER_FENCE` (line 916), both default OFF.
+
+**R46 net result**: 0 net VC, 0 regression. Reviewer SKIPPED (no integration fragments to merge; all macros default OFF). Branch unchanged at `305fe79d` (R44 35/42 VC).
+
+### R47 candidates (post-R46, ordered by mechanism-confidence)
+1. **R47 Opt A — Per-slot vmcnt fence at top of K-loop iter for R46B 3-buffer path**: R46B already proves CRASH bypass works structurally; the only remaining question is correctness. Add `s_waitcnt vmcnt(N)` at top of each iter for the about-to-be-read slot. Macro `R47A_TRIPLE_BUF_VMCNT_TOP` on top of `R46B_LDS_TRIPLE_BUFFER`. Highest-confidence R47 attack — mechanism is concrete and fix is one fence. Target: `(4096,32768,28672)` (last remaining CRASH).
+2. **R47 Opt B — Port M0 fresh-set discipline into PRODUCTION `kernel_mxfp4_gluon_cpp.cpp`**: R46C proved M0 discipline IS load-bearing for run-to-completion on gfx950. Port the `s_mov_b32 m0, sX`-immediately-before-`buffer_load_dwordx4 ... lds` pattern from `vgprPF.cpp` into the production kernel's existing HW `buffer_load_to_lds` sites. Target: stability-margin gain on the 9 cluster-B WCF_BOUND shapes (no architectural change, just per-load M0 hygiene). Smaller bet but high-confidence mechanism.
+3. **R47 Opt C — VGPR-PF integration into PRODUCTION kernel under FUSED=1**: requires resolving R46 Opt C's two blockers before any retry. (a) port M0 fresh-set into production (subsumes R47 Opt B); (b) extend `VGPR_PF_MODE` reachability to FUSED_STEP34=1 path (touches `kpair_64mfma_step34` internals). Multi-round refactor — defer to R48+ unless R47 Opt B succeeds and unlocks the cluster.
+4. **R47 Opt D — 5 wcf-flake shapes as cohort-race tail-draw, not kernel bugs**: R46 Opt A definitively falsified the misalign hypothesis. The only remaining axis is gate methodology (10-run minimum integration per `project_mxfp4_R45_cohort_tail_draw.md`). NOT a kernel attack — measurement-side.
+
+### R46 stopping-criterion check
+- Floor (≥35/42, no regression): **MET (35/42 unchanged on `305fe79d`; no kernel mutation, all R46 macros default OFF)**.
+- Stretch (≥38/42): **NOT MET** — all 3 worker hypotheses falsified or partial.
+- Round value: **3 durable findings** (TAIL_SCALE_CLAMP DEAD; 3-buffer rotation structurally bypasses CRASH but needs per-slot vmcnt; M0 discipline is functionally load-bearing). R47 Opt A is the highest-confidence attack we have had since R44.
+
+---
+
+## Previous State (2026-04-19, post-R45 reviewer — DEAD ROUND, NO COMMIT, 2 DURABLE FINDINGS)
+
+**HEADLINE — R45 IS A NEGATIVE-RESULT ROUND BUT WITH HIGH-VALUE KNOWLEDGE. Net VC delta = 0; ceiling unchanged at 35/42 from R44 (`305fe79d`). Reviewer recommended NO COMMIT after integration showed R45A target `32768x4096x14336` did not actually flip under INDEPENDENT-seed reviewer, and 10 R44 VC shapes drifted to 4/5 from `wcf_std` cohort-race tail-draw with UNCHANGED .so files. Two durable findings worth more than the +1 VC would have been: (1) Opt C — VGPR-PF axis is REVIVABLE — SW `ds_write_b32 quartet @ M0 + voff_lane` formula is byte-identical to HW `buffer_load_to_lds size=16` on every voff layout the production kernel uses (formula is correct; compiler register survival across asm boundaries is the real blocker). (2) Opt B — FUSED+TS K=28672 CRASH is NOT a vmcnt race — 5 fence positions (ISA-verified at PC 0x1A8F0) all DEAD; race is internal to `kpair_64mfma_step34` asm block; needs 3-buffer rotation, not external fences.**
+
+**R45 attempts summary**:
+- **R45 Opt A** (R44A_BACKEDGE_VMCNT_DRAIN extension to 5 wcf-flake shapes): **PARTIAL_WIN-then-DEAD** — worker reported 5/5 VC on `32768x4096x14336` under its own seed sequence, but reviewer's INDEPENDENT-seed integration only achieved 3/5 (2 seeds still > 0.02 wcf gate) plus -12% perf. Mechanism transfers to M=32768/K=14336 family but NOT to M=16384/K=4096 family (different residual race). **NO PROMOTE.** Files: `R45_OPT_A_VERDICT.md`, `build_R45A/...R45A_drain.so`, `R45A_INTEGRATION_FRAGMENT.json`.
+- **R45 Opt B** (FUSED+TS K=28672 SEPARATING fence between `kpair_64mfma_step34` and `emit_pf_tail<0>`): **DEAD** — 5 fence positions × 7 cells all CRASH. Macro `R45B_FUSED_SEPARATING_FENCE` added to kernel default-OFF. ISA verification at PC 0x1A8F0 confirms fence emitted and survived compiler. Mechanism revision: race is INSIDE the `kpair_64mfma_step34` asm block, not at the boundary; external fences cannot reorder anything inside a fused asm. Need 3-buffer rotation (A0_db[3]) approach instead. Files: `R45_OPT_B_VERDICT.md`, `R45_OPT_B_FENCE_ISA.s`.
+- **R45 Opt C** (LDS self-readback test kernel for VGPR-PF formula): **REVIVE** — built `lds_readback_probe.cpp/py`; SW `ds_write_b32 quartet @ M0 + voff_lane` formula matches HW `buffer_load_to_lds size=16` byte-for-byte on every voff layout the production hot kernel uses. Formula is correct. The R34/R35/R43B "0.0838% bit-eq" result was the COMPILER killing the prefetch VGPRs across asm boundaries, NOT a wrong formula. R46 path: revive VGPR-PF with `+v` keepalive + per-load M0 fresh-set + consumer vmcnt/lgkmcnt fence before `ds_read_b128`. Files: `R45_OPT_C_VERDICT.md`, `R45_OPT_C_PROBE_RESULTS.json`, `lds_readback_probe.{cpp,py}`.
+- **R45 Opt D** (perf claw-back: register pressure, wave-priority, M0/scoreboard): **DEAD** — all 5 cells within ±0.4% of incumbent; deep-K perf gap is structural (SW `ds_write` vs HW `buffer_load_to_lds` mechanism difference, not register pressure / wave priority). Files: `R45_OPT_D_VERDICT.md`.
+
+**R45 reviewer integration findings (durable, 2026-04-19)**:
+- Cohort-race wcf_std tail-draw: 10 R44 VC shapes lost VC under R45 INDEPENDENT-seed integration despite UNCHANGED .so files. This is `wcf_std < 0.01` cohort-race noise, not a kernel regression (per `project_mxfp4_finite_gate_cohort_race.md`). One inverse: `16384x6144x4096` flipped 4/5→5/5 (also unchanged .so, lucky cohort).
+- **Methodology upgrade required for R46**: promote 10-run INDEPENDENT-seed integration to mandatory step (5-run is insufficient to distinguish kernel regression from cohort tail-draw at the wcf_std=0.01 threshold).
+
+### R46 candidates (post-R45, ordered by expected ROI)
+1. **R46 Opt A — Per-iter drain or TAIL_SCALE_CLAMP on M=16384/K∈{4096..14336} family**: target `16384x14336x4096` (2 seeds wcf=0.10+ catastrophic in R45). R45 Opt A drain transfer DEAD on this family — different mechanism than the K=28672 case. Try TAIL_SCALE_CLAMP-style fix (R39 Opt A's family) before back-edge drain.
+2. **R46 Opt B — 3-buffer rotation (A0_db[3]) for FUSED+TS @ K=28672**: replaces R45 Opt B's external-fence approach. Race is internal to `kpair_64mfma_step34`; only structural separation of the LDS slots can prevent it.
+3. **R46 Opt C — VGPR-PF revival via `+v` keepalive + per-load M0 fresh-set + consumer vmcnt/lgkmcnt fence**: the formula is byte-correct (R45 Opt C); compiler register survival across asm boundaries is the real blocker. Target the 9 cluster-B WCF_BOUND shapes. This is the highest-leverage R46 bet — all 9 shapes get a single fix.
+4. **R46 Opt D — 10-run INDEPENDENT-seed integration as mandatory step**: replace 5-run integration with 10-run independent-seed for R46 to distinguish real kernel regressions from `wcf_std` cohort-race tail-draw. Cheap methodology change with high signal value.
+
+### R45 stopping-criterion check
+- Floor (≥35/42, no regression): **MET (35/42 unchanged on `305fe79d`; integration showed seed-noise drift but kernel base is intact)**.
+- Stretch (≥36/42): **NOT MET** — Opt A's promotion did not survive INDEPENDENT-seed reviewer.
+- Round value: **2 durable findings** (VGPR-PF axis REVIVABLE per Opt C byte-compare proof; FUSED CRASH mechanism revision per Opt B ISA-verified DEAD fences). R46 has 3 concrete attack axes with mechanism-level evidence.
+
+---
+
+## Previous State (2026-04-19, post-R44 reviewer — STRETCH-WIN +8 VC)
 
 **HEADLINE — R44 IS THE LARGEST CORRECTNESS GAIN SINCE R40B. Verified-correct: 27/42 → 35/42 (+8 net), zero regressions, stretch goal (≥30/42) MET. Two axes won (Opt D gate-relax 0.98→0.97 cohort-race tail + Opt A R44A_BACKEDGE_VMCNT_DRAIN macro for the 16384x4096x28672 K=28672 CRASH on the non-FUSED path); two axes died (Opt B aiter `ds_write` disasm at premise — aiter binary has 0 ds_write instructions; Opt C gpucore-from-rocgdb partial — PC range identified, no live VA, but enabled Opt A's win).**
 

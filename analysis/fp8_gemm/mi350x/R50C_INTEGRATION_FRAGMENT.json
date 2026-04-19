@@ -1,0 +1,62 @@
+{
+  "round": "R50_optC",
+  "verdict": "PROMOTE",
+  "synthesized_by": "decider (Opt C agent stalled in self-matching pgrep wait loop after sweep complete; data fully present in R50C_SWEEP.json)",
+  "shape_so_promotions": {
+    "4096x28672x32768": {
+      "backend": "hipkittens",
+      "src": "R50C/gm8_lgk2_po28",
+      "so_path": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R50C/tk_mxfp4_R50C_4096_28672_32768_gm8_lgk2_po28.cpython-310-x86_64-linux-gnu.so",
+      "gm": 8,
+      "lgk": 2,
+      "pfoff": 28,
+      "use_R41A_pfoff_override": true,
+      "k_iters": 128,
+      "baseline": {
+        "src": "R41A",
+        "gm": 7,
+        "lgk": 0,
+        "pfoff": 32,
+        "pct_comp": 61.9
+      },
+      "five_run_summary": {
+        "n_runs": 5,
+        "n_OK_5": 5,
+        "verified_correct": true,
+        "wcf_max": 0.018237,
+        "wcf_std": 0.007041,
+        "fin_min": 0.999121,
+        "tflops_p50": 3661.1,
+        "pct_comp": 64.7994,
+        "gain_pct": 2.8994
+      },
+      "rationale": [
+        "5-run @ 80% gate PASS: VC retained, gain +2.90% pct_comp vs R41A baseline",
+        "wcf_max 0.0182 < 0.02 hard gate; fin_min 0.999 > 0.97; wcf_std 0.0070 < 0.01",
+        "Knob change only: gm 7->8, lgk 0->2 (pfoff 32->28 same R41A override path)",
+        "No new macros; pure variant-knob retuning"
+      ],
+      "reviewer_must_10run_crossval": true
+    }
+  },
+  "tested_shapes_no_promote": [
+    "14336x4096x32768",
+    "16384x4096x28672",
+    "4096x32768x128256",
+    "4096x4096x32768",
+    "4096x6144x32768",
+    "6144x4096x16384",
+    "4096x14336x16384",
+    "16384x4096x14336",
+    "14336x32768x4096",
+    "128256x32768x4096",
+    "28672x32768x4096",
+    "6144x4096x8192",
+    "32768x4096x7168",
+    "28672x4096x8192"
+  ],
+  "do_not_modify": [
+    "kernel_mxfp4_gluon_cpp.cpp",
+    "any other shape's bench/build pipeline"
+  ]
+}

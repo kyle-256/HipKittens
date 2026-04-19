@@ -1,0 +1,78 @@
+{
+  "ts": "2026-04-19",
+  "round": "R50_OPT_A",
+  "modules": {
+    "16384x6144x4096|baseline": "tk_mxfp4_gluon_cpp_m16384_n6144_k4096_ts_lgk2_gm7_v12_pfoff14_R50A_baseline",
+    "16384x28672x4096|baseline": "tk_mxfp4_gluon_cpp_m16384_n28672_k4096_ts_gm7_v12_dc_pfoff14_R50A_baseline",
+    "16384x28672x4096|v1": "tk_mxfp4_gluon_cpp_m16384_n28672_k4096_ts_gm7_v12_dc_pfoff14_R50A_v1",
+    "16384x14336x4096|v1": "tk_mxfp4_gluon_cpp_m16384_n14336_k4096_ts_gm7_v12_dc_pfoff14_R50A_v1",
+    "16384x6144x4096|v1": "tk_mxfp4_gluon_cpp_m16384_n6144_k4096_ts_lgk2_gm7_v12_pfoff14_R50A_v1",
+    "16384x14336x4096|baseline": "tk_mxfp4_gluon_cpp_m16384_n14336_k4096_ts_gm7_v12_dc_pfoff14_R50A_baseline",
+    "4096x4096x8192|baseline": "tk_mxfp4_gluon_cpp_m4096_n4096_k8192_ts_v12_tv0_gm7_pfoff28_kx8192_btw_all_R50A_baseline",
+    "4096x4096x8192|v1": "tk_mxfp4_gluon_cpp_m4096_n4096_k8192_ts_v12_tv0_gm7_pfoff28_kx8192_btw_all_R50A_v1",
+    "8192x8192x8192|baseline": "tk_mxfp4_gluon_cpp_m8192_n8192_k8192_ts_v12_tv0_gm7_pfoff28_kx8192_btw_all_R50A_baseline",
+    "8192x8192x8192|v1": "tk_mxfp4_gluon_cpp_m8192_n8192_k8192_ts_v12_tv0_gm7_pfoff28_kx8192_btw_all_R50A_v1",
+    "4096x32768x14336|baseline": "tk_mxfp4_gluon_cpp_m4096_n32768_k14336_ts_v12_tv0_btw_all_R50A_baseline",
+    "32768x4096x14336|v1": "tk_mxfp4_gluon_cpp_m32768_n4096_k14336_ts_v12_tv0_dc_gm7_pfoff54_kx14336_btw_all_R50A_v1",
+    "4096x32768x14336|v1": "tk_mxfp4_gluon_cpp_m4096_n32768_k14336_ts_v12_tv0_btw_all_R50A_v1",
+    "32768x4096x14336|baseline": "tk_mxfp4_gluon_cpp_m32768_n4096_k14336_ts_v12_tv0_dc_gm7_pfoff54_kx14336_btw_all_R50A_baseline",
+    "28672x4096x16384|v1": "tk_mxfp4_gluon_cpp_m28672_n4096_k16384_ts_lgk2_gm7_pfoff56_kx16384_btw_all_R50A_v1",
+    "28672x4096x16384|baseline": "tk_mxfp4_gluon_cpp_m28672_n4096_k16384_ts_lgk2_gm7_pfoff56_kx16384_btw_all_R50A_baseline",
+    "16384x8192x8192|baseline": "tk_mxfp4_gluon_cpp_m16384_n8192_k8192_ts_v12_tv0_gm7_pfoff28_kx8192_btw_all_R50A_baseline",
+    "16384x8192x8192|v1": "tk_mxfp4_gluon_cpp_m16384_n8192_k8192_ts_v12_tv0_gm7_pfoff28_kx8192_btw_all_R50A_v1",
+    "32768x4096x4096|baseline": "tk_mxfp4_gluon_cpp_m32768_n4096_k4096_ts_gm7_v12_dc_pfoff14_R50A_baseline",
+    "32768x4096x4096|v1": "tk_mxfp4_gluon_cpp_m32768_n4096_k4096_ts_gm7_v12_dc_pfoff14_R50A_v1",
+    "4096x16384x4096|v1": "tk_mxfp4_gluon_cpp_m4096_n16384_k4096_ts_gm7_v12_dc_pfoff14_R50A_v1",
+    "4096x16384x4096|baseline": "tk_mxfp4_gluon_cpp_m4096_n16384_k4096_ts_gm7_v12_dc_pfoff14_R50A_baseline"
+  },
+  "targets": {
+    "4096x4096x8192": {
+      "tag": "ts_v12_tv0_gm7_memc_pfoff28_kx8192_btw_all",
+      "flags": "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=7 -DSTEP3_BARRIER_VMCNT=12 -DTAIL_BARRIER_VMCNT=0 -DR25C_TAIL_PF_OFF_ITERS=28 -DR25C_K_LIMIT=32768 -DR25C_K_EXACT=8192 -mllvm -amdgpu-sched-strategy=max-memory-clause -DBARRIER_TO_WAITCNT_ALL=1"
+    },
+    "16384x14336x4096": {
+      "tag": "ts_gm7_v12_memc_dc_pfoff14",
+      "flags": "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=7 -DSTEP3_BARRIER_VMCNT=12 -DR25C_TAIL_PF_OFF_ITERS=14 -DR25C_K_LIMIT=32768 -mllvm -amdgpu-sched-strategy=max-memory-clause -mllvm -amdgpu-disable-clustered-low-occupancy-reschedule"
+    },
+    "16384x28672x4096": {
+      "tag": "ts_gm7_v12_memc_dc_pfoff14",
+      "flags": "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=7 -DSTEP3_BARRIER_VMCNT=12 -DR25C_TAIL_PF_OFF_ITERS=14 -DR25C_K_LIMIT=32768 -mllvm -amdgpu-sched-strategy=max-memory-clause -mllvm -amdgpu-disable-clustered-low-occupancy-reschedule"
+    },
+    "16384x6144x4096": {
+      "tag": "ts_lgk2_gm7_v12_memc_pfoff14",
+      "flags": "-DTAIL_SPLIT=1 -DSTEP12_BR_LGKMCNT=2 -DGROUP_SIZE_M=7 -DSTEP3_BARRIER_VMCNT=12 -DR25C_TAIL_PF_OFF_ITERS=14 -DR25C_K_LIMIT=32768 -mllvm -amdgpu-sched-strategy=max-memory-clause"
+    },
+    "28672x4096x16384": {
+      "tag": "ts_lgk2_gm7_memc_pfoff56_kx16384_btw_all",
+      "flags": "-DTAIL_SPLIT=1 -DSTEP12_BR_LGKMCNT=2 -DGROUP_SIZE_M=7 -DR25C_TAIL_PF_OFF_ITERS=56 -DR25C_K_LIMIT=32768 -DR25C_K_EXACT=16384 -mllvm -amdgpu-sched-strategy=max-memory-clause -DBARRIER_TO_WAITCNT_ALL=1"
+    },
+    "32768x4096x14336": {
+      "tag": "ts_v12_tv0_memc_dc_gm7_pfoff54_kx14336_btw_all",
+      "flags": "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=7 -DSTEP3_BARRIER_VMCNT=12 -DTAIL_BARRIER_VMCNT=0 -DR25C_TAIL_PF_OFF_ITERS=54 -DR25C_K_LIMIT=32768 -DR25C_K_EXACT=14336 -mllvm -amdgpu-sched-strategy=max-memory-clause -mllvm -amdgpu-disable-clustered-low-occupancy-reschedule -DBARRIER_TO_WAITCNT_ALL=1"
+    },
+    "4096x32768x14336": {
+      "tag": "ts_v12_tv0_memc_btw_all",
+      "flags": "-DTAIL_SPLIT=1 -DSTEP3_BARRIER_VMCNT=12 -DTAIL_BARRIER_VMCNT=0 -mllvm -amdgpu-sched-strategy=max-memory-clause -DBARRIER_TO_WAITCNT_ALL=1"
+    },
+    "8192x8192x8192": {
+      "tag": "ts_v12_tv0_gm7_memc_pfoff28_kx8192_btw_all",
+      "flags": "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=7 -DSTEP3_BARRIER_VMCNT=12 -DTAIL_BARRIER_VMCNT=0 -DR25C_TAIL_PF_OFF_ITERS=28 -DR25C_K_LIMIT=32768 -DR25C_K_EXACT=8192 -mllvm -amdgpu-sched-strategy=max-memory-clause -DBARRIER_TO_WAITCNT_ALL=1"
+    },
+    "16384x8192x8192": {
+      "tag": "ts_v12_tv0_gm7_memc_pfoff28_kx8192_btw_all",
+      "flags": "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=7 -DSTEP3_BARRIER_VMCNT=12 -DTAIL_BARRIER_VMCNT=0 -DR25C_TAIL_PF_OFF_ITERS=28 -DR25C_K_LIMIT=32768 -DR25C_K_EXACT=8192 -mllvm -amdgpu-sched-strategy=max-memory-clause -DBARRIER_TO_WAITCNT_ALL=1"
+    },
+    "32768x4096x4096": {
+      "tag": "ts_gm7_v12_memc_dc_pfoff14",
+      "flags": "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=7 -DSTEP3_BARRIER_VMCNT=12 -DR25C_TAIL_PF_OFF_ITERS=14 -DR25C_K_LIMIT=32768 -mllvm -amdgpu-sched-strategy=max-memory-clause -mllvm -amdgpu-disable-clustered-low-occupancy-reschedule"
+    },
+    "4096x16384x4096": {
+      "tag": "ts_gm7_v12_memc_dc_pfoff14",
+      "flags": "-DTAIL_SPLIT=1 -DGROUP_SIZE_M=7 -DSTEP3_BARRIER_VMCNT=12 -DR25C_TAIL_PF_OFF_ITERS=14 -DR25C_K_LIMIT=32768 -mllvm -amdgpu-sched-strategy=max-memory-clause -mllvm -amdgpu-disable-clustered-low-occupancy-reschedule"
+    }
+  },
+  "cells": {
+    "baseline": 0,
+    "v1": 1
+  }
+}

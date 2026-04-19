@@ -32,6 +32,67 @@ using namespace kittens;
 #ifndef STEP3_EMBED_BARRIER
 #define STEP3_EMBED_BARRIER 1
 #endif
+// R49 Opt A (2026-04-19): aiter ISA disasm-driven pattern port.
+// Per R49A_aiter_256x256.s (disasm of f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co):
+// aiter uses `s_waitcnt vmcnt(15) lgkmcnt(0)` at the K-loop iter top while
+// HipKittens currently uses `s_waitcnt vmcnt(8) lgkmcnt(0)` (STEP3_BARRIER_VMCNT=8).
+// The +7 in-flight-VMEM tolerance lets aiter's 8 buffer_load_to_lds + 7 in-flight
+// ds_reads overlap further with MFMA work without serializing at the iter
+// boundary. Variant ladder:
+//   R49A_AITER_PATTERN_VMCNT_RELAX = 0 (default)  : keep STEP3_BARRIER_VMCNT=8
+//   R49A_AITER_PATTERN_VMCNT_RELAX = 1           : override STEP3_BARRIER_VMCNT
+//                                                  AND TAIL_BARRIER_VMCNT to 15
+//                                                  (matches aiter exactly)
+//   R49A_AITER_PATTERN_VMCNT_RELAX = 2           : override to 12 (intermediate)
+//   R49A_AITER_PATTERN_VMCNT_RELAX = 3           : override to 10
+// When OFF (=0), build is byte-compatible with R44 baseline. When non-zero,
+// applies BEFORE the STEP3_BARRIER_VMCNT and TAIL_BARRIER_VMCNT defaults so
+// any user override of those still wins via -D.
+// Cohort target: 6 cluster-B wcf-flake shapes; baseline check on 4096x4096x8192.
+#ifndef R49A_AITER_PATTERN_VMCNT_RELAX
+#define R49A_AITER_PATTERN_VMCNT_RELAX 0
+#endif
+
+// ==========================================================================
+// R50 Opt A — Aiter MFMA<->ds_read 1:4 spread interleaving inside
+// kpair_64mfma_step34 (vs HK's R44 "front-loaded ds_reads in Row 0" pattern).
+//
+// When R50A_AITER_INTERLEAVE=1, the asm volatile body of kpair_64mfma_step34
+// is rewritten so that the 8 ds_reads per Step (Step3 / Step4) are spread
+// evenly across all 4 rows (1 ds_read per ~4 MFMAs) instead of being
+// concentrated in Row 0. SAME MFMA count (32+32), SAME ds_read count (8+8),
+// SAME register operands. Only ISSUE ORDER changes inside the asm volatile.
+//
+// Default OFF: R44 baseline byte-equivalent.
+// ==========================================================================
+#ifndef R50A_AITER_INTERLEAVE
+#define R50A_AITER_INTERLEAVE 0
+#endif
+
+// R49A override: when ON, FORCE-OVERRIDE STEP3_BARRIER_VMCNT and
+// TAIL_BARRIER_VMCNT regardless of any prior -D from variant flags. Many R40B
+// variants pass `-DSTEP3_BARRIER_VMCNT=12` from bench_all_42.py; we need to
+// stomp those when R49A is enabled because the whole point is to test the
+// aiter-mirrored value. Without #undef, the parent's -D wins and R49A is a
+// no-op. This is intentional: R49A is a deliberate experiment that must
+// override variant tuning.
+#if R49A_AITER_PATTERN_VMCNT_RELAX == 1
+#  undef STEP3_BARRIER_VMCNT
+#  define STEP3_BARRIER_VMCNT 15
+#  undef TAIL_BARRIER_VMCNT
+#  define TAIL_BARRIER_VMCNT 15
+#elif R49A_AITER_PATTERN_VMCNT_RELAX == 2
+#  undef STEP3_BARRIER_VMCNT
+#  define STEP3_BARRIER_VMCNT 13
+#  undef TAIL_BARRIER_VMCNT
+#  define TAIL_BARRIER_VMCNT 13
+#elif R49A_AITER_PATTERN_VMCNT_RELAX == 3
+#  undef STEP3_BARRIER_VMCNT
+#  define STEP3_BARRIER_VMCNT 10
+#  undef TAIL_BARRIER_VMCNT
+#  define TAIL_BARRIER_VMCNT 10
+#endif
+
 #ifndef STEP3_BARRIER_VMCNT
 #define STEP3_BARRIER_VMCNT 8
 #endif
@@ -271,6 +332,304 @@ using namespace kittens;
 #define R44A_BACKEDGE_VMCNT_DRAIN 0
 #endif
 
+// R45 Opt B (2026-04-19): per R44 Opt A's mechanistic finding, the
+// FUSED_STEP34 + TAIL_SPLIT path needs a SEPARATING `s_waitcnt vmcnt(0)`
+// fence BETWEEN `kpair_64mfma_step34` and the unconditional `emit_pf_tail<0>`
+// calls inside the FUSED branch. R44A's back-edge drain (placed at the END
+// of the K-loop body) does NOT close the FUSED branch CRASH on
+// (4096, 32768, 28672) — empirically still 5/5 CRASH (R44_OPT_A_VERDICT.md).
+// The mechanism: the 16 `buffer_load_dwordx4 ... lds` (PCs 0x1A884–0x1A9A0,
+// see R44_OPT_C_FAULT_PC.md) issued by `emit_pf_tail<0>` may be scheduled
+// to overlap with the late `ds_read_b128` issues that `kpair_64mfma_step34`
+// emits for the next-iter A0/Bl tiles, both targeting the SAME LDS double-
+// buffer slots → HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION (code 0x29).
+// Inserting `asm volatile("s_waitcnt vmcnt(0)\n" ::: "memory")` immediately
+// AFTER `kpair_64mfma_step34` and BEFORE `emit_pf_tail<0>` drains all
+// in-flight VMEM (including the LDS-direct prefetches from prior iters)
+// before issuing the new tail prefetches. Default OFF; per-shape gated.
+#ifndef R45B_FUSED_SEPARATING_FENCE
+#define R45B_FUSED_SEPARATING_FENCE 0
+#endif
+
+// R45 Opt B variant 2: fence AFTER emit_pf_tail<0> calls in FUSED branch.
+// Drains the just-issued tail prefetches before the loop back-edge so the
+// next iter's step12 ds_reads see drained LDS state. Different placement
+// from R44A_BACKEDGE_VMCNT_DRAIN (which is at the END of the K-loop body
+// after R45B's own scope). Default OFF.
+#ifndef R45B_FUSED_POST_EMIT_FENCE
+#define R45B_FUSED_POST_EMIT_FENCE 0
+#endif
+
+// R45 Opt B variant 3: STRONG separating fence (vmcnt(0) + lgkmcnt(0) +
+// s_waitcnt expcnt(0) + s_barrier) between step34 and emit_pf_tail. Forces
+// all wave-shared LDS state to be coherent before issuing new prefetches.
+// Belt-and-braces test for whether the issue is purely VMEM ordering or
+// involves LDS export/load races. Default OFF.
+#ifndef R45B_FUSED_STRONG_FENCE
+#define R45B_FUSED_STRONG_FENCE 0
+#endif
+
+// R46 Opt B (2026-04-19): 3-buffer LDS rotation to bypass FUSED+TS K=28672
+// CRASH that R45 Opt B's 5 fence positions could not close (R45_OPT_B_VERDICT.md).
+// Mechanism: race lives INSIDE the FUSED `kpair_64mfma_step34` asm block
+// (not at its boundary), where iter-N+1's emit_pf_tail<0> writes target the
+// SAME LDS double-buffer slot that iter-N's step34 reads via ds_read_b128.
+// External fences cannot reorder the FUSED block. 3-buffer rotation
+// structurally separates the slots: at iter bt, READ from slot
+// `(bt+1) % 3`, WRITE prefetch into slot `(bt+2) % 3`, leaving slot
+// `bt % 3` as currently-consumed (by step12). No aliasing by construction.
+// Only A0 and Bl get triple-buffered (the tiles step34 reads next-iter
+// from); A1 and Br stay double-buffered (consumed only by current iter,
+// already race-free). LDS budget: 3*16K (A0) + 2*16K (A1) + 3*16K (Bl)
+// + 2*16K (Br) = 144 KB <= 160 KB hardware GROUP segment on gfx950.
+// Default OFF; only enabled per-shape for the K=28672 sister CRASH.
+#ifndef R46B_LDS_TRIPLE_BUFFER
+#define R46B_LDS_TRIPLE_BUFFER 0
+#endif
+
+// R47 Opt A (2026-04-19): per-slot vmcnt fence for the R46B 3-buffer
+// rotation. R46B structurally bypasses the FUSED+TS K=28672 HSA aperture
+// CRASH but produces wcf=0.33 wrong output: the slot-(bt+1)%3 read by
+// step34 may hold stale LDS because the producer (iter bt-1's
+// emit_pf_tail<0>) has not drained vmcnt for the now-distant write.
+// The back-edge `s_waitcnt lgkmcnt(0)` only gates LDS-direct (lgkmcnt),
+// not VMEM-via-buffer_load_to_lds (vmcnt).
+//
+// Variants (compile-time R47A_TRIPLE_BUF_VMCNT_TOP value):
+//   1 = `s_waitcnt vmcnt(0)` at TOP of K-loop iter (most conservative)
+//   2 = `s_waitcnt vmcnt(8)` at TOP of K-loop iter (allow 8 in-flight
+//       loads to OTHER two slots; PF_MPT=4 per A0/Bl tile × 2 tiles = 8)
+//   3 = `s_waitcnt vmcnt(0)` JUST BEFORE step34 in the FUSED+TS branch
+//
+// Default OFF; only meaningful when R46B_LDS_TRIPLE_BUFFER=1.
+#ifndef R47A_TRIPLE_BUF_VMCNT_TOP
+#define R47A_TRIPLE_BUF_VMCNT_TOP 0
+#endif
+
+// R48 Opt A (2026-04-19): Physically split `kpair_64mfma_step34` into TWO
+// separate `asm volatile` blocks (Step3 first, Step4 second) so the compiler
+// can interleave loads/stores between the two halves and reschedule operand
+// register allocation across the boundary. Combined with R46B 3-buffer
+// rotation, this aims to fix the FUSED+TS K=28672 correctness bug
+// (`(4096,32768,28672)`) — the only remaining CRASH after R44/R46/R47.
+//
+// Mechanism (per project_mxfp4_R47A_external_fence_axis_closed.md): R45B
+// proved 5 fence positions × 7 cells DEAD on FUSED+TS K=28672 (race lives
+// INSIDE the fused asm block). R47A proved 3 vmcnt-fence positions ALL
+// re-trigger HSA aperture violation under R46B 3-buffer rotation (external
+// fences cannot fix in-block race AND adding fences breaks R46B's bypass).
+// External-fence axis CLOSED. The remaining axis is to physically split
+// the fused asm so the compiler regains a scheduling boundary; combined
+// with R46B for slot separation, this restores the conditions under which
+// R44A's back-edge fence (proven on non-FUSED) can drain VMEM correctly
+// for the 3-buffer-rotated slots.
+//
+// Default OFF; harmless when 0 (selects the existing single fused asm).
+#ifndef R48A_SPLIT_STEP34
+#define R48A_SPLIT_STEP34 0
+#endif
+
+// ─────────────────────────────────────────────────────────────────────────────
+// R47 Opt C (2026-04-19): MFMA cohort-race attack via wave priority + NOP
+// pacing + MFMA group splitting. Targets the 6 cluster-B wcf-flake shapes
+// where R44_INTEGRATION's 5-run consensus reports n_OK in 2..4/5 with
+// wcf_max ~ 0.02-0.045. R42 Opt A confirmed (median Jaccard ~ 0.06) that
+// the bad cells are non-deterministic — hypothesis: MFMA accumulator cohort
+// race driven by inter-wave scheduling jitter. aiter sets wave priority
+// during MFMA-heavy regions; we test the same family of mitigations.
+//
+// All three knobs default OFF (bit-identical to baseline).
+//
+//   R47C_WAVE_PRIO  (default 0):
+//     1 = emit `s_setprio 3` (max priority) just before the K-loop, restore
+//         `s_setprio 1` after K-loop exit. Reduces inter-wave de-schedule
+//         during the MFMA-heavy K-iter, which may stabilise MFMA accumulator
+//         cohort issue order.
+//
+//   R47C_MFMA_NOP_N  (default 0, valid 0..4):
+//     N>0 = inject `s_nop N-1` between every 16-MFMA block inside
+//         kpair_64mfma_step34 (3 sites: after step3 row1 (16 MFMAs),
+//         after step3 (32 MFMAs), after step4 row1 (48 MFMAs)). Spreads
+//         MFMA issue cadence to reduce VGPR-bank conflict on accumulator
+//         reads.
+//
+//   R47C_MFMA_SPLIT  (default 0):
+//     1 = insert `s_waitcnt vmcnt(0) lgkmcnt(0)` between step3 and step4
+//         inside kpair_64mfma_step34 (after MFMA #32). Forces the
+//         scheduler to drain all in-flight memory traffic at the
+//         step-boundary; tests whether the second half of step34's
+//         MFMA cohort completes deterministically once VMEM is quiesced.
+// ─────────────────────────────────────────────────────────────────────────────
+#ifndef R47C_WAVE_PRIO
+#define R47C_WAVE_PRIO 0
+#endif
+#ifndef R47C_MFMA_NOP_N
+#define R47C_MFMA_NOP_N 0
+#endif
+#ifndef R47C_MFMA_SPLIT
+#define R47C_MFMA_SPLIT 0
+#endif
+
+// Stringification helpers for R47C inline-asm fragments.
+#define R47C_STR_(x) #x
+#define R47C_STR(x) R47C_STR_(x)
+
+// MFMA NOP fragment: emitted inside the kpair_64mfma_step34 asm block at
+// 16-MFMA boundaries. Empty string when R47C_MFMA_NOP_N == 0.
+#if R47C_MFMA_NOP_N > 0
+  #define R47C_NOP_FRAG "s_nop " R47C_STR(R47C_MFMA_NOP_N) "\n"
+#else
+  #define R47C_NOP_FRAG ""
+#endif
+
+// MFMA SPLIT fragment: emitted between step3 and step4 inside step34.
+#if R47C_MFMA_SPLIT == 1
+  #define R47C_SPLIT_FRAG "s_waitcnt vmcnt(0) lgkmcnt(0)\n"
+#else
+  #define R47C_SPLIT_FRAG ""
+#endif
+
+// Wave-priority hooks (used in K-loop pre/post).
+#if R47C_WAVE_PRIO == 1
+  #define R47C_PRIO_HIGH() do { asm volatile("s_setprio 3" ::: "memory"); } while (0)
+  #define R47C_PRIO_LOW()  do { asm volatile("s_setprio 1" ::: "memory"); } while (0)
+#else
+  #define R47C_PRIO_HIGH() ((void)0)
+  #define R47C_PRIO_LOW()  ((void)0)
+#endif
+
+// ─────────────────────────────────────────────────────────────────────────────
+// R49 Opt C (2026-04-19): Producer-side per-slot vmcnt EMBEDDED inside the
+// emit_pf_tail asm volatile block.
+//
+// Per project_mxfp4_R47A_external_fence_axis_closed.md (R47A: 3 vmcnt-fence
+// positions external to producer DEAD on FUSED+TS K=28672) and
+// project_mxfp4_R48A_split_step34_dead.md (R48A: physical asm-block split at
+// the consumer DEAD — compiler RA/scheduler runs before asm-volatile boundary
+// insertion at this MIR layer), the ONE remaining external-fence axis is to
+// embed the fence INSIDE the producer's own asm volatile block so the compiler
+// cannot reorder the fence across the producer/consumer boundary.
+//
+// Strategy: After emit_pf_tail finishes emitting all of its emit_one_pf calls
+// (which by default use the llvm_amdgcn_raw_buffer_load_lds intrinsic), append
+// an additional `asm volatile("s_waitcnt vmcnt(N)" ::: "memory")` as the LAST
+// statement of the templated function body. Because the fence sits inside the
+// templated function body — not at the C++ call site — it is part of the
+// producer's emission and cannot be hoisted above any of the loads by the
+// compiler scheduler.
+//
+// Distinct from R47A: R47A placed the fence in C++ space at the call site —
+// the compiler can reorder around the call. R49C places the fence in the
+// producer body so it always emits AFTER all prefetch loads of the same
+// emit_pf_tail invocation.
+//
+// Distinct from R45B: R45B placed external fences in the K-loop body — same
+// compiler reordering issue.
+//
+// Macro:
+//   R49C_EMBEDDED_VMCNT (default 0): when 0, behavior is byte-compatible with
+//     R44 baseline (no fence emitted). When 1, append the embedded fence.
+//   R49C_EMBEDDED_VMCNT_N (default 0): vmcnt depth (0=fully drain VMEM, 8 or
+//     16 = leave N in flight; PF_MPT=4 per tile × 2 tiles = 8 in-flight loads
+//     per emit_pf_tail call by default, so N=8 retains all of this call's
+//     loads while draining anything older).
+//
+// ─────────────────────────────────────────────────────────────────────────────
+#ifndef R49C_EMBEDDED_VMCNT
+#define R49C_EMBEDDED_VMCNT 0
+#endif
+#ifndef R49C_EMBEDDED_VMCNT_N
+#define R49C_EMBEDDED_VMCNT_N 0
+#endif
+
+#define R49C_STR_(x) #x
+#define R49C_STR(x) R49C_STR_(x)
+
+#if R49C_EMBEDDED_VMCNT == 1
+  // Trailing fence emitted as the LAST statement of emit_pf_tail. The
+  // "memory" clobber tells the compiler this asm has memory side effects so
+  // it cannot be hoisted above the preceding intrinsic prefetch loads.
+  #define R49C_PF_TAIL_FENCE() do { \
+      asm volatile("s_waitcnt vmcnt(" R49C_STR(R49C_EMBEDDED_VMCNT_N) ")" \
+                   ::: "memory"); \
+  } while (0)
+#else
+  #define R49C_PF_TAIL_FENCE() ((void)0)
+#endif
+
+// ─────────────────────────────────────────────────────────────────────────────
+// R48 Opt B (2026-04-19): MFMA chain-reorder + Phase-1 fine-grain s_setprio +
+// ds_read drain — attack residual MFMA cohort race on cluster-B wcf-flake
+// shapes that R47C wave-priority alone could not stabilise (R47 round-dead;
+// 5-run promote killed by 10-run protocol — see project_mxfp4_R47_round_dead).
+//
+// Mechanism: each step3 MFMA accumulator (acc_bl[0..15] split into 4 row
+// chains of 4 elements) is read TWICE in close succession (Phase 0 then
+// Phase 1) before moving to the next chain. The current emission order
+//   Row0 P0 P0 P0 P0 / Row0 P1 P1 P1 P1 / Row1 ... / Row2 ... / Row3 ...
+// schedules the SAME accumulator for back-to-back read-modify-write within
+// 4 MFMAs. Cohort-issue order between waves is non-deterministic at this
+// granularity (median Jaccard ~ 0.06 cluster-B). Spreading Phase 1 issue
+// across all 4 row chains lengthens the dependency window for each
+// accumulator from 4 MFMAs to 16 MFMAs — much longer issue gap → cohort
+// completion order becomes deterministic by construction.
+//
+// Three independent knobs (default OFF — bit-identical to R47 baseline):
+//
+//   R48B_MFMA_REORDER (default 0):
+//     1 = re-issue the 32 step3 MFMAs as
+//           Row0 P0(4) Row1 P0(4) Row2 P0(4) Row3 P0(4)  (16 MFMAs)
+//           Row0 P1(4) Row1 P1(4) Row2 P1(4) Row3 P1(4)  (16 MFMAs)
+//         instead of the current Row0(P0+P1) Row1(P0+P1) Row2(P0+P1)
+//         Row3(P0+P1). Same 32 instructions, same 8 ds_reads, only the
+//         issue ORDER changes. The 8 ds_reads (4 of nxt_a0[0..3], 4 of
+//         nxt_a0[4..7]) are kept inline at the same MFMA-relative cadence
+//         to preserve the original LDS issue spread. Step4 layout
+//         unchanged. Symmetric Step4 reorder is gated on R48B_MFMA_REORDER
+//         too (same mechanism; otherwise we'd half-fix the race).
+//
+//   R48B_PRIO_PHASE1 (default 0):
+//     1 = wrap each Phase-1 MFMA quartet (the SECOND pass over
+//         acc_bl[0..3], acc_bl[4..7], etc.) with `s_setprio 3` before
+//         and `s_setprio 1` after. Inside the asm block, this ensures
+//         the MFMA cohort responsible for the read-modify-write hazard
+//         executes at max wave priority (vs R47C_WAVE_PRIO which sets
+//         priority for the entire K-loop). Tests whether the race is
+//         specifically the Phase-1 quartet's issue cadence.
+//
+//   R48B_DSREAD_DRAIN (default 0):
+//     1 = emit `s_nop 7` between Step3 and Step4 inside the FUSED
+//         step34 asm block (replacing the current empty
+//         `R47C_SPLIT_FRAG` slot). Forces the LDS subsystem to
+//         drain the in-flight `ds_read_b128` for nxt_a0[0..7] before
+//         Step4 starts issuing its own ds_reads for nxt_bl. Cheaper
+//         than R47C_MFMA_SPLIT (no waitcnt, just instruction-pacing
+//         delay) and targets the AGPR-write-back window directly.
+// ─────────────────────────────────────────────────────────────────────────────
+#ifndef R48B_MFMA_REORDER
+#define R48B_MFMA_REORDER 0
+#endif
+#ifndef R48B_PRIO_PHASE1
+#define R48B_PRIO_PHASE1 0
+#endif
+#ifndef R48B_DSREAD_DRAIN
+#define R48B_DSREAD_DRAIN 0
+#endif
+
+#if R48B_PRIO_PHASE1 == 1
+  #define R48B_PRIO_HI_FRAG  "s_setprio 3\n"
+  #define R48B_PRIO_LO_FRAG  "s_setprio 1\n"
+#else
+  #define R48B_PRIO_HI_FRAG  ""
+  #define R48B_PRIO_LO_FRAG  ""
+#endif
+
+#if R48B_DSREAD_DRAIN == 1
+  #define R48B_DRAIN_FRAG    "s_nop 7\n"
+#else
+  #define R48B_DRAIN_FRAG    ""
+#endif
+
 // R38 Opt A (2026-04-19): replace the `__builtin_amdgcn_raw_buffer_load_lds`
 // intrinsic in emit_one_pf with an `asm volatile("buffer_load_dwordx4 ... lds")`
 // block carrying a "memory" clobber. The intrinsic, being a regular call, is
@@ -286,6 +645,23 @@ using namespace kittens;
 // R38A_INLINE_BUFLOAD_LDS=1 explicitly.
 #ifndef R38A_INLINE_BUFLOAD_LDS
 #define R38A_INLINE_BUFLOAD_LDS 0
+#endif
+
+// R47 Opt B (2026-04-19): port aiter's per-load `s_mov_b32 m0, sX`-immediately-
+// before-`buffer_load_dwordx4 ... lds` discipline to the PROLOGUE tile loader
+// (`emit_tile_pf` at line ~1154), which currently uses the LLVM intrinsic
+// emission path (no M0 fresh-set guarantee). R46 Opt C falsified the "M0 is
+// stylistic" interpretation: PF_N=2 with M0-only completes (99.9% finite),
+// PF_N=2 with consumer-fence-only HSA_FAULTs. The fence is NOT a substitute
+// for M0 hygiene.
+//
+// When R47B_M0_FRESH_SET_PRODUCTION=1, `emit_tile_pf` switches from the
+// `llvm_amdgcn_raw_buffer_load_lds` intrinsic to inline asm with explicit
+// `s_mov_b32 m0, %0` immediately before each `buffer_load_dwordx4 ... lds`.
+// This stacks on top of R38A_INLINE_BUFLOAD_LDS=1 (which only patches the
+// per-iter `emit_one_pf` site). Default OFF.
+#ifndef R47B_M0_FRESH_SET_PRODUCTION
+#define R47B_M0_FRESH_SET_PRODUCTION 0
 #endif
 
 // R25-C: K-loop tail epilogue specialization. When set to N>0, the last N
@@ -1074,7 +1450,23 @@ __device__ __forceinline__ void load_bl_direct_async(
 
 // ── Tile prefetch ──
 
+// R48 Opt C (2026-04-19): PF_MPT override knob.
+// PF_MPT is the number of buffer_load_dwordx4 instructions emitted per warp
+// per tile. Geometrically `PF_MPT = (HB * BK * sizeof(fp8e4m3)) / (16 *
+// _NUM_THREADS) = 4` is the count required to fully cover one HB×BK tile
+// at 16 B/lane × 256 threads. This override exists ONLY for falsification
+// testing of the "deepen prefetch pipeline under R46B" hypothesis. Setting
+// `R48C_PF_MPT_OVERRIDE > 4` issues redundant loads beyond tile coverage:
+// the upper indices read past the valid `so_a/so_b[PF_MPT]` arrays (UB)
+// and write past the LDS tile bounds (UB). Default 0 = use natural value.
+#ifndef R48C_PF_MPT_OVERRIDE
+#define R48C_PF_MPT_OVERRIDE 0
+#endif
+#if R48C_PF_MPT_OVERRIDE > 0
+static constexpr int PF_MPT = R48C_PF_MPT_OVERRIDE;
+#else
 static constexpr int PF_MPT = (HB * BK * sizeof(fp8e4m3)) / (16 * _NUM_THREADS);
+#endif
 
 // R22B: cache_hint defaults to cache_all (0); pass MXFP4_R22B_B_HINT for B-tile sites.
 __device__ __forceinline__ void emit_tile_pf(
@@ -1099,11 +1491,27 @@ __device__ __forceinline__ void emit_tile_pf(
         const uint32_t sid = lin / ST::underlying_subtile_bytes;
         uint32_t lds_b = lds_tile_base + lin + sid * ST::subtile_padding;
         asm volatile("" : "+s"(lds_b));
+#if R47B_M0_FRESH_SET_PRODUCTION
+        // R47B: emit per-load `s_mov_b32 m0, sLDS` immediately before
+        // `buffer_load_dwordx4 ... lds`, matching aiter's discipline (R46C
+        // proved this is load-bearing on gfx950, not stylistic).
+        // cache_hint dropped (inline asm uses default cache mode).
+        uint32_t voff_local = so[i];
+        int32x4_t srd_local = std::bit_cast<int32x4_t>(srd);
+        asm volatile(
+            "s_mov_b32 m0, %0\n"
+            "buffer_load_dwordx4 %1, %2, %3 offen lds\n"
+            :
+            : "s"(lds_b), "v"(voff_local), "s"(srd_local), "s"(soff)
+            : "memory"
+        );
+#else
         llvm_amdgcn_raw_buffer_load_lds(
             std::bit_cast<int32x4_t>(srd),
             (as3_uint32_ptr)(uintptr_t)lds_b,
             16, so[i], soff, 0,
             cache_hint);
+#endif
     }
 }
 
@@ -1278,10 +1686,18 @@ __device__ __forceinline__ void emit_pf_tail(const tile_pf_params& pf0, const ti
         for (int pi = PF_N; pi < PF_MPT; ++pi) emit_one_pf(pf0, pi);
         #pragma unroll
         for (int pi = 0; pi < PF_MPT; ++pi) emit_one_pf(pf1, pi);
+        // R49 Opt C: producer-side embedded vmcnt fence. Placed inside the
+        // templated function body so the fence cannot be hoisted above the
+        // preceding loads by the compiler scheduler. Default OFF
+        // (R44 baseline byte-compatible).
+        R49C_PF_TAIL_FENCE();
     } else if constexpr (PF_N < 2 * PF_MPT) {
         #pragma unroll
         for (int pi = PF_N - PF_MPT; pi < PF_MPT; ++pi) emit_one_pf(pf1, pi);
+        R49C_PF_TAIL_FENCE();
     }
+    // PF_N == 2*PF_MPT path: zero loads emitted; do NOT emit a fence (no-op
+    // function, fence would just stall for nothing).
 }
 
 // ── KPAIR shared operand setup macro ──
@@ -1768,45 +2184,52 @@ __device__ __forceinline__ void kpair_64mfma_step34(
     // R19B: site _S1 (kpair_64mfma_step34, dead with default FUSED_STEP34=0)
     asm volatile(MXFP4_STEP3_BARRIER_INST_S1 ::: "memory");
 
+#if R50A_AITER_INTERLEAVE
+    // ═══ R50 Opt A: AITER 1:4 SPREAD INTERLEAVE ═══
+    // Same 64 MFMAs + 16 ds_reads as R44 baseline; ds_reads spread evenly
+    // across all 4 rows (1 per ~4 MFMAs) instead of front-loaded in Row 0.
+    // Same operand list/clobbers as R44 baseline.
     asm volatile(
-        // ═══ STEP 3: A1×Bl (32 MFMAs) + 8 ds_reads for nxt_a0 ═══
-        // Row 0 Phase 0: 4 MFMAs + 4 ds_reads
+        // ── STEP 3: A1×Bl (32 MFMAs + 8 ds_reads spread 2/2/1/1/1/1/0/0) ──
+        // Row 0 P0: 4 MFMAs + 2 ds_reads (was 4)
         "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %48, %56, %0,  %72, %74 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "ds_read_b128 %32, %78 offset:0\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %48, %57, %1,  %72, %74 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "ds_read_b128 %33, %78 offset:2048\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %48, %58, %2,  %72, %75 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %34, %78 offset:4096\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %48, %59, %3,  %72, %75 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %35, %78 offset:6144\n"
-        // Row 0 Phase 1: 4 MFMAs + 4 ds_reads
+        // Row 0 P1: 4 MFMAs + 2 ds_reads (was 4)
         "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %52, %60, %0,  %72, %74 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "ds_read_b128 %36, %79 offset:0\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %52, %61, %1,  %72, %74 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "ds_read_b128 %37, %79 offset:2048\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %52, %62, %2,  %72, %75 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %38, %79 offset:4096\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %52, %63, %3,  %72, %75 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %39, %79 offset:6144\n"
-        // Row 1: 8 pure Step3 MFMAs (odd, sa0)
+        // Row 1 P0: 4 MFMAs + 1 ds_read (was 0)
         "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %49, %56, %4,  %72, %74 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %49, %57, %5,  %72, %74 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %34, %78 offset:4096\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %49, %58, %6,  %72, %75 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %49, %59, %7,  %72, %75 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        // Row 1 P1: 4 MFMAs + 1 ds_read (was 0)
         "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %53, %60, %4,  %72, %74 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %53, %61, %5,  %72, %74 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %38, %79 offset:4096\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %53, %62, %6,  %72, %75 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %53, %63, %7,  %72, %75 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        // Row 2: 8 pure Step3 MFMAs (even, sa1)
+        // Row 2 P0: 4 MFMAs + 1 ds_read (was 0)
         "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %50, %56, %8,  %73, %74 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %50, %57, %9,  %73, %74 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %35, %78 offset:6144\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %50, %58, %10, %73, %75 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %50, %59, %11, %73, %75 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        // Row 2 P1: 4 MFMAs + 1 ds_read (was 0)
         "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %54, %60, %8,  %73, %74 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %54, %61, %9,  %73, %74 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %39, %79 offset:6144\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %54, %62, %10, %73, %75 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %54, %63, %11, %73, %75 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        // Row 3: 8 pure Step3 MFMAs (odd, sa1)
+        // Row 3 P0+P1: 8 PURE MFMAs
         "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %51, %56, %12, %73, %74 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %51, %57, %13, %73, %74 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %51, %58, %14, %73, %75 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
@@ -1815,44 +2238,46 @@ __device__ __forceinline__ void kpair_64mfma_step34(
         "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %55, %61, %13, %73, %74 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %55, %62, %14, %73, %75 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %55, %63, %15, %73, %75 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        // ═══ STEP 4: A1×Br (32 MFMAs) + 8 ds_reads for nxt_bl ═══
-        // Row 0 Phase 0: 4 MFMAs + 4 ds_reads
+        // ── STEP 4: A1×Br (32 MFMAs + 8 ds_reads spread 2/2/1/1/1/1/0/0) ──
+        // Row 0 P0: 4 MFMAs + 2 ds_reads
         "v_mfma_scale_f32_16x16x128_f8f6f4 %16, %48, %64, %16, %72, %76 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "ds_read_b128 %40, %80 offset:0\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %17, %48, %65, %17, %72, %76 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "ds_read_b128 %41, %80 offset:2048\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %18, %48, %66, %18, %72, %77 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %42, %80 offset:4096\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %19, %48, %67, %19, %72, %77 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %43, %80 offset:6144\n"
-        // Row 0 Phase 1: 4 MFMAs + 4 ds_reads
+        // Row 0 P1: 4 MFMAs + 2 ds_reads
         "v_mfma_scale_f32_16x16x128_f8f6f4 %16, %52, %68, %16, %72, %76 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "ds_read_b128 %44, %81 offset:0\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %17, %52, %69, %17, %72, %76 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "ds_read_b128 %45, %81 offset:2048\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %18, %52, %70, %18, %72, %77 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %46, %81 offset:4096\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %19, %52, %71, %19, %72, %77 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %47, %81 offset:6144\n"
-        // Row 1: 8 pure Step4 MFMAs (odd, sa0)
+        // Row 1 P0: 4 MFMAs + 1 ds_read
         "v_mfma_scale_f32_16x16x128_f8f6f4 %20, %49, %64, %20, %72, %76 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %21, %49, %65, %21, %72, %76 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %42, %80 offset:4096\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %22, %49, %66, %22, %72, %77 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %23, %49, %67, %23, %72, %77 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        // Row 1 P1: 4 MFMAs + 1 ds_read
         "v_mfma_scale_f32_16x16x128_f8f6f4 %20, %53, %68, %20, %72, %76 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %21, %53, %69, %21, %72, %76 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %46, %81 offset:4096\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %22, %53, %70, %22, %72, %77 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %23, %53, %71, %23, %72, %77 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        // Row 2: 8 pure Step4 MFMAs (even, sa1)
+        // Row 2 P0: 4 MFMAs + 1 ds_read
         "v_mfma_scale_f32_16x16x128_f8f6f4 %24, %50, %64, %24, %73, %76 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %25, %50, %65, %25, %73, %76 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %43, %80 offset:6144\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %26, %50, %66, %26, %73, %77 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %27, %50, %67, %27, %73, %77 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        // Row 2 P1: 4 MFMAs + 1 ds_read
         "v_mfma_scale_f32_16x16x128_f8f6f4 %24, %54, %68, %24, %73, %76 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %25, %54, %69, %25, %73, %76 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %47, %81 offset:6144\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %26, %54, %70, %26, %73, %77 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %27, %54, %71, %27, %73, %77 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        // Row 3: 8 pure Step4 MFMAs (odd, sa1)
+        // Row 3 P0+P1: 8 PURE MFMAs
         "v_mfma_scale_f32_16x16x128_f8f6f4 %28, %51, %64, %28, %73, %76 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %29, %51, %65, %29, %73, %76 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %30, %51, %66, %30, %73, %77 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
@@ -1882,6 +2307,397 @@ __device__ __forceinline__ void kpair_64mfma_step34(
           "v"(sa0), "v"(sa1), "v"(sbl0), "v"(sbl1), "v"(sbr0), "v"(sbr1),
           "v"(a0_p0), "v"(a0_p1), "v"(bl_p0), "v"(bl_p1)
     );
+    return;  // R50A path emits the entire kpair_64mfma_step34 body — skip baseline
+#endif // R50A_AITER_INTERLEAVE
+
+#if R48A_SPLIT_STEP34
+    // ═══ R48 Opt A: PHYSICALLY SPLIT step3 + step4 into two asm volatile blocks ═══
+    // Block A: Step3 — 32 MFMAs writing acc_bl + 8 ds_reads writing nxt_a0_d
+    //   New operand map (per-block): %0..%15=acc_bl, %16..%23=nxt_a0_d,
+    //                                %24..%27=a1_*l, %28..%31=a1_*h,
+    //                                %32..%35=bl_*l, %36..%39=bl_*h,
+    //                                %40=sa0, %41=sa1, %42=sbl0, %43=sbl1,
+    //                                %44=a0_p0, %45=a0_p1.
+    asm volatile(
+        // Row 0 Phase 0: 4 MFMAs + 4 ds_reads
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %24, %32, %0,  %40, %42 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %16, %44 offset:0\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %24, %33, %1,  %40, %42 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %17, %44 offset:2048\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %24, %34, %2,  %40, %43 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %18, %44 offset:4096\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %24, %35, %3,  %40, %43 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %19, %44 offset:6144\n"
+        // Row 0 Phase 1: 4 MFMAs + 4 ds_reads
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %28, %36, %0,  %40, %42 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %20, %45 offset:0\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %28, %37, %1,  %40, %42 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %21, %45 offset:2048\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %28, %38, %2,  %40, %43 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %22, %45 offset:4096\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %28, %39, %3,  %40, %43 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %23, %45 offset:6144\n"
+        // Row 1: 8 pure Step3 MFMAs (odd, sa0)
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %25, %32, %4,  %40, %42 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %25, %33, %5,  %40, %42 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %25, %34, %6,  %40, %43 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %25, %35, %7,  %40, %43 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %29, %36, %4,  %40, %42 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %29, %37, %5,  %40, %42 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %29, %38, %6,  %40, %43 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %29, %39, %7,  %40, %43 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        // Row 2: 8 pure Step3 MFMAs (even, sa1)
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %26, %32, %8,  %41, %42 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %26, %33, %9,  %41, %42 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %26, %34, %10, %41, %43 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %26, %35, %11, %41, %43 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %30, %36, %8,  %41, %42 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %30, %37, %9,  %41, %42 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %30, %38, %10, %41, %43 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %30, %39, %11, %41, %43 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        // Row 3: 8 pure Step3 MFMAs (odd, sa1)
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %27, %32, %12, %41, %42 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %27, %33, %13, %41, %42 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %27, %34, %14, %41, %43 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %27, %35, %15, %41, %43 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %31, %36, %12, %41, %42 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %31, %37, %13, %41, %42 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %31, %38, %14, %41, %43 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %31, %39, %15, %41, %43 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        : "+a"(acc_bl[0]),  "+a"(acc_bl[1]),  "+a"(acc_bl[2]),  "+a"(acc_bl[3]),
+          "+a"(acc_bl[4]),  "+a"(acc_bl[5]),  "+a"(acc_bl[6]),  "+a"(acc_bl[7]),
+          "+a"(acc_bl[8]),  "+a"(acc_bl[9]),  "+a"(acc_bl[10]), "+a"(acc_bl[11]),
+          "+a"(acc_bl[12]), "+a"(acc_bl[13]), "+a"(acc_bl[14]), "+a"(acc_bl[15]),
+          "=&v"(nxt_a0_d[0]), "=&v"(nxt_a0_d[1]), "=&v"(nxt_a0_d[2]), "=&v"(nxt_a0_d[3]),
+          "=&v"(nxt_a0_d[4]), "=&v"(nxt_a0_d[5]), "=&v"(nxt_a0_d[6]), "=&v"(nxt_a0_d[7])
+        : "v"(a1_0l), "v"(a1_1l), "v"(a1_2l), "v"(a1_3l),
+          "v"(a1_0h), "v"(a1_1h), "v"(a1_2h), "v"(a1_3h),
+          "v"(bl_0l), "v"(bl_1l), "v"(bl_2l), "v"(bl_3l),
+          "v"(bl_0h), "v"(bl_1h), "v"(bl_2h), "v"(bl_3h),
+          "v"(sa0), "v"(sa1), "v"(sbl0), "v"(sbl1),
+          "v"(a0_p0), "v"(a0_p1)
+    );
+    // Block B: Step4 — 32 MFMAs writing acc_br + 8 ds_reads writing nxt_bl_d
+    //   New operand map (per-block): %0..%15=acc_br, %16..%23=nxt_bl_d,
+    //                                %24..%27=a1_*l, %28..%31=a1_*h,
+    //                                %32..%35=br_*l, %36..%39=br_*h,
+    //                                %40=sa0, %41=sa1, %42=sbr0, %43=sbr1,
+    //                                %44=bl_p0, %45=bl_p1.
+    asm volatile(
+        // Row 0 Phase 0: 4 MFMAs + 4 ds_reads
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %24, %32, %0,  %40, %42 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %16, %44 offset:0\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %24, %33, %1,  %40, %42 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %17, %44 offset:2048\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %24, %34, %2,  %40, %43 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %18, %44 offset:4096\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %24, %35, %3,  %40, %43 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %19, %44 offset:6144\n"
+        // Row 0 Phase 1: 4 MFMAs + 4 ds_reads
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %28, %36, %0,  %40, %42 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %20, %45 offset:0\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %28, %37, %1,  %40, %42 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %21, %45 offset:2048\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %28, %38, %2,  %40, %43 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %22, %45 offset:4096\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %28, %39, %3,  %40, %43 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %23, %45 offset:6144\n"
+        // Row 1: 8 pure Step4 MFMAs (odd, sa0)
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %25, %32, %4,  %40, %42 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %25, %33, %5,  %40, %42 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %25, %34, %6,  %40, %43 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %25, %35, %7,  %40, %43 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %29, %36, %4,  %40, %42 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %29, %37, %5,  %40, %42 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %29, %38, %6,  %40, %43 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %29, %39, %7,  %40, %43 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        // Row 2: 8 pure Step4 MFMAs (even, sa1)
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %26, %32, %8,  %41, %42 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %26, %33, %9,  %41, %42 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %26, %34, %10, %41, %43 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %26, %35, %11, %41, %43 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %30, %36, %8,  %41, %42 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %30, %37, %9,  %41, %42 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %30, %38, %10, %41, %43 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %30, %39, %11, %41, %43 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        // Row 3: 8 pure Step4 MFMAs (odd, sa1)
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %27, %32, %12, %41, %42 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %27, %33, %13, %41, %42 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %27, %34, %14, %41, %43 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %27, %35, %15, %41, %43 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %31, %36, %12, %41, %42 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %31, %37, %13, %41, %42 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %31, %38, %14, %41, %43 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %31, %39, %15, %41, %43 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        : "+a"(acc_br[0]),  "+a"(acc_br[1]),  "+a"(acc_br[2]),  "+a"(acc_br[3]),
+          "+a"(acc_br[4]),  "+a"(acc_br[5]),  "+a"(acc_br[6]),  "+a"(acc_br[7]),
+          "+a"(acc_br[8]),  "+a"(acc_br[9]),  "+a"(acc_br[10]), "+a"(acc_br[11]),
+          "+a"(acc_br[12]), "+a"(acc_br[13]), "+a"(acc_br[14]), "+a"(acc_br[15]),
+          "=&v"(nxt_bl_d[0]), "=&v"(nxt_bl_d[1]), "=&v"(nxt_bl_d[2]), "=&v"(nxt_bl_d[3]),
+          "=&v"(nxt_bl_d[4]), "=&v"(nxt_bl_d[5]), "=&v"(nxt_bl_d[6]), "=&v"(nxt_bl_d[7])
+        : "v"(a1_0l), "v"(a1_1l), "v"(a1_2l), "v"(a1_3l),
+          "v"(a1_0h), "v"(a1_1h), "v"(a1_2h), "v"(a1_3h),
+          "v"(br_0l), "v"(br_1l), "v"(br_2l), "v"(br_3l),
+          "v"(br_0h), "v"(br_1h), "v"(br_2h), "v"(br_3h),
+          "v"(sa0), "v"(sa1), "v"(sbr0), "v"(sbr1),
+          "v"(bl_p0), "v"(bl_p1)
+    );
+#else
+    asm volatile(
+#if R48B_MFMA_REORDER
+        // ═══ R48B REORDER: STEP 3 — interleave row Phase-0 across all 4 chains
+        // before any Phase-1, then interleave Phase-1. Same 32 MFMAs + 8 ds_reads,
+        // only the issue order changes. Per-acc dep window 4 → 16 MFMAs.
+        // Phase-0 block (16 MFMAs) — Row0 P0 (with ds_reads %32-35), Row1..3 P0.
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %48, %56, %0,  %72, %74 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %32, %78 offset:0\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %48, %57, %1,  %72, %74 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %33, %78 offset:2048\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %48, %58, %2,  %72, %75 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %34, %78 offset:4096\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %48, %59, %3,  %72, %75 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %35, %78 offset:6144\n"
+        // Row 1 P0 (sa0)
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %49, %56, %4,  %72, %74 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %49, %57, %5,  %72, %74 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %49, %58, %6,  %72, %75 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %49, %59, %7,  %72, %75 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        // Row 2 P0 (sa1)
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %50, %56, %8,  %73, %74 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %50, %57, %9,  %73, %74 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %50, %58, %10, %73, %75 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %50, %59, %11, %73, %75 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        // Row 3 P0 (sa1)
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %51, %56, %12, %73, %74 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %51, %57, %13, %73, %74 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %51, %58, %14, %73, %75 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %51, %59, %15, %73, %75 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        // R48B: Step3 P0/P1 boundary; allow opt-in PRIO_PHASE1 wrap + NOP pacing
+        R47C_NOP_FRAG
+        R48B_PRIO_HI_FRAG
+        // Phase-1 block (16 MFMAs) — Row0 P1 (with ds_reads %36-39), Row1..3 P1.
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %52, %60, %0,  %72, %74 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %36, %79 offset:0\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %52, %61, %1,  %72, %74 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %37, %79 offset:2048\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %52, %62, %2,  %72, %75 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %38, %79 offset:4096\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %52, %63, %3,  %72, %75 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %39, %79 offset:6144\n"
+        // Row 1 P1 (sa0)
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %53, %60, %4,  %72, %74 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %53, %61, %5,  %72, %74 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %53, %62, %6,  %72, %75 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %53, %63, %7,  %72, %75 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        // Row 2 P1 (sa1)
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %54, %60, %8,  %73, %74 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %54, %61, %9,  %73, %74 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %54, %62, %10, %73, %75 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %54, %63, %11, %73, %75 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        // Row 3 P1 (sa1)
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %55, %60, %12, %73, %74 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %55, %61, %13, %73, %74 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %55, %62, %14, %73, %75 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %55, %63, %15, %73, %75 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        R48B_PRIO_LO_FRAG
+        // R48B: 32-MFMA Step3 done — NOP/SPLIT/DRAIN before Step4
+        R47C_NOP_FRAG
+        R47C_SPLIT_FRAG
+        R48B_DRAIN_FRAG
+        // ═══ R48B REORDER: STEP 4 — same interleave on A1×Br ═══
+        // Phase-0 block (16 MFMAs) — Row0 P0 (with ds_reads %40-43), Row1..3 P0.
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %16, %48, %64, %16, %72, %76 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %40, %80 offset:0\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %17, %48, %65, %17, %72, %76 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %41, %80 offset:2048\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %18, %48, %66, %18, %72, %77 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %42, %80 offset:4096\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %19, %48, %67, %19, %72, %77 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %43, %80 offset:6144\n"
+        // Row 1 P0 (sa0)
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %20, %49, %64, %20, %72, %76 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %21, %49, %65, %21, %72, %76 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %22, %49, %66, %22, %72, %77 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %23, %49, %67, %23, %72, %77 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        // Row 2 P0 (sa1)
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %24, %50, %64, %24, %73, %76 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %25, %50, %65, %25, %73, %76 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %26, %50, %66, %26, %73, %77 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %27, %50, %67, %27, %73, %77 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        // Row 3 P0 (sa1)
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %28, %51, %64, %28, %73, %76 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %29, %51, %65, %29, %73, %76 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %30, %51, %66, %30, %73, %77 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %31, %51, %67, %31, %73, %77 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        // R48B: Step4 P0/P1 boundary; allow opt-in PRIO_PHASE1 wrap + NOP pacing
+        R47C_NOP_FRAG
+        R48B_PRIO_HI_FRAG
+        // Phase-1 block (16 MFMAs) — Row0 P1 (with ds_reads %44-47), Row1..3 P1.
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %16, %52, %68, %16, %72, %76 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %44, %81 offset:0\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %17, %52, %69, %17, %72, %76 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %45, %81 offset:2048\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %18, %52, %70, %18, %72, %77 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %46, %81 offset:4096\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %19, %52, %71, %19, %72, %77 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %47, %81 offset:6144\n"
+        // Row 1 P1 (sa0)
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %20, %53, %68, %20, %72, %76 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %21, %53, %69, %21, %72, %76 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %22, %53, %70, %22, %72, %77 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %23, %53, %71, %23, %72, %77 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        // Row 2 P1 (sa1)
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %24, %54, %68, %24, %73, %76 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %25, %54, %69, %25, %73, %76 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %26, %54, %70, %26, %73, %77 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %27, %54, %71, %27, %73, %77 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        // Row 3 P1 (sa1)
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %28, %55, %68, %28, %73, %76 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %29, %55, %69, %29, %73, %76 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %30, %55, %70, %30, %73, %77 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %31, %55, %71, %31, %73, %77 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        R48B_PRIO_LO_FRAG
+#else
+        // ═══ STEP 3: A1×Bl (32 MFMAs) + 8 ds_reads for nxt_a0 ═══
+        // Row 0 Phase 0: 4 MFMAs + 4 ds_reads
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %48, %56, %0,  %72, %74 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %32, %78 offset:0\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %48, %57, %1,  %72, %74 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %33, %78 offset:2048\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %48, %58, %2,  %72, %75 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %34, %78 offset:4096\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %48, %59, %3,  %72, %75 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %35, %78 offset:6144\n"
+        // Row 0 Phase 1: 4 MFMAs + 4 ds_reads
+        R48B_PRIO_HI_FRAG
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %52, %60, %0,  %72, %74 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %36, %79 offset:0\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %52, %61, %1,  %72, %74 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %37, %79 offset:2048\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %52, %62, %2,  %72, %75 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %38, %79 offset:4096\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %52, %63, %3,  %72, %75 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %39, %79 offset:6144\n"
+        R48B_PRIO_LO_FRAG
+        // Row 1: 8 pure Step3 MFMAs (odd, sa0)
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %49, %56, %4,  %72, %74 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %49, %57, %5,  %72, %74 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %49, %58, %6,  %72, %75 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %49, %59, %7,  %72, %75 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        R48B_PRIO_HI_FRAG
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %53, %60, %4,  %72, %74 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %53, %61, %5,  %72, %74 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %53, %62, %6,  %72, %75 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %53, %63, %7,  %72, %75 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        R48B_PRIO_LO_FRAG
+        // R47C: 16-MFMA boundary (Step3 first half done) — opt-in NOP pacing
+        R47C_NOP_FRAG
+        // Row 2: 8 pure Step3 MFMAs (even, sa1)
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %50, %56, %8,  %73, %74 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %50, %57, %9,  %73, %74 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %50, %58, %10, %73, %75 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %50, %59, %11, %73, %75 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        R48B_PRIO_HI_FRAG
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %54, %60, %8,  %73, %74 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %54, %61, %9,  %73, %74 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %54, %62, %10, %73, %75 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %54, %63, %11, %73, %75 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        R48B_PRIO_LO_FRAG
+        // Row 3: 8 pure Step3 MFMAs (odd, sa1)
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %51, %56, %12, %73, %74 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %51, %57, %13, %73, %74 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %51, %58, %14, %73, %75 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %51, %59, %15, %73, %75 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        R48B_PRIO_HI_FRAG
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %55, %60, %12, %73, %74 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %55, %61, %13, %73, %74 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %55, %62, %14, %73, %75 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %55, %63, %15, %73, %75 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        R48B_PRIO_LO_FRAG
+        // R47C: 32-MFMA boundary (Step3 done) — opt-in NOP pacing + opt-in
+        // Step3/Step4 SPLIT (drain VMEM/LDS counters between MFMA halves).
+        R47C_NOP_FRAG
+        R47C_SPLIT_FRAG
+        R48B_DRAIN_FRAG
+        // ═══ STEP 4: A1×Br (32 MFMAs) + 8 ds_reads for nxt_bl ═══
+        // Row 0 Phase 0: 4 MFMAs + 4 ds_reads
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %16, %48, %64, %16, %72, %76 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %40, %80 offset:0\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %17, %48, %65, %17, %72, %76 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %41, %80 offset:2048\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %18, %48, %66, %18, %72, %77 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %42, %80 offset:4096\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %19, %48, %67, %19, %72, %77 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %43, %80 offset:6144\n"
+        // Row 0 Phase 1: 4 MFMAs + 4 ds_reads
+        R48B_PRIO_HI_FRAG
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %16, %52, %68, %16, %72, %76 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %44, %81 offset:0\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %17, %52, %69, %17, %72, %76 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %45, %81 offset:2048\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %18, %52, %70, %18, %72, %77 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %46, %81 offset:4096\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %19, %52, %71, %19, %72, %77 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %47, %81 offset:6144\n"
+        R48B_PRIO_LO_FRAG
+        // Row 1: 8 pure Step4 MFMAs (odd, sa0)
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %20, %49, %64, %20, %72, %76 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %21, %49, %65, %21, %72, %76 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %22, %49, %66, %22, %72, %77 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %23, %49, %67, %23, %72, %77 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        R48B_PRIO_HI_FRAG
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %20, %53, %68, %20, %72, %76 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %21, %53, %69, %21, %72, %76 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %22, %53, %70, %22, %72, %77 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %23, %53, %71, %23, %72, %77 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        R48B_PRIO_LO_FRAG
+        // R47C: 48-MFMA boundary (Step4 first half done) — opt-in NOP pacing
+        R47C_NOP_FRAG
+        // Row 2: 8 pure Step4 MFMAs (even, sa1)
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %24, %50, %64, %24, %73, %76 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %25, %50, %65, %25, %73, %76 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %26, %50, %66, %26, %73, %77 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %27, %50, %67, %27, %73, %77 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        R48B_PRIO_HI_FRAG
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %24, %54, %68, %24, %73, %76 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %25, %54, %69, %25, %73, %76 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %26, %54, %70, %26, %73, %77 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %27, %54, %71, %27, %73, %77 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        R48B_PRIO_LO_FRAG
+        // Row 3: 8 pure Step4 MFMAs (odd, sa1)
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %28, %51, %64, %28, %73, %76 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %29, %51, %65, %29, %73, %76 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %30, %51, %66, %30, %73, %77 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %31, %51, %67, %31, %73, %77 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        R48B_PRIO_HI_FRAG
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %28, %55, %68, %28, %73, %76 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %29, %55, %69, %29, %73, %76 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %30, %55, %70, %30, %73, %77 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %31, %55, %71, %31, %73, %77 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        R48B_PRIO_LO_FRAG
+#endif // R48B_MFMA_REORDER
+        : "+a"(acc_bl[0]),  "+a"(acc_bl[1]),  "+a"(acc_bl[2]),  "+a"(acc_bl[3]),
+          "+a"(acc_bl[4]),  "+a"(acc_bl[5]),  "+a"(acc_bl[6]),  "+a"(acc_bl[7]),
+          "+a"(acc_bl[8]),  "+a"(acc_bl[9]),  "+a"(acc_bl[10]), "+a"(acc_bl[11]),
+          "+a"(acc_bl[12]), "+a"(acc_bl[13]), "+a"(acc_bl[14]), "+a"(acc_bl[15]),
+          "+a"(acc_br[0]),  "+a"(acc_br[1]),  "+a"(acc_br[2]),  "+a"(acc_br[3]),
+          "+a"(acc_br[4]),  "+a"(acc_br[5]),  "+a"(acc_br[6]),  "+a"(acc_br[7]),
+          "+a"(acc_br[8]),  "+a"(acc_br[9]),  "+a"(acc_br[10]), "+a"(acc_br[11]),
+          "+a"(acc_br[12]), "+a"(acc_br[13]), "+a"(acc_br[14]), "+a"(acc_br[15]),
+          "=&v"(nxt_a0_d[0]), "=&v"(nxt_a0_d[1]), "=&v"(nxt_a0_d[2]), "=&v"(nxt_a0_d[3]),
+          "=&v"(nxt_a0_d[4]), "=&v"(nxt_a0_d[5]), "=&v"(nxt_a0_d[6]), "=&v"(nxt_a0_d[7]),
+          "=&v"(nxt_bl_d[0]), "=&v"(nxt_bl_d[1]), "=&v"(nxt_bl_d[2]), "=&v"(nxt_bl_d[3]),
+          "=&v"(nxt_bl_d[4]), "=&v"(nxt_bl_d[5]), "=&v"(nxt_bl_d[6]), "=&v"(nxt_bl_d[7])
+        : "v"(a1_0l), "v"(a1_1l), "v"(a1_2l), "v"(a1_3l),
+          "v"(a1_0h), "v"(a1_1h), "v"(a1_2h), "v"(a1_3h),
+          "v"(bl_0l), "v"(bl_1l), "v"(bl_2l), "v"(bl_3l),
+          "v"(bl_0h), "v"(bl_1h), "v"(bl_2h), "v"(bl_3h),
+          "v"(br_0l), "v"(br_1l), "v"(br_2l), "v"(br_3l),
+          "v"(br_0h), "v"(br_1h), "v"(br_2h), "v"(br_3h),
+          "v"(sa0), "v"(sa1), "v"(sbl0), "v"(sbl1), "v"(sbr0), "v"(sbr1),
+          "v"(a0_p0), "v"(a0_p1), "v"(bl_p0), "v"(bl_p1)
+    );
+#endif // R48A_SPLIT_STEP34
 }
 
 // ── 32 KPAIR MFMAs + 16 ds_reads (2 tiles) + 8 pf (row blocks) ──
@@ -2524,7 +3340,21 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     constexpr int a_packs = RBM / 32;
     constexpr int b_packs = RBN / 32;
 
+#if R46B_LDS_TRIPLE_BUFFER
+    // R46 Opt B: A0/Bl triple-buffered (3 slots); A1/Br stay double-buffered.
+    // LDS layout: 3*16K + 2*16K + 3*16K + 2*16K = 144 KB <= 160 KB gfx950 limit.
+    constexpr int A0_SLOTS = 3;
+    constexpr int A1_SLOTS = 2;
+    constexpr int BL_SLOTS = 3;
+    constexpr int BR_SLOTS = 2;
+    __shared__ ST_tile A0_db[3], A1_db[2], Bl_db[3], Br_db[2];
+#else
+    constexpr int A0_SLOTS = 2;
+    constexpr int A1_SLOTS = 2;
+    constexpr int BL_SLOTS = 2;
+    constexpr int BR_SLOTS = 2;
     __shared__ ST_tile A0_db[2], A1_db[2], Bl_db[2], Br_db[2];
+#endif
 
     // XCD-aware dispatch + GROUP_SIZE_M swizzle for L2 B-tile reuse
     constexpr int NUM_XCDS = 8;
@@ -2685,17 +3515,24 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         return __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(
             reinterpret_cast<uintptr_t>(&t.data[0]) + wlo));
     };
-    uint32_t lb_a0[2], lb_a1[2], lb_br[2];
+    uint32_t lb_a0[A0_SLOTS], lb_a1[A1_SLOTS], lb_br[BR_SLOTS];
 #if !DIRECT_BL
-    uint32_t lb_bl[2];
+    uint32_t lb_bl[BL_SLOTS];
 #endif
-    for (int d = 0; d < 2; ++d) {
-        lb_a0[d]=lb(A0_db[d]); lb_a1[d]=lb(A1_db[d]);
-#if !DIRECT_BL
-        lb_bl[d]=lb(Bl_db[d]);
-#endif
+    for (int d = 0; d < A0_SLOTS; ++d) {
+        lb_a0[d]=lb(A0_db[d]);
+    }
+    for (int d = 0; d < A1_SLOTS; ++d) {
+        lb_a1[d]=lb(A1_db[d]);
+    }
+    for (int d = 0; d < BR_SLOTS; ++d) {
         lb_br[d]=lb(Br_db[d]);
     }
+#if !DIRECT_BL
+    for (int d = 0; d < BL_SLOTS; ++d) {
+        lb_bl[d]=lb(Bl_db[d]);
+    }
+#endif
 
     constexpr int R22B_A_HINT_VAL = static_cast<int>(MXFP4_R22B_A_HINT);
     constexpr int R22B_B_HINT_VAL = static_cast<int>(MXFP4_R22B_B_HINT);
@@ -2712,16 +3549,28 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     // Avoids runtime-indexed [2][2] arrays that compiler spills to LDS + ds_read_b64.
     // Selection via ternary (compiles to v_cndmask). No swap needed.
     uint32_t a0_0_p0, a0_0_p1, a0_1_p0, a0_1_p1;
+#if R46B_LDS_TRIPLE_BUFFER
+    uint32_t a0_2_p0, a0_2_p1;
+#endif
 #if !DIRECT_BL
     uint32_t bl_0_p0, bl_0_p1, bl_1_p0, bl_1_p1;
+#if R46B_LDS_TRIPLE_BUFFER
+    uint32_t bl_2_p0, bl_2_p1;
+#endif
 #endif
     uint32_t br_0_p0, br_0_p1, br_1_p0, br_1_p1;
     uint32_t a1_0_p0, a1_0_p1, a1_1_p0, a1_1_p1;
     compute_lds_base_addrs<A_row_reg>(kittens::subtile_inplace<RBM, BK>(A0_db[0], {wm, 0}), a0_0_p0, a0_0_p1);
     compute_lds_base_addrs<A_row_reg>(kittens::subtile_inplace<RBM, BK>(A0_db[1], {wm, 0}), a0_1_p0, a0_1_p1);
+#if R46B_LDS_TRIPLE_BUFFER
+    compute_lds_base_addrs<A_row_reg>(kittens::subtile_inplace<RBM, BK>(A0_db[2], {wm, 0}), a0_2_p0, a0_2_p1);
+#endif
 #if !DIRECT_BL
     compute_lds_base_addrs<B_row_reg>(kittens::subtile_inplace<RBN, BK>(Bl_db[0], {wn, 0}), bl_0_p0, bl_0_p1);
     compute_lds_base_addrs<B_row_reg>(kittens::subtile_inplace<RBN, BK>(Bl_db[1], {wn, 0}), bl_1_p0, bl_1_p1);
+#if R46B_LDS_TRIPLE_BUFFER
+    compute_lds_base_addrs<B_row_reg>(kittens::subtile_inplace<RBN, BK>(Bl_db[2], {wn, 0}), bl_2_p0, bl_2_p1);
+#endif
 #endif
     compute_lds_base_addrs<B_row_reg>(kittens::subtile_inplace<RBN, BK>(Br_db[0], {wn, 0}), br_0_p0, br_0_p1);
     compute_lds_base_addrs<B_row_reg>(kittens::subtile_inplace<RBN, BK>(Br_db[1], {wn, 0}), br_1_p0, br_1_p1);
@@ -3014,6 +3863,12 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     // ── Non-SWAP path: tail-split to eliminate wasted prefetch/LDS on last iter ──
     // Steady-state loop: bt = 0 .. k_byte_iters-2
     // Tail: bt = k_byte_iters-1 (no prefetch, no next-iter scale/LDS loads)
+    // R47 Opt C: raise wave priority to max for the MFMA-heavy K-loop.
+    // Empty when R47C_WAVE_PRIO=0 (default). aiter does this at MFMA region
+    // entry to reduce inter-wave de-schedule jitter. Placed BEFORE the
+    // #pragma unroll so the pragma stays adjacent to the for-loop (clang
+    // requires that adjacency).
+    R47C_PRIO_HIGH();
 #ifdef UNROLL_K
   #if UNROLL_K == 0
     #pragma unroll
@@ -3030,6 +3885,37 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     for (int bt = 0; bt + 1 < k_byte_iters; ++bt) {
         const int cur = bt & 1;
         const int nxt = 1 - cur;
+#if R46B_LDS_TRIPLE_BUFFER
+        // R46 Opt B: A0/Bl rotated through 3 slots.
+        // cur_a0bl = bt % 3   = slot read by step12 (current iter)
+        // nxt_a0bl = (bt+1)%3 = slot read by step34 ds_read (next iter)
+        // pf_a0bl  = (bt+2)%3 = slot written by emit_pf_tail (for iter bt+2)
+        // Modular arithmetic: avoid expensive division by precomputing the
+        // 3-cycle [0,1,2,0,1,2,...] from bt. Use precomputed lookup since
+        // bt is loop-induction; compiler will fold via #pragma unroll.
+        // Implementation: (bt mod 3) via subtraction tree; for K up to ~4096
+        // iters this is a couple of cmov.
+        const int cur_a0bl = bt - (bt / 3) * 3;
+        int _np1 = cur_a0bl + 1; if (_np1 >= 3) _np1 -= 3;
+        int _np2 = cur_a0bl + 2; if (_np2 >= 3) _np2 -= 3;
+        const int nxt_a0bl = _np1;
+        const int pf_a0bl  = _np2;
+#else
+        const int cur_a0bl = cur;
+        const int nxt_a0bl = nxt;
+        const int pf_a0bl  = cur;
+#endif
+
+#if R46B_LDS_TRIPLE_BUFFER && (R47A_TRIPLE_BUF_VMCNT_TOP == 1)
+        // R47 Opt A V1: drain ALL in-flight buffer_load_to_lds writes
+        // before step34 reads slot-(bt+1)%3. Most conservative.
+        asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
+#elif R46B_LDS_TRIPLE_BUFFER && (R47A_TRIPLE_BUF_VMCNT_TOP == 2)
+        // R47 Opt A V2: allow up to 8 in-flight loads (PF_MPT*2 for the
+        // OTHER two slots' tail prefetches) — drains only the oldest write
+        // group (the one targeting the about-to-be-read slot).
+        asm volatile("s_waitcnt vmcnt(8)" ::: "memory");
+#endif
 
 #if R38F_TAIL_DRAIN && R37_FIX_B && !FUSED_STEP34
         // R38F Fix B4: drain in-flight buffer_load_to_lds loads at the TOP of
@@ -3060,11 +3946,21 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         const uint32_t sel_br_p1 = cur ? br_1_p1 : br_0_p1;
         const uint32_t sel_a1_p0 = cur ? a1_1_p0 : a1_0_p0;
         const uint32_t sel_a1_p1 = cur ? a1_1_p1 : a1_0_p1;
+#if R46B_LDS_TRIPLE_BUFFER
+        // R46 Opt B: 3-way slot select for A0/Bl (next-iter consumer reads).
+        const uint32_t sel_a0_p0 = (nxt_a0bl == 0) ? a0_0_p0 : ((nxt_a0bl == 1) ? a0_1_p0 : a0_2_p0);
+        const uint32_t sel_a0_p1 = (nxt_a0bl == 0) ? a0_0_p1 : ((nxt_a0bl == 1) ? a0_1_p1 : a0_2_p1);
+#if !DIRECT_BL
+        const uint32_t sel_bl_p0 = (nxt_a0bl == 0) ? bl_0_p0 : ((nxt_a0bl == 1) ? bl_1_p0 : bl_2_p0);
+        const uint32_t sel_bl_p1 = (nxt_a0bl == 0) ? bl_0_p1 : ((nxt_a0bl == 1) ? bl_1_p1 : bl_2_p1);
+#endif
+#else
         const uint32_t sel_a0_p0 = nxt ? a0_1_p0 : a0_0_p0;
         const uint32_t sel_a0_p1 = nxt ? a0_1_p1 : a0_0_p1;
 #if !DIRECT_BL
         const uint32_t sel_bl_p0 = nxt ? bl_1_p0 : bl_0_p0;
         const uint32_t sel_bl_p1 = nxt ? bl_1_p1 : bl_0_p1;
+#endif
 #endif
 
         const int pf_bt = (bt + 2 < k_byte_iters) ? (bt + 2) : (k_byte_iters - 1);
@@ -3081,12 +3977,14 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         // hoisting the per-iter buffer_load_to_lds prefetches across the
         // step12 asm boundary.
 #else
-        tile_pf_params pf_a0_p = make_pf_params(A0_db[cur], g.a, coord<ST_tile>(0,0,br*2,     pf_bt), so_a, srd_a, base_a, lb_a0[cur], R22B_A_HINT_VAL);
-        tile_pf_params pf_a1_p = make_pf_params(A1_db[cur], g.a, coord<ST_tile>(0,0,br*2+1,   pf_bt), so_a, srd_a, base_a, lb_a1[cur], R22B_A_HINT_VAL);
+        // R46B: A0/Bl prefetch destination uses pf_a0bl (slot (bt+2)%3).
+        // A1/Br stay double-buffered (slot cur).
+        tile_pf_params pf_a0_p = make_pf_params(A0_db[pf_a0bl], g.a, coord<ST_tile>(0,0,br*2,     pf_bt), so_a, srd_a, base_a, lb_a0[pf_a0bl], R22B_A_HINT_VAL);
+        tile_pf_params pf_a1_p = make_pf_params(A1_db[cur],     g.a, coord<ST_tile>(0,0,br*2+1,   pf_bt), so_a, srd_a, base_a, lb_a1[cur],     R22B_A_HINT_VAL);
 #if !DIRECT_BL
-        tile_pf_params pf_bl_p = make_pf_params(Bl_db[cur], g.b, coord<ST_tile>(0,0,bc*2,     pf_bt), so_b, srd_b, base_b, lb_bl[cur], R22B_B_HINT_VAL);
+        tile_pf_params pf_bl_p = make_pf_params(Bl_db[pf_a0bl], g.b, coord<ST_tile>(0,0,bc*2,     pf_bt), so_b, srd_b, base_b, lb_bl[pf_a0bl], R22B_B_HINT_VAL);
 #endif
-        tile_pf_params pf_br_p = make_pf_params(Br_db[cur], g.b, coord<ST_tile>(0,0,bc*2+1,   pf_bt), so_b, srd_b, base_b, lb_br[cur], R22B_B_HINT_VAL);
+        tile_pf_params pf_br_p = make_pf_params(Br_db[cur],     g.b, coord<ST_tile>(0,0,bc*2+1,   pf_bt), so_b, srd_b, base_b, lb_br[cur],     R22B_B_HINT_VAL);
 #endif // R38B_TAIL_FIX / R40A_PF_FENCE
 
 #if OUTER_K_PF_DEPTH > 1 && OUTER_K_PF_MODE == 1
@@ -3245,9 +4143,36 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         // Fused Step34: barrier + 64 MFMAs + 16 ds_reads in one asm block
         float4 nxt_a0_d[8];
         float4 nxt_bl_d[8];
+#if R46B_LDS_TRIPLE_BUFFER && (R47A_TRIPLE_BUF_VMCNT_TOP == 3)
+        // R47 Opt A V3: drain VMEM just BEFORE step34's ds_reads of the
+        // about-to-be-consumed slot-(bt+1)%3. Tighter placement than V1's
+        // top-of-iter (the latter may drain too early if scheduler reorders
+        // step12 ds_reads from registers below the fence).
+        asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
+#endif
         kpair_64mfma_step34(acc_A1Bl, acc_A1Br, tA1, tBl, tBr,
             a1_raw, bl_raw, br_raw, nxt_a0_d, nxt_bl_d,
             sel_a0_p0, sel_a0_p1, sel_bl_p0, sel_bl_p1);
+#if R45B_FUSED_SEPARATING_FENCE
+        // R45 Opt B: SEPARATING fence between step34 (above) and the
+        // unconditional emit_pf_tail<0> (below) inside the FUSED branch.
+        // Drain all in-flight VMEM/LDS-direct loads from prior iters' tail
+        // prefetches before issuing new ones — closes the LDS double-buffer
+        // race that R44A's back-edge drain cannot reach (back-edge fires
+        // AFTER emit_pf_tail). Volatile + memory clobber pin the fence
+        // textually between the MFMA block and the buffer_load_to_lds; the
+        // compiler cannot hoist or drop it. Per R44_OPT_A_VERDICT.md, this
+        // is the prescribed fix for (4096,32768,28672) FUSED CRASH 5/5.
+        asm volatile("s_waitcnt vmcnt(0)\n" ::: "memory");
+#endif
+#if R45B_FUSED_STRONG_FENCE
+        // R45 Opt B variant 3: STRONG separating fence — drains every counter
+        // and adds an s_barrier so all wave-shared LDS state is coherent
+        // before issuing the new tail prefetches. Tests whether the residual
+        // CRASH after the simple vmcnt(0) variant is an LDS-coherence issue
+        // rather than pure VMEM ordering.
+        asm volatile("s_waitcnt vmcnt(0) lgkmcnt(0) expcnt(0)\n s_barrier\n" ::: "memory");
+#endif
 #if R43A_GATE_PF_TAIL_KBOUND
         // R43 Opt A.fix1 — at K=28672 (k_byte_iters=112), the FUSED_STEP34+TAIL_SPLIT
         // conjunction triggers HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION at runtime.
@@ -3326,6 +4251,13 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         emit_pf_tail<0>(pf_a0_p, pf_a1_p);
         emit_pf_tail<0>(pf_bl_p, pf_br_p);
 #endif // R43A_GATE_PF_TAIL_KBOUND
+#if R45B_FUSED_POST_EMIT_FENCE
+        // R45 Opt B variant 2: drain the just-issued tail prefetches BEFORE
+        // the loop back-edge so the next iter's step12 ds_reads start from a
+        // coherent LDS state. Different placement from R44A drain (END of
+        // K-loop body, after R45B's scope).
+        asm volatile("s_waitcnt vmcnt(0)\n" ::: "memory");
+#endif
 #elif R37_FIX_B
         // R37 Fix B (default): use fused step3+step4 (correctness fix) while
         // preserving R25-C tail-pf-off + STEP4_EXTERNAL_BR_PREFETCH branching
@@ -3607,6 +4539,9 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         kpair_32mfma_with_pf<0>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw, dummy_pf, dummy_pf);
         kpair_32mfma_with_pf<0>(acc_A1Br, tA1, tBr, a1_raw, br_raw, dummy_pf, dummy_pf);
     }
+    // R47 Opt C: restore default wave priority after the K-loop + tail iter
+    // (epilogue stores have lower MFMA density). No-op when R47C_WAVE_PRIO=0.
+    R47C_PRIO_LOW();
 
 #else // TAIL_SPLIT == 0: original single-loop (better for large K)
 
