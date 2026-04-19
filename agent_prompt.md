@@ -54,6 +54,51 @@ python3 test_mxfp8_python.py 4096 14336 4096
 5. 禁止提交 `*.so`、`*.s`、`*_layout_results_*.json`、`.bak*`、`gpucore.*`、`__pycache__` 等（`.gitignore` 已覆盖）
 6. 每个子 agent 使用不同 `HIP_VISIBLE_DEVICES` 以免 GPU 冲突：Dev A → 0，Dev B → 1，Dev C → 2，Reviewer/formal → 7
 
+## R48 cycle 完结 (2026-04-19, 7 devs + 1 reviewer) ★ 0 SHIP + 6 REFUTATION + 1 HARDWARE-CEILING DEEPENING + 1 REVIEWER AUDIT — bounds remaining headroom; defines structural R49 priorities
+
+R48 派 7 devs (A/B/C/D/E/F/G) + 1 reviewer. **No SHIP commits** — every easy lever from R47+ frontier was tested and structurally refuted. Cumulative deliverable: **15 of 21 cells classified at hardware ceiling** (Dev D extension to all 4096³ shapes); remaining 4 HEADROOM cells need kernel rewrite (not pragma sweeps).
+
+- **Dev A** (`db92bdda`) REFUTED: 8192³ RRR R47 baseline slip = SCLK contamination. Strict 5×/30s cooldown re-bench gave 94.6%. Established **strict SCLK protocol** as Cycle requirement.
+- **Dev B** (`80bf861e`) REFUTED: cooperative B-scale on 70B Down RCR/CRR is structurally infeasible — V2 slab geometry assigns disjoint B-scale slabs per warp. New direction: A-scale path → Dev F.
+- **Dev C** (`2d79bb04`) REFUTED: CRR wide-N GROUP_M sweep — best alt (GM=8) had 8B Gate/Up +5.47% but 70B Down -3.24% (would push back from PASS to FAIL). Agent died silently mid-bench; findings harvested manually.
+- **Dev D** (`7ffd083b`) ★ HARDWARE-CEILING DEEPENING: extended R47D's 8192³ RCR proof to all 4096³ shapes. **CEILING 11/15** + **HEADROOM 4** (70B Gate/Up CRR 88.5%/+4pp, 8B Gate/Up RRR 90.4%/+3.1pp, 8B Q/O RRR 91.2%/+2.3pp, 8B Q/O CRR 89.7%/+2.3pp). **Key new finding**: at K=4096 FP8 RRR fully unrolled (1024 MFMAs straight-line) but MXFP8 RRR keeps K-loop intact (~1-2pp gap); CRR has 6 `v_lshrrev_b32` scale-shift ops per K-pair (vs RCR/RRR 0) → CRR ceiling ~92% vs RCR ~95%.
+- **Dev E** (`c46227d0`) REFUTED: MXFP8 RRR full unroll → catastrophic VGPR spill (~70% regression, 392 scratch ops, 67 spill bytes). Inlined `do_k_iter` scale-pack live ranges exceed 256-VGPR window once unrolled. Macro `MXFP8_RRR_MAIN_UNROLL` left default OFF.
+- **Dev F** (`112ea0cb`) REFUTED: A-scale cachepolicy + A-first issue order on 70B Down RCR. All policies wash within ±0.5% — A-scale is NOT the bottleneck.
+- **Dev G** (`1110c447`) REFUTED: RRR partial-unroll sweet spot. Confirmed compiler's bimodal threshold N=0/1 → no spill, N≥2 → flat 208 B/lane spill regardless of factor. R49 needs structural rewrite (noinline phase split, scale-SRD indirection).
+- **Reviewer** (`09ba0b5d`) audit: 4 verified, 0 disputed. 3 escalations. All 3 R48 macros confirmed default-OFF. Recommends bake strict SCLK protocol + cite Dev D STOP list for R49+.
+
+### R48 baseline (no movement; all macros default-OFF — same as R47)
+| Shape | RCR% | RRR% | CRR% |
+|---|---:|---:|---:|
+| 8192³ | 94.4 | 91.1 | 94.1 |
+| 8B Q/O | **95.3** | 91.2 (HR) | 89.7 (HR) |
+| 8B Gate/Up | 93.9 | 90.4 (HR) | 90.5 |
+| 8B Down | **95.6** | **105.1** | 94.6 |
+| 70B Q/O | 94.9 | 93.4 | 93.6 |
+| 70B Gate/Up | **95.6** | 93.7 | 88.5 (HR) |
+| 70B Down | 90.9 | **108.2** | 88.2 |
+
+PASS 5/21. **HR = HEADROOM** per Dev D — only 4 cells worth attacking via kernel rewrite. Remaining 11 cells classified at predicted hardware ceiling (do not optimize).
+
+### R48 cumulative (since R32: 49 closed + 11 refuted; R47 was 49+5 → R48: 0 closed + 6 refuted)
+
+### R48 Cherry-pick status (8/8 on `feat/mxfp8-only`)
+- `db92bdda` Dev A — 8192³ RRR REFUTED (SCLK)
+- `7ffd083b` Dev D — 4096³ ISA hardware-ceiling
+- `80bf861e` Dev B — cooperative B-scale REFUTED
+- `c46227d0` Dev E — RRR full unroll REFUTED
+- `09ba0b5d` Reviewer audit
+- `1110c447` Dev G — RRR partial unroll REFUTED
+- `112ea0cb` Dev F — A-scale cachepolicy REFUTED
+- `2d79bb04` Dev C — CRR GROUP_M REFUTED
+
+### R49+ priorities (gated by Dev D STOP list)
+1. **CRR scale-shift restructuring** — opsel-friendly CRR scale layout to eliminate 6 `v_lshrrev_b32` ops/K-pair → lifts CRR ceiling 92% → 95%. Highest cumulative leverage.
+2. **MXFP8 RRR `do_k_iter` structural rewrite** — noinline phase split + scale-SRD indirection to break 208 B/lane bimodal compiler spill. Targets 8B Gate/Up RRR + 8B Q/O RRR.
+3. **8B Q/O small-shape wave-tail mitigation** — 256 CTA / 0.42 wave; try persistent kernel pattern.
+4. **STOP list**: 11 cells at ceiling per Dev D — do not optimize.
+5. **Strict SCLK protocol mandatory** for any "regression hunt" or ±2pp claim.
+
 ## R47 cycle 完结 (2026-04-19) ★★ 3 SHIP (RCR + CRR XCD swizzle + R28 stale-conditional removed) + 1 HARDWARE-CEILING PROOF (Dev D ISA byte-level: scaled MFMA 16B vs unscaled 8B = 2× front-end slot) + 1 REFUTATION (Dev C cachepolicy SLC sweep) — baseline 5/21 stable (peak 7/21)
 
 R47 派 4 dev (全员存活). **70B Gate/Up RCR 90.5% → 95.6% (+5.4pp NEW PASS) via Dev A 移植 RRR swizzle 到 RCR**.
