@@ -52,6 +52,36 @@
 #define MXFP8_RRR_PRAGMA_UNROLL_MAIN
 #endif
 
+// R50 Dev D: Optional inter-phase sched_barrier inside do_k_iter to gate the
+// LLVM scheduler at the load-issue -> MMA-dispatch boundary without
+// materializing a call frame (the noinline tool from R49B was too coarse,
+// see r49b_findings.md "Diagnosis"). The barrier is emitted right after the
+// post-load s_barrier() and before the s_setprio(1)/s_waitcnt that opens
+// the MFMA dispatch window.
+//
+// MXFP8_RRR_SCHED_BARRIER values (default 0 = OFF, baseline behavior):
+//   0 = OFF                         (no extra sched_barrier emitted)
+//   1 = mask 0x0000 (strictest: nothing crosses)
+//   2 = mask 0x0008 (allow MFMA/WMMA only)
+//   3 = mask 0x0010 (allow ALL VMEM only)
+//   4 = mask 0x0080 (allow ALL DS/LDS only)
+// (Mask values per /opt/rocm/lib/llvm/include/llvm/IR/IntrinsicsAMDGPU.td.)
+#ifndef MXFP8_RRR_SCHED_BARRIER
+#define MXFP8_RRR_SCHED_BARRIER 0
+#endif
+
+#if MXFP8_RRR_SCHED_BARRIER == 1
+#define MXFP8_RRR_PHASE_SB() __builtin_amdgcn_sched_barrier(0x0000)
+#elif MXFP8_RRR_SCHED_BARRIER == 2
+#define MXFP8_RRR_PHASE_SB() __builtin_amdgcn_sched_barrier(0x0008)
+#elif MXFP8_RRR_SCHED_BARRIER == 3
+#define MXFP8_RRR_PHASE_SB() __builtin_amdgcn_sched_barrier(0x0010)
+#elif MXFP8_RRR_SCHED_BARRIER == 4
+#define MXFP8_RRR_PHASE_SB() __builtin_amdgcn_sched_barrier(0x0080)
+#else
+#define MXFP8_RRR_PHASE_SB() do {} while (0)
+#endif
+
 // R49 Dev B: Phase-split do_k_iter MMA quartet into two noinline halves to
 // break the compiler's bimodal VGPR-spill threshold (R48 Dev E/G: any unroll
 // >= 2 commits to flat 208 B/lane scratch). The lambda's 4 MFMAs (cA, cB,
@@ -566,6 +596,7 @@ void rrr_exact_8wave_scaled_kernel(const layout_globals g) {
         G::load(As[toc][1], g.a, a_co(br * 2 + 1, k + 1), soA);
         TK_WAIT_LGKM(RRR_PREFETCH_LGKM);
         __builtin_amdgcn_s_barrier();
+        MXFP8_RRR_PHASE_SB();
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
 #if RRR_B_REG_ROW_LOAD_TRANSPOSE && RRR_B_REG_ROW_LOAD_ALIAS
@@ -587,6 +618,7 @@ void rrr_exact_8wave_scaled_kernel(const layout_globals g) {
         G::load(Bs[tic][0], g.b, b_co(bc * 2, k + 2), soB);
 #endif
         __builtin_amdgcn_s_barrier();
+        MXFP8_RRR_PHASE_SB();
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
 #if RRR_B_REG_ROW_LOAD_TRANSPOSE && RRR_B_REG_ROW_LOAD_ALIAS
@@ -604,6 +636,7 @@ void rrr_exact_8wave_scaled_kernel(const layout_globals g) {
         G::load(Bs[tic][1], g.b, b_co(bc * 2 + 1, k + 2), soB);
 #endif
         __builtin_amdgcn_s_barrier();
+        MXFP8_RRR_PHASE_SB();
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
 #if RRR_B_REG_ROW_LOAD_TRANSPOSE && RRR_B_REG_ROW_LOAD_ALIAS
@@ -618,6 +651,7 @@ void rrr_exact_8wave_scaled_kernel(const layout_globals g) {
         G::load(As[tic][0], g.a, a_co(br * 2, k + 2), soA);
         TK_WAIT_VMCNT(RRR_STEADY_VMCNT);
         __builtin_amdgcn_s_barrier();
+        MXFP8_RRR_PHASE_SB();
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
 #if RRR_B_REG_ROW_LOAD_TRANSPOSE && RRR_B_REG_ROW_LOAD_ALIAS
