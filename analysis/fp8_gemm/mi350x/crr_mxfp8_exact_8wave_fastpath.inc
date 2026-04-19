@@ -70,17 +70,19 @@
 #endif
 // R27 Dev A H1: cachepolicy bits for V2 scale buffer loads (b128/b64).
 // Default 0 = previous behavior. 1=GLC, 2=SLC, 3=GLC|SLC.
-// R28 Dev A: auto-default to 2 (SLC) when the compile-time shape gate
-// matches the WIN region observed in R27 (large-N, large-K CRR shapes
-// such as LLaMA 70B Gate 4096x28672x8192). User-provided -D wins.
-// Gate: N_DIM >= 28672 AND K_DIM >= 8192. Outside this region cp=0
-// preserves baseline (KV K=8192 N=1024, 8B Gate K=4096, 8192^3, etc.).
+// R28 Dev A had auto-defaulted to 2 (SLC) when (N_DIM >= 28672 AND
+// K_DIM >= 8192) based on a +2.6% Welch-significant win on
+// 4096x28672x8192 CRR. R47 Dev C re-swept all 4 policies × 7
+// compute-bound shapes after the R44/R45/R46 baseline shifted upward
+// (notably R46 Dev D RRR XCD swizzle and surrounding optimizations)
+// and found the SLC default has FLIPPED to a -1.5% loss on the same
+// 4096x28672x8192 CRR shape (cp0=2502.54 vs cp2=2464.57 TFLOPS,
+// median of 3 reps, ±0.4% spread). p1/p2/p3 either tie or lose
+// across all 7 shapes × 3 layouts (no policy ≥ +2% on any cell).
+// Conditional auto-gate REMOVED — unconditional default 0.
+// User-provided -D still wins.
 #ifndef MXFP8_CRR_V2_SCALE_CACHEPOLICY
-#  if defined(N_DIM) && defined(K_DIM) && ((N_DIM) >= 28672) && ((K_DIM) >= 8192)
-#    define MXFP8_CRR_V2_SCALE_CACHEPOLICY 2
-#  else
-#    define MXFP8_CRR_V2_SCALE_CACHEPOLICY 0
-#  endif
+#define MXFP8_CRR_V2_SCALE_CACHEPOLICY 0
 #endif
 
 #ifndef CRR_USE_EXACT_8WAVE_FASTPATH

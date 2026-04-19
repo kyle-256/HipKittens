@@ -1,0 +1,14 @@
+=== MXFP8 GEMM Layout Benchmark (preshuffle-quant): M=4096, N=8192, K=28672 ===
+Warmup=20, iters=20, correctness=off
+Layouts=crr,rcr,rrr
+
+--- RCR Layout: C = A @ B^T ---
+  Avg time: 0.6733 ms, TFLOPS: 2857.93
+
+--- RRR Layout: C = A @ B ---
+  Avg time: 0.6789 ms, TFLOPS: 2834.01
+
+--- CRR Layout: C = A^T @ B ---
+  Avg time: 0.7505 ms, TFLOPS: 2563.80
+
+Results saved to mxfp8_layout_results_4096x8192x28672_pq.json
