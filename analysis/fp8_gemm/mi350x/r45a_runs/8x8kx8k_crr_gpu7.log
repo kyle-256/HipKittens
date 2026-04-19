@@ -1,0 +1,63 @@
+===== R45A label=8x8kx8k_crr gpu=7 SHAPE=8x8kx8k LAYOUT=crr M=8 N=8192 K=8192 =====
+[orchestrate] N_PAIRS=5 WARMUP=30 ITERS=50 PREHEAT=30s WARMUP_PAIRS=2
+[orchestrate] R36 3-gate: G1>=2200 G2a>=2200 G2b<=0.01 MAX_RETRIES=3
+Sat Apr 18 21:51:46 UTC 2026
+[bench attempt 1/3]
+[bench attempt=1 rc=0]
+[sclk-pre-preheat] GPU[7]		: sclk clock level: 1: (1738Mhz)
+[preheat 30.0s] done 7164 iters
+[sclk-post-preheat] GPU[7]		: sclk clock level: 1: (1664Mhz)
+CORRECTNESS_DECODE snr_db=49.57
+CORRECTNESS_BASELINE snr_db=49.57
+[sclk-pre-bench] GPU[7]		: sclk clock level: 1: (2327Mhz)
+WARMUP 0 DECODE=0.8361 BASELINE=0.4464
+WARMUP 1 DECODE=0.8365 BASELINE=0.4463
+PAIR 0 D1=0.8360 B1=0.4464 D2=0.8365 B2=0.4467
+PAIR 1 D1=0.8366 B1=0.4467 D2=0.8359 B2=0.4469
+PAIR 2 D1=0.8363 B1=0.4462 D2=0.8357 B2=0.4463
+PAIR 3 D1=0.8354 B1=0.4466 D2=0.8355 B2=0.4466
+PAIR 4 D1=0.8352 B1=0.4469 D2=0.8356 B2=0.4470
+[sclk-post-bench] GPU[7]		: sclk clock level: 1: (2409Mhz)
+BASELINE median=0.4466 mean=0.4466 stdev=0.0003 n=10
+DECODE   median=0.8358 mean=0.8359 stdev=0.0005 n=10
+Welch t (DECODE vs BASELINE) = 2161.423  (positive = DECODE faster)
+DELTA_MEDIAN_PCT DECODE_vs_BASELINE = +87.1253%
+DECODE_TFLOPS_LIST 0.8360,0.8365,0.8366,0.8359,0.8363,0.8357,0.8354,0.8355,0.8352,0.8356
+BASELINE_TFLOPS_LIST 0.4464,0.4467,0.4467,0.4469,0.4462,0.4463,0.4466,0.4466,0.4469,0.4470
+--- stderr (head) ---
+W20260418 21:51:48.801861 139972903133184 agent.cpp:461] Attempt to enable hip visiblity for agent-2 which is not visible to HSA (ROCR)
+[mxfp8_dispatch] crr_pq: shape=(M=0,N=0,K=0) -> V1-PQ-DEFAULT
+[mxfp8_dispatch] crr_pq_v1: shape=(M=8,N=8192,K=8192) -> SMALLM-DECODE-M2-16-CRR (R44A)
+[mxfp8_dispatch] crr_pq: shape=(M=0,N=0,K=0) -> V1-PQ-DEFAULT
+[orchestrate] attempt=1 rc=0 G1=1664MHz G2a=2409MHz G2b DEC=0.000598 BASE=0.000672 (gate=0.01 pass=1)
+[orchestrate] attempt=1 FAILED gates; sleep 5...
+[bench attempt 2/3]
+[bench attempt=2 rc=0]
+[sclk-pre-preheat] GPU[7]		: sclk clock level: 1: (1805Mhz)
+[preheat 30.0s] done 7164 iters
+[sclk-post-preheat] GPU[7]		: sclk clock level: 1: (2250Mhz)
+CORRECTNESS_DECODE snr_db=49.57
+CORRECTNESS_BASELINE snr_db=49.57
+[sclk-pre-bench] GPU[7]		: sclk clock level: 1: (2378Mhz)
+WARMUP 0 DECODE=0.8361 BASELINE=0.4462
+WARMUP 1 DECODE=0.8367 BASELINE=0.4462
+PAIR 0 D1=0.8363 B1=0.4461 D2=0.8364 B2=0.4463
+PAIR 1 D1=0.8365 B1=0.4459 D2=0.8361 B2=0.4401
+PAIR 2 D1=0.8362 B1=0.4456 D2=0.8363 B2=0.4459
+PAIR 3 D1=0.8362 B1=0.4460 D2=0.8362 B2=0.4459
+PAIR 4 D1=0.8365 B1=0.4461 D2=0.8360 B2=0.4464
+[sclk-post-bench] GPU[7]		: sclk clock level: 1: (2407Mhz)
+BASELINE median=0.4460 mean=0.4454 stdev=0.0019 n=10
+DECODE   median=0.8363 mean=0.8363 stdev=0.0002 n=10
+Welch t (DECODE vs BASELINE) = 648.185  (positive = DECODE faster)
+DELTA_MEDIAN_PCT DECODE_vs_BASELINE = +87.5288%
+DECODE_TFLOPS_LIST 0.8363,0.8364,0.8365,0.8361,0.8362,0.8363,0.8362,0.8362,0.8365,0.8360
+BASELINE_TFLOPS_LIST 0.4461,0.4463,0.4459,0.4401,0.4456,0.4459,0.4460,0.4459,0.4461,0.4464
+--- stderr (head) ---
+W20260418 21:53:31.923929 140158384406528 agent.cpp:461] Attempt to enable hip visiblity for agent-2 which is not visible to HSA (ROCR)
+[mxfp8_dispatch] crr_pq: shape=(M=0,N=0,K=0) -> V1-PQ-DEFAULT
+[mxfp8_dispatch] crr_pq_v1: shape=(M=8,N=8192,K=8192) -> SMALLM-DECODE-M2-16-CRR (R44A)
+[mxfp8_dispatch] crr_pq: shape=(M=0,N=0,K=0) -> V1-PQ-DEFAULT
+[orchestrate] attempt=2 rc=0 G1=2250MHz G2a=2407MHz G2b DEC=0.000239 BASE=0.004260 (gate=0.01 pass=1)
+[orchestrate] PASS R36 3-gate at attempt=2; using as final.
+Sat Apr 18 21:54:33 UTC 2026
