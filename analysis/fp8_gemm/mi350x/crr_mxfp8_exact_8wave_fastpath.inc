@@ -153,6 +153,67 @@
 #error "MXFP8_CRR_SCALE_LAYOUT_V2 incompatible with MXFP8_CRR_SCALE_LEAD"
 #endif
 
+// R54 Dev A: CRR LDS-resident pre-shifted scale layout lever.
+// Hypothesis: eliminate the conditional 6× v_lshrrev_b32/K-pair shift block
+// in the K-loop body by pre-staging BOTH the lo (bytes 0/1) and hi (bytes 2/3,
+// pre-shifted to bytes 0/1) versions of every scale-pack VGPR into per-wave
+// LDS slots at scale-load time. The K-loop body then issues 6 ds_read_b32 per
+// K-iter to fetch the right phase's scale-pack into the consuming VGPR
+// (instead of doing 6 v_lshrrev_b32 in-place on odd K-iters), keeping the
+// MMA opsel a compile-time constant (opsel<0,0>..<1,1>) — avoiding R53A's
+// body-duplication 70-VGPR spill.
+//
+// Distinct from prior CRR scale levers:
+//   * R49A (REFUTED -14.16%): host-side scale repack → v_perm_b32.
+//   * R50A (REFUTED -1.5%):   scale prefetch lead-distance → 5 VGPR spill.
+//   * R53A (REFUTED -67%):    opsel-keyed phase MMA dispatch → 70 VGPR spill.
+//   * R54A (this lever):      LDS-resident pre-shifted scales — keeps opsel
+//     constant, no host change, no live-range extension. Trades 6 v_lshrrev_b32
+//     + s_bitcmp/s_cbranch (per K-pair, conditional on odd iters) for 12
+//     ds_write_b32 (per K-pair, at load time) + 12 ds_read_b32 (per K-pair, in
+//     loop body) + extra lgkmcnt drain before MMA.
+//
+// LDS budget at 70B Gate/Up CRR (M=4096 N=28672 K=8192, A_PACK=2 B_PACK=1):
+//   per-wave per-K-pair scale state = (2 a0 + 2 a1 + 1 b0 + 1 b1) packs
+//                                     × 32 lanes × 4 bytes × 2 phases
+//                                   = 6 × 32 × 4 × 2 = 1536 bytes / wave
+//   per-CTA (8 waves): 12288 bytes per K-pair
+//   double-buffered (tic/toc): 24576 bytes additional LDS / CTA
+//   baseline LDS = 139264 B; budget = 163840 B → headroom = 24576 B (exact fit)
+//
+// Falsifiable predictions:
+//   P1: VGPR usage stable (≤+5 VGPR vs baseline 227); zero spill required.
+//   P2: LDS Size ≤ 163840 (≤ CU budget). If exceeds, occupancy drops 2→1
+//       and lever must REFUTE.
+//   P3: Per-K-pair: 6 v_lshrrev_b32 GONE; 12 ds_write_b32 + 12 ds_read_b32
+//       NEW; conditional s_bitcmp0_b32 + s_cbranch_scc1 GONE.
+//   P4: ≥ +6.7% on 70B Gate/Up CRR (recover 89.0% → 95%+) iff LDS pipe was
+//       NOT the bottleneck AND v_lshrrev WAS sitting on critical path.
+//   P5: ≤ -2% on no-regression cells (70B Q/O CRR, 70B Gate/Up RCR/RRR,
+//       8B Down CRR).
+//   P6: SNR ≥ 48 dB; det 3/3 PASS.
+//
+// Failure modes anticipated:
+//   F1 — LDS round-trip cost > VALU-shift saving:
+//     ds_read latency (~10-30 cycles) + lgkmcnt-drain serialization with MMA
+//     could exceed the 6-cycle shift saving. R53C diagnostic measured LDS pipe
+//     at 12 reads/K-pair with no bank conflicts — adding 12 more = +100% LDS
+//     pressure. If LDS bandwidth becomes new bottleneck, lever REFUTES.
+//   F2 — Compiler refuses to keep ds_read out of MMA dependency chain:
+//     compiler may emit lgkmcnt(0) before each MMA pair, serializing the
+//     LDS-fetch with MMA issue. Same hardware pattern as conditional shift —
+//     no improvement.
+//   F3 — VGPR spill from extra scratch register needed by ds_read:
+//     even if scale-pack VGPR has same live range, the ds_read produces a
+//     temp that must be alive across the MMA chain → +6 VGPR/K-iter, may spill.
+#ifndef MXFP8_CRR_LDS_SCALE_LAYOUT
+#define MXFP8_CRR_LDS_SCALE_LAYOUT 0
+#endif
+
+#if MXFP8_CRR_LDS_SCALE_LAYOUT && (MXFP8_CRR_SCALE_LAYOUT_V2 || MXFP8_CRR_SCALE_LEAD)
+#error "MXFP8_CRR_LDS_SCALE_LAYOUT mutually exclusive with V2 / LEAD scale levers"
+#endif
+
 #ifndef CRR_USE_EXACT_8WAVE_FASTPATH
 #define CRR_USE_EXACT_8WAVE_FASTPATH 1
 #endif
@@ -363,6 +424,30 @@ void crr_exact_8wave_scaled_kernel(const layout_globals g)
     __shared__ ST_crr_a As[CRR_LDS_OUTER][2];
     __shared__ ST_crr_b Bs[CRR_LDS_OUTER][2];
 
+#if MXFP8_CRR_LDS_SCALE_LAYOUT
+    // R54 Dev A: pre-shifted scale-pack staging in LDS.
+    // Layout: [phase=0|1] [a0/a1/b0/b1 region] [wave_id 0..7] [pack_idx]
+    //         [lane 0..63] -> uint32_t scale-pack dword.
+    // Phase 0 holds the lo half (bytes 0/1 of original dword); phase 1 holds
+    // the hi half (bytes 2/3 of original, pre-shifted right by 16). The K-loop
+    // body issues ds_read_b32 from the slot corresponding to (k & 1), feeding
+    // the consuming scale-pack VGPR with no in-place v_lshrrev_b32.
+    //
+    // Sized for the worst-case A_PACK=2, B_PACK=1 (70B Gate/Up RBM=64 RBN=32):
+    //   per-wave per-K-pair = 6 packs * 64 lanes * 4 bytes * 2 phases = 3072 B
+    //   per-CTA (8 waves)   = 24576 B per K-pair
+    //   double-buffered     = 49152 B / CTA total
+    //   plus baseline 139264 B = 188416 B > 163840 B CU budget (fail at occ 2).
+    constexpr int CRR_SCALE_LDS_PACKS_PER_WAVE =
+        2 * crr_a_pack_count + 2 * crr_b_pack_count; // a0[2*PA] + b0/b1[2*PB]
+    constexpr int CRR_SCALE_LDS_DWORDS_PER_WAVE =
+        CRR_SCALE_LDS_PACKS_PER_WAVE * 64; // × 64 lanes (full wavefront)
+    constexpr int CRR_SCALE_LDS_TOTAL_DWORDS =
+        2 /*phases*/ * 2 /*tic/toc double buf*/ * 8 /*waves*/ *
+        CRR_SCALE_LDS_DWORDS_PER_WAVE;
+    __shared__ uint32_t scale_lds[CRR_SCALE_LDS_TOTAL_DWORDS];
+#endif
+
     A_col_reg a;
     B_col_reg b0, b1;
     rt_fl<RBM, RBN, col_l, rt_16x16_s> cA, cB, cC, cD;
@@ -513,6 +598,73 @@ void crr_exact_8wave_scaled_kernel(const layout_globals g)
         }
 #endif
     }
+#if MXFP8_CRR_LDS_SCALE_LAYOUT
+    // R54 Dev A: per-wave per-lane LDS slot index helper. Writes are issued
+    // by each lane to its own slot (no cross-lane contention). The dword
+    // address within scale_lds[] is:
+    //   buf * (2 * 8 * DPW) + phase * (8 * DPW) + wid * DPW + pack * 64 + lane
+    // where DPW = CRR_SCALE_LDS_DWORDS_PER_WAVE, buf ∈ {0,1} (tic/toc),
+    // phase ∈ {0,1} (lo/hi), wid = warpid(), pack = 0..PACKS_PER_WAVE-1,
+    // lane = laneid() (full 0..63 wavefront).
+    auto crr_scale_lds_addr = [&](int buf, int phase, int wid, int pack) {
+        constexpr int DPW = CRR_SCALE_LDS_DWORDS_PER_WAVE;
+        return buf * (2 * 8 * DPW) + phase * (8 * DPW) + wid * DPW + pack * 64;
+    };
+    const int crr_scale_lane = static_cast<int>(kittens::laneid());  // 0..63
+    const int crr_scale_wid  = static_cast<int>(warpid());
+    auto crr_scale_lds_store_pair = [&](int buf) __attribute__((always_inline)) {
+        // Write all 6 packs (a0[0..PA-1], a1[0..PA-1], b0[0..PB-1], b1[0..PB-1])
+        // both lo and hi to the buf'th double-buffer slot.
+        const int base_lo = crr_scale_lds_addr(buf, 0, crr_scale_wid, 0);
+        const int base_hi = crr_scale_lds_addr(buf, 1, crr_scale_wid, 0);
+        int p = 0;
+        #pragma unroll
+        for (int g = 0; g < crr_a_pack_count; g++, p++) {
+            const uint32_t v = std::bit_cast<uint32_t>(a0_scale_packs[g]);
+            scale_lds[base_lo + p * 64 + crr_scale_lane] = v;
+            scale_lds[base_hi + p * 64 + crr_scale_lane] = v >> 16;
+        }
+        #pragma unroll
+        for (int g = 0; g < crr_a_pack_count; g++, p++) {
+            const uint32_t v = std::bit_cast<uint32_t>(a1_scale_packs[g]);
+            scale_lds[base_lo + p * 64 + crr_scale_lane] = v;
+            scale_lds[base_hi + p * 64 + crr_scale_lane] = v >> 16;
+        }
+        #pragma unroll
+        for (int g = 0; g < crr_b_pack_count; g++, p++) {
+            const uint32_t v = std::bit_cast<uint32_t>(b0_scale_packs[g]);
+            scale_lds[base_lo + p * 64 + crr_scale_lane] = v;
+            scale_lds[base_hi + p * 64 + crr_scale_lane] = v >> 16;
+        }
+        #pragma unroll
+        for (int g = 0; g < crr_b_pack_count; g++, p++) {
+            const uint32_t v = std::bit_cast<uint32_t>(b1_scale_packs[g]);
+            scale_lds[base_lo + p * 64 + crr_scale_lane] = v;
+            scale_lds[base_hi + p * 64 + crr_scale_lane] = v >> 16;
+        }
+    };
+    auto crr_scale_lds_load_phase = [&](int buf, int phase) __attribute__((always_inline)) {
+        // Read the phase'th set of all 6 packs back into the scale_packs VGPRs.
+        const int base = crr_scale_lds_addr(buf, phase, crr_scale_wid, 0);
+        int p = 0;
+        #pragma unroll
+        for (int g = 0; g < crr_a_pack_count; g++, p++) {
+            a0_scale_packs[g] = std::bit_cast<fp8e8m0_4>(scale_lds[base + p * 64 + crr_scale_lane]);
+        }
+        #pragma unroll
+        for (int g = 0; g < crr_a_pack_count; g++, p++) {
+            a1_scale_packs[g] = std::bit_cast<fp8e8m0_4>(scale_lds[base + p * 64 + crr_scale_lane]);
+        }
+        #pragma unroll
+        for (int g = 0; g < crr_b_pack_count; g++, p++) {
+            b0_scale_packs[g] = std::bit_cast<fp8e8m0_4>(scale_lds[base + p * 64 + crr_scale_lane]);
+        }
+        #pragma unroll
+        for (int g = 0; g < crr_b_pack_count; g++, p++) {
+            b1_scale_packs[g] = std::bit_cast<fp8e8m0_4>(scale_lds[base + p * 64 + crr_scale_lane]);
+        }
+    };
+#endif
     auto load_raw_scales = [&](int k_pair) __attribute__((always_inline)) {
 #if MXFP8_CRR_EXACT_PQ_PIPELINE_SCALE_ENABLE
         if constexpr (PRESHUFFLED_QUANT) {
@@ -967,7 +1119,25 @@ void crr_exact_8wave_scaled_kernel(const layout_globals g)
 
     TK_PRAGMA_UNROLL(CRR_MAIN_UNROLL)
     for (int k = 0; k < k_iters - 2; k++, tic ^= 1, toc ^= 1) {
-#if MXFP8_CRR_SCALE_LAYOUT_V2
+#if MXFP8_CRR_LDS_SCALE_LAYOUT
+        // R54 Dev A: LDS-resident pre-shifted scale layout.
+        // Even k: load fresh scales (load_raw_scales fills VGPRs with lo half
+        //         live), then store BOTH lo (as-is) and hi (>>16) versions to
+        //         this k_pair's LDS double-buffer slot (buf = (k>>1) & 1).
+        //         No re-load needed for the cA/cB MMA — VGPRs already contain
+        //         the lo half straight from the buffer_load.
+        // Odd k:  ds_read the hi-phase slot from the SAME k_pair's buffer
+        //         (buf = (k>>1) & 1, phase = 1) into the scale-pack VGPRs.
+        //         No v_lshrrev, no s_bitcmp, no s_cbranch.
+        const int crr_scale_buf = (k >> 1) & 1;
+        if ((k & 1) == 0) {
+            load_raw_scales(k >> 1);
+            // Stage both phases to LDS now that the dword is live in VGPR.
+            crr_scale_lds_store_pair(crr_scale_buf);
+        } else {
+            crr_scale_lds_load_phase(crr_scale_buf, 1);
+        }
+#elif MXFP8_CRR_SCALE_LAYOUT_V2
         // R53 Dev A: opsel-keyed K-phase MMA dispatch. Even iters load fresh
         // scales (same as baseline); odd iters re-use the SAME scale packs
         // unmodified — the MMA dispatcher reads bytes 2/3 directly via
