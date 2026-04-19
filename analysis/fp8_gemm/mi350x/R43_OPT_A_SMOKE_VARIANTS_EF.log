@@ -1,0 +1,19 @@
+R43A bench: 2 shapes x 2 cells = 4 jobs, runs=1
+  shapes: [(4096, 32768, 28672), (16384, 4096, 28672)]
+  cells:  ['p2b_fix1e', 'p2b_fix1f']
+  gpus:   [0, 1]
+R43A Bench [run1/1, seed=42] - GPUs: [0, 1], n_jobs=4
+warmup=200, iters=500, trim=0.1, SNR>=10.0dB AND wcf<0.02 AND finite>=0.98
+==============================================================================================================
+  [  1/4]   4096x 32768x 28672  p2b_fix1e       CRASH rc=-6 snr=? fin=N/A wcf=N/A GPU0
+  [  2/4]   4096x 32768x 28672  p2b_fix1f       CRASH rc=-6 snr=? fin=N/A wcf=N/A GPU1
+  [  3/4]  16384x  4096x 28672  p2b_fix1e       CRASH rc=-6 snr=? fin=N/A wcf=N/A GPU0
+  [  4/4]  16384x  4096x 28672  p2b_fix1f       CRASH rc=-6 snr=? fin=N/A wcf=N/A GPU1
+
+Results saved to /shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/R43_OPT_A_SMOKE_VARIANTS_EF.json
+
+Consensus summary:
+    4096x 32768x 28672  p2b_fix1e       CRASH_1/1       n_OK=0 wcf_max=  N/A  fin_min=  N/A  tflops_p50=   N/A   
+    4096x 32768x 28672  p2b_fix1f       CRASH_1/1       n_OK=0 wcf_max=  N/A  fin_min=  N/A  tflops_p50=   N/A   
+   16384x  4096x 28672  p2b_fix1e       CRASH_1/1       n_OK=0 wcf_max=  N/A  fin_min=  N/A  tflops_p50=   N/A   
+   16384x  4096x 28672  p2b_fix1f       CRASH_1/1       n_OK=0 wcf_max=  N/A  fin_min=  N/A  tflops_p50=   N/A   

@@ -1,0 +1,107 @@
+{
+  "ts": "2026-04-19 09:20:18",
+  "round": "R43A",
+  "parent_variant": "ts_lgk2_gm7_memc_pfoff104_kx28672_btw_all",
+  "shapes": [
+    [
+      4096,
+      32768,
+      28672,
+      5568.2
+    ],
+    [
+      16384,
+      4096,
+      28672,
+      5525.3
+    ]
+  ],
+  "cells": [
+    "p2b_ctrl",
+    "p2b_fix1",
+    "p2b_fix1b",
+    "p2b_fix1c",
+    "p2b_fix1d",
+    "p2b_fix1e",
+    "p2b_fix1f"
+  ],
+  "shapes_to_modules_per_cell": {
+    "4096x32768x28672": {
+      "p2b_ctrl": {
+        "module": "tk_mxfp4_gluon_cpp_n32768_k28672_ts_lgk2_gm7_pfoff104_kx28672_btw_all_R43A_p2b_ctrl",
+        "so_path": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R43A/tk_mxfp4_gluon_cpp_n32768_k28672_ts_lgk2_gm7_pfoff104_kx28672_btw_all_R43A_p2b_ctrl.cpython-310-x86_64-linux-gnu.so",
+        "macros": "FUSED_STEP34=1, R43A_GATE_PF_TAIL_KBOUND=0"
+      },
+      "p2b_fix1": {
+        "module": "tk_mxfp4_gluon_cpp_n32768_k28672_ts_lgk2_gm7_pfoff104_kx28672_btw_all_R43A_p2b_fix1",
+        "so_path": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R43A/tk_mxfp4_gluon_cpp_n32768_k28672_ts_lgk2_gm7_pfoff104_kx28672_btw_all_R43A_p2b_fix1.cpython-310-x86_64-linux-gnu.so",
+        "macros": "FUSED_STEP34=1, R43A_GATE_PF_TAIL_KBOUND=1"
+      },
+      "p2b_fix1b": {
+        "module": "tk_mxfp4_gluon_cpp_n32768_k28672_ts_lgk2_gm7_pfoff104_kx28672_btw_all_R43A_p2b_fix1b",
+        "so_path": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R43A/tk_mxfp4_gluon_cpp_n32768_k28672_ts_lgk2_gm7_pfoff104_kx28672_btw_all_R43A_p2b_fix1b.cpython-310-x86_64-linux-gnu.so",
+        "macros": "FUSED_STEP34=1, R43A_GATE_PF_TAIL_KBOUND=2"
+      },
+      "p2b_fix1c": {
+        "module": "tk_mxfp4_gluon_cpp_n32768_k28672_ts_lgk2_gm7_pfoff104_kx28672_btw_all_R43A_p2b_fix1c",
+        "so_path": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R43A/tk_mxfp4_gluon_cpp_n32768_k28672_ts_lgk2_gm7_pfoff104_kx28672_btw_all_R43A_p2b_fix1c.cpython-310-x86_64-linux-gnu.so",
+        "macros": "FUSED_STEP34=1, R43A_GATE_PF_TAIL_KBOUND=3"
+      },
+      "p2b_fix1d": {
+        "module": "tk_mxfp4_gluon_cpp_n32768_k28672_ts_lgk2_gm7_pfoff104_kx28672_btw_all_R43A_p2b_fix1d",
+        "so_path": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R43A/tk_mxfp4_gluon_cpp_n32768_k28672_ts_lgk2_gm7_pfoff104_kx28672_btw_all_R43A_p2b_fix1d.cpython-310-x86_64-linux-gnu.so",
+        "macros": "FUSED_STEP34=1, R43A_GATE_PF_TAIL_KBOUND=4"
+      },
+      "p2b_fix1e": {
+        "module": "tk_mxfp4_gluon_cpp_n32768_k28672_ts_lgk2_gm7_pfoff104_kx28672_btw_all_R43A_p2b_fix1e",
+        "so_path": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R43A/tk_mxfp4_gluon_cpp_n32768_k28672_ts_lgk2_gm7_pfoff104_kx28672_btw_all_R43A_p2b_fix1e.cpython-310-x86_64-linux-gnu.so",
+        "macros": "FUSED_STEP34=1, R43A_GATE_PF_TAIL_KBOUND=5"
+      },
+      "p2b_fix1f": {
+        "module": "tk_mxfp4_gluon_cpp_n32768_k28672_ts_lgk2_gm7_pfoff104_kx28672_btw_all_R43A_p2b_fix1f",
+        "so_path": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R43A/tk_mxfp4_gluon_cpp_n32768_k28672_ts_lgk2_gm7_pfoff104_kx28672_btw_all_R43A_p2b_fix1f.cpython-310-x86_64-linux-gnu.so",
+        "macros": "FUSED_STEP34=1, R43A_GATE_PF_TAIL_KBOUND=6"
+      }
+    },
+    "16384x4096x28672": {
+      "p2b_ctrl": {
+        "module": "tk_mxfp4_gluon_cpp_n4096_k28672_ts_lgk2_gm7_pfoff104_kx28672_btw_all_R43A_p2b_ctrl",
+        "so_path": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R43A/tk_mxfp4_gluon_cpp_n4096_k28672_ts_lgk2_gm7_pfoff104_kx28672_btw_all_R43A_p2b_ctrl.cpython-310-x86_64-linux-gnu.so",
+        "macros": "FUSED_STEP34=1, R43A_GATE_PF_TAIL_KBOUND=0"
+      },
+      "p2b_fix1": {
+        "module": "tk_mxfp4_gluon_cpp_n4096_k28672_ts_lgk2_gm7_pfoff104_kx28672_btw_all_R43A_p2b_fix1",
+        "so_path": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R43A/tk_mxfp4_gluon_cpp_n4096_k28672_ts_lgk2_gm7_pfoff104_kx28672_btw_all_R43A_p2b_fix1.cpython-310-x86_64-linux-gnu.so",
+        "macros": "FUSED_STEP34=1, R43A_GATE_PF_TAIL_KBOUND=1"
+      },
+      "p2b_fix1b": {
+        "module": "tk_mxfp4_gluon_cpp_n4096_k28672_ts_lgk2_gm7_pfoff104_kx28672_btw_all_R43A_p2b_fix1b",
+        "so_path": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R43A/tk_mxfp4_gluon_cpp_n4096_k28672_ts_lgk2_gm7_pfoff104_kx28672_btw_all_R43A_p2b_fix1b.cpython-310-x86_64-linux-gnu.so",
+        "macros": "FUSED_STEP34=1, R43A_GATE_PF_TAIL_KBOUND=2"
+      },
+      "p2b_fix1c": {
+        "module": "tk_mxfp4_gluon_cpp_n4096_k28672_ts_lgk2_gm7_pfoff104_kx28672_btw_all_R43A_p2b_fix1c",
+        "so_path": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R43A/tk_mxfp4_gluon_cpp_n4096_k28672_ts_lgk2_gm7_pfoff104_kx28672_btw_all_R43A_p2b_fix1c.cpython-310-x86_64-linux-gnu.so",
+        "macros": "FUSED_STEP34=1, R43A_GATE_PF_TAIL_KBOUND=3"
+      },
+      "p2b_fix1d": {
+        "module": "tk_mxfp4_gluon_cpp_n4096_k28672_ts_lgk2_gm7_pfoff104_kx28672_btw_all_R43A_p2b_fix1d",
+        "so_path": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R43A/tk_mxfp4_gluon_cpp_n4096_k28672_ts_lgk2_gm7_pfoff104_kx28672_btw_all_R43A_p2b_fix1d.cpython-310-x86_64-linux-gnu.so",
+        "macros": "FUSED_STEP34=1, R43A_GATE_PF_TAIL_KBOUND=4"
+      },
+      "p2b_fix1e": {
+        "module": "tk_mxfp4_gluon_cpp_n4096_k28672_ts_lgk2_gm7_pfoff104_kx28672_btw_all_R43A_p2b_fix1e",
+        "so_path": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R43A/tk_mxfp4_gluon_cpp_n4096_k28672_ts_lgk2_gm7_pfoff104_kx28672_btw_all_R43A_p2b_fix1e.cpython-310-x86_64-linux-gnu.so",
+        "macros": "FUSED_STEP34=1, R43A_GATE_PF_TAIL_KBOUND=5"
+      },
+      "p2b_fix1f": {
+        "module": "tk_mxfp4_gluon_cpp_n4096_k28672_ts_lgk2_gm7_pfoff104_kx28672_btw_all_R43A_p2b_fix1f",
+        "so_path": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R43A/tk_mxfp4_gluon_cpp_n4096_k28672_ts_lgk2_gm7_pfoff104_kx28672_btw_all_R43A_p2b_fix1f.cpython-310-x86_64-linux-gnu.so",
+        "macros": "FUSED_STEP34=1, R43A_GATE_PF_TAIL_KBOUND=6"
+      }
+    }
+  },
+  "built": 14,
+  "cached": 0,
+  "failed": 0
+}

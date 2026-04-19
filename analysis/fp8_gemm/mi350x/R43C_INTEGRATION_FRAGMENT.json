@@ -1,0 +1,16 @@
+{
+  "round": "R43_OPT_C",
+  "ts": "2026-04-19",
+  "verdict": "DEAD",
+  "promote_gate": {
+    "n_OK_min": 4,
+    "wcf_std_max": 0.005,
+    "fin_min": 0.985,
+    "tflops_ratio": 1.05
+  },
+  "n_shapes_targeted": 14,
+  "n_shapes_promoted": 0,
+  "n_shapes_with_any_5run_candidate": 2,
+  "manifest_changes": {},
+  "rationale": "Phase 1 smoke (147 candidates over 14 shapes) found only 5 candidates across 2 shapes that beat current by +3% with fin>=0.98 & wcf<0.02 (1-rep). Phase 2 5-run consensus then disqualified all 5 under the strict +5%/n_OK>=4 gate: the best n_OK=5 candidate yielded only +1.7%; the best delta (+4.2%) only had n_OK=2/5. The existing R40B/R41A/R41B variant table is at-or-near optimal for these 14 shapes within the (FINITE_GATE=0.98, no-new-macro) constraint."
+}

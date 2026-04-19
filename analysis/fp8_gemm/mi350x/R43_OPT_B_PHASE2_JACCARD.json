@@ -1,0 +1,19 @@
+{
+  "round": "R43_OPT_B_PHASE2",
+  "date": "2026-04-19",
+  "status": "NOT_RUN",
+  "reason": "Phase-1 pre-flight refuted prerequisite for Phase-2. The Jaccard oracle measures positional consistency of bad cells across runs of the SAME kernel on identical inputs. The oracle assumes the kernel is structurally correct (i.e., it would produce the expected output absent races). The R43 Opt B candidate kernel (R35A V2_vmcnt15_n8 with +v keepalive) is structurally broken: bit_eq vs incumbent is 0.0838% on the canonical N=32768,K=4096 build shape. Running Phase-2 would only measure the noise distribution of broken output, NOT the cohort race the oracle was designed to detect. Phase-2 was therefore SKIPPED.",
+  "preflight": {
+    "M": 4096, "N": 32768, "K": 4096,
+    "incumbent_so": "tk_mxfp4_gluon_cpp_n32768_k4096_R35A_v12_memc_btw_all_legacyfork",
+    "candidate_so": "tk_mxfp4_gluon_cpp_n32768_k4096_R35A_v12_memc_btw_all_vmcnt15_n8",
+    "bit_eq_on_both_finite": 0.000838,
+    "P_B_1_threshold_jaccard": 0.7,
+    "verdict": "REFUTED_PREREQUISITE"
+  },
+  "shapes_targeted_in_plan": [
+    "16384x14336x4096",
+    "28672x4096x8192",
+    "4096x32768x14336"
+  ]
+}

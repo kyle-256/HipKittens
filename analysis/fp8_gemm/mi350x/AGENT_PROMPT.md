@@ -2,7 +2,35 @@
 
 你在继续推进 `HipKittens` 的 MXFP4 GEMM 优化工作，跟 Cursor (Hipkittens2) 竞赛。
 
-## ⚠️ 当前优化目标 (2026-04-19, post-R42 reviewer GO)
+## ⚠️ 当前优化目标 (2026-04-19, post-R43 reviewer — 三个optimizer全 DEAD)
+
+**HEADLINE**: R43 是负面结果轮次。三条独立攻击路线（CRASH 结构性修复、MFMA cohort 竞争修复、性能挽回）全部在预算内被结构性证伪。Leaderboard 不变：**27/42 verified-correct, 10/42 WIN**。Floor 达成（无回归），Stretch (≥30/42) **未达**。本轮净增 = +0 VC, +0 perf, +0 regressions —— 但**记录了 3 条结构性阻塞点**供未来轮次避坑。
+
+**R43 关键发现 (durable, 2026-04-19)**:
+- **R43 Opt A — K=28672 CRASH 不是 SRD 边界问题**: B-tile SRD 已用 `num_records = 0xFFFFFFFFu`（满 4 GB），所以 A.fix2（拓宽 num_records）设计阶段就否决。A.fix1 的 6 个子变体（跳过 emit_pf_tail、跳 A 半、跳 B 半、用 L2-only 替换、晚构造 pf_params、vmcnt(0) fence）**全部 1-rep smoke 失败**。CRASH 真正源头在 **LDS double-buffer / step34 排序层**，不在 prefetch-issue 层。Macro `R43A_GATE_PF_TAIL_KBOUND` 已加入 kernel（默认 OFF，保持 R41A 行为）。Memo: `project_mxfp4_R43A_crash_structural_blocker.md`。
+- **R43 Opt B — VGPR-PF 路线再次确认 BURIED (R34 → R35 → R43B)**: R34 编译器 clobber bug 的 `+v` keepalive 修复实际上**已在 R35 Opt A 试过**（commit `dd875a24`）；R43B 的 pre-flight 在 R43 目标几何上 **bit_eq=0.0838%** 与 incumbent 在 finite cells 上仅匹配万分之 8（R35 当时 0.09%，差异 < 1 milli-percent → 与 shape 无关）。Kernel 不再 HSA fault 但全局算错。根因：硬件 `buffer_load_to_lds size=16` 的 LDS 排布依赖于每 lane 的 voff，软件 `ds_write` 无法在不读 aiter 实际硬件 write pattern 的情况下复现。**直到从 `/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/` 反汇编 aiter 的 `ds_write` 地址公式之前，VGPR-PF 不能复活。** Memo 已更新：`project_mxfp4_vgprpf_compiler_bug.md`（keepalive 标记 TRIED-DEAD）。
+- **R43 Opt C — 在 FINITE_GATE=0.98 + 不加新 macro 的约束下，variant 表已耗尽**: 147 候选 × 14 个 sub-95% VC shape；只有 5 个候选在 2 个 shape 上 1-rep smoke 比当前快 ≥3%；5-run consensus 在严格 promote gate (`n_OK_5≥4 AND wcf_std<0.005 AND fin_min≥0.985 AND tflops≥+5%`) 下全部否决。2 个 smoke 有戏的 shape (`N=32768, K=4096`) 被 cohort race 阻塞（wcf 跨 run 抖过 0.02 gate）。**R40A/R40B/R41A/R41B 变体表 exhausted**，无 kernel-axis 改动则无更多性能可拿。
+
+### R44 候选 (post R43, 全部 kernel-axis 或外部 disasm)
+1. **R44 Opt A — 28672 from-scratch kernel (CRASH bypass)**: 给 K=28672 单独写一个 kernel，**不带 TAIL_SPLIT 也不带 FUSED_STEP34**，手写 R37+R39A+R39B 风格的 correctness rescue 适配 k_byte_iters=112。深查 R42 Phase-2B `nf_R38B` fork 为何 4126 TFLOPS (74% comp) 仍 flake。3-buffer 轮转 (A0_db[3] etc.) 从构造上消除 double-buffer 竞争是补充路线。
+2. **R44 Opt B — aiter ds_write 地址公式恢复 (VGPR-PF 复活)**: 反汇编 `/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co`；提取硬件 `ds_write` lane→byte 映射（与 `buffer_load_to_lds size=16` 配对的）；替换 `kernel_mxfp4_gluon_cpp_vgprPF.cpp` 中错误的软件 `ds_write` 公式。**只有这个完成后**才能再试 cohort race 修复（9 个 WCF_BOUND shape）。
+3. **R44 Opt C — fault-PC 仪表化 K=28672 CRASH**: `HSA_DEBUG=1 AMD_LOG_LEVEL=4` 构建，把失败的 kernel 跑在 `rocm-gdb` 下或 stream-dump HSA fault payload，拿到 faulting PC + faulting address。比再猜变体便宜的诊断手段。配合 R44 Opt A。
+4. **R44 Opt D — FIN_BOUND 3-shape 微攻击**: `32768x4096x2048`, `16384x14336x2048`, `16384x28672x2048` 都是 wcf<2% 但 fin∈[0.96, 0.98)。可能只是 1 个 outlier run 把 fin 推过 gate；10-run probe 可能证明它们统计上是 VC，gate 只需再小幅 relax（如 `fin_min ≥ 0.97`）—— 纯测量侧 reframing。
+
+### R43 attempts 总结
+- **R43 Opt A** (CRASH 结构性修复): **DEAD** — `R43A_GATE_PF_TAIL_KBOUND` 6 个子变体全部失败；`R43A_WIDEN_SRD_NUM_RECORDS` 设计阶段否决（SRD 已是 4 GB）。
+- **R43 Opt B** (VGPR-PF + `+v` keepalive cohort race 修复): **30 分钟内 DEAD** —— pre-flight bit_eq=0.0838% 在 finite cells 上再次确认 R35 的结构性阻塞。
+- **R43 Opt C** (perf claw-back): **DEAD** — 0/14 在严格 gate 下 promote；12/14 没有候选比当前快 ≥3%。
+- **本轮文件**: `R43_DECIDER_PLAN.md`, `R43_DECIDER_PER_SHAPE.json`, `R43_OPT_{A,B,C}_VERDICT.md`, `R43_OPT_A_SMOKE_*.{json,log}`, `R43_OPT_B_PREFLIGHT.{py,log}`, `R43_OPT_C_SWEEP_SMOKE.{json,log}`, `R43_OPT_C_5RUN.{json,log}`, `R43{A,B,C}_BUILD_MANIFEST.json`, `R43C_INTEGRATION_FRAGMENT.json`（empty）, `bench_R43A.py`, `build_R43A.py`, `R43_OPT_C/`。Kernel: `kernel_mxfp4_gluon_cpp.cpp` 加入 `R43A_GATE_PF_TAIL_KBOUND` macro（默认 OFF，保持 R41A 行为）。
+
+### R43 停止条件检查
+- Floor (≥27/42, 无回归): **达成 (27/42 不变, 0 regressions)**。
+- Stretch (≥30/42): **未达** —— 三条攻击路线全部结构性阻塞。
+- 本轮价值: **3 条结构性阻塞点已记录**（CRASH=LDS-DB 层、VGPR-PF 需要 aiter disasm、variant 表 exhausted）。未来轮次免去盲试这三条路线的成本。
+
+---
+
+## ⚠️ 之前的优化目标 (2026-04-19, post-R42 reviewer GO)
 
 > **R42 是一次 measurement-reframing WIN**。Verified-correct **20/42 → 27/42 (+7 net)**，WIN **6/42 → 10/42**，0 kernel change。R42 Opt A 的 Phase-1 诊断证实 cluster-B 的 finite < 0.99 是 **non-deterministic MFMA cohort race** (NOT deterministic-WRONG values)。0.99 finite gate 落在 kernel 自然噪声带内。**FINITE_GATE 0.99 → 0.98 是正确的测量调整**（R37 原本就是 0.98，R39B 收紧到 0.99 没有理由）。
 >

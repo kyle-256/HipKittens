@@ -84,6 +84,22 @@ using namespace kittens;
 #define FUSED_STEP34 0
 #endif
 
+// R43 Opt A.fix1 (2026-04-19): R43A_GATE_PF_TAIL_KBOUND
+// Default OFF. When enabled together with FUSED_STEP34=1 + TAIL_SPLIT=1, gates
+// the unconditional `emit_pf_tail<0>(pf_a0_p, pf_a1_p)` and
+// `emit_pf_tail<0>(pf_bl_p, pf_br_p)` calls that follow the fused step34 asm
+// block (kernel line ~3222). Skips the prefetch on the LAST steady-state iter
+// (bt == k_byte_iters - 2) where pf_bt clamps to k_byte_iters-1 and the
+// in-flight LDS write races the TAIL_SPLIT tail handler's reads. Closes the
+// HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION on the K=28672 CRASH shapes
+// without exposing the 17%-bf16-overflow correctness bug that stripping
+// FUSED_STEP34 or TAIL_SPLIT alone would re-introduce. See R43_OPT_A_VERDICT.md.
+// No effect when FUSED_STEP34=0; no behavior change on non-CRASH variants when
+// the macro is unset.
+#ifndef R43A_GATE_PF_TAIL_KBOUND
+#define R43A_GATE_PF_TAIL_KBOUND 0
+#endif
+
 // R37 Fix B (2026-04-19): the non-fused step3+step4 path emits 4 separate
 // `asm volatile` blocks; the compiler is free to interleave clobbering moves
 // between them which corrupts the upper-left 128x128 quadrant of every 256x256
@@ -3219,8 +3235,84 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         kpair_64mfma_step34(acc_A1Bl, acc_A1Br, tA1, tBl, tBr,
             a1_raw, bl_raw, br_raw, nxt_a0_d, nxt_bl_d,
             sel_a0_p0, sel_a0_p1, sel_bl_p0, sel_bl_p1);
+#if R43A_GATE_PF_TAIL_KBOUND
+        // R43 Opt A.fix1 — at K=28672 (k_byte_iters=112), the FUSED_STEP34+TAIL_SPLIT
+        // conjunction triggers HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION at runtime.
+        // R42 Opt B Phase-2A localized the CRASH to FUSED_STEP34=1 AND TAIL_SPLIT=1
+        // (stripping either knob alone removes the CRASH but exposes a separate
+        // 17%-bf16-overflow correctness bug — see R42_OPT_B_VERDICT.md).
+        //
+        // Variants (compile-time R43A_GATE_PF_TAIL_KBOUND value):
+        //   1 = skip BOTH emit_pf_tail on bt == k_byte_iters-2 (kills A & B halves)
+        //   2 = skip only B-half on the clamped iter
+        //   3 = skip only A-half on the clamped iter
+        //   4 = REPLACE the data prefetches with L2-only (cache-warming, no LDS race)
+        //   5 = R38B-style: build pf_*_p HERE (after step34) instead of top-of-iter,
+        //       then emit_pf_tail. Mirrors R37_FIX_B+R38B_TAIL_FIX inside FUSED_STEP34.
+        //   6 = pre-emit-pf vmcnt fence: insert s_waitcnt vmcnt(0) BEFORE emit_pf_tail
+        //       to drain in-flight buffer_load_to_lds from prior iters before issuing
+        //       new ones (closes write-after-write race on shared LDS double-buffer).
+        const bool _r43a_skip = (bt >= k_byte_iters - 2);
+#if R43A_GATE_PF_TAIL_KBOUND == 1
+        if (!_r43a_skip) {
+            emit_pf_tail<0>(pf_a0_p, pf_a1_p);
+            emit_pf_tail<0>(pf_bl_p, pf_br_p);
+        }
+#elif R43A_GATE_PF_TAIL_KBOUND == 2
+        emit_pf_tail<0>(pf_a0_p, pf_a1_p);
+        if (!_r43a_skip) {
+            emit_pf_tail<0>(pf_bl_p, pf_br_p);
+        }
+#elif R43A_GATE_PF_TAIL_KBOUND == 3
+        if (!_r43a_skip) {
+            emit_pf_tail<0>(pf_a0_p, pf_a1_p);
+        }
+        emit_pf_tail<0>(pf_bl_p, pf_br_p);
+#elif R43A_GATE_PF_TAIL_KBOUND == 4
+        if (!_r43a_skip) {
+            emit_pf_tail<0>(pf_a0_p, pf_a1_p);
+            emit_pf_tail<0>(pf_bl_p, pf_br_p);
+        } else {
+            emit_full_pf_l2only<PF_MPT>(pf_a0_p);
+            emit_full_pf_l2only<PF_MPT>(pf_a1_p);
+            emit_full_pf_l2only<PF_MPT>(pf_bl_p);
+            emit_full_pf_l2only<PF_MPT>(pf_br_p);
+        }
+#elif R43A_GATE_PF_TAIL_KBOUND == 5
+        // R43 fix1 variant 5: defer make_pf_params construction to here (after step34)
+        // so the live-range of the pf_*_p structs spans only the emit_pf_tail emission,
+        // mirroring the R38B_TAIL_FIX pattern in the R37_FIX_B (non-FUSED) branch.
+        // The original (top-of-iter) pf_*_p go unused on the FUSED path with this
+        // variant — the compiler should DCE them. Suppress unused-warning only.
+        {
+            tile_pf_params pf_a0_p_late = make_pf_params(A0_db[cur], g.a, coord<ST_tile>(0,0,br*2,     pf_bt), so_a, srd_a, base_a, lb_a0[cur], R22B_A_HINT_VAL);
+            tile_pf_params pf_a1_p_late = make_pf_params(A1_db[cur], g.a, coord<ST_tile>(0,0,br*2+1,   pf_bt), so_a, srd_a, base_a, lb_a1[cur], R22B_A_HINT_VAL);
+#if !DIRECT_BL
+            tile_pf_params pf_bl_p_late = make_pf_params(Bl_db[cur], g.b, coord<ST_tile>(0,0,bc*2,     pf_bt), so_b, srd_b, base_b, lb_bl[cur], R22B_B_HINT_VAL);
+#endif
+            tile_pf_params pf_br_p_late = make_pf_params(Br_db[cur], g.b, coord<ST_tile>(0,0,bc*2+1,   pf_bt), so_b, srd_b, base_b, lb_br[cur], R22B_B_HINT_VAL);
+            emit_pf_tail<0>(pf_a0_p_late, pf_a1_p_late);
+            emit_pf_tail<0>(pf_bl_p_late, pf_br_p_late);
+        }
+        (void)pf_a0_p; (void)pf_a1_p;
+#if !DIRECT_BL
+        (void)pf_bl_p;
+#endif
+        (void)pf_br_p;
+#elif R43A_GATE_PF_TAIL_KBOUND == 6
+        // Variant 6: vmcnt(0) fence BEFORE the unconditional emit_pf_tail to ensure
+        // all prior buffer_load_to_lds have drained before issuing new ones.
+        asm volatile("s_waitcnt vmcnt(0)\n" ::: "memory");
         emit_pf_tail<0>(pf_a0_p, pf_a1_p);
         emit_pf_tail<0>(pf_bl_p, pf_br_p);
+#else
+#error "R43A_GATE_PF_TAIL_KBOUND must be 0, 1, 2, 3, 4, 5, or 6"
+#endif
+        (void)_r43a_skip;
+#else
+        emit_pf_tail<0>(pf_a0_p, pf_a1_p);
+        emit_pf_tail<0>(pf_bl_p, pf_br_p);
+#endif // R43A_GATE_PF_TAIL_KBOUND
 #elif R37_FIX_B
         // R37 Fix B (default): use fused step3+step4 (correctness fix) while
         // preserving R25-C tail-pf-off + STEP4_EXTERNAL_BR_PREFETCH branching

@@ -1,0 +1,21 @@
+Parent variant: ts_lgk2_gm7_memc_pfoff104_kx28672_btw_all
+Base flags: -DTAIL_SPLIT=1 -DSTEP12_BR_LGKMCNT=2 -DGROUP_SIZE_M=7 -DR25C_TAIL_PF_OFF_ITERS=104 -DR25C_K_LIMIT=32768 -DR25C_K_EXACT=28672 -mllvm -amdgpu-sched-strategy=max-memory-clause -DBARRIER_TO_WAITCNT_ALL=1
+R43A builder: 14 entries, 14 unique builds
+  Cells: ['p2b_ctrl', 'p2b_fix1', 'p2b_fix1b', 'p2b_fix1c', 'p2b_fix1d', 'p2b_fix1e', 'p2b_fix1f']
+  [  1/14] BUILT N=32768,K=28672,cell=p2b_fix1 (5.1s)
+  [  2/14] BUILT N=32768,K=28672,cell=p2b_fix1b (5.2s)
+  [  3/14] BUILT N=32768,K=28672,cell=p2b_fix1c (5.2s)
+  [  4/14] BUILT N=32768,K=28672,cell=p2b_fix1d (5.2s)
+  [  5/14] BUILT N=32768,K=28672,cell=p2b_fix1e (5.3s)
+  [  6/14] BUILT N=32768,K=28672,cell=p2b_fix1f (5.3s)
+  [  7/14] BUILT N=32768,K=28672,cell=p2b_ctrl (5.4s)
+  [  8/14] BUILT N=4096,K=28672,cell=p2b_ctrl (5.4s)
+  [  9/14] BUILT N=4096,K=28672,cell=p2b_fix1c (5.1s)
+  [ 10/14] BUILT N=4096,K=28672,cell=p2b_fix1b (5.2s)
+  [ 11/14] BUILT N=4096,K=28672,cell=p2b_fix1 (5.2s)
+  [ 12/14] BUILT N=4096,K=28672,cell=p2b_fix1d (5.2s)
+  [ 13/14] BUILT N=4096,K=28672,cell=p2b_fix1e (5.2s)
+  [ 14/14] BUILT N=4096,K=28672,cell=p2b_fix1f (5.3s)
+
+Done in 10.7s: built=14, cached=0, failed=0
+Manifest: R43A_BUILD_MANIFEST.json

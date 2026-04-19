@@ -1,6 +1,40 @@
 # MXFP4 GEMM Optimization TODO
 
-## Current State (2026-04-19, post-R42 reviewer GO)
+## Current State (2026-04-19, post-R43 reviewer — ALL THREE OPTIMIZERS DEAD)
+
+**HEADLINE — R43 IS A NEGATIVE-RESULT ROUND. Three independent attack axes (CRASH structural fix, MFMA cohort race fix, perf claw-back) ALL exhausted within budget. Leaderboard unchanged: 27/42 verified-correct, 10/42 WIN. Floor met (no regression), stretch (≥30/42) NOT met. Net delta = +0 VC, +0 perf, +0 regressions, but +3 structural blockers documented for future rounds.**
+
+**R43 leaderboard (no manifest change vs R42, integration re-run skipped because zero promotions)**:
+- **27/42 verified-correct** (same as R42, R39B random-scale gate, FINITE_GATE=0.98).
+- **10/42 WIN** (same as R42).
+- 2 CRASH carry-over: `(16384,4096,28672)`, `(4096,32768,28672)` — now with structural-blocker memo.
+- 9 WCF_BOUND cohort-race shapes (cluster-B residual): unfixable without aiter ds_write addr-formula recovery.
+
+**R43 NEW KNOWLEDGE (durable, 2026-04-19) — all THREE attack axes structurally blocked**:
+- **R43 Opt A — CRASH at K=28672 is NOT an SRD bounds issue**: B-tile SRD already uses `num_records = 0xFFFFFFFFu` (full 4 GB — see `include/ops/warp/memory/util/util.cuh:75`), so A.fix2 (widen num_records) was rejected at design time. A.fix1's 6 sub-variants (skip both `emit_pf_tail<0>`, skip A-half, skip B-half, replace with L2-only, late `make_pf_params`, vmcnt(0) fence) ALL failed 1-rep smoke (CRASH or 50-60% finite garbage). The CRASH lives at the **LDS double-buffer / step34 ordering** level, not at the prefetch-issue level. Macro `R43A_GATE_PF_TAIL_KBOUND` added to kernel default-OFF (preserves R41A behavior). Memo: `project_mxfp4_R43A_crash_structural_blocker.md`.
+- **R43 Opt B — VGPR-PF axis re-confirmed BURIED (R34 → R35 → R43B)**: the `+v` keepalive remediation for the R34 compiler-clobber bug had ALREADY been tried in R35 Opt A (commit `dd875a24`); R43B's pre-flight on the new R43 target geometry confirmed only **0.0838% bit-equality on finite cells vs incumbent** (matches R35's 0.09% within 1 milli-percent → mechanism is shape-invariant). The kernel runs without HSA fault but produces wrong values everywhere. Root cause (now durable): hardware `buffer_load_to_lds size=16` LDS layout depends on per-lane voff in a way software `ds_write` cannot replicate without reading aiter's actual hardware write pattern. **Until aiter's `ds_write` address formula is recovered from disasm at `/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/`, VGPR-PF cannot be revived.** Memo updated: `project_mxfp4_vgprpf_compiler_bug.md` (keepalive marked TRIED-DEAD).
+- **R43 Opt C — variant table at-or-near optimal under FINITE_GATE=0.98 (no-new-macro)**: 147 candidates × 14 sub-95% VC shapes; only 5 candidates over 2 shapes beat current by ≥+3% in 1-rep smoke; 5-run consensus then disqualified all 5 under strict promote gate (`n_OK_5≥4 AND wcf_std<0.005 AND fin_min≥0.985 AND tflops≥+5%`). The 2 promising-smoke shapes (`N=32768, K=4096`) are blocked by the documented MFMA cohort race (variance in `wcf` jitters past 0.02 gate). **The R40A/R40B/R41A/R41B variant table is exhausted**; no further perf gain possible without a kernel-axis change.
+
+### R44 candidates (post R43, all kernel-axis or external-disasm)
+1. **R44 Opt A — 28672 from-scratch kernel (CRASH bypass)**: build a K=28672-specific kernel WITHOUT TAIL_SPLIT AND WITHOUT FUSED_STEP34, with hand-written R37+R39A+R39B-style correctness rescue tuned to k_byte_iters=112. Investigate why R42 Phase-2B's `nf_R38B` fork flaked at 4126 TFLOPS (74% comp). 3-buffer rotation (A0_db[3] etc.) to eliminate double-buffer races by construction is a complementary axis.
+2. **R44 Opt B — aiter ds_write address-formula recovery (VGPR-PF revival)**: disassemble aiter's `f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co` at `/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/`; extract the hardware `ds_write` lane-to-byte mapping that pairs with `buffer_load_to_lds size=16`; replace the broken software `ds_write` formulas in `kernel_mxfp4_gluon_cpp_vgprPF.cpp`. ONLY then re-attempt the cohort-race fix on the 9 WCF_BOUND shapes.
+3. **R44 Opt C — fault-PC instrumentation on K=28672 CRASH**: build with `HSA_DEBUG=1 AMD_LOG_LEVEL=4`, run failing kernel under `rocm-gdb` or stream dump the HSA fault payload, get the faulting PC + faulting address. Cheaper diagnostic than guessing more variants. Pairs with R44 Opt A.
+4. **R44 Opt D — FIN_BOUND 3-shape micro-attack**: `32768x4096x2048`, `16384x14336x2048`, `16384x28672x2048` are wcf<2% but fin∈[0.96, 0.98). Could be one outlier run pushing fin under gate; 10-run probe might prove they're statistically VC and the gate just needs a slight further relax (e.g., `fin_min ≥ 0.97`) — measurement-side reframing only.
+
+### R43 attempts summary
+- **R43 Opt A** (CRASH structural fix): **DEAD** — 6 sub-variants of `R43A_GATE_PF_TAIL_KBOUND` failed; `R43A_WIDEN_SRD_NUM_RECORDS` rejected at design time (SRD already at 4 GB).
+- **R43 Opt B** (VGPR-PF + `+v` keepalive cohort race fix): **DEAD** in 30 min — pre-flight bit_eq=0.0838% on finite cells re-confirms R35's structural blocker.
+- **R43 Opt C** (perf claw-back): **DEAD** — 0/14 promoted under strict gate; 12/14 had no candidate beating current by even +3%.
+- **Files**: `R43_DECIDER_PLAN.md`, `R43_DECIDER_PER_SHAPE.json`, `R43_OPT_{A,B,C}_VERDICT.md`, `R43_OPT_A_SMOKE_*.{json,log}`, `R43_OPT_B_PREFLIGHT.{py,log}`, `R43_OPT_B_PHASE2_JACCARD.json` (NOT_RUN), `R43_OPT_C_SWEEP_SMOKE.{json,log}`, `R43_OPT_C_5RUN.{json,log}`, `R43{A,B,C}_BUILD_MANIFEST.json`, `R43C_INTEGRATION_FRAGMENT.json` (empty), `bench_R43A.py`, `build_R43A.py`, `R43_OPT_C/`. Kernel: `kernel_mxfp4_gluon_cpp.cpp` adds `R43A_GATE_PF_TAIL_KBOUND` macro (default OFF; R41A behavior preserved).
+
+### R43 stopping-criterion check
+- Floor (≥27/42, no regression): **MET (27/42 unchanged, 0 regressions)**.
+- Stretch (≥30/42): **NOT MET** — all three attacks structurally blocked. Net delta = +0 VC.
+- Round value: **3 durable structural blockers documented** (CRASH=LDS-DB layer, VGPR-PF needs aiter disasm, variant table exhausted). Future rounds saved from re-trying these axes blind.
+
+---
+
+## Previous State (2026-04-19, post-R42 reviewer GO)
 
 **HEADLINE — R42 Opt A is a MEASUREMENT REFRAMING WIN. Verified-correct: 20/42 → 27/42 (+7 net), WIN: 6/42 → 10/42, no kernel change required.**
 

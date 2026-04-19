@@ -1,0 +1,235 @@
+{
+  "timestamp": "2026-04-19 09:21:26",
+  "round": "R43_optA",
+  "warmup": 200,
+  "iters": 500,
+  "trim_frac": 0.1,
+  "snr_threshold_db": 10.0,
+  "wrong_cell_gate": 0.02,
+  "finite_gate": 0.98,
+  "random_seed": 42,
+  "n_shapes": 2,
+  "n_cells": 2,
+  "n_runs": 1,
+  "gpus": [
+    0,
+    1
+  ],
+  "shape_cells": [
+    {
+      "m": 4096,
+      "n": 32768,
+      "k": 28672,
+      "comp": 5568.2,
+      "cell": "p2b_fix1e"
+    },
+    {
+      "m": 4096,
+      "n": 32768,
+      "k": 28672,
+      "comp": 5568.2,
+      "cell": "p2b_fix1f"
+    },
+    {
+      "m": 16384,
+      "n": 4096,
+      "k": 28672,
+      "comp": 5525.3,
+      "cell": "p2b_fix1e"
+    },
+    {
+      "m": 16384,
+      "n": 4096,
+      "k": 28672,
+      "comp": 5525.3,
+      "cell": "p2b_fix1f"
+    }
+  ],
+  "consensus": [
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 28672,
+      "tflops": null,
+      "avg_ms": null,
+      "comp": 5568.2,
+      "status": "CRASH",
+      "kernel_finite": null,
+      "best_variant": "R43A_p2b_fix1e",
+      "cell": "p2b_fix1e",
+      "returncode": -6,
+      "stderr_tail": ":0:rocdevice.cpp            :3580: 1256490720267 us:  Callback: Queue 0x7f3221000000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29\n",
+      "consensus": "CRASH_1/1",
+      "wcf_per_run": [
+        null
+      ],
+      "finite_per_run": [
+        null
+      ],
+      "status_per_run": [
+        "CRASH"
+      ],
+      "n_OK": 0,
+      "wcf_max": null,
+      "wcf_std": 0.0,
+      "fin_min": null,
+      "tflops_p50": null,
+      "VC": false
+    },
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 28672,
+      "tflops": null,
+      "avg_ms": null,
+      "comp": 5568.2,
+      "status": "CRASH",
+      "kernel_finite": null,
+      "best_variant": "R43A_p2b_fix1f",
+      "cell": "p2b_fix1f",
+      "returncode": -6,
+      "stderr_tail": ":0:rocdevice.cpp            :3580: 1256501848258 us:  Callback: Queue 0x7fb2d0400000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29\n",
+      "consensus": "CRASH_1/1",
+      "wcf_per_run": [
+        null
+      ],
+      "finite_per_run": [
+        null
+      ],
+      "status_per_run": [
+        "CRASH"
+      ],
+      "n_OK": 0,
+      "wcf_max": null,
+      "wcf_std": 0.0,
+      "fin_min": null,
+      "tflops_p50": null,
+      "VC": false
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 28672,
+      "tflops": null,
+      "avg_ms": null,
+      "comp": 5525.3,
+      "status": "CRASH",
+      "kernel_finite": null,
+      "best_variant": "R43A_p2b_fix1e",
+      "cell": "p2b_fix1e",
+      "returncode": -6,
+      "stderr_tail": ":0:rocdevice.cpp            :3580: 1256507948776 us:  Callback: Queue 0x7f0d35000000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29\n",
+      "consensus": "CRASH_1/1",
+      "wcf_per_run": [
+        null
+      ],
+      "finite_per_run": [
+        null
+      ],
+      "status_per_run": [
+        "CRASH"
+      ],
+      "n_OK": 0,
+      "wcf_max": null,
+      "wcf_std": 0.0,
+      "fin_min": null,
+      "tflops_p50": null,
+      "VC": false
+    },
+    {
+      "M": 16384,
+      "N": 4096,
+      "K": 28672,
+      "tflops": null,
+      "avg_ms": null,
+      "comp": 5525.3,
+      "status": "CRASH",
+      "kernel_finite": null,
+      "best_variant": "R43A_p2b_fix1f",
+      "cell": "p2b_fix1f",
+      "returncode": -6,
+      "stderr_tail": ":0:rocdevice.cpp            :3580: 1256527732881 us:  Callback: Queue 0x7fbae8c00000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29\n",
+      "consensus": "CRASH_1/1",
+      "wcf_per_run": [
+        null
+      ],
+      "finite_per_run": [
+        null
+      ],
+      "status_per_run": [
+        "CRASH"
+      ],
+      "n_OK": 0,
+      "wcf_max": null,
+      "wcf_std": 0.0,
+      "fin_min": null,
+      "tflops_p50": null,
+      "VC": false
+    }
+  ],
+  "per_run": [
+    {
+      "run": 1,
+      "seed": 42,
+      "elapsed_minutes": 1.0,
+      "results": [
+        {
+          "M": 4096,
+          "N": 32768,
+          "K": 28672,
+          "tflops": null,
+          "avg_ms": null,
+          "comp": 5568.2,
+          "status": "CRASH",
+          "kernel_finite": null,
+          "best_variant": "R43A_p2b_fix1e",
+          "cell": "p2b_fix1e",
+          "returncode": -6,
+          "stderr_tail": ":0:rocdevice.cpp            :3580: 1256490720267 us:  Callback: Queue 0x7f3221000000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29\n"
+        },
+        {
+          "M": 4096,
+          "N": 32768,
+          "K": 28672,
+          "tflops": null,
+          "avg_ms": null,
+          "comp": 5568.2,
+          "status": "CRASH",
+          "kernel_finite": null,
+          "best_variant": "R43A_p2b_fix1f",
+          "cell": "p2b_fix1f",
+          "returncode": -6,
+          "stderr_tail": ":0:rocdevice.cpp            :3580: 1256501848258 us:  Callback: Queue 0x7fb2d0400000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29\n"
+        },
+        {
+          "M": 16384,
+          "N": 4096,
+          "K": 28672,
+          "tflops": null,
+          "avg_ms": null,
+          "comp": 5525.3,
+          "status": "CRASH",
+          "kernel_finite": null,
+          "best_variant": "R43A_p2b_fix1e",
+          "cell": "p2b_fix1e",
+          "returncode": -6,
+          "stderr_tail": ":0:rocdevice.cpp            :3580: 1256507948776 us:  Callback: Queue 0x7f0d35000000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29\n"
+        },
+        {
+          "M": 16384,
+          "N": 4096,
+          "K": 28672,
+          "tflops": null,
+          "avg_ms": null,
+          "comp": 5525.3,
+          "status": "CRASH",
+          "kernel_finite": null,
+          "best_variant": "R43A_p2b_fix1f",
+          "cell": "p2b_fix1f",
+          "returncode": -6,
+          "stderr_tail": ":0:rocdevice.cpp            :3580: 1256527732881 us:  Callback: Queue 0x7fbae8c00000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29\n"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "round": "R43_OPT_C",
+  "ts": "2026-04-19",
+  "policy": "no new kernel macros; reuse existing R40A/R40B/R41A/R41B builds",
+  "builds_added": [],
+  "rationale": "Opt C is a per-shape variant claw-back round. No new .so files were built; all 147 candidates were existing artifacts in build_R40A/R40B/R41A/R41B. No promotions = no manifest additions."
+}

@@ -1,0 +1,7 @@
+M=4096 N=32768 K=4096
+  legacy finite_frac = 39.1959%
+  vgprPF V2_n8 finite_frac = 73.7811%
+  both_finite_frac = 36.4540%
+  bit_eq (on both finite) = 0.0838%
+VERDICT: VGPR-PF deposit path CONFIRMED BROKEN (R35 finding holds)
+RECOMMENDATION: KILL R43 Opt B axis; document and exit

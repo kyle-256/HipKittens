@@ -1,0 +1,22 @@
+{
+  "round": "R43_OPT_B",
+  "date": "2026-04-19",
+  "status": "DEAD_PRE_PHASE2",
+  "verdict": "VGPR-PF deposit path structurally broken (R35 finding re-confirmed); no new builds produced",
+  "reused_builds": [
+    {
+      "tag": "R35A_V0_legacyfork_k4096",
+      "so_path": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/tk_mxfp4_gluon_cpp_n32768_k4096_R35A_v12_memc_btw_all_legacyfork.cpython-310-x86_64-linux-gnu.so",
+      "macros": "PARENT_FLAGS only (VGPR_PF_MODE=0)",
+      "purpose": "incumbent control for pre-flight bit_eq comparison"
+    },
+    {
+      "tag": "R35A_V2_vmcnt15_n8_k4096",
+      "so_path": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_all42/tk_mxfp4_gluon_cpp_n32768_k4096_R35A_v12_memc_btw_all_vmcnt15_n8.cpython-310-x86_64-linux-gnu.so",
+      "macros": "PARENT_FLAGS -DVGPR_PF_MODE=1 -DVGPR_PF_N=8 -DVGPR_PF_DRAIN_VMCNT=0 -DBARRIER_TO_WAITCNT_RELAXED_VMCNT=15",
+      "purpose": "the +v keepalive variant under test (R35 V2 unchanged)"
+    }
+  ],
+  "new_builds": [],
+  "reason_no_new_builds": "Pre-flight on existing R35 V2 build refuted P-B.1 prerequisite (bit_eq=0.08% means VGPR-PF deposit path is broken regardless of which target shape is tested). No new R43B-tagged builds were produced."
+}
