@@ -10,6 +10,22 @@
 #ifndef MXFP8_RRR_V2_SCALE_CACHEPOLICY
 #define MXFP8_RRR_V2_SCALE_CACHEPOLICY 0
 #endif
+// R46 Dev D: XCD-aware block swizzle for the MXFP8 RRR exact 8-wave fastpath.
+// Improves L2 cache locality for N-heavy shapes (Gate/Up: N=28672, K=8192)
+// where the default row-major block order causes B-tile cache thrashing.
+// Sweep across 7 compute-bound shapes (R46) showed:
+//   70B Gate/Up +6.51% ★, 70B Down +2.99% ★, 8B Q/O +1.43%, 8B Down +1.14%,
+//   70B Q/O +0.19%, 8192³ -0.25%, 8B Gate/Up -0.74% (worst, within noise).
+// Net positive for production prefill — enabled by default.
+#ifndef MXFP8_RRR_BLOCK_SWIZZLE
+#define MXFP8_RRR_BLOCK_SWIZZLE 1
+#endif
+#ifndef MXFP8_RRR_BLOCK_SWIZZLE_NUM_XCDS
+#define MXFP8_RRR_BLOCK_SWIZZLE_NUM_XCDS 8
+#endif
+#ifndef MXFP8_RRR_BLOCK_SWIZZLE_GROUP_M
+#define MXFP8_RRR_BLOCK_SWIZZLE_GROUP_M 4
+#endif
 
 #if MXFP8_RRR_EXACT_8WAVE_FAST_ENABLE
 
@@ -28,8 +44,11 @@ void rrr_exact_8wave_scaled_kernel(const layout_globals g) {
     //       R21 V2-RCR wiring. The host must preshuffle the scale tensors
     //       via preshuffle_scale_matrix_mfma16_v2_rcr_a/b (same layout as
     //       RCR — A/B scale base formulas are identical between RCR/RRR).
-    const int blocks_per_col = g.n / BLK;
-    const int k_iters = g.k / BK;
+    // R46 Dev D: use constexpr for the exact fastpath to enable full
+    // loop unrolling and better compile-time scheduling.
+    constexpr int blocks_per_row = M_DIM / BLK;
+    constexpr int blocks_per_col = N_DIM / BLK;
+    constexpr int k_iters = K_DIM / BK;
 
     __shared__ ST_row As[2][2];
 #if RRR_ROW_SHARED_TRANSPOSE
@@ -43,9 +62,40 @@ void rrr_exact_8wave_scaled_kernel(const layout_globals g) {
     rt_fl<RBM, RBN, col_l, rt_16x16_s> cA, cB, cC, cD;
     zero(cA); zero(cB); zero(cC); zero(cD);
 
-    const int bid = blockIdx.x;
+    int bid = blockIdx.x;
+#if MXFP8_RRR_BLOCK_SWIZZLE
+    // R46 Dev D: XCD-aware chiplet swizzle + grouped-M swizzle.
+    // Chiplet swizzle: interleave blocks across XCDs for better L2 locality.
+    {
+        const int num_wgs = gridDim.x;
+        if (num_wgs >= MXFP8_RRR_BLOCK_SWIZZLE_NUM_XCDS &&
+            (num_wgs % MXFP8_RRR_BLOCK_SWIZZLE_NUM_XCDS) == 0) {
+            bid =
+                (bid % MXFP8_RRR_BLOCK_SWIZZLE_NUM_XCDS) *
+                    (num_wgs / MXFP8_RRR_BLOCK_SWIZZLE_NUM_XCDS) +
+                (bid / MXFP8_RRR_BLOCK_SWIZZLE_NUM_XCDS);
+        }
+    }
+    // Grouped-M swizzle: group M-tiles so adjacent blocks share B-tiles.
+    const int num_wgid_in_group = MXFP8_RRR_BLOCK_SWIZZLE_GROUP_M * blocks_per_col;
+    const int group_id = bid / num_wgid_in_group;
+    const int first_pid_m = group_id * MXFP8_RRR_BLOCK_SWIZZLE_GROUP_M;
+    const int group_size_m =
+        (first_pid_m + MXFP8_RRR_BLOCK_SWIZZLE_GROUP_M <= blocks_per_row)
+            ? MXFP8_RRR_BLOCK_SWIZZLE_GROUP_M
+            : (blocks_per_row - first_pid_m);
+    int br, bc;
+    if (group_size_m <= 0) {
+        br = blocks_per_row;
+        bc = blocks_per_col;
+    } else {
+        br = first_pid_m + ((bid % num_wgid_in_group) % group_size_m);
+        bc = (bid % num_wgid_in_group) / group_size_m;
+    }
+#else
     const int br = bid / blocks_per_col;
     const int bc = bid % blocks_per_col;
+#endif
     const int wm = warpid() / WARPS_N;
     const int wn = warpid() % WARPS_N;
 
