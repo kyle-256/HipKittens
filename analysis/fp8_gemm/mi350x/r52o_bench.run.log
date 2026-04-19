@@ -1,0 +1,39 @@
+=== R52 Dev O: V1 vs V2 RRR strict-SCLK A/B over 7 cells ===
+    GPU: HIP_VISIBLE_DEVICES=2
+    WARMUP=100  ITERS=200  RUNS=5  COOL=30s  REBUILD_COOL=60s
+=== 8B_GateUp (4096 x 14336 x 4096) RRR ===
+  build for shape (4096,14336,4096)...
+  --> [A=V1] (RRR_PRESHUFFLE_V2_RUNTIME=0)
+      sleep 60s (no rebuild needed; cool only)
+  --> [B=V2] (RRR_PRESHUFFLE_V2_RUNTIME=1)
+=== 8B_QO (4096 x 4096 x 4096) RRR ===
+  build for shape (4096,4096,4096)...
+  --> [A=V1] (RRR_PRESHUFFLE_V2_RUNTIME=0)
+      sleep 60s (no rebuild needed; cool only)
+  --> [B=V2] (RRR_PRESHUFFLE_V2_RUNTIME=1)
+=== 8B_Down (4096 x 4096 x 14336) RRR ===
+  build for shape (4096,4096,14336)...
+  --> [A=V1] (RRR_PRESHUFFLE_V2_RUNTIME=0)
+      sleep 60s (no rebuild needed; cool only)
+  --> [B=V2] (RRR_PRESHUFFLE_V2_RUNTIME=1)
+=== 70B_GateUp (4096 x 28672 x 8192) RRR ===
+  build for shape (4096,28672,8192)...
+  --> [A=V1] (RRR_PRESHUFFLE_V2_RUNTIME=0)
+      sleep 60s (no rebuild needed; cool only)
+  --> [B=V2] (RRR_PRESHUFFLE_V2_RUNTIME=1)
+=== 70B_QO (4096 x 8192 x 8192) RRR ===
+  build for shape (4096,8192,8192)...
+  --> [A=V1] (RRR_PRESHUFFLE_V2_RUNTIME=0)
+      sleep 60s (no rebuild needed; cool only)
+  --> [B=V2] (RRR_PRESHUFFLE_V2_RUNTIME=1)
+=== 70B_Down (4096 x 8192 x 28672) RRR ===
+  build for shape (4096,8192,28672)...
+  --> [A=V1] (RRR_PRESHUFFLE_V2_RUNTIME=0)
+      sleep 60s (no rebuild needed; cool only)
+  --> [B=V2] (RRR_PRESHUFFLE_V2_RUNTIME=1)
+=== Cube_8192 (8192 x 8192 x 8192) RRR ===
+  build for shape (8192,8192,8192)...
+  --> [A=V1] (RRR_PRESHUFFLE_V2_RUNTIME=0)
+      sleep 60s (no rebuild needed; cool only)
+  --> [B=V2] (RRR_PRESHUFFLE_V2_RUNTIME=1)
+=== R52O strict-SCLK A/B complete ===
