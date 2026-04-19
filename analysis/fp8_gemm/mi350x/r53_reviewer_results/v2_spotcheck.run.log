@@ -1,0 +1,8 @@
+=== R53 Reviewer V2 spot-check (GPU 3, 5 runs/arm) ===
+=== 8B_GateUp (4096 x 14336 x 4096) RRR ===
+  --> [V1]
+  --> [V2]
+=== 70B_QO (4096 x 8192 x 8192) RRR ===
+  --> [V1]
+  --> [V2]
+=== DONE ===
