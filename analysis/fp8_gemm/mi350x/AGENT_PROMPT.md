@@ -2,8 +2,14 @@
 
 你在继续推进 `HipKittens` 的 MXFP4 GEMM 优化工作，跟 Cursor (Hipkittens2) 竞赛。
 
-## ⚠️ 当前优化目标 (2026-04-19, post-R38)
-> **WIN: 12, LOSE_CORRECT: 4, WRONG_OUTPUT: 26, CRASH: 0** (R38E run3, best-of-3) — 16 verified-correct (R37 14 + 2 NEW)。
+## ⚠️ 当前优化目标 (2026-04-19, post-R39 Opt B; Opt A in flight)
+
+> **REFRAMING**: R39 Opt B 用 random-scale + wrong_cell_frac gate 重测 → **真正 verified-correct 只有 6/42**。R37 的 14 和 R38E 的 16 都被 uniform scale=-4 的 mask 效应抬高了。所有 6 个真正正确的 shape 都是 small-K (K ∈ {2048, 3072, 4096})。所有 large-K (K≥7168) 都被结构 bug 挡住。
+> **新 bench harness: `bench_all_42_R39B.py`** (random scale [-2,2], wrong_cell_frac < 2% AND snr_med ≥ 10 dB AND finite ≥ 0.99, 3-run majority vote)。bf16+K=thousands+random scale 的 intrinsic SNR 上限 ~20-25 dB，40 dB 目标不现实。
+> **R39 Opt A (TAIL_SCALE_CLAMP)** 进行中 — 如果 hypothesis 对 (load_pq_scale_x2_async 在 tail iters 推进 scale index 但 data tile 被 clamp)，可能一次救回所有 large-K shape，把 verified-correct 推到 14+19+9 = 42 范围。
+
+> **R38 history (post-R37)**:
+> - WIN: 12, LOSE_CORRECT: 4, WRONG_OUTPUT: 26, CRASH: 0 (under uniform-scale gate; INFLATED — 见上面 R39 重测)。
 > R38 跑了 6 个并行 attack (A/B/C/D/E/F)，全部数据收敛到一个 root-cause hypothesis: `load_pq_scale_x2_async(... bt+1 ...)` 在 tail iters 把 **scale index** 推进了，但 **data tile** 被 clamp 到 `pf_bt = k_byte_iters - 1`，scale-vs-data 不对齐 → BF16-overflow garbage。这跟 "17% deterministic-wrong cells" project memo 信号完全一致。
 > `R38_BEST_VARIANTS_v3.py` 是新的 drop-in dict (per-shape macro overrides)。`build_R38E.py` 是 builder。`R38_LEADERBOARD.md` 是 R37 vs R38E 对比表。
 

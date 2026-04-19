@@ -1,11 +1,23 @@
 # MXFP4 GEMM Optimization TODO
 
-## Current State (2026-04-19, post-R38)
+## Current State (2026-04-19, post-R39 Opt B; Opt A in flight)
 
-**Bench**: `bench_all42_results_R38_optE.json` (run3, best-of-3) — `R38_LEADERBOARD.md`
-**Result**: **WIN: 12/42, LOSE_CORRECT: 4/42, WRONG_OUTPUT: 26/42, CRASH: 0/42** — 16 verified-correct (+2 vs R37). 0 CRASH (R38B selectively applied to 3 shapes).
+**HEADLINE — VERIFIED CORRECT COUNT IS LOWER THAN PRIOR HEADLINES SUGGESTED.**
 
-`R38_BEST_VARIANTS_v3.py` is the new drop-in dict with per-shape macro overrides (R37 14 WIN preserved + R38D 5 new correct + selective R38B for 3 CRASH→WIN shapes).
+**R39 Opt B re-bench under random-scale + wrong_cell_frac gate**:
+- **R37**: 14 → really only 6 verified-correct
+- **R38E**: 16 → really only 6 verified-correct
+- The uniform scale=-4 finite gate was MASKING wrong cells. Under realistic random scales, all the 17%-deterministic-wrong cells surface (matches R34/R35 project memo signature).
+- All 6 truly-correct shapes are small-K (K ∈ {2048, 3072, 4096}). All large-K shapes (K ≥ 7168) are structurally broken.
+
+**Bench harness now `bench_all_42_R39B.py`**: random scale [-2, 2], wrong_cell_frac < 2% AND snr_med ≥ 10 dB AND finite ≥ 0.99. The 40 dB SNR target was unreachable (bf16 + K=thousands + random scales caps intrinsic SNR at 20-25 dB).
+
+**R39 Opt A (TAIL_SCALE_CLAMP)** is in flight — if hypothesis holds, it should fix the structural large-K bug and re-lift verified-correct count toward 14+19+9 = 42.
+
+### R39 NEW KNOWLEDGE (durable, 2026-04-19)
+- **R39 Opt B (random-scale gate)**: REFRAMING WIN, leaderboard LOSS. Adopted as the project's new correctness gate. The R37/R38 "16/42" headlines were inflated by the brittle uniform-(-4) probe; reality is ~6/42 verified-correct, all small-K. Per-cell wrong_cell_frac map (in `bench_all42_results_R39_optB.json`) can be used to bisect the actual bug.
+- **bf16 saturates intrinsic SNR**: at K=thousands with random scales, max achievable SNR is 20-25 dB. 40+ dB target is unreachable; use wrong_cell_frac instead.
+- **bench_all_42_R39B.py supersedes bench_all_42_R37.py**: 3-tier gate (wrong_cell_frac < 2% AND snr_med ≥ 10 dB AND finite ≥ 0.99) with 3-run majority-vote consensus.
 
 ### R38 NEW KNOWLEDGE (durable, 2026-04-19) — SCALE/DATA TILE MISALIGNMENT
 - **Six R38 attacks (A/B/C/D/E/F) converged on a single root-cause hypothesis**: `load_pq_scale_x2_async(... bt+1 ...)` advances the **scale index** on tail iters even when the **data tile** is clamped to `pf_bt = k_byte_iters - 1`. Scale-vs-data tile **misalignment** produces the BF16-overflow garbage that matches the "17% deterministic-wrong cells" project memo signature exactly.
