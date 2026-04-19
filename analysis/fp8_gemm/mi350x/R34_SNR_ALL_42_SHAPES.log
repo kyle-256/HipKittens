@@ -1,0 +1,65 @@
+==============================================================================================================
+MXFP4 GEMM SNR Validation -- ALL 42 Shapes vs Torch Float32 Reference
+==============================================================================================================
+Methodology: 5-run consistency filter + torch float32 reference
+SNR gate: 40.0 dB (on deterministic cells)
+Deterministic fraction gate: 50%
+Scale exponent: constant -4 (2^-4 = 0.0625) to avoid bf16 overflow
+FP4 E2M1 table: [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0]
+
+[ 1/42]  16384x  4096x  2048  det_frac= 60.6%  SNR_det=-728.99 dB  SNR_single=-740.45 dB  finite= 87.1%  FAIL  (ref 0.2s)  [ts_v12_gm7_memc_pfoff4_kx2048_btw_all]
+
+WARNING: First shape deterministic SNR = -728.99 dB
+This is very low. Possible dequant table mismatch.
+Continuing anyway...
+
+[ 2/42]  16384x  4096x  3072  det_frac= 61.5%  SNR_det=-730.74 dB  SNR_single=-739.12 dB  finite= 62.9%  FAIL  (ref 0.0s)  [ts_gm6_v12_memc_dc_pfoff4]
+[ 3/42]  16384x  6144x  2048  det_frac= 56.5%  SNR_det=-730.91 dB  SNR_single=-740.43 dB  finite= 84.6%  FAIL  (ref 0.0s)  [ts_lgk2_gm6_v12_memc_pfoff4]
+[ 4/42]  32768x  4096x  2048  det_frac= 49.0%  SNR_det=-729.79 dB  SNR_single=-740.57 dB  finite= 80.6%  FAIL  (ref 0.0s)  [ts_lgk2_gm6_v12_memc_pfoff4]
+[ 5/42]  32768x  4096x  3072  det_frac= 42.9%  SNR_det=-729.08 dB  SNR_single=-739.95 dB  finite= 44.8%  FAIL  (ref 0.0s)  [ts_lgk2_memc_btw_all]
+[ 6/42]  32768x  6144x  2048  det_frac= 53.3%  SNR_det=-731.32 dB  SNR_single=-740.33 dB  finite= 82.6%  FAIL  (ref 0.0s)  [ts_lgk2_gm6_v12_memc_pfoff4]
+[ 7/42]  16384x 14336x  2048  det_frac= 55.2%  SNR_det=-727.29 dB  SNR_single=-739.68 dB  finite= 85.2%  FAIL  (ref 0.0s)  [ts_v12_gm7_memc_pfoff4_kx2048_btw_all]
+[ 8/42]  16384x 28672x  2048  det_frac= 33.1%  SNR_det=-732.33 dB  SNR_single=-741.27 dB  finite= 79.5%  FAIL  (ref 0.0s)  [ts_lgk2_gm6_v12_memc_pfoff4]
+[ 9/42]  32768x 14336x  2048  det_frac= 51.6%  SNR_det=-730.89 dB  SNR_single=-740.26 dB  finite= 82.4%  FAIL  (ref 0.0s)  [ts_gm6_v12_memc_dc_pfoff4]
+[10/42]  32768x 28672x  2048  det_frac= 34.9%  SNR_det=-730.51 dB  SNR_single=-740.92 dB  finite= 80.0%  FAIL  (ref 0.0s)  [ts_lgk2_gm6_v12_memc_pfoff4]
+[11/42]   4096x  4096x 16384  det_frac= 53.1%  SNR_det=-717.25 dB  SNR_single=-732.98 dB  finite= 53.9%  FAIL  (ref 0.0s)  [ts_lgk2_gm7_memc_pfoff56_kx16384_btw_all]
+[12/42]   4096x 14336x 16384  det_frac= 56.3%  SNR_det=-720.10 dB  SNR_single=-730.78 dB  finite= 59.5%  FAIL  (ref 0.0s)  [ts_lgk2_gm7_memc_pfoff56_kx16384_btw_all]
+[13/42]   6144x  4096x 16384  det_frac= 60.0%  SNR_det=-720.80 dB  SNR_single=-732.29 dB  finite= 60.1%  FAIL  (ref 0.0s)  [ts_lgk2_gm7_memc_pfoff56_kx16384_btw_all]
+[14/42]   4096x  4096x  8192  det_frac= 56.1%  SNR_det=-660.54 dB  SNR_single=-733.08 dB  finite= 89.4%  FAIL  (ref 0.0s)  [ts_v12_tv0_gm7_memc_pfoff28_kx8192_btw_all]
+[15/42]   4096x  4096x 32768  det_frac= 54.8%  SNR_det=-715.61 dB  SNR_single=-730.40 dB  finite= 56.0%  FAIL  (ref 0.0s)  [ts_v12_tv0_memc_dc_gm7_pfoff120_kx32768_btw_a]
+[16/42]   4096x  6144x 32768  det_frac= 53.0%  SNR_det=-717.32 dB  SNR_single=-730.25 dB  finite= 55.1%  FAIL  (ref 0.0s)  [ts_v12_tv0_memc_dc_gm7_pfoff120_kx32768_btw_a]
+[17/42]   4096x 14336x  8192  det_frac= 49.6%  SNR_det=-661.47 dB  SNR_single=-732.01 dB  finite= 86.3%  FAIL  (ref 0.0s)  [ts_v12_tv0_gm7_memc_pfoff28_kx8192_btw_all]
+[18/42]   4096x 28672x 32768  det_frac= 60.3%  SNR_det=-717.70 dB  SNR_single=-727.72 dB  finite= 56.4%  FAIL  (ref 0.0s)  [ts_v12_tv0_memc_dc_gm7_pfoff120_kx32768_btw_a]
+[19/42]   4096x 32768x  4096  det_frac= 53.9%  SNR_det=-721.68 dB  SNR_single=-735.28 dB  finite= 73.0%  FAIL  (ref 0.0s)  [ts_lgk2_gm7_v12_memc_pfoff14]
+[20/42]   4096x 32768x  6144  det_frac= 43.5%  SNR_det=-729.99 dB  SNR_single=-737.30 dB  finite= 53.7%  FAIL  (ref 0.0s)  [ts_v12_gm7_memc_pfoff19_kx6144_btw_all]
+[21/42]   4096x 32768x 14336  det_frac= 36.5%  SNR_det=-730.31 dB  SNR_single=-735.03 dB  finite= 31.6%  FAIL  (ref 0.0s)  [ts_v12_tv0_memc_btw_all]
+[22/42]   4096x 32768x 28672  det_frac= 52.1%  SNR_det=-717.88 dB  SNR_single=-728.44 dB  finite= 53.1%  FAIL  (ref 0.0s)  [ts_lgk2_gm7_memc_pfoff104_kx28672_btw_all]
+[23/42]   4096x 32768x128256  det_frac= 35.0%  SNR_det=-667.33 dB  SNR_single=-720.32 dB  finite= 54.6%  FAIL  (ref 0.0s)  [ts_lgk2_v12_memc_btw_all]
+[24/42]   4096x128256x 32768  det_frac= 53.9%  SNR_det=-718.59 dB  SNR_single=-727.93 dB  finite= 55.3%  FAIL  (ref 0.0s)  [ts_v12_tv0_memc_dc_gm7_pfoff120_kx32768_btw_a]
+[25/42]   6144x  4096x  8192  det_frac= 54.8%  SNR_det=-694.69 dB  SNR_single=-732.75 dB  finite= 88.7%  FAIL  (ref 0.0s)  [ts_v12_tv0_gm7_memc_pfoff28_kx8192_btw_all]
+[26/42]   6144x 32768x  4096  det_frac= 52.1%  SNR_det=-721.15 dB  SNR_single=-734.86 dB  finite= 72.9%  FAIL  (ref 0.0s)  [ts_gm7_v12_memc_dc_pfoff14]
+[27/42]  14336x  4096x 32768  det_frac= 59.8%  SNR_det=-716.21 dB  SNR_single=-728.13 dB  finite= 58.5%  FAIL  (ref 0.0s)  [ts_v12_tv0_memc_dc_gm7_pfoff120_kx32768_btw_a]
+[28/42]  14336x 32768x  4096  det_frac= 33.5%  SNR_det=-722.31 dB  SNR_single=-736.76 dB  finite= 61.4%  FAIL  (ref 0.0s)  [ts_lgk2_gm7_v12_memc_pfoff14]
+[29/42]  16384x  4096x  4096  det_frac= 66.8%  SNR_det=-717.50 dB  SNR_single=-735.01 dB  finite= 82.5%  FAIL  (ref 0.0s)  [ts_gm7_v12_memc_dc_pfoff14]
+[30/42]  16384x  4096x  6144  det_frac= 57.3%  SNR_det=-726.98 dB  SNR_single=-735.82 dB  finite= 64.7%  FAIL  (ref 0.0s)  [ts_v12_gm7_memc_pfoff19_kx6144_btw_all]
+[31/42]  16384x  4096x  7168  det_frac= 56.1%  SNR_det=-717.26 dB  SNR_single=-734.16 dB  finite= 86.1%  FAIL  (ref 0.0s)  [ts_v12_tv0_gm7_memc_pfoff24_kx7168_btw_all]
+[32/42]  16384x  4096x 14336  det_frac= 63.2%  SNR_det=-707.29 dB  SNR_single=-730.44 dB  finite= 76.6%  FAIL  (ref 0.0s)  [ts_v12_tv0_memc_dc_gm7_pfoff54_kx14336_btw_al]
+[33/42]  16384x  4096x 28672  det_frac= 61.7%  SNR_det=-716.18 dB  SNR_single=-727.81 dB  finite= 63.5%  FAIL  (ref 0.0s)  [ts_lgk2_gm7_memc_pfoff104_kx28672_btw_all]
+[34/42]  16384x  6144x  4096  det_frac= 63.5%  SNR_det=-720.13 dB  SNR_single=-734.96 dB  finite= 81.2%  FAIL  (ref 0.0s)  [ts_lgk2_gm7_v12_memc_pfoff14]
+[35/42]  16384x 14336x  4096  det_frac= 65.9%  SNR_det=-722.59 dB  SNR_single=-734.73 dB  finite= 80.0%  FAIL  (ref 0.0s)  [ts_gm7_v12_memc_dc_pfoff14]
+[36/42]  16384x 28672x  4096  det_frac= 66.7%  SNR_det=-723.18 dB  SNR_single=-734.40 dB  finite= 79.4%  FAIL  (ref 0.0s)  [ts_gm7_v12_memc_dc_pfoff14]
+[37/42]  28672x  4096x  8192  det_frac= 42.9%  SNR_det=-696.47 dB  SNR_single=-732.30 dB  finite= 81.4%  FAIL  (ref 0.0s)  [ts_v12_tv0_gm7_memc_pfoff28_kx8192_btw_all]
+[38/42]  28672x  4096x 16384  det_frac= 59.0%  SNR_det=-720.80 dB  SNR_single=-730.74 dB  finite= 57.3%  FAIL  (ref 0.0s)  [ts_lgk2_gm7_memc_pfoff56_kx16384_btw_all]
+[39/42]  28672x 32768x  4096  det_frac= 38.5%  SNR_det=-722.65 dB  SNR_single=-735.10 dB  finite= 71.6%  FAIL  (ref 0.0s)  [ts_gm7_v12_memc_dc_pfoff14]
+[40/42]  32768x  4096x  7168  det_frac= 50.8%  SNR_det=-717.34 dB  SNR_single=-733.97 dB  finite= 81.6%  FAIL  (ref 0.0s)  [ts_v12_tv0_gm7_memc_pfoff24_kx7168_btw_all]
+[41/42]  32768x  4096x 14336  det_frac= 60.3%  SNR_det=-711.35 dB  SNR_single=-730.59 dB  finite= 76.3%  FAIL  (ref 0.0s)  [ts_v12_tv0_memc_dc_gm7_pfoff54_kx14336_btw_al]
+Traceback (most recent call last):
+  File "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/snr_all_42_shapes.py", line 457, in <module>
+    main()
+  File "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/snr_all_42_shapes.py", line 371, in main
+    r = test_single_shape(m, n, k, variant, idx, len(ALL_SHAPES))
+  File "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/snr_all_42_shapes.py", line 308, in test_single_shape
+    snr_single, maxdiff_single, exact_single, n_single = compute_snr_double(
+  File "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/snr_all_42_shapes.py", line 224, in compute_snr_double
+    rv = ref_d[mask]
+torch.OutOfMemoryError: HIP out of memory. Tried to allocate 67174464.06 GiB. GPU 0 has a total capacity of 287.98 GiB of which 110.27 GiB is free. Of the allocated memory 164.81 GiB is allocated by PyTorch, and 11.94 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)

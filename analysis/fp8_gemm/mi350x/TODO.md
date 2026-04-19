@@ -1,9 +1,38 @@
 # MXFP4 GEMM Optimization TODO
 
-## Current State (2026-04-18, post-R33)
+## Current State (2026-04-19, post-R34)
 
 **Bench**: `bench_all42_results_R25_FINAL_v2.{json,log}` + R29 single-shape verifies
 **Result**: **41/42 WIN, 1/42 LOSE, 0 ERR, projected win rate 97.6%** — unchanged since R29.
+
+### R34 NEW KNOWLEDGE (durable — 2026-04-19)
+- **VGPR-PF approach (R34 Opt B) BUILDS but DOESN'T HELP**: Routing B-tile prefetch through scratch VGPRs (avoiding M0 backpressure) builds at 219 VGPR / 0 spills, vmcnt(15) variants don't HSA-fault for the first time in 6 rounds. **BUT a CDNA4 clang register-allocator bug** drops scratch VGPR contents between adjacent `asm volatile` blocks (`"=v"(dst)` doesn't keep values live). Without `+v` keepalive barriers, the kernel reads garbage. R35 candidate: VGPR-PF with `asm volatile("" : "+v"(b_scratch[i]))` keepalives.
+- **Kernel correctness has TWO failure modes**:
+  1. ~13% non-deterministic cells (race conditions, varies run-to-run)
+  2. **~17% deterministically-wrong cells** writing bf16-overflow garbage (±3.39e+38) — these survive multi-run consistency filters but disagree from torch reference by 600+ dB
+- **The 17% deterministic-wrong tier** has been latent since at least R25 (visible in finite_frac < 90%). Cannot be filtered by run-consistency. Swamps any aggregate SNR metric.
+- **SNR vs torch reference is reproducible at narrow setup only**: M=N=4096, K=2048, n_runs=5 → SNR_det = 47.06-47.82 dB across all scale modes (zero/const/random). Confirms FP4 dequant table + scale interpretation are CORRECT for the truly-stable 70% of cells.
+- **For all M > 4096**: same kernel, same N, same K → SNR_det collapses to -600 to -700 dB. Either (a) my torch reference doesn't capture an M-dependent kernel layout, or (b) the kernel is silently wrong at large M (matches what bench_all_42 measures, since bench has no correctness check).
+- **Practical implication**: TFLOPS numbers from `bench_all_42.py` measure wall-clock time of *whatever the kernel computes*; aiter is the implicit reference. The 41/42 WIN record is conditional on tolerating the 17% "deterministic-wrong" tier.
+
+### R34 attempts
+- **R34 Decider** (`R34_DECIDER_VERDICT.md`): aiter binary ISA deep-dive (24-hr fork plan, 8 sub-tasks A-H). Top hypothesis: aiter routes B-tile loads to scratch VGPRs (`v[168:199]`), avoiding M0 backpressure → enables vmcnt(15).
+- **R34 Opt A** (scale-load granularity): NEUTRAL/NEGATIVE on L6 — 1-rep and 5-rep both inside noise.
+- **R34 Opt B** (VGPR-PF prefetch fork): kernel `kernel_mxfp4_gluon_cpp_vgprPF.cpp` builds at 219 VGPR / 0 spills, vmcnt(15) doesn't crash → first plausible vmcnt(15) path in 6 rounds. Output is INCORRECT due to compiler bug (see R34 NEW KNOWLEDGE above).
+- **R34 SNR sweep** (`snr_all_42_shapes.py`): all 42 shapes report SNR_det ≈ -700 dB; methodology breaks beyond M=4096. Diagnostic in `snr_diag_random.py` reproducibly hits 47 dB at M=N=4096.
+
+### R34 close — files
+- `R34_DECIDER_VERDICT.md` — 8-task plan, aiter ISA hypothesis
+- `R34_SNR_FINDINGS.md` — full SNR methodology limits + 47 dB anchor
+- `kernel_mxfp4_gluon_cpp_vgprPF.cpp` — VGPR-PF fork (incorrect output, needs keepalive fix)
+- `snr_diag_random.py` — minimal SNR repro (47 dB at M=N=4096)
+- `snr_all_42_shapes.py` — full sweep (broken methodology for M>4096)
+- `R34_SNR_ALL_42_SHAPES.log` — sweep output
+
+### R35 candidates (post R34)
+1. **VGPR-PF v2 with keepalive barriers** (4-8 hr): add `asm volatile("" : "+v"(b_scratch[i]))` between buffer_load and ds_write to defeat compiler's VGPR clobber. If correctness restored, test if vmcnt(15) actually unlocks throughput on L6.
+2. **Diagnose the 17% deterministic-wrong tier**: identify which K-iters/which lanes write garbage. May reveal a fixable bug that lifts L6 ceiling AND fixes incumbent correctness.
+3. **V7 Stream-K** (≥2wk, deferred): only structural lever left.
 **Status**: **STRUCTURALLY SATURATED, RE-CONFIRMED ACROSS 5 ROUNDS (R29/R30/R31/R32/R33).** R33 was the first round to disassemble the aiter binary directly:
 
 ### R33 NEW KNOWLEDGE (durable)

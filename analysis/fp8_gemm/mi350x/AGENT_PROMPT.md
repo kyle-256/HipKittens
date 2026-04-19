@@ -2,9 +2,17 @@
 
 你在继续推进 `HipKittens` 的 MXFP4 GEMM 优化工作，跟 Cursor (Hipkittens2) 竞赛。
 
-## ⚠️ 当前优化目标 (2026-04-18, post-R33)
-> 41/42 WIN (97.6%) = **structurally saturated, RE-CONFIRMED 5 rounds**.
-> R29 (V8 peel DEAD), R30 (transplant + K_EXACT audit DEAD), R31 (UNROLL_K + Persistent-XCD + STEP3_BARRIER_VMCNT 全 DEAD), R32 (K_LOOP_SYNC + NT_LOAD + V6 split-K 全 DEAD), R33 (aiter binary archaeology + SRD swap + vmcnt-mimic 全 DEAD).
+## ⚠️ 当前优化目标 (2026-04-19, post-R34)
+> 41/42 WIN (97.6%) = **structurally saturated, RE-CONFIRMED 6 rounds**.
+> R29 (V8 peel DEAD), R30 (transplant + K_EXACT audit DEAD), R31 (UNROLL_K + Persistent-XCD + STEP3_BARRIER_VMCNT 全 DEAD), R32 (K_LOOP_SYNC + NT_LOAD + V6 split-K 全 DEAD), R33 (aiter binary archaeology + SRD swap + vmcnt-mimic 全 DEAD), R34 (VGPR-PF for B-tile 编译成功但 compiler bug 导致结果错; SNR sweep 揭示 17% 单元 deterministic-wrong).
+
+> **R34 NEW KNOWLEDGE (durable, 2026-04-19)**:
+> - **VGPR-PF (R34 Opt B)** 编译干净 (219 VGPR / 0 spills), vmcnt(15) 不再 HSA-fault — 6 轮以来首次. **但** CDNA4 clang register-allocator bug: `"=v"(dst)` 不能保持 scratch VGPR 在相邻 `asm volatile` 之间 live, 编译器丢弃 prefetch 数据. R35 候选: 加 `asm volatile("" : "+v"(b_scratch[i]))` keepalive barriers.
+> - **Kernel 有 17% deterministic-wrong cells** (写 bf16-overflow garbage ±3.39e+38), 跨多次运行一致, 不能被 consistency filter 过滤. 加上 ~13% non-deterministic cells, 总错误率 ~30%. 自 R25 以来一直存在 (finite_frac < 90% 是症状). 这意味着我们的 TFLOPS 数字测的是 "kernel 算的东西" 的 wall-clock, aiter 是隐式 reference.
+> - **SNR vs torch reference 只在窄设置可重现**: M=N=4096, K=2048, n_runs=5 → SNR_det = 47.06-47.82 dB (cross zero/const/random scales). 证实 FP4 dequant + scale 解释 CORRECT for 70% truly-stable cells. 一旦 M > 4096 → SNR_det 崩到 -700 dB.
+> - **R35 候选**: (1) VGPR-PF v2 加 keepalive barriers (4-8 hr); (2) 诊断 17% deterministic-wrong tier (可能修复 incumbent + 提升 L6); (3) V7 Stream-K (≥2 周, deferred).
+
+> **R33 NEW KNOWLEDGE (durable)**:
 >
 > **R33 NEW KNOWLEDGE (durable)**:
 > - **aiter 二进制可反汇编** at `/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/`. L6 dispatch → `f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co`. 用 `llvm-objdump --disassemble --arch=amdgcn -mcpu=gfx950`.
@@ -63,9 +71,26 @@ R25 累计死路 (per `R26_PLAN.md` §4):
 
 R25-G 之前各类已知 dead (history): `iterative-ilp` 编译器 bug, BK=256 LDS 不够, Direct-B 慢 28%, ds_bpermute 退化, GROUP_SIZE_M=32/64 大N 退化, UNROLL_K=1/2/4 比默认差, FUSED_STEP34 退化 7%, ASM rewriter (s_nop removal) 破坏正确性, PF_N=1/2 退化 2-6%, asymmetric PF 无效.
 
+### 正确性验证规则 (MANDATORY — 在任何性能声明之前必须通过)
+
+**每个新 kernel variant 在 benchmark 之前必须通过 SNR ≥ 40 dB 正确性门槛。**
+
+#### SNR 验证流程
+1. **Torch reference**: dequant FP4 E2M1 nibbles → float32, apply E8M0 block scales (`2^exp`, block_size=32), `torch.matmul` in float32, cast to bf16
+2. **SNR** = `10 * log10(mean(ref²) / mean((test - ref)²))` on finite elements
+3. **Gate**: SNR ≥ 40 dB → PASS; < 40 dB → FAIL, 不能 benchmark
+4. **输入**: FP4 random nibbles 0-15; scale_exp ∈ [-2, 2] (K ≤ 16384), [-1, 1] (K > 16384)
+5. **调用**: `mod.gemm_rcr(A, B, A_scale, B_scale, C)` — scales 在 output 之前
+6. **参考脚本**: `snr_R34_proper.py`
+
+#### K=128256 特殊情况
+- K=128256 的 SNR 方法论**完全不可用** — 即使正确 kernel 也产生 ~50% NaN/inf, SNR 始终为负.
+- **先在 K=4096 验证** (相同 variant flags, 只改 `-DK_DIM=4096`). K=4096 SNR ≥ 40 dB 后才能进行 K=128256 性能 benchmark.
+- K=128256 性能稳定性: 用 incumbent-vs-variant `diff_frac` method (阈值: legacyfork baseline + 5pp).
+
 ### 工作准则
 - **每轮锁定 1-3 个 P0/P1 shape** 专项优化, 不再全 42 跑.
-- **改动后必跑 regression**: `bench_deep_lose.py` (10 shape spot) + `bench_all42_parallel.py` 抽测 (确认 24 WIN 不掉).
+- **改动后必跑 correctness + regression**: 先 SNR ≥ 40 dB (上述流程), 再 `bench_deep_lose.py` (10 shape spot) + `bench_all42_parallel.py` 抽测.
 - **+1pp 即可 commit** (不再要求翻 WIN).
 - **大 K (≥14336) shapes** 是主战场: 该类的 gap 主要来自 LDS broadcast bandwidth 不足 + B tile reuse 效率低.
 - **mega-M shape 128256×32768×4096** 已被验证为 **register-pressure / MFMA-pipeline bound** (Round 4 PERSISTENT_XCD_QUEUE 实证), **不是 launch-bound**. 不要再尝试 dispatch 优化.
