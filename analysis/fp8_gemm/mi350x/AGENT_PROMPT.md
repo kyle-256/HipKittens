@@ -2,12 +2,23 @@
 
 你在继续推进 `HipKittens` 的 MXFP4 GEMM 优化工作，跟 Cursor (Hipkittens2) 竞赛。
 
-## ⚠️ 当前优化目标 (2026-04-19, post-R37)
-> **WIN: 14/42, LOSE: 0/42, WRONG_OUTPUT: 19/42, CRASH: 9/42** — 第一份 correctness-gated leaderboard。
-> R37 Fix B 给出了 6 轮以来第一批"真正"的 WIN (14 个 shape, 104-118% of comp, kernel_finite ≥ 0.995)。剩余 28 个 shape 都被两个结构性 bug 卡住，R38 用并行两支 attack:
-> - **R38 Opt A**: 把 `emit_one_pf` 内的 `__builtin_amdgcn_raw_buffer_load_lds` 转成内联 `asm volatile` block，让 LLVM scheduler 没法 reorder。瞄准 **19 WRONG_OUTPUT**.
-> - **R38 Opt B**: 在 fused-step34 branch 里加 srd-bounded tail prefetches，让 R25-C `pfoff ≥ 1` 不再 OOB。瞄准 **9 CRASH** (`_ts_lgk2_gm6_v12_memc_pfoff4` family).
-> 全部回归必须用 `bench_all_42_R37.py` (correctness-gated, kernel_finite ≥ 0.995)。`bench_all_42.py` 已废弃 — 它测 wall-clock-of-garbage。
+## ⚠️ 当前优化目标 (2026-04-19, post-R38)
+> **WIN: 12, LOSE_CORRECT: 4, WRONG_OUTPUT: 26, CRASH: 0** (R38E run3, best-of-3) — 16 verified-correct (R37 14 + 2 NEW)。
+> R38 跑了 6 个并行 attack (A/B/C/D/E/F)，全部数据收敛到一个 root-cause hypothesis: `load_pq_scale_x2_async(... bt+1 ...)` 在 tail iters 把 **scale index** 推进了，但 **data tile** 被 clamp 到 `pf_bt = k_byte_iters - 1`，scale-vs-data 不对齐 → BF16-overflow garbage。这跟 "17% deterministic-wrong cells" project memo 信号完全一致。
+> `R38_BEST_VARIANTS_v3.py` 是新的 drop-in dict (per-shape macro overrides)。`build_R38E.py` 是 builder。`R38_LEADERBOARD.md` 是 R37 vs R38E 对比表。
+
+> **R38 NEW KNOWLEDGE (durable, 2026-04-19)**:
+> - **R38A (`asm volatile buffer_load_dwordx4 ... offen lds` + "memory" clobber)**: REFUTED。inline asm 确实 emit 了 (llvm-objdump 验证)，但 14 R37 WIN 全部 regress 到 0。LLVM-scheduler-reorder 不是 root cause。
+> - **R38B (always-emit tail prefetches)**: PARTIAL。9/9 CRASH 全部消除 (那些 CRASH 是 "WRONG_OUTPUT then GPU fault" — vmcnt 不匹配)，无条件用代价 9 WIN→LOSE + 3 WIN→WRONG_OUTPUT。**Selectively useful** 在 3 个 shape (CRASH→WIN): `(16384,4096,3072)`, `(32768,6144,2048)`, `(128256,32768,4096)` (LOSS_CORRECT)。
+> - **R38C (L2-only tail prefetch)**: REFUTED。跟 R38B bandwidth-equivalent (LDS write vs discard VGPR — GMEM load 都一样)。
+> - **R38D (variant fork)**: PARTIAL。从 R25 sweep 测了 190 个 candidates (无 memc/dc/tv0) + alternate axes (FUSED_STEP34=1)，找回 5 shape (2 NEW WIN + 3 LOSS_CORRECT)。**14 unrecovered shape 没法用 variant flag 救** — 可能是 bf16 saturation under uniform scale=-4 probe at K≥14336。
+> - **R38E (unified leaderboard, per-shape macro override)**: ORCHESTRATION WIN。`build_R38E.py` 的 per-shape override 机制工作正常。Best-of-3 = 16 verified-correct。**Gate flakiness on 5-7 borderline shapes (finite ∈ [0.97, 0.99])** 是当前主要噪声 — 同样 binary 重 run 可以翻转 status。
+> - **R38F (`s_waitcnt vmcnt(0)` + `s_barrier` 在 tail iters)**: REFUTED。即使 F3 (`s_waitcnt 0` — drain everything) 都没让 finite 过 0.995。Drain 机制不够用。
+
+### R39 候选 (post R38)
+1. **R39 Opt A (`R39_TAIL_SCALE_CLAMP`)**: 在 R37_FIX_B 的 tail iters 上同时 clamp scale index (跟 data tile 一起 clamp 到 `k_byte_iters - 1`)。这是 R38F agent 推断的 root cause 修复。如果对，可能一次修好 14 unrecovered WRONG_OUTPUT。
+2. **R39 Opt B (random-scale + SNR ≥ 40 dB gate)**: 把 uniform scale=-4 finite gate 换掉。能救回 ~6 个 borderline shape (finite ∈ [0.97, 0.99] under uniform-scale)。
+3. **R39 Opt C (bench-harness rerun)**: 同 R38E v3 binary 但更长 warmup + multi-run consensus，对抗 gate flakiness。0 kernel change，可能从 16 提到 18+。
 
 > **R37 NEW KNOWLEDGE (durable, 2026-04-19)**:
 > - **`-mllvm -amdgpu-sched-strategy=max-memory-clause` 是 fused-step34 的敌人**: LLVM "memory clause" scheduler 会跨 K-iter reorder `raw_buffer_load_lds`，破坏 fused step34 顺序约束。`build_R37.py` 在 build flags 里删掉它就解锁正确性。

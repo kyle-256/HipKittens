@@ -1,11 +1,25 @@
 # MXFP4 GEMM Optimization TODO
 
-## Current State (2026-04-19, post-R37)
+## Current State (2026-04-19, post-R38)
 
-**Bench**: `bench_all42_results_R37_fixB.json` (correctness-gated leaderboard)
-**Result**: **WIN: 14/42, LOSE: 0/42, WRONG_OUTPUT: 19/42, CRASH: 9/42** — first valid leaderboard.
+**Bench**: `bench_all42_results_R38_optE.json` (run3, best-of-3) — `R38_LEADERBOARD.md`
+**Result**: **WIN: 12/42, LOSE_CORRECT: 4/42, WRONG_OUTPUT: 26/42, CRASH: 0/42** — 16 verified-correct (+2 vs R37). 0 CRASH (R38B selectively applied to 3 shapes).
 
-The 14 WINs run at 104-118% of `competitor_tflops` with verified correct output (kernel_finite ≥ 0.995). All other shapes are blocked on two structural bugs that R38 will attack in parallel.
+`R38_BEST_VARIANTS_v3.py` is the new drop-in dict with per-shape macro overrides (R37 14 WIN preserved + R38D 5 new correct + selective R38B for 3 CRASH→WIN shapes).
+
+### R38 NEW KNOWLEDGE (durable, 2026-04-19) — SCALE/DATA TILE MISALIGNMENT
+- **Six R38 attacks (A/B/C/D/E/F) converged on a single root-cause hypothesis**: `load_pq_scale_x2_async(... bt+1 ...)` advances the **scale index** on tail iters even when the **data tile** is clamped to `pf_bt = k_byte_iters - 1`. Scale-vs-data tile **misalignment** produces the BF16-overflow garbage that matches the "17% deterministic-wrong cells" project memo signature exactly.
+- **R38A (inline asm `buffer_load_dwordx4 ... lds`)**: REFUTED. Inline asm IS emitted (verified via `llvm-objdump`) but regressed 14 WINs to 0. LLVM-scheduler-reorders-raw_buffer_load_lds is NOT the root cause.
+- **R38B (always-emit tail prefetches)**: PARTIAL. Eliminates 9/9 CRASH (those CRASHes were always "WRONG_OUTPUT then GPU fault" — vmcnt mismatch). Costs 9 WIN→LOSE + 3 WIN→WRONG_OUTPUT when applied unconditionally. **Selectively useful** on 3 shapes (CRASH→WIN): `(16384,4096,3072)`, `(32768,6144,2048)`, `(128256,32768,4096)` (LOSS_CORRECT).
+- **R38C (L2-only tail prefetch)**: REFUTED. Bandwidth-equivalent to R38B (GMEM load is the same whether dest is LDS or discard VGPR). Same outcome.
+- **R38D (variant fork)**: PARTIAL. Tested 190 candidates without `memc/dc/tv0` flags + alternate axes (FUSED_STEP34=1). Recovered 5 shapes (2 NEW WINs + 3 LOSS_CORRECT). **14 remaining WRONG shapes are unfixable by variant flag selection** — likely bf16 saturation under uniform scale=-4 probe at K≥14336.
+- **R38E (unified leaderboard)**: ORCHESTRATION WIN. Per-shape macro override mechanism in `build_R38E.py` works. Best-of-3 = 16 verified-correct. Gate flakiness on 5-7 borderline shapes (finite ∈ [0.97, 0.99]) is the dominant remaining noise.
+- **R38F (s_waitcnt vmcnt(0)+s_barrier on tail iters; F1/F2/F3/F4)**: REFUTED. Even F3 (`s_waitcnt 0` — drain everything) doesn't recover finite. Drain is structurally insufficient.
+
+### R39 candidates (post R38)
+1. **R39 Opt A (TAIL_SCALE_CLAMP)**: clamp the scale index alongside the data index on tail iters in R37_FIX_B path. This directly addresses the scale/data misalignment root cause Opt F identified. If correct, may fix all 14 unrecovered WRONG_OUTPUT shapes at once.
+2. **R39 Opt B (random-scale + SNR gate)**: replace the uniform scale=-4 finite gate with random-scale + SNR ≥ 40 dB. Recovers ~6 borderline shapes at finite ∈ [0.97, 0.99] that bf16-saturate under uniform-scale probe.
+3. **R39 Opt C**: bench-harness rerun — re-confirm R38E v3 with longer warmup + multi-run consensus to defeat the gate flakiness. Should solidify 16 → 18+ verified-correct without any kernel change.
 
 ### R37 NEW KNOWLEDGE (durable, 2026-04-19) — FIRST CORRECTNESS-GATED LEADERBOARD
 - **R37 Fix B SUCCEEDS where R36 failed**: backporting `kpair_64mfma_step34` into the default code path with `pf_active` semantics (driven by `R37_FIX_B` macro, default ON) + S1-force-back-to-`s_barrier` produces correct output on **14/42 shapes** at 104-118% of comp.
