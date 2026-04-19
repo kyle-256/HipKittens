@@ -5,6 +5,13 @@
 **Bench**: `bench_all42_results_R25_FINAL_v2.{json,log}` + R29 single-shape verifies
 **Result**: **41/42 WIN, 1/42 LOSE, 0 ERR, projected win rate 97.6%** — unchanged since R29.
 
+### R35-R36 NEW KNOWLEDGE (durable, 2026-04-19) — CORRECTNESS BUG ROOT-CAUSED
+- **R35 Opt B SMOKING GUN**: the ~17% deterministic-wrong cells live in the **upper-left 128x128 quadrant of every 256x256 output tile** (`acc_A0Bl` accumulator). Other 3 quadrants are 100% clean. `_f34` (FUSED_STEP34=1) variant fixes it — non-finite drops from 5-8% to 0.06%, upper-left from ~27% to 0.00%. Mechanism: non-fused step3+step4 emits 4 separate `asm volatile` blocks, compiler interleaves clobbering moves between them.
+- **R36 BLOCKER**: mechanically appending `-DFUSED_STEP34=1` to BEST_VARIANTS stacks → **0/42 PASS** (17 CRASH, 25 WRONG_OUTPUT). The fused branch in `kernel_mxfp4_gluon_cpp.cpp:2849-2945` BYPASSES the R25-C tail-pf-off conditional → on final K-iter prefetches read past SRD bounds → HSA fault or inf/nan.
+- **R37 REQUIRED**: Fix B = backport `kpair_64mfma_step34` into the DEFAULT code path (replace non-fused step3+step4 at lines ~1657-1680 + tail-iter equivalents) AND add a `pf_active` template parameter to skip prefetches on final K-iter. This is the structural fix that makes correctness AND R25-C tail-pf-off coexist. Estimate 4-8 hours.
+- **The 41/42 WIN record is INVALID**: every R31/R32/R33 "WIN" was measuring time-to-write-garbage. The leaderboard is empty until Fix B lands. R37 will produce the first correctness-gated leaderboard.
+- **bench_all_42.py has no correctness check** — that's how this slipped through 6+ rounds. R37 must add `kernel_finite >= 0.995` gate.
+
 ### R34 NEW KNOWLEDGE (durable — 2026-04-19)
 - **VGPR-PF approach (R34 Opt B) BUILDS but DOESN'T HELP**: Routing B-tile prefetch through scratch VGPRs (avoiding M0 backpressure) builds at 219 VGPR / 0 spills, vmcnt(15) variants don't HSA-fault for the first time in 6 rounds. **BUT a CDNA4 clang register-allocator bug** drops scratch VGPR contents between adjacent `asm volatile` blocks (`"=v"(dst)` doesn't keep values live). Without `+v` keepalive barriers, the kernel reads garbage. R35 candidate: VGPR-PF with `asm volatile("" : "+v"(b_scratch[i]))` keepalives.
 - **Kernel correctness has TWO failure modes**:

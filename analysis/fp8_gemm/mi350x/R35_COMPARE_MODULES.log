@@ -1,0 +1,10 @@
+module                                                  | nonfinite% | det% | upper-left128 nf% | other 75% nf%
+tk_mxfp4_gluon_cpp_n4096_k2048                          |     6.76%  |  73.2% |    26.98%        | 0.0212%
+tk_mxfp4_gluon_cpp_n4096_k2048_ext_br                   |     6.92%  |  62.6% |    26.70%        | 0.3315%
+tk_mxfp4_gluon_cpp_n4096_k2048_f34                      |     0.06%  |  84.4% |     0.00%        | 0.0800%
+tk_mxfp4_gluon_cpp_n4096_k2048_v12                      |     5.79%  |  64.1% |    23.00%        | 0.0562%
+tk_mxfp4_gluon_cpp_n4096_k2048_v4                       |     6.74%  |  63.3% |    25.84%        | 0.3699%
+tk_mxfp4_gluon_cpp_n4096_k2048_lgk2                     |     7.60%  |  61.4% |    28.85%        | 0.5183%
+tk_mxfp4_gluon_cpp_n4096_k2048_swap                     |     7.55%  |  64.4% |    29.20%        | 0.3274%
+tk_mxfp4_gluon_cpp_n4096_k2048_swap_gm8                 |     8.05%  |  60.4% |    30.03%        | 0.7277%
+tk_mxfp4_gluon_cpp_n4096_k2048_no_embed                 |     7.36%  |  64.0% |    28.15%        | 0.4340%

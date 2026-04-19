@@ -6,6 +6,14 @@
 > 41/42 WIN (97.6%) = **structurally saturated, RE-CONFIRMED 6 rounds**.
 > R29 (V8 peel DEAD), R30 (transplant + K_EXACT audit DEAD), R31 (UNROLL_K + Persistent-XCD + STEP3_BARRIER_VMCNT 全 DEAD), R32 (K_LOOP_SYNC + NT_LOAD + V6 split-K 全 DEAD), R33 (aiter binary archaeology + SRD swap + vmcnt-mimic 全 DEAD), R34 (VGPR-PF for B-tile 编译成功但 compiler bug 导致结果错; SNR sweep 揭示 17% 单元 deterministic-wrong).
 
+> **R35-R36 NEW KNOWLEDGE (durable, 2026-04-19) — 修正 41/42 WIN 是 INVALID, 需要 R37 Fix B**:
+> - **R35 Opt B 找到 root cause**: 17% deterministic-wrong cells 都在每个 256x256 tile 的左上 128x128 (`acc_A0Bl` 累加器). 其他三个 quadrant 100% clean. `_f34` (FUSED_STEP34=1) 完美修正 — non-finite 从 5-8% 降到 0.06%, 左上 corruption 从 ~27% 降到 0%.
+> - **机制**: 非融合 step3+step4 发出 4 个独立 `asm volatile` block, 编译器在中间插入指令导致 `acc_A0Bl` 寄存器被 clobber. `_f34` 把所有 64 MFMA + 16 ds_read 放进单个 asm block, 阻止编译器调度.
+> - **R36 BLOCKER**: 机械加 `-DFUSED_STEP34=1` 到 BEST_VARIANTS → **0/42 PASS** (17 CRASH, 25 WRONG_OUTPUT). 因为 `_f34` branch bypasses R25-C tail-pf-off conditional, 最后一个 K-iter 的 prefetch 读越界 → HSA fault.
+> - **R37 必须做 Fix B** (4-8 hr): 把 `kpair_64mfma_step34` backport 到 default code path (替换 lines ~1657-1680 + tail-iter), 加 `pf_active` template parameter 让最后 K-iter 跳过 prefetch. 既保留 R25-C tail-pf-off 又得到正确性.
+> - **41/42 WIN 是 INVALID**: 所有 R31/R32/R33 "WIN" 都在测 time-to-write-garbage. Leaderboard empty 直到 R37 着陆.
+> - **bench_all_42.py 没有 correctness check** — 6+ 轮 都没发现. R37 必须加 `kernel_finite >= 0.995` gate.
+
 > **R34 NEW KNOWLEDGE (durable, 2026-04-19)**:
 > - **VGPR-PF (R34 Opt B)** 编译干净 (219 VGPR / 0 spills), vmcnt(15) 不再 HSA-fault — 6 轮以来首次. **但** CDNA4 clang register-allocator bug: `"=v"(dst)` 不能保持 scratch VGPR 在相邻 `asm volatile` 之间 live, 编译器丢弃 prefetch 数据. R35 候选: 加 `asm volatile("" : "+v"(b_scratch[i]))` keepalive barriers.
 > - **Kernel 有 17% deterministic-wrong cells** (写 bf16-overflow garbage ±3.39e+38), 跨多次运行一致, 不能被 consistency filter 过滤. 加上 ~13% non-deterministic cells, 总错误率 ~30%. 自 R25 以来一直存在 (finite_frac < 90% 是症状). 这意味着我们的 TFLOPS 数字测的是 "kernel 算的东西" 的 wall-clock, aiter 是隐式 reference.
