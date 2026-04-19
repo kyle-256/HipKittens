@@ -1,0 +1,37 @@
+>>> u=2 shape=4096x4096x4096 (8B_QO)
+./rrr_mxfp8_exact_8wave_fastpath.inc:64:1: remark:     VGPRs: 256 [-Rpass-analysis=kernel-resource-usage]
+./rrr_mxfp8_exact_8wave_fastpath.inc:64:1: remark:     ScratchSize [bytes/lane]: 208 [-Rpass-analysis=kernel-resource-usage]
+  Avg time: 0.1707 ms, TFLOPS: 805.31
+  Avg time: 0.1710 ms, TFLOPS: 803.56
+  Avg time: 0.1706 ms, TFLOPS: 805.47
+>>> u=2 shape=4096x14336x4096 (8B_GateUp)
+./rrr_mxfp8_exact_8wave_fastpath.inc:64:1: remark:     VGPRs: 256 [-Rpass-analysis=kernel-resource-usage]
+./rrr_mxfp8_exact_8wave_fastpath.inc:64:1: remark:     ScratchSize [bytes/lane]: 208 [-Rpass-analysis=kernel-resource-usage]
+  Avg time: 0.6191 ms, TFLOPS: 776.98
+  Avg time: 0.6203 ms, TFLOPS: 775.48
+  Avg time: 0.6173 ms, TFLOPS: 779.30
+>>> u=4 shape=4096x4096x4096 (8B_QO)
+./rrr_mxfp8_exact_8wave_fastpath.inc:64:1: remark:     VGPRs: 256 [-Rpass-analysis=kernel-resource-usage]
+./rrr_mxfp8_exact_8wave_fastpath.inc:64:1: remark:     ScratchSize [bytes/lane]: 208 [-Rpass-analysis=kernel-resource-usage]
+  Avg time: 0.1696 ms, TFLOPS: 810.21
+  Avg time: 0.1696 ms, TFLOPS: 810.47
+  Avg time: 0.1697 ms, TFLOPS: 810.04
+>>> u=4 shape=4096x14336x4096 (8B_GateUp)
+./rrr_mxfp8_exact_8wave_fastpath.inc:64:1: remark:     VGPRs: 256 [-Rpass-analysis=kernel-resource-usage]
+./rrr_mxfp8_exact_8wave_fastpath.inc:64:1: remark:     ScratchSize [bytes/lane]: 208 [-Rpass-analysis=kernel-resource-usage]
+  Avg time: 0.6189 ms, TFLOPS: 777.29
+  Avg time: 0.6169 ms, TFLOPS: 779.70
+  Avg time: 0.6175 ms, TFLOPS: 779.02
+>>> u=8 shape=4096x4096x4096 (8B_QO)
+./rrr_mxfp8_exact_8wave_fastpath.inc:64:1: remark:     VGPRs: 256 [-Rpass-analysis=kernel-resource-usage]
+./rrr_mxfp8_exact_8wave_fastpath.inc:64:1: remark:     ScratchSize [bytes/lane]: 208 [-Rpass-analysis=kernel-resource-usage]
+  Avg time: 0.1698 ms, TFLOPS: 809.57
+  Avg time: 0.1702 ms, TFLOPS: 807.61
+  Avg time: 0.1734 ms, TFLOPS: 792.55
+>>> u=8 shape=4096x14336x4096 (8B_GateUp)
+./rrr_mxfp8_exact_8wave_fastpath.inc:64:1: remark:     VGPRs: 256 [-Rpass-analysis=kernel-resource-usage]
+./rrr_mxfp8_exact_8wave_fastpath.inc:64:1: remark:     ScratchSize [bytes/lane]: 208 [-Rpass-analysis=kernel-resource-usage]
+  Avg time: 0.6181 ms, TFLOPS: 778.27
+  Avg time: 0.6183 ms, TFLOPS: 778.00
+  Avg time: 0.6179 ms, TFLOPS: 778.47
+SWEEP DONE

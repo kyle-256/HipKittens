@@ -27,6 +27,31 @@
 #define MXFP8_RRR_BLOCK_SWIZZLE_GROUP_M 4
 #endif
 
+// R48 Dev E: K-pair unroll factor for the main K-pair loop.
+// Default = 0 (no #pragma unroll directive — preserves R48 baseline behavior
+// where MXFP8 RRR keeps the K-loop intact at K=4096 while FP8 RRR fully unrolls).
+// Set to a positive integer to emit `#pragma unroll N` on the K-pair loop.
+// At K=4096, k_pairs=15 — values >= 15 force full unroll.
+// Set to 1 to disable unrolling explicitly.
+//
+// Lever motivation (r48d_findings.md §2.2):
+//   ISA dump showed FP8 RRR @ K=4096 fully unrolled (1024 MFMAs straight-line)
+//   but MXFP8 RRR keeps loop intact, costing ~3 loop-control instr per K-pair
+//   (s_cbranch + s_cmp + s_add). Estimated +1-2pp recoverable on 8B Q/O RRR
+//   and 8B Gate/Up RRR (both K=4096) by forcing full unroll.
+// Risk:
+//   Larger K (K>=8192 has k_pairs >= 31) plus full unroll may explode VGPR
+//   spill or hurt I-cache locality; benchmark all 7 RRR shapes before SHIP.
+#ifndef MXFP8_RRR_MAIN_UNROLL
+#define MXFP8_RRR_MAIN_UNROLL 0
+#endif
+
+#if MXFP8_RRR_MAIN_UNROLL > 0
+#define MXFP8_RRR_PRAGMA_UNROLL_MAIN _Pragma(TK_STRINGIFY(unroll MXFP8_RRR_MAIN_UNROLL))
+#else
+#define MXFP8_RRR_PRAGMA_UNROLL_MAIN
+#endif
+
 #if MXFP8_RRR_EXACT_8WAVE_FAST_ENABLE
 
 static_assert(BLK == 256, "MXFP8 exact 8-wave fast path requires BLK=256");
@@ -462,8 +487,9 @@ void rrr_exact_8wave_scaled_kernel(const layout_globals g) {
     };
 
     {
-        const int k_iters_main = k_iters - 2;
-        const int k_pairs = k_iters_main / 2;
+        constexpr int k_iters_main = k_iters - 2;
+        constexpr int k_pairs = k_iters_main / 2;
+        MXFP8_RRR_PRAGMA_UNROLL_MAIN
         for (int kp = 0; kp < k_pairs; kp++) {
             load_scale_packs(kp);
             do_k_iter(kp * 2, phase_t<0>{});
