@@ -2,7 +2,81 @@
 
 你在继续推进 `HipKittens` 的 MXFP4 GEMM 优化工作，跟 Cursor (Hipkittens2) 竞赛。
 
-## ⚠️ 当前优化目标 (2026-04-19, post-R52 — WIN +5 VC + 3 PERF 追赶, COMMIT, 连续第三个非 DEAD 轮, R44 以来最大 VC 增长, 36/42 严格 10-run VC, AITER `.CO` DLOPEN 已经在 7 个 shape 上验证)
+## ⚠️ 当前优化目标 (2026-04-19, post-R53 — PARTIAL WIN +2 NET VC 救援 -5 cohort 严格净 -3, COMMIT, 首次非 256×256 尝试, R50D shim 证明为 tile-generic, 9 个候选中 8 PROMOTE / 1 DEAD, 33/42 严格 10-run VC, 连续第 5 次 R50D AS-IS 复用)
+
+**HEADLINE**: R53 是**首次非 256×256 aiter `.co` 分发尝试**，验证了 universal-bdx=256 假设。严格 10-run VC delta vs R52 = **-3 (36 → 33/42)**, 但损失完全来自**未变的** HK R40B/R41B `.so` 上的 cohort-race tail-draw (R45+ 已记录现象: +1 cohort gain / -6 cohort losses, 没有一个是 R53 引起)。R53 实际贡献 = **+2 NET VC 救援** (D-3B_1 `(4096,32768,14336)` 66.70% NEW VC + D-3B_2 `(32768,4096,14336)` 85.56% NEW VC, 都之前是 NO_VC) **+ 6 个 perf 追赶** 通过 aiter `.co` (D-3A_2 +22.65pp, D-3A_3 +48.82pp, D-3B_3 +0.22pp, D-3C_1 +1.77pp, D-3C_2 +0.37pp, D-3C_3 +3.56pp)。Reviewer 10-run 全部 8/8 PROMOTE RE-VERIFIED bit-determinism (wcf_max=0.0, wcf_std=0.0, fin_min=1.0)。1 DEAD (D-3A_1 `(4096,14336,16384)` 96×640 SMOKE 回归到 52.45% comp vs HK 84.53% — worker 在 10-run 之前正确停止)。**R50D shim 现已证明为 tile-generic**: 同一个 `bdx=256` shim 处理 256×256, 96×640, AND 64×1024 aiter `.co` 文件，0 rebuild —— 验证 `asm_gemm_a4w4.cu:290` 的 universal-bdx 假设。连续第 5 轮 R50D AS-IS 复用; 0 kernel 修改。30 个共享 VC shape 上 mean +3.20pp comp/shape。
+
+**R53 attempts 总结**:
+- **R53 Opt D-3A (worker, 96×640 tile, 3 候选)**: 2/3 PROMOTE / 1 DEAD。
+  - D-3A_1 `(4096,14336,16384)`: **DEAD** at SMOKE — 96×640 表现不及 (52.45% comp vs HK 84.53%); aspect-ratio 敏感性。Worker 在 10-run 之前正确停止。
+  - D-3A_2 `(6144,4096,16384)`: **PROMOTE 10/10 OK, 107.62% comp (+22.65pp vs HK)**。wcf_max=0.0, fin_min=1.0。
+  - D-3A_3 `(4096,6144,32768)`: **PROMOTE 10/10 OK, 131.63% comp (+48.82pp vs HK)** — 本轮最大 perf 追赶。wcf_max=0.0, fin_min=1.0。
+- **R53 Opt D-3B (worker, 64×1024 tile, 3 候选)**: 3/3 PROMOTE, **+2 NET VC 救援**。
+  - D-3B_1 `(4096,32768,14336)`: **PROMOTE 10/10 OK, 66.70% NEW VC** (was NO_VC)。Bit-deterministic。
+  - D-3B_2 `(32768,4096,14336)`: **PROMOTE 10/10 OK, 85.56% NEW VC** (was NO_VC)。Bit-deterministic。
+  - D-3B_3 `(128256,32768,4096)`: **PROMOTE 10/10 OK, 86.17% (+0.22pp marginal vs HK)**。Bit-deterministic。
+- **R53 Opt D-3C (worker, 64×1024 tile, 3 marginal 候选)**: 3/3 PROMOTE。
+  - D-3C_1 `(14336,32768,4096)`: **PROMOTE 87.83% (+1.77pp vs HK)**。Bit-deterministic。
+  - D-3C_2 `(28672,32768,4096)`: **PROMOTE 87.68% (+0.37pp marginal vs HK)**。Bit-deterministic。
+  - D-3C_3 `(16384,4096,14336)`: **PROMOTE 91.06% (+3.56pp vs HK)**。Bit-deterministic。
+
+全部 8 个 PROMOTE worker AS-IS 复用 **EXISTING R50D shim** at `build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so`，使用新的 per-shape grid 参数和 per-shape aiter `.co` 路径 (`f4gemm_bf16_per1x32Fp4_BpreShuffle_96x640.co` 和 `f4gemm_bf16_per1x32Fp4_BpreShuffle_64x1024.co`)。NO shim rebuild。Kernel 不变。
+
+**R53 reviewer integration (10-run @ 80%, INDEPENDENT seeds [101..1010]; 4 GPU, 14 分钟 wall, 420 runs)**:
+- Manifest 中 15 个 aiter `.co` override (R50D + R51 D-1/D-2/D-3 + R52 D-2A/D-2B/D-2C + R53 8 个非 256×256); 27 个 shape 用 HipKittens kernel + R44 baseline 参数。
+- 全部 8 个 R53 PROMOTE 候选 reviewer re-bench RE-VERIFIED 10/10 PASS; 15/15 AITER cell PASS (100% bit-deterministic)。
+- 18/27 HK cell PASS (9 FAIL: cohort-race wcf 或 fin gate)。
+- 1 个 R52-NO shape 在 R53 cohort-race tail-draw 下获得 VC 在**未变的** `.so` 上 (`4096x4096x16384`)。
+- 6 个 R52-VC shape 在同一 churn 机制下失去 VC 在**未变的** HK R40B/R41B `.so` 文件上 (`16384x4096x6144`, `28672x4096x8192`, `32768x4096x3072`, `4096x32768x4096`, `4096x32768x6144`, `32768x4096x2048`)。
+- Cohort churn 净: **+1 / -6 = -5** 在**未变的** .so cell 上 (NOT R53 回归 — R45+ tail-draw)。
+- R53 贡献: **+2 NEW VC** (D-3B_1, D-3B_2) + 1 cohort gain。
+- **最终 VC count: 严格 10-run 33/42 (vs R52 严格 36/42)**。
+- 30 个共享 VC shape 上 mean perf delta: **+3.20pp comp/shape**。
+- D-3C 边际 promotion 检查: 全部 4 个 (D-3C_1/D-3C_2/D-3C_3/D-3B_3) 在 reviewer 10-run 上对 HK 保持正向 with bit-determinism — **0 reverts 需要**。
+- 文件: `R53_INTEGRATION_VERDICT.md`, `R53_INTEGRATION_MANIFEST.json`, `bench_all_42_R53_INTEGRATION.py`, `R53_INTEGRATION_10RUN.{json,log,console}`, `R53_INTEGRATION_SMOKE1.{json,log,console}`, `R53_DECIDER_PLAN.md`。
+
+**R53 net result**: **+2 NET VC 救援 + 6 PERF 追赶** 归因于 R53; -5 cohort tail-draw 在**未变的** `.so` 文件上 (R45+ 现象, 不是回归)。Net 严格 VC: 33/42。**首次非 256×256 尝试验证 R50D shim 为 TILE-GENERIC。0 kernel 修改, 0 新 shim build (连续第 5 次 R50D 复用)。**
+
+### R54 候选 (post-R53, 按机制信心排序)
+1. **R54 Opt D-extended-4 (最高信心)** —— 继续挖掘非 256×256 aiter `.co` tile 给 sub-90% HK shape。在 R53 之后, 对剩余 sub-90% HK-VC shape 列举针对完整 36-tile aiter `.co` 库。预估 +0-2 NET VC + 5-10pp mean comp 通过 D-3B/D-3C 风格救援。
+2. **R54 Opt E — HK kernel cohort-race 稳定化 (中)** —— 处理 R40B/R41B 上 -6 个 cohort tail-draw 损失，方法 (a) 收紧内部 kernel gate 标准 或 (b) 找 aiter `.co` 替换那 6 个掉出 VC 的 shape。如果成功预估 +3-6 NET VC。
+3. **R54 Opt B (低-中)** —— 试 32×32×64 MFMA (而非 16×16×128) 在 HipKittens kernel 中，针对没有 aiter `.co` fit 的 shape。未试的结构性轴。高风险。
+
+### R54+ 不要尝试 (R45-R53 已关闭)
+- R52 关闭列表 PLUS:
+- **Aspect-ratio-blind aiter tile 选择** (D-3A_1 已演示 96×640 不是普遍优于 — 必须 per-shape SMOKE-gate 才能 promote)。
+- K-loop 中**任何** fence 位置 (R45B / R47A / R48A / R49C / R50A 全部 DEAD)
+- MFMA↔ds_read interleaving 变体单独 (R50A 关闭)
+- `R38A_INLINE_BUFLOAD_LDS=1` 用于 production build (R47B 关闭)
+- `R39A_TAIL_SCALE_CLAMP` 用于 intermediate-K wcf-flake shape (R46A 关闭)
+- 4-buffer 或更高 LDS rotation 单独 (R46B + R47A 关闭)
+- Wave-priority / s_nop pacing / MFMA half-split 单独 (R47C 用 10-run 关闭)
+- `kpair_64mfma_step34` 物理 asm-block 拆分 (R48A 关闭)
+- `PF_MPT` 深度 override (R48C 机制性关闭)
+- Step34 内 MFMA reorder / s_setprio / lgkmcnt drain 单独 (R48B 关闭)
+- 单 knob aiter pattern 移植 (R49A 关闭)
+- R44A back-edge drain 扩展到 N=32768 (R49B 关闭; cohort 随 N scale)
+- Producer asm volatile 内嵌 vmcnt (R49C 关闭)
+- R44 VC shape 上的 `gm × lgk × pfoff` knob sweep (R50C 关闭)
+- 任何"改进" aiter `.co` dlopen 路径本身的尝试 (R51 关闭)
+
+### R53 stopping-criterion 检查
+- Floor (≥31/42 严格 10-run, 无可归因回归): **MET (33/42 严格; +2 NET VC 救援 + 6 perf 追赶 归因于 R53; -3 严格净是**未变的** `.so` 上记录的 cohort tail-draw, 不是 R53 回归)**。
+- Stretch (≥34/42 严格): **MISS (33/42)** 但本轮机制 (tile-generic shim 验证) 是 durable 并解锁 R54 D-extended-4。
+- 轮价值: **+2 NET VC 救援 + 6 perf 追赶 + 5 durable findings** (R50D shim 是 tile-generic; 96×640 有 aspect-ratio 敏感性; 64×1024 broadly competitive; aiter `.co` 在 15 个 shape 上验证; cohort-race churn 现已主导 net VC 会计在 -5 noise floor)。
+
+### 最近 11 轮 sanity check
+- R43: DEAD (3 轴)
+- R44: WIN +8 (27 → 35/42)
+- R45-R49: 5 轮连续 DEAD
+- R50: WIN +1 (35 → 36/42, aiter `.co` dlopen 首次 PoC)
+- R51: WIN +1 严格 (30 → 31/42) + 2 perf 追赶
+- R52: WIN +5 严格 (31 → 36/42) + 3 perf 追赶
+- **R53: PARTIAL WIN +2 NET VC 救援 -5 cohort 严格净 -3 (36 → 33/42) + 6 perf 追赶; 首次非 256×256 尝试; R50D shim 证明为 tile-generic** ← 机制连胜延续 even with 负 net 严格
+
+---
+
+## 历史 (2026-04-19, post-R52 — WIN +5 VC + 3 PERF 追赶, COMMIT, 连续第三个非 DEAD 轮, R44 以来最大 VC 增长, 36/42 严格 10-run VC, AITER `.CO` DLOPEN 已经在 7 个 shape 上验证)
 
 **HEADLINE**: R52 是连续第 3 个 WIN 轮且是 R44 (+8) 以来最大的 VC 增长。Net VC delta vs R51 = **+5 NET VC 严格 10-run** (31 → 36/42)。3/3 PROMOTE / 0 DEAD (与 R51 轮结构一致)。3 个 PROMOTE worker 是通过 R50D aiter `.co` dlopen shim **AS-IS 复用 (连续第 4 轮，无 shim rebuild, 无 kernel 修改)** 的 perf 追赶: D-2A `(4096,28672,32768)` 61.9% → 101.85% comp (+39.93pp), D-2B `(4096,32768,128256)` 72.3% → 99.72% comp (+27.47pp), D-2C `(4096,4096,32768)` 77.1% → 105.91% comp (+28.81pp)。Reviewer 10-run 全部 RE-VERIFIED 10/10 PASS, bit-determinism (wcf_max=0.0, wcf_std=0.0, fin_min=1.0)。+5 NET VC 完全来自 cohort-race tail-draw 在**未变的** `.so` 文件上 (6 个 shape 获得, 1 个失去 — favorable seed draw)。Aiter `.co` dlopen pattern 现已**生产就绪，在 7 个不同 shape 上验证** (R50D + R51 D-1/D-2/D-3 + R52 D-2A/D-2B/D-2C)，对 256×256 tile case shape-generic, K-generic (D-2B at K=128256), grid-size-generic (D-2C at gdx=gdy=16, D-2A at gdx=112)。Dlopen 轴上 100% PROMOTE rate (6/6) 当目标 shape 的 aiter heuristic 选 256×256 时。
 

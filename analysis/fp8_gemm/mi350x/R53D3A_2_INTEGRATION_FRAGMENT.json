@@ -1,0 +1,70 @@
+{
+  "round": "R53_optD3A_2",
+  "verdict": "PROMOTE",
+  "shape_so_promotions": {
+    "6144x4096x16384": {
+      "backend": "aiter",
+      "dispatch": "hipModuleLoadData",
+      "co_path": "/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_96x640.co",
+      "kernel_name": "_ZN5aiter41f4gemm_bf16_per1x32Fp4_BpreShuffle_96x640E",
+      "shim_so": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so",
+      "shim_entrypoint": "R50D_aiter_shim.launch",
+      "tile_M": 96,
+      "tile_N": 640,
+      "log2_k_split": 0,
+      "grid": {"gdx": 7, "gdy": 64, "gdz": 1, "bdx": 256, "bdy": 1, "bdz": 1, "sharedMemBytes": 0},
+      "input_layout": {
+        "A":       "[M, K/2] uint8 fp4x2 row-major (no preshuffle)",
+        "B":       "[N, K/2] uint8 fp4x2 PRESHUFFLED via aiter.shuffle_weight(layout=(16,16))",
+        "A_scale": "[M, K/32] uint8 e8m0 PRESHUFFLED via aiter.get_triton_quant(per_1x32)(x, shuffle=True)",
+        "B_scale": "[N, K/32] uint8 e8m0 PRESHUFFLED via aiter.get_triton_quant(per_1x32)(w, shuffle=True)",
+        "C":       "[((M+31)//32)*32, N] bfloat16 row-major"
+      },
+      "ten_run_summary": {
+        "n_runs": 10,
+        "n_OK": 10,
+        "n_OK_5": 10,
+        "fin_min": 1.0,
+        "fin_max": 1.0,
+        "wcf_min": 0.0,
+        "wcf_max": 0.0,
+        "wcf_std": 0.0,
+        "snr_med_min": 55.5679081341444,
+        "snr_med_max": 55.607684293739624,
+        "passes_10run_gate": true
+      },
+      "perf": {
+        "tflops": 4717.9,
+        "comp_tflops": 4428.1,
+        "pct_comp": 106.54,
+        "warmup": 200,
+        "iters": 500,
+        "trim_frac": 0.10
+      },
+      "rationale": [
+        "R53 Opt D-3A_2: perf claw-back on shape (6144,4096,16384).",
+        "HK pre-R53 sat at ~83.89% comp. First successful application of R50D shim",
+        "to a NON-256x256 aiter tile (96x640). Shim works AS-IS — no rebuild needed",
+        "because aiter uses bdx=256 for ALL .co tiles (verified from",
+        "asm_gemm_a4w4.cu line 290: '256, // bdx: 4 wv64'). Only tile_M, tile_N,",
+        "co_path, and kernel_name are runtime kwargs.",
+        "Per-shape grid: gdx=ceil(4096/640)=7, gdy=ceil(6144/96)=64.",
+        "Gates: 10/10 INDEPENDENT seeds [101..1010] under bench rules",
+        "(warmup=200, iters=500, trim_frac=0.10). wcf_max=0, fin_min=1.0,",
+        "snr_med 55.57-55.61 dB across all seeds. Perf jumps from 83.89% to",
+        "106.54% comp (+22.65 pct points)."
+      ]
+    }
+  },
+  "do_not_modify": [
+    "kernel_mxfp4_gluon_cpp.cpp",
+    "any other shape's bench/build pipeline",
+    "R50D_aiter_dlopen.cpp",
+    "build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so"
+  ],
+  "build_artifacts": {
+    "shim_src": "R50D_aiter_dlopen.cpp",
+    "shim_so": "build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so",
+    "bench_script": "bench_R53D3A_2.py"
+  }
+}
