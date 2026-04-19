@@ -1,0 +1,16 @@
+{
+  "round": "R44",
+  "worker": "Opt B",
+  "round_start_commit": "0ca8c72a",
+  "kernel_files_touched": [],
+  "new_builds": [],
+  "reused_builds": [],
+  "macros_introduced": [],
+  "macros_default_off": [],
+  "build_logs": [],
+  "status": "EMPTY (Phase-1 DEAD_DISASM; no kernel work performed)",
+  "see": [
+    "R44_OPT_B_VERDICT.md",
+    "R44_OPT_B_DSWRITE_FORMULA.md"
+  ]
+}

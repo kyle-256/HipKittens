@@ -1,0 +1,18 @@
+{
+  "round": "R44",
+  "worker": "Opt B",
+  "phase": 3,
+  "phase_name": "INPUT_REUSE Jaccard oracle on 3 representative WCF_BOUND shapes",
+  "status": "NOT_RUN",
+  "reason": "Phase-1 KILL (DEAD_DISASM); see R44_OPT_B_VERDICT.md. Even if Phase 2 were attempted with R34/R35-V0..V2 formulas (already known-broken), running Phase 3 on a structurally-broken kernel would yield meaningless Jaccard numbers (cf. R43_OPT_B_VERDICT.md 'Why Phase-2 oracle could NOT run' section).",
+  "shapes_skipped": [
+    {"M": 16384, "N": 14336, "K": 4096},
+    {"M": 28672, "N": 4096, "K": 8192},
+    {"M": 4096, "N": 32768, "K": 14336}
+  ],
+  "predictions": {
+    "P-B.3_target": "Jaccard >= 0.7 on all 3 representative shapes",
+    "P-B.3_outcome": "NOT_RUN"
+  },
+  "wall_clock_seconds": 0
+}

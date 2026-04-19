@@ -1,0 +1,70 @@
+{
+  "round": "R44_OPT_A",
+  "ts": "2026-04-19",
+  "leaderboard_delta": {
+    "before": "27/42 verified-correct",
+    "after": "28/42 verified-correct",
+    "added_shapes": ["16384x4096x28672"],
+    "still_uncrackable": ["4096x32768x28672"]
+  },
+  "per_shape_overrides": {
+    "16384x4096x28672": {
+      "module": "tk_mxfp4_gluon_cpp_n4096_k28672_ts_lgk2_gm7_kx28672_btw_all_p3_R44A_nonfused_ts_drain_R38B",
+      "build_dir": "build_R44A",
+      "macros": "-DTAIL_SPLIT=1 -DSTEP12_BR_LGKMCNT=2 -DGROUP_SIZE_M=7 -DR25C_K_LIMIT=32768 -DR25C_K_EXACT=28672 -DBARRIER_TO_WAITCNT_ALL=1 -DR44A_BACKEDGE_VMCNT_DRAIN=1 -DR25C_TAIL_PF_OFF_ITERS=0 -DR38B_TAIL_FIX=1",
+      "cell_label": "nonfused_ts_drain_R38B",
+      "tflops_p50": 3426.3,
+      "competitor_tflops": 5525.3,
+      "pct_comp": 62.0,
+      "verified_correct": true,
+      "promote": false,
+      "n_OK_5": 5,
+      "wcf_max": 0.000244,
+      "wcf_std": 9.76e-5,
+      "fin_min": 0.9817,
+      "tflops_per_run": [3416.0, 3437.0, 3437.0, 3422.0, 3426.3],
+      "notes": "VC but not promote (fin_min=0.9817 < 0.985). 1 of 5 seeds gave fin=0.9817; other 4 gave fin>=0.991. Eligible for leaderboard inclusion at GATE=0.98."
+    }
+  },
+  "macro_changes": {
+    "kernel_mxfp4_gluon_cpp.cpp": {
+      "added_macro": "R44A_BACKEDGE_VMCNT_DRAIN",
+      "default": 0,
+      "definition_line": "262-272",
+      "emission_line": "3559-3573",
+      "behavior": "When set to 1, emits asm volatile(\"s_waitcnt vmcnt(0)\\n\" ::: \"memory\") at the very last C++ statement of the for (int bt = 0; bt + 1 < k_byte_iters; ++bt) TAIL_SPLIT K-loop body, drains all in-flight buffer_load_to_lds before fall-through to the TAIL_SPLIT epilogue.",
+      "regression_risk": "ZERO — defaults OFF; per-build opt-in only. Not used by any of the 27 already-VC shapes."
+    }
+  },
+  "shape_A_status": {
+    "shape": "4096x32768x28672",
+    "competitor_tflops": 5568.2,
+    "best_R44A_attempt": {
+      "cell": "nonfused_ts_drain_R38B",
+      "n_OK_5": 1,
+      "wcf_max": 0.0699,
+      "wcf_std": 0.0210,
+      "fin_min": 0.9784,
+      "tflops_p50": 3538.2
+    },
+    "blocker": "wcf_max > 0.02 gate on 4 of 5 seeds. The non-FUSED + R38B + drain combo passes shape B (small N) but fails shape A (large N=32768) on wcf. The larger N exposes a wcf-precision race that the back-edge drain alone cannot rescue.",
+    "next_round_recommendations": [
+      "3-buffer rotation (Opt C's structurally robust alternative to single-fence)",
+      "Smaller N-tile partitioning (try GROUP_SIZE_M != 7)",
+      "Tile-by-tile golden-output diff at K=28672+N=32768 to localize wrong-cell pattern"
+    ]
+  },
+  "all_FUSED_variants_still_CRASH": {
+    "variants_tested": [
+      "fused_ts_drain",
+      "fused_ts_drain_pfoff104",
+      "fused_ts_drain_pfoff32",
+      "fused_ts_drain_pfoff8",
+      "fused_ts_drain_R40A",
+      "fused_ts_drain_R40A_pfoff104",
+      "fused_ts_drain_memc_pfoff104"
+    ],
+    "result": "All 7 FUSED_STEP34=1 variants crash 5/5 on both shapes EVEN with R44A_BACKEDGE_VMCNT_DRAIN=1 enabled.",
+    "implication": "Opt C's back-edge fence prescription is INSUFFICIENT for the FUSED+TAIL_SPLIT path. The crash mechanism includes an in-loop unsafe interleave (no asm volatile fence between kpair_64mfma_step34 and emit_pf_tail in the FUSED branch) that a back-edge fence cannot rescue. The non-FUSED R37_FIX_B path has the necessary in-loop fences and IS rescued by the back-edge drain."
+  }
+}

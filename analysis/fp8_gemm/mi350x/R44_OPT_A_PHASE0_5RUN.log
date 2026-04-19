@@ -1,0 +1,24 @@
+R44 Opt A Phase 0 — cheap-win 5-run consensus
+  shapes: [(4096, 32768, 28672), (16384, 4096, 28672)]
+  cell:   nf_R38B
+  seeds:  [101, 202, 303, 404, 505]
+  gates:  finite>=0.98, wcf<0.02, snr_med>=10.0dB
+  warmup=200, iters=500, trim=0.1
+  GPUs:   [0, 1]
+==============================================================================================================
+  [ 1/10]  4096x32768x28672 seed=202 WRONG_OUTPUT fin=0.9837 wcf=0.0207 GPU1
+  [ 2/10]  4096x32768x28672 seed=101  4184.9 TF fin=0.9876 wcf=0.0148 GPU0
+  [ 3/10]  4096x32768x28672 seed=404 WRONG_OUTPUT fin=0.9811 wcf=0.0357 GPU1
+  [ 4/10]  4096x32768x28672 seed=303 WRONG_OUTPUT fin=0.9788 wcf=0.0477 GPU0
+  [ 5/10] 16384x 4096x28672 seed=101 WRONG_OUTPUT fin=0.9749 wcf=0.0000 GPU1
+  [ 6/10]  4096x32768x28672 seed=505 WRONG_OUTPUT fin=0.9894 wcf=0.0462 GPU0
+  [ 7/10] 16384x 4096x28672 seed=303 WRONG_OUTPUT fin=0.9641 wcf=0.0000 GPU1
+  [ 8/10] 16384x 4096x28672 seed=202 WRONG_OUTPUT fin=0.9618 wcf=0.0000 GPU0
+  [ 9/10] 16384x 4096x28672 seed=505 WRONG_OUTPUT fin=0.9739 wcf=0.0000 GPU1
+  [10/10] 16384x 4096x28672 seed=404 WRONG_OUTPUT fin=0.9689 wcf=0.0000 GPU0
+
+=== R44 Opt A Phase 0 SUMMARY ===
+Elapsed: 0.5 min
+   4096x32768x28672  n_OK=1/5  tflops_p50=4184.9  wcf_max=0.0477  wcf_std=0.0133  fin_min=0.9788  -> FAIL
+  16384x 4096x28672  n_OK=0/5  tflops_p50=N/A  wcf_max=0.0000  wcf_std=0.0000  fin_min=0.9618  -> FAIL
+Output: /shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/R44_OPT_A_PHASE0_5RUN.json

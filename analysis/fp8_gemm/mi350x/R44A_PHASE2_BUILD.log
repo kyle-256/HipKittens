@@ -1,0 +1,20 @@
+R44 Opt A Phase 2 builder: 8 cells x 2 shapes
+  [  1/16] BUILT N=32768,K=28672,cell=R38B_pfoff32_R38F2 (5.2s)
+  [  2/16] BUILT N=32768,K=28672,cell=R38B_pfoff32_R38F4 (5.3s)
+  [  3/16] BUILT N=32768,K=28672,cell=R38B_pfoff32_R38F1 (5.3s)
+  [  4/16] BUILT N=32768,K=28672,cell=R38B_pfoff8_R38F2 (5.3s)
+  [  5/16] BUILT N=32768,K=28672,cell=R38B_pfoff8_R38F1 (5.4s)
+  [  6/16] BUILT N=32768,K=28672,cell=R38B_no_r25c_R38F2 (5.4s)
+  [  7/16] BUILT N=32768,K=28672,cell=R38B_pfoff8_R38F4 (5.5s)
+  [  8/16] BUILT N=32768,K=28672,cell=R38B_no_r25c_R38F4 (5.5s)
+  [  9/16] BUILT N=4096,K=28672,cell=R38B_pfoff32_R38F1 (5.1s)
+  [ 10/16] BUILT N=4096,K=28672,cell=R38B_pfoff8_R38F1 (5.2s)
+  [ 11/16] BUILT N=4096,K=28672,cell=R38B_pfoff8_R38F4 (5.2s)
+  [ 12/16] BUILT N=4096,K=28672,cell=R38B_pfoff32_R38F2 (5.2s)
+  [ 13/16] BUILT N=4096,K=28672,cell=R38B_pfoff8_R38F2 (5.3s)
+  [ 14/16] BUILT N=4096,K=28672,cell=R38B_pfoff32_R38F4 (5.2s)
+  [ 15/16] BUILT N=4096,K=28672,cell=R38B_no_r25c_R38F2 (5.3s)
+  [ 16/16] BUILT N=4096,K=28672,cell=R38B_no_r25c_R38F4 (5.3s)
+
+Done in 10.9s: built=16, cached=0, failed=0
+Manifest updated: /shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/R44A_BUILD_MANIFEST.json

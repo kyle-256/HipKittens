@@ -258,6 +258,19 @@ using namespace kittens;
 #define R40A_PF_FENCE 0
 #endif
 
+// R44 Opt A (2026-04-19): per Opt C R44_OPT_C_FAULT_PC.md diagnosis,
+// the TAIL_SPLIT + FUSED_STEP34 K-loop back-edge has no s_waitcnt vmcnt(0)
+// drain. The 16 in-flight buffer_load_to_lds prefetches issued at the
+// end of the FUSED branch (line ~3313) can race the TAIL_SPLIT epilogue's
+// ds_reads on the SAME LDS double-buffer slots → HSA_STATUS_ERROR_MEMORY_
+// APERTURE_VIOLATION (code 0x29) at K=28672. Insert a single
+// `asm volatile("s_waitcnt vmcnt(0)\n" ::: "memory")` at the END of the
+// for (int bt = 0; bt + 1 < k_byte_iters; ++bt) loop body to drain
+// in-flight VMEM before fall-through. Default OFF.
+#ifndef R44A_BACKEDGE_VMCNT_DRAIN
+#define R44A_BACKEDGE_VMCNT_DRAIN 0
+#endif
+
 // R38 Opt A (2026-04-19): replace the `__builtin_amdgcn_raw_buffer_load_lds`
 // intrinsic in emit_one_pf with an `asm volatile("buffer_load_dwordx4 ... lds")`
 // block carrying a "memory" clobber. The intrinsic, being a regular call, is
@@ -3540,6 +3553,22 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         for (int p = 0; p < a_packs; ++p) { pf_a0[p] = nxt_pf_a0[p]; pf_a1[p] = nxt_pf_a1[p]; }
         #pragma unroll
         for (int p = 0; p < b_packs; ++p) { pf_bl[p] = nxt_pf_bl[p]; pf_br[p] = nxt_pf_br[p]; }
+#endif
+
+#if R44A_BACKEDGE_VMCNT_DRAIN
+        // R44 Opt A (per Opt C R44_OPT_C_FAULT_PC.md diagnosis):
+        // The TAIL_SPLIT + FUSED_STEP34 path's K-loop back-edge has no
+        // s_waitcnt vmcnt(0) drain. The 16 unconditional buffer_load_dwordx4
+        // ... lds prefetches issued at the end of the FUSED branch (line ~3313)
+        // can still be in flight when the loop falls through to the TAIL_SPLIT
+        // epilogue, which then ds_reads the SAME LDS double-buffer slots →
+        // HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION (code 0x29) at K=28672.
+        // This volatile asm at the very last C++ statement of the loop body
+        // is placed AFTER all step3/step4 + emit_pf_tail to drain in-flight
+        // VMEM before fall-through. memory clobber + volatile prevents
+        // compiler hoisting; combine with R37_FIX_B + R40A_PF_FENCE for max
+        // effectiveness.
+        asm volatile("s_waitcnt vmcnt(0)\n" ::: "memory");
 #endif
     }
 

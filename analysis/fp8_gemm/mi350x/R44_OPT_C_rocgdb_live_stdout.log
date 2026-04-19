@@ -1,0 +1,6 @@
+R44_OPT_C_repro: SO=/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R43A/tk_mxfp4_gluon_cpp_n32768_k28672_ts_lgk2_gm7_pfoff104_kx28672_btw_all_R43A_p2b_ctrl.cpython-310-x86_64-linux-gnu.so
+R44_OPT_C_repro: M=4096 N=32768 K=28672
+R44_OPT_C_repro: MOD_NAME=tk_mxfp4_gluon_cpp_n32768_k28672_ts_lgk2_gm7_pfoff104_kx28672_btw_all_R43A_p2b_ctrl
+R44_OPT_C_repro: module loaded
+R44_OPT_C_repro: tensors built; calling gemm_rcr...
+R44_OPT_C_repro: completed without crash (UNEXPECTED)

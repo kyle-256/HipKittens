@@ -1,0 +1,31 @@
+
+warning: core file may not match specified executable file.
+
+warning: Selected architecture i386:x86-64 is not compatible with reported target architecture i386
+
+warning: Architecture rejected target-supplied description
+
+warning: Couldn't find general-purpose registers in core file.
+
+warning: Couldn't find general-purpose registers in core file.
+#0  <unavailable> in ?? ()
+=== LOADED CORE ===
+  Id   Target Id         Frame 
+* 1    process 1         <unavailable> in ?? ()
+=== BACKTRACE ALL ===
+
+Thread 1 (process 1):
+#0  <unavailable> in ?? ()
+Backtrace stopped: not enough registers or memory available to unwind further
+=== AGENT/WAVE INFO ===
+  Id State Target Id                  Architecture Device Name         Cores Threads Location 
+  1  A     AMDGPU Agent (GPUID 24656) gfx950       AMD Instinct MI355X 1024  8192    0000:0d:00.0 
+  2  A     AMDGPU Agent (GPUID 36622) gfx950       AMD Instinct MI355X 1024  8192    0000:26:00.0 
+  3  A     AMDGPU Agent (GPUID 23660) gfx950       AMD Instinct MI355X 1024  8192    0000:5d:00.0 
+  4  A     AMDGPU Agent (GPUID 17010) gfx950       AMD Instinct MI355X 1024  8192    0000:75:00.0 
+  5  A     AMDGPU Agent (GPUID 12657) gfx950       AMD Instinct MI355X 1024  8192    0000:8e:00.0 
+  6  A     AMDGPU Agent (GPUID 49070) gfx950       AMD Instinct MI355X 1024  8192    0000:a7:00.0 
+  7  A     AMDGPU Agent (GPUID 27852) gfx950       AMD Instinct MI355X 1024  8192    0000:dc:00.0 
+  8  A     AMDGPU Agent (GPUID 29394) gfx950       AMD Instinct MI355X 1024  8192    0000:f4:00.0 
+R44_OPT_C_rocgdb_core.txt:9: Error in sourced command file:
+Undefined info command: "wavefronts".  Try "help info".

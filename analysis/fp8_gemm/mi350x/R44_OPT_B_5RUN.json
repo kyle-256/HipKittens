@@ -1,0 +1,25 @@
+{
+  "round": "R44",
+  "worker": "Opt B",
+  "phase": 4,
+  "phase_name": "5-run consensus on 9 WCF_BOUND + 13 already-VC shapes",
+  "status": "NOT_RUN",
+  "reason": "Phase-1 KILL (DEAD_DISASM); no kernel patch produced; nothing to bench. See R44_OPT_B_VERDICT.md.",
+  "bench_params_planned": {
+    "warmup": 200,
+    "iters": 500,
+    "trim_frac": 0.10,
+    "n_runs": 5,
+    "finite_gate": 0.98,
+    "GPUs": [2, 3, 4]
+  },
+  "shapes_planned_count": 22,
+  "shapes_run": 0,
+  "predictions": {
+    "P-B.4_target": ">=2 of 3 reps flip to PASS_VC; stretch >=4 of 9 WCF_BOUND",
+    "P-B.4_outcome": "NOT_RUN",
+    "P-B.5_target": "no >3% perf regression on 13 already-VC shapes",
+    "P-B.5_outcome": "NOT_RUN"
+  },
+  "wall_clock_seconds": 0
+}

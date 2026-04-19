@@ -1,0 +1,30 @@
+{
+  "_comment": "5 currently-VC shapes (R42 GATE=0.98) chosen for Phase 3 crossval. Goal: confirm relaxing gate to 0.97 doesn't accidentally pass deterministic-wrong shapes that 0.98 was correctly catching. Picked the 5 closest-to-gate (lowest fin_min within VC pool), spanning K-classes 2048/4096/8192/14336.",
+  "shapes": [
+    {
+      "shape": "14336x32768x4096",
+      "comp": 4462.6,
+      "so_path": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R40B/tk_mxfp4_gluon_cpp_n32768_k4096_ts_lgk2_gm7_v12_pfoff14_R40B_safe.cpython-310-x86_64-linux-gnu.so"
+    },
+    {
+      "shape": "4096x32768x4096",
+      "comp": 4166.5,
+      "so_path": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R40B/tk_mxfp4_gluon_cpp_n32768_k4096_lgk2_v16_R40B_safe.cpython-310-x86_64-linux-gnu.so"
+    },
+    {
+      "shape": "32768x28672x2048",
+      "comp": 3353.4,
+      "so_path": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R40B/tk_mxfp4_gluon_cpp_n28672_k2048_ts_lgk2_gm6_v12_pfoff4_R40B_safe.cpython-310-x86_64-linux-gnu.so"
+    },
+    {
+      "shape": "16384x4096x14336",
+      "comp": 5142.1,
+      "so_path": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R41B/tk_mxfp4_gluon_cpp_n4096_k14336_ts_gm8_v12_btw_all_R41B_v0b.cpython-310-x86_64-linux-gnu.so"
+    },
+    {
+      "shape": "4096x14336x8192",
+      "comp": 4345.8,
+      "so_path": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R40B/tk_mxfp4_gluon_cpp_n14336_k8192_ts_v12_tv0_gm7_pfoff28_kx8192_btw_all_R40B_safe.cpython-310-x86_64-linux-gnu.so"
+    }
+  ]
+}
