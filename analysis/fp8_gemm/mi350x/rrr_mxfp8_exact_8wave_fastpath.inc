@@ -121,6 +121,30 @@
 #define MXFP8_RRR_SOFT_BAR() do {} while (0)
 #endif
 
+// R52 Dev L: Manually peel the last K-pair out of the main K-pair loop body.
+// At K=4096, k_pairs=15. Default OFF (no peel). When MXFP8_RRR_PEEL_TAIL=1,
+// the main loop runs for kp = 0..k_pairs-2 (14 iters at K=4096) and the
+// final kp=k_pairs-1 K-pair is emitted as straight-line code immediately
+// after the loop, before the existing pre-tail / epilogue blocks.
+//
+// Lever motivation (r52l_findings.md):
+//   r48d_findings.md §2.2 identified the K=4096 RRR gap as ~3 loop-control
+//   instructions per K-pair (s_cmp, s_cbranch, s_add). R50B (full unroll
+//   N>=2) caused catastrophic spill (-69%); R51F per-shape sweep refuted;
+//   R52H asm-volatile barrier produced bit-identical ISA. The unexplored
+//   angle: peel only the final K-pair, leaving the interior loop intact
+//   so register-pressure stays bounded. This separates the dependency
+//   chain that gates s_endpgm (the final K-pair's MFMA writes) from the
+//   loop-control prologue, hoping the compiler can schedule the tail's
+//   wait-counter sequencing more aggressively.
+// Risk:
+//   Source-level peeling can perturb scheduler liveness. If the compiler
+//   ignores it (no observable ISA change), the lever is a no-op. Pre-bench
+//   VGPR audit gates this.
+#ifndef MXFP8_RRR_PEEL_TAIL
+#define MXFP8_RRR_PEEL_TAIL 0
+#endif
+
 #if MXFP8_RRR_EXACT_8WAVE_FAST_ENABLE
 
 #if MXFP8_RRR_PHASE_SPLIT
@@ -694,6 +718,36 @@ void rrr_exact_8wave_scaled_kernel(const layout_globals g) {
     {
         constexpr int k_iters_main = k_iters - 2;
         constexpr int k_pairs = k_iters_main / 2;
+#if MXFP8_RRR_PEEL_TAIL
+        // R52 Dev L: peel the final K-pair (kp = k_pairs-1) out of the loop.
+        // The interior loop runs for kp = 0 .. k_pairs-2; the peeled K-pair
+        // is emitted as straight-line code immediately after the loop. This
+        // keeps register pressure bounded (only one extra K-pair body inlined)
+        // while removing loop-control overhead from the most critical-path
+        // iteration (the one whose MFMA writes feed the pre-tail / epilogue).
+        // Static_assert ensures we never underflow the loop bound.
+        static_assert(k_pairs >= 1,
+                      "MXFP8_RRR_PEEL_TAIL requires k_pairs >= 1 (K_DIM/BK >= 4)");
+        constexpr int k_pairs_main = k_pairs - 1;
+        MXFP8_RRR_PRAGMA_UNROLL_MAIN
+        for (int kp = 0; kp < k_pairs_main; kp++) {
+            load_scale_packs(kp);
+            do_k_iter(kp * 2, phase_t<0>{});
+            tic ^= 1; toc ^= 1;
+            do_k_iter(kp * 2 + 1, phase_t<1>{});
+            tic ^= 1; toc ^= 1;
+        }
+        // Peeled final K-pair (kp = k_pairs - 1). Open-coded straight-line
+        // body — no loop-control instructions (s_cmp/s_cbranch/s_add).
+        {
+            constexpr int kp = k_pairs - 1;
+            load_scale_packs(kp);
+            do_k_iter(kp * 2, phase_t<0>{});
+            tic ^= 1; toc ^= 1;
+            do_k_iter(kp * 2 + 1, phase_t<1>{});
+            tic ^= 1; toc ^= 1;
+        }
+#else
         MXFP8_RRR_PRAGMA_UNROLL_MAIN
         for (int kp = 0; kp < k_pairs; kp++) {
             load_scale_packs(kp);
@@ -702,6 +756,7 @@ void rrr_exact_8wave_scaled_kernel(const layout_globals g) {
             do_k_iter(kp * 2 + 1, phase_t<1>{});
             tic ^= 1; toc ^= 1;
         }
+#endif
     }
 
     {
