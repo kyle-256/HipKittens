@@ -54,6 +54,62 @@ python3 test_mxfp8_python.py 4096 14336 4096
 5. 禁止提交 `*.so`、`*.s`、`*_layout_results_*.json`、`.bak*`、`gpucore.*`、`__pycache__` 等（`.gitignore` 已覆盖）
 6. 每个子 agent 使用不同 `HIP_VISIBLE_DEVICES` 以免 GPU 冲突：Dev A → 0，Dev B → 1，Dev C → 2，Reviewer/formal → 7
 
+## R52 cycle 完结 (2026-04-19, 6 devs + 1 reviewer) ★ 0 new SHIP + 1 CONFIRM-SHIPPED + 4 REFUTATIONS + 1 DIAGNOSTIC — closes cachepolicy/N-tile/CRR-un-ship levers; identifies TC-backpressure as dominant 8B Gate/Up RRR gap; **3 R49 verdict flips + V2-is-default correction**
+
+R52 派 6 devs (G/N/O/P/Q/R) + 1 Reviewer. Cycle outcome: V2-RRR confirmed shipped (R22-A still in place; R52N's framing was wrong); cachepolicy + N-tile + CRR-un-ship levers all REFUTED; TC-return backpressure identified as the 8B Gate/Up RRR HEADROOM driver; baseline refreshed to 5/21 PASS with 3 R49 verdict flips.
+
+### R52 commits on `feat/mxfp8-only`
+- `9a246498` Dev G — CRR XCD per-shape un-ship REFUTED (un-shipping regresses -5.40%)
+- `72a3c217` Dev N — V1 RRR baseline spill investigation NEUTRAL-DIAGNOSTIC (V2 framing later corrected by P/O)
+- `34f273db` Dev P — rocprof PMC stall breakdown DIAGNOSTIC-COMPLETE (TC backpressure)
+- `b28c8054` Dev Q — V2 RRR data-load cachepolicy REFUTED
+- `12ed1083` Reviewer — R49–R52 audit + 21-cell baseline refresh + 3 verdict flips
+- `c9a5e014` Dev R — per-shape N-tile shrink REFUTED-PLUMBING (pre-bench)
+- `44265e97` Dev O — SCALE_VERSION=2 RRR dispatch CONFIRM-SHIPPED (V2 already production default since R22-A)
+
+### R52 Dev results
+- **Dev G** REFUTED: per-shape gate to disable `MXFP8_CRR_BLOCK_SWIZZLE` for B_70B_GateUp_CRR. Strict-SCLK 8-run/arm confirm: PRE swizzle-ON med=2488.4 vs POST per-shape-gate-OFF med=2354.1 = **-5.40% regression** (sign-flip from R49). R49's ON-arm 10.27% spread was thermal noise; R52G's <1% spread is genuine. **B_70B_GateUp_CRR re-classified REGRESSION → CONFIRMED.**
+- **Dev N** NEUTRAL-DIAGNOSTIC: V1 spill is in prologue/epilogue (11 stores + 11 reloads), K-loop body has ZERO scratch ops. V2 has 0 scratch / 0 spill / 254 VGPR. Framing error: claimed V2 "NOT wired by default" — corrected by R52P/R52O.
+- **Dev O** **CONFIRM-SHIPPED**: V2-RRR is production default since R22-A (`dabeffa0`). `MXFP8_DISPATCH_TRACE=1` shows `rrr_v2 -> RRR-V2-EXACT-8WAVE` on default env. Strict-SCLK A/B on 7 RRR cells: V2-WIN +2.10% to +6.80% (mean +4.36%). No source patch needed.
+- **Dev P** DIAGNOSTIC: 5 cells profiled (V1/V2 × 8B GateUp, 70B Q/O, 70B GateUp). V2 8B Gate/Up MfmaUtil 55.35% vs V2 70B Q/O 67.78% (+12.43pp gap). **TA_DATA_STALLED_BY_TC/GRBM: 1.4968 vs 0.9501 (+57%)**. K=4096 confirmed as discriminator. **L2/TC cache-return backpressure dominates 8B GateUp RRR HEADROOM** (hit rate unchanged → bandwidth-shape, not miss-driven). Recommended §5.1 cachepolicy (→ R52Q REFUTED), §5.2 K-superblock persistent, §5.3 N-tile shrink (→ R52R REFUTED-PLUMBING).
+- **Dev Q** REFUTED: V2 RRR data-load cachepolicy sweep at 8B Gate/Up. CP0 baseline wins; CP1 (R52P primary) -8.71%. Plumbing in 3 files (load_coh template + macro routing) defaults preserve baseline ISA bit-identically. **Why failed**: A reloaded each K-iter via `buffer_load_lds`; R52P's "consumed once per stripe" model wrong. **Cachepolicy lever family closed** for V2 RRR at 8B Gate/Up.
+- **Dev R** REFUTED-PLUMBING (pre-bench): per-shape N-tile shrink at K=4096 RRR (R52P §5.3). `rrr_mxfp8_exact_8wave_fastpath.inc:216-219` hard-codes `BLK==256, WARPS_N==4` via static_assert; V2 scale slab math hard-codes B-side `pack_count=2`. Multi-day scope across 4 components.
+
+### R52 Reviewer audit — 3 R49 verdict flips
+**Phase 1**: 5/21 PASS on HEAD `9a246498` (vs R48 reported 7/21; 8192³ RRR/CRR re-classified FAIL — R48 FP8 baseline contaminated). PASS cells: 8B Down RCR (95.5%) / RRR (107.6%) / CRR (95.2%), 70B Gate/Up RCR (96.5%), 70B Down RRR (108.5%).
+**Phase 2 verdict flips**:
+- B_8B_Down_CRR: NOISE → CONFIRMED (+0.97%)
+- C_70B_GateUp_CRR: CONFIRMED → INFLATED (+0.89% real vs +9.74% R49 — 11× SCLK noise inflation)
+- B_70B_GateUp_CRR: REGRESSION → CONFIRMED (R52G's confirm proved R49 ON-arm spread thermal noise)
+**Phase 3**: R52H + R52J ISA diffs re-validate refutations.
+**Open headroom**: 70B Gate/Up CRR 89.0% (+6.0pp), 70B Down CRR 88.0% (+7.0pp), 70B Down RCR 90.8% (+4.2pp).
+**Methodology**: 20 min contaminated by sibling reviewer on same GPU 7 — recommends per-GPU exclusivity locking for R53+.
+**Recommendation**: CRR scale-cache layout restructure is the highest-leverage open R53+ direction.
+
+### R52 cycle outcome
+**0 new SHIP + 1 CONFIRM-SHIPPED + 4 REFUTATIONS + 1 DIAGNOSTIC** + 21-cell baseline refresh. Cumulative deliverable:
+1. V2-RRR ship validated (R52N framing corrected by R52O)
+2. TC return backpressure identified as 8B Gate/Up HEADROOM driver (R52P)
+3. Cachepolicy lever family closed (R52Q)
+4. N-tile shrink scope refused as multi-day plumbing rewrite (R52R)
+5. 3 R49 verdict flips + 5/21 PASS baseline (Reviewer)
+6. CRR XCD swizzle re-confirmed on all 7 CRR cells (R52G)
+
+### R53+ candidate levers
+1. **CRR scale-cache layout restructure** (Reviewer recommendation) — eliminate 6 `v_lshrrev_b32` per K-pair via opsel-friendly pack at host preshuffle. R49A failed via per-pair re-pack (forced `v_perm_b32` + occ collapse); R53 should try a different pack invariant.
+2. **K-superblock persistent CTA** (R52P §5.2) — fold multiple K-stripes per CTA so TC-return backpressure amortizes.
+3. **A-side LDS double-buffer at occ=1** for 4096³ — R52K REFUTED at prototype prep; revisit when CRR scale layout work clears VGPR/LDS budget.
+4. **8B Q/O RRR/CRR small-shape wave-tail** (256 CTA, 0.42 wave) — R49C persistent REFUTED; R53 needs different framing (e.g., 2-CTA-per-tile cooperative).
+
+### R52 Cherry-pick status (7/7 on `feat/mxfp8-only`)
+- `9a246498` Dev G CRR un-ship REFUTED
+- `72a3c217` Dev N V1 spill NEUTRAL
+- `34f273db` Dev P TC backpressure DIAG
+- `b28c8054` Dev Q cachepolicy REFUTED
+- `12ed1083` Reviewer audit + baseline
+- `c9a5e014` Dev R N-tile REFUTED-PLUMBING
+- `44265e97` Dev O V2-RRR CONFIRM-SHIPPED
+
 ## R49 cycle 完结 (2026-04-19, 5 devs + 1 reviewer-in-flight) ★ 0 SHIP + 5 REFUTATION + R48 strict-protocol baseline (7/21 PASS)
 
 R49 派 5 devs (A/B/C/D/E) + 1 Reviewer (R47 SHIP re-validation). All 5 devs REFUTED — Reviewer still in flight. R48 strict-protocol baseline landed first (7/21 PASS).
