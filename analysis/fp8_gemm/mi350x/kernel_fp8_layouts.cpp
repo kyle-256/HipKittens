@@ -85,59 +85,19 @@ using B_row_reg = rt_fp8e4m3<RBN, BK, row_l, rt_16x128_s>;
 // Col-layout register tiles (for B in RRR, A/B in CRR)
 using A_col_reg = rt_fp8e4m3<BK, RBM, col_l, rt_128x16_s>;  // 128×64
 using B_col_reg = rt_fp8e4m3<BK, RBN, col_l, rt_128x16_s>;  // 128×32
-using RCR_B_reg = B_row_reg;
 
 using ST_v2     = st_fp8e4m3<HB, BK, st_16x128_v2_s>;
 using ST_v2a    = st_fp8e4m3<HB, BK, st_16x128_v2a_s>;
-using ST_rrr_b  = ST_v2;
 
 static_assert(sizeof(A_row_reg) == sizeof(A_col_reg));
 static_assert(alignof(A_row_reg) == alignof(A_col_reg));
 static_assert(sizeof(B_row_reg) == sizeof(B_col_reg));
 static_assert(alignof(B_row_reg) == alignof(B_col_reg));
 
-template<typename RT, int K_HALF>
-__device__ __forceinline__ void load_col_from_v2_st_half(
-    RT& dst, const ST_v2& tile, int col_start)
-{
-    const int laneid = kittens::laneid();
-    const int row_off = ((laneid % 16) / 2) + ((laneid / 16) * 16);
-    const int col_off = (laneid % 2) * 8;
-    const uint32_t tile_base = reinterpret_cast<uintptr_t>(&tile.data[0]);
-
-    constexpr int idx = K_HALF * 4;
-    const int k_row = row_off + K_HALF * 64;
-
-    const uint32_t stidx = k_row >> 4;
-    const uint32_t base_k = tile_base + (stidx << 11) + (stidx << 7) + ((k_row & 15) << 7);
-    const uint32_t sw_k   = (k_row & 7) << 4;
-
-    #pragma unroll
-    for (int j = 0; j < RT::width; j++) {
-        const uint32_t nc = col_start + j * 16 + col_off;
-        const uint32_t addr = base_k + (nc ^ sw_k);
-
-        asm volatile(
-            "ds_read_b64_tr_b8 %0, %2 offset:0\n"
-            "ds_read_b64_tr_b8 %1, %2 offset:1024\n"
-            : "=&v"(*reinterpret_cast<float2*>(&dst.tiles[0][j].data[idx])),
-              "=&v"(*reinterpret_cast<float2*>(&dst.tiles[0][j].data[idx + 2]))
-            : "v"(addr)
-            : "memory"
-        );
-    }
-}
-
-template<typename RT>
-__device__ __forceinline__ void load_col_from_v2_st(
-    RT& dst, const ST_v2& tile, int col_start)
-{
-    load_col_from_v2_st_half<RT, 0>(dst, tile, col_start);
-    load_col_from_v2_st_half<RT, 1>(dst, tile, col_start);
-}
-
+// Cooperative col-major load from a v2/v2a-swizzled FP8 LDS tile.
+// Two `ds_read_b64_tr_b8` per lane per K_HALF (offset:0 + offset:1024).
 template<typename RT, int K_HALF, typename ST>
-__device__ __forceinline__ void load_col_from_v2a_st_half(
+__device__ __forceinline__ void load_col_from_st_half(
     RT& dst, const ST& tile, int col_start)
 {
     const int laneid = kittens::laneid();
@@ -169,11 +129,11 @@ __device__ __forceinline__ void load_col_from_v2a_st_half(
 }
 
 template<typename RT, typename ST>
-__device__ __forceinline__ void load_col_from_v2a_st(
+__device__ __forceinline__ void load_col_from_st(
     RT& dst, const ST& tile, int col_start)
 {
-    load_col_from_v2a_st_half<RT, 0>(dst, tile, col_start);
-    load_col_from_v2a_st_half<RT, 1>(dst, tile, col_start);
+    load_col_from_st_half<RT, 0>(dst, tile, col_start);
+    load_col_from_st_half<RT, 1>(dst, tile, col_start);
 }
 
 __device__ __forceinline__ void rrr_mma(
@@ -187,27 +147,10 @@ __device__ __forceinline__ void rrr_mma(
 __device__ __forceinline__ void rcr_mma(
     rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
     const A_row_reg& a,
-    const RCR_B_reg& b)
+    const B_row_reg& b)
 {
     mma_ABt(acc, a, b, acc);
 }
-
-__device__ __noinline__ void rcr_rhs_mma(
-    rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
-    const A_row_reg& a,
-    const RCR_B_reg& b)
-{
-    rcr_mma(acc, a, b);
-}
-
-__device__ __noinline__ RCR_B_reg rcr_rhs_copy(const RCR_B_reg b)
-{
-    return b;
-}
-
-#define RCR_RHS_MMA(acc, a, b) rcr_mma(acc, a, b)
-
-#define RCR_PAIR_CB_MMA(acc, a, b, wn) RCR_RHS_MMA((acc), (a), (b))
 
 __device__ __forceinline__ void crr_mma(
     rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
@@ -522,11 +465,6 @@ __device__ __forceinline__ void rcr_8w_load_hoist(
         }
     }
 }
-
-// Convenience macro used inside the 8-wave RCR branch to switch between the
-// stock G::load(...) path and the hoist helper at compile time.
-#define RCR_LOAD_8W(DST, SRC, IDX, SO) \
-    rcr_8w_load_hoist<_NUM_THREADS>((DST), (SRC), (IDX), (SO))
 
 struct layout_globals {
     _gl_fp8 a, b;
@@ -1050,7 +988,7 @@ void gemm_kernel(const layout_globals g) {
         __shared__ ST_rcr As[2][2];
         __shared__ ST_rcr Bs[2][2];
         A_row_reg a;
-        RCR_B_reg b0, b1;
+        B_row_reg b0, b1;
 
         constexpr int bpt = ST_rcr::underlying_subtile_bytes_per_thread;
         constexpr int bpm = bpt * _NUM_THREADS;
@@ -1066,7 +1004,7 @@ void gemm_kernel(const layout_globals g) {
             auto sub = subtile_inplace<RBM, BK>(tile, {wi, 0});
             load(dst, sub);
         };
-        auto load_b = [&](RCR_B_reg& dst, ST_rcr& tile, int wi) {
+        auto load_b = [&](B_row_reg& dst, ST_rcr& tile, int wi) {
             auto sub = subtile_inplace<RBN, BK>(tile, {wi, 0});
             load(dst, sub);
         };
@@ -1076,18 +1014,18 @@ void gemm_kernel(const layout_globals g) {
         };
 
         int tic = 0, toc = 1;
-        RCR_LOAD_8W(b_tile(tic, 0), g.b, b_co(bc*2,   0), soB);
-        RCR_LOAD_8W(As[tic][0], g.a, a_co(br*2,   0), soA);
-        RCR_LOAD_8W(b_tile(tic, 1), g.b, b_co(bc*2+1, 0), soB);
-        RCR_LOAD_8W(As[tic][1], g.a, a_co(br*2+1, 0), soA);
+        rcr_8w_load_hoist<_NUM_THREADS>(b_tile(tic, 0), g.b, b_co(bc*2,   0), soB);
+        rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0], g.a, a_co(br*2,   0), soA);
+        rcr_8w_load_hoist<_NUM_THREADS>(b_tile(tic, 1), g.b, b_co(bc*2+1, 0), soB);
+        rcr_8w_load_hoist<_NUM_THREADS>(As[tic][1], g.a, a_co(br*2+1, 0), soA);
 
         if (wm == 1) __builtin_amdgcn_s_barrier();
         TK_WAIT_VMCNT(RCR_INIT0_VMCNT);
         __builtin_amdgcn_s_barrier();
 
-        RCR_LOAD_8W(b_tile(toc, 0), g.b, b_co(bc*2,   1), soB);
-        RCR_LOAD_8W(As[toc][0], g.a, a_co(br*2,   1), soA);
-        RCR_LOAD_8W(b_tile(toc, 1), g.b, b_co(bc*2+1, 1), soB);
+        rcr_8w_load_hoist<_NUM_THREADS>(b_tile(toc, 0), g.b, b_co(bc*2,   1), soB);
+        rcr_8w_load_hoist<_NUM_THREADS>(As[toc][0], g.a, a_co(br*2,   1), soA);
+        rcr_8w_load_hoist<_NUM_THREADS>(b_tile(toc, 1), g.b, b_co(bc*2+1, 1), soB);
 
         TK_WAIT_VMCNT(RCR_INIT1_VMCNT);
         __builtin_amdgcn_s_barrier();
@@ -1096,7 +1034,7 @@ void gemm_kernel(const layout_globals g) {
             auto main_loop_iter = [&](int tile) {
                 load_b(b0, Bs[0][0], wn);
                 load_a(a, As[0][0], wm);
-                RCR_LOAD_8W(As[1][1], g.a, a_co(br*2+1, tile+1), soA);
+                rcr_8w_load_hoist<_NUM_THREADS>(As[1][1], g.a, a_co(br*2+1, tile+1), soA);
                 TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
 
                 asm volatile("s_waitcnt lgkmcnt(0)");
@@ -1104,7 +1042,7 @@ void gemm_kernel(const layout_globals g) {
                 __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
 
                 load_b(b1, Bs[0][1], wn);
-                RCR_LOAD_8W(Bs[0][0], g.b, b_co(bc*2, tile+2), soB);
+                rcr_8w_load_hoist<_NUM_THREADS>(Bs[0][0], g.b, b_co(bc*2, tile+2), soB);
                 __builtin_amdgcn_s_barrier();
 
                 asm volatile("s_waitcnt lgkmcnt(0)");
@@ -1112,7 +1050,7 @@ void gemm_kernel(const layout_globals g) {
                 __builtin_amdgcn_s_barrier();
 
                 load_a(a, As[0][1], wm);
-                RCR_LOAD_8W(As[0][0], g.a, a_co(br*2, tile+2), soA);
+                rcr_8w_load_hoist<_NUM_THREADS>(As[0][0], g.a, a_co(br*2, tile+2), soA);
                 __builtin_amdgcn_s_barrier();
 
                 asm volatile("s_waitcnt lgkmcnt(0)");
@@ -1120,14 +1058,14 @@ void gemm_kernel(const layout_globals g) {
                 __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
 
                 load_b(b0, Bs[1][0], wn);
-                RCR_LOAD_8W(Bs[0][1], g.b, b_co(bc*2+1, tile+2), soB);
+                rcr_8w_load_hoist<_NUM_THREADS>(Bs[0][1], g.b, b_co(bc*2+1, tile+2), soB);
                 TK_WAIT_VMCNT(RCR_TWO_TILE_MID_VMCNT); __builtin_amdgcn_s_barrier();
 
                 __builtin_amdgcn_s_setprio(1); mma_ABt(cD, a, b1, cD); __builtin_amdgcn_s_setprio(0);
                 __builtin_amdgcn_s_barrier();
 
                 load_a(a, As[1][0], wm);
-                RCR_LOAD_8W(As[0][1], g.a, a_co(br*2+1, tile+2), soA);
+                rcr_8w_load_hoist<_NUM_THREADS>(As[0][1], g.a, a_co(br*2+1, tile+2), soA);
                 TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
 
                 asm volatile("s_waitcnt lgkmcnt(0)");
@@ -1135,7 +1073,7 @@ void gemm_kernel(const layout_globals g) {
                 __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
 
                 load_b(b1, Bs[1][1], wn);
-                RCR_LOAD_8W(Bs[1][0], g.b, b_co(bc*2, tile+3), soB);
+                rcr_8w_load_hoist<_NUM_THREADS>(Bs[1][0], g.b, b_co(bc*2, tile+3), soB);
                 __builtin_amdgcn_s_barrier();
 
                 asm volatile("s_waitcnt lgkmcnt(0)");
@@ -1143,14 +1081,14 @@ void gemm_kernel(const layout_globals g) {
                 __builtin_amdgcn_s_barrier();
 
                 load_a(a, As[1][1], wm);
-                RCR_LOAD_8W(As[1][0], g.a, a_co(br*2, tile+3), soA);
+                rcr_8w_load_hoist<_NUM_THREADS>(As[1][0], g.a, a_co(br*2, tile+3), soA);
                 __builtin_amdgcn_s_barrier();
 
                 asm volatile("s_waitcnt lgkmcnt(0)");
                 __builtin_amdgcn_s_setprio(1); mma_ABt(cC, a, b0, cC); __builtin_amdgcn_s_setprio(0);
                 __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
 
-                RCR_LOAD_8W(Bs[1][1], g.b, b_co(bc*2+1, tile+3), soB);
+                rcr_8w_load_hoist<_NUM_THREADS>(Bs[1][1], g.b, b_co(bc*2+1, tile+3), soB);
                 TK_WAIT_VMCNT(RCR_TWO_TILE_MID_VMCNT); __builtin_amdgcn_s_barrier();
 
                 __builtin_amdgcn_s_setprio(1); mma_ABt(cD, a, b1, cD); __builtin_amdgcn_s_setprio(0);
@@ -1169,29 +1107,29 @@ void gemm_kernel(const layout_globals g) {
         for (int k = 0; k < ki_dyn - 2; k++, tic ^= 1, toc ^= 1) {
             load_b(b0, b_tile(tic, 0), wn);
             load_a(a, As[tic][0], wm);
-            RCR_LOAD_8W(As[toc][1], g.a, a_co(br*2+1, k+1), soA);
+            rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], g.a, a_co(br*2+1, k+1), soA);
             TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); rcr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
 
             load_b(b1, b_tile(tic, 1), wn);
-            RCR_LOAD_8W(b_tile(tic, 0), g.b, b_co(bc*2, k+2), soB);
+            rcr_8w_load_hoist<_NUM_THREADS>(b_tile(tic, 0), g.b, b_co(bc*2, k+2), soB);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); RCR_RHS_MMA(cB, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cB, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
-            RCR_LOAD_8W(As[tic][0], g.a, a_co(br*2, k+2), soA);
+            rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0], g.a, a_co(br*2, k+2), soA);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); rcr_mma(cC, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
 
-            RCR_LOAD_8W(b_tile(tic, 1), g.b, b_co(bc*2+1, k+2), soB);
+            rcr_8w_load_hoist<_NUM_THREADS>(b_tile(tic, 1), g.b, b_co(bc*2+1, k+2), soB);
             TK_WAIT_VMCNT(RCR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
-            __builtin_amdgcn_s_setprio(1); RCR_RHS_MMA(cD, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cD, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
         }
         }
@@ -1199,7 +1137,7 @@ void gemm_kernel(const layout_globals g) {
         {
             load_b(b0, b_tile(tic, 0), wn);
             load_a(a, As[tic][0], wm);
-            RCR_LOAD_8W(As[toc][1], g.a, a_co(br*2+1, ki_dyn-1), soA);
+            rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], g.a, a_co(br*2+1, ki_dyn-1), soA);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); rcr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
@@ -1208,7 +1146,7 @@ void gemm_kernel(const layout_globals g) {
             load_b(b1, b_tile(tic, 1), wn);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); RCR_RHS_MMA(cB, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cB, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
@@ -1220,7 +1158,7 @@ void gemm_kernel(const layout_globals g) {
             load_b(b0, b_tile(toc, 0), wn);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); RCR_RHS_MMA(cD, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cD, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
             tic ^= 1; toc ^= 1;
         }
@@ -1235,7 +1173,7 @@ void gemm_kernel(const layout_globals g) {
             load_b(b1, b_tile(tic, 1), wn);
             __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); RCR_RHS_MMA(cB, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cB, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
@@ -1243,14 +1181,14 @@ void gemm_kernel(const layout_globals g) {
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1);
             rcr_mma(cC, a, b0);
-            RCR_RHS_MMA(cD, a, b1);
+            rcr_mma(cD, a, b1);
             __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
         }
 
     } else if constexpr (L == Layout::RRR) {
         __shared__ ST_row As[2][2];
-        __shared__ ST_rrr_b Bs[2][2];
+        __shared__ ST_v2 Bs[2][2];
         A_row_reg a;
         B_col_reg b0, b1;
 
@@ -1261,22 +1199,22 @@ void gemm_kernel(const layout_globals g) {
         G::prefill_swizzled_offsets(As[0][0], g.a, soA);
 
         constexpr int bptB =
-            ST_rrr_b::underlying_subtile_bytes_per_thread;
+            ST_v2::underlying_subtile_bytes_per_thread;
         constexpr int bpmB = bptB * _NUM_THREADS;
         constexpr int mptB =
-            ST_rrr_b::rows * ST_rrr_b::cols * sizeof(fp8e4m3) / bpmB;
+            ST_v2::rows * ST_v2::cols * sizeof(fp8e4m3) / bpmB;
         uint32_t soB[mptB];
         G::prefill_swizzled_offsets(Bs[0][0], g.b, soB);
 
         auto a_co = [&](int s, int k) -> coord<ST_row> { return {0, 0, s, k}; };
-        auto b_co = [&](int s, int k) -> coord<ST_rrr_b> { return {0, 0, k, s}; };
+        auto b_co = [&](int s, int k) -> coord<ST_v2> { return {0, 0, k, s}; };
 
         auto load_a = [&](A_row_reg& dst, ST_row& tile, int wi) {
             auto sub = subtile_inplace<RBM, BK>(tile, {wi, 0});
             load(dst, sub);
         };
-        auto load_b = [&](B_col_reg& dst, ST_rrr_b& tile, int wi) {
-            load_col_from_v2_st(dst, tile, wi * RBN);
+        auto load_b = [&](B_col_reg& dst, ST_v2& tile, int wi) {
+            load_col_from_st(dst, tile, wi * RBN);
         };
 
         int tic = 0, toc = 1;
@@ -1417,10 +1355,10 @@ void gemm_kernel(const layout_globals g) {
         };
 
         auto load_a = [&](A_col_reg& dst, ST_crr_a& tile, int wi) {
-            load_col_from_v2a_st(dst, tile, wi * RBM);
+            load_col_from_st(dst, tile, wi * RBM);
         };
         auto load_b = [&](B_col_reg& dst, ST_crr_b& tile, int wi) {
-            load_col_from_v2_st(dst, tile, wi * RBN);
+            load_col_from_st(dst, tile, wi * RBN);
         };
 
         int tic = 0, toc = 1;
