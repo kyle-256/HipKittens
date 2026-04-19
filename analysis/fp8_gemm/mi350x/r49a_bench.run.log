@@ -1,0 +1,81 @@
+############################################
+##  PASS: MXFP8_CRR_OPSEL=0  ##
+############################################
+=== [opsel=0] [1/7] 8192cube (8192x8192x8192) ===
+  built
+  benched (5 runs)
+  corr/det checked
+=== [opsel=0] [2/7] 8B_QO (4096x4096x4096) ===
+  built
+  benched (5 runs)
+  corr/det checked
+=== [opsel=0] [3/7] 8B_GateUp (4096x14336x4096) ===
+  built
+  benched (5 runs)
+  corr/det checked
+=== [opsel=0] [4/7] 8B_Down (4096x4096x14336) ===
+  built
+  benched (5 runs)
+  corr/det checked
+=== [opsel=0] [5/7] 70B_QO (4096x8192x8192) ===
+  built
+  benched (5 runs)
+  corr/det checked
+=== [opsel=0] [6/7] 70B_GateUp (4096x28672x8192) ===
+  built
+  benched (5 runs)
+  corr/det checked
+=== [opsel=0] [7/7] 70B_Down (4096x8192x28672) ===
+  built
+  benched (5 runs)
+  corr/det checked
+
+############################################
+##  PASS: MXFP8_CRR_OPSEL=1  ##
+############################################
+=== [opsel=1] [1/7] 8192cube (8192x8192x8192) ===
+  built
+  benched (5 runs)
+  corr/det checked
+=== [opsel=1] [2/7] 8B_QO (4096x4096x4096) ===
+  built
+  benched (5 runs)
+  corr/det checked
+=== [opsel=1] [3/7] 8B_GateUp (4096x14336x4096) ===
+  built
+  benched (5 runs)
+  corr/det checked
+=== [opsel=1] [4/7] 8B_Down (4096x4096x14336) ===
+  built
+  benched (5 runs)
+  corr/det checked
+=== [opsel=1] [5/7] 70B_QO (4096x8192x8192) ===
+  built
+  benched (5 runs)
+  corr/det checked
+=== [opsel=1] [6/7] 70B_GateUp (4096x28672x8192) ===
+  built
+  benched (5 runs)
+  corr/det checked
+=== [opsel=1] [7/7] 70B_Down (4096x8192x28672) ===
+  built
+  benched (5 runs)
+  corr/det checked
+
+
+========== R49 Dev A SUMMARY ==========
+
+Shape                |  OFF med   ON med spread% |  delta% | SNR_OFF  SNR_ON detOFF  detON
+------------------------------------------------------------------------------------------
+8192^3               |   2801.1   1826.8  78.61% | -34.78% |    49.6    49.6     OK     OK
+8B Q/O (4096^3)      |   2285.6   2019.4   4.22% | -11.65% |    49.6    49.6     OK     OK
+8B Gate/Up           |   2367.8   2134.2   1.32% |  -9.87% |    49.6    49.6     OK     OK
+8B Down              |   2800.8   2475.4   0.40% | -11.62% |    49.6    49.6     OK     OK
+70B Q/O              |   2742.7   2415.6   3.38% | -11.93% |    49.6    49.6     OK     OK
+70B Gate/Up          |   2503.2   2305.5   0.95% |  -7.90% |    49.6    49.6     OK     OK
+70B Down             |   2655.1   2448.7   0.80% |  -7.78% |    49.6    49.6     OK     OK
+
+GEOMEAN delta: -14.16%   worst: -34.78%   best: -7.78%
+VERDICT: REFUTED  (gate: geomean>=+1.5%=False, worst>=-2%=False)
+
+Written to r49a_results/SUMMARY.txt

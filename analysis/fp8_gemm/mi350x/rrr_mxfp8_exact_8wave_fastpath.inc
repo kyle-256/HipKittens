@@ -52,7 +52,88 @@
 #define MXFP8_RRR_PRAGMA_UNROLL_MAIN
 #endif
 
+// R49 Dev B: Phase-split do_k_iter MMA quartet into two noinline halves to
+// break the compiler's bimodal VGPR-spill threshold (R48 Dev E/G: any unroll
+// >= 2 commits to flat 208 B/lane scratch). The lambda's 4 MFMAs (cA, cB,
+// cC, cD) consume {a0_scale_packs, a1_scale_packs} × {b0_scale_packs,
+// b1_scale_packs}; the noinline boundary forces the compiler to drop a0
+// scale-pack live ranges before a1 scale-pack live ranges become live.
+//
+// Default OFF (=0). When MXFP8_RRR_PHASE_SPLIT=1, the lambda routes its 4
+// MFMAs through `do_mma_quartet_first_half` (cA+cB, uses a0_scale_packs)
+// and `do_mma_quartet_second_half` (cC+cD, uses a1_scale_packs), both
+// marked __attribute__((noinline)).
+#ifndef MXFP8_RRR_PHASE_SPLIT
+#define MXFP8_RRR_PHASE_SPLIT 0
+#endif
+
 #if MXFP8_RRR_EXACT_8WAVE_FAST_ENABLE
+
+#if MXFP8_RRR_PHASE_SPLIT
+// Noinline halves of the do_k_iter MMA quartet. Each takes only the scale
+// packs it actually uses (a0 or a1, plus both b packs). Barriers/setprio
+// surrounding each MFMA pair stay inside the function so the live-range
+// graph at the call site is just {a, b0, b1, scale_packs, accumulators}.
+//
+// The accumulators (rt_fl<RBM,RBN,...>) are passed by reference; the input
+// `a` and `b` regs are passed by const-reference; scale packs are
+// arrays-by-reference (already preserved through rrr_mma_scaled_phase).
+//
+// `__attribute__((noinline))` is the load-bearing attribute. We also add
+// `__attribute__((flatten))` so any inner inlinable helpers (e.g.
+// rrr_mma_scaled_phase) still get inlined into the helper, but the helper
+// itself remains a function call.
+template<int K_PHASE, int A_PACK_COUNT, int B_PACK_COUNT>
+__attribute__((noinline)) __device__
+void do_mma_quartet_first_half(
+    rt_fl<RBM, RBN, col_l, rt_16x16_s>& cA,
+    rt_fl<RBM, RBN, col_l, rt_16x16_s>& cB,
+    const A_row_reg& a,
+    const B_col_reg& b0,
+    const B_col_reg& b1,
+    const fp8e8m0_4 (&a0_scale_packs)[A_PACK_COUNT],
+    const fp8e8m0_4 (&b0_scale_packs)[B_PACK_COUNT],
+    const fp8e8m0_4 (&b1_scale_packs)[B_PACK_COUNT])
+{
+    asm volatile("s_waitcnt lgkmcnt(0)");
+    __builtin_amdgcn_s_setprio(1);
+    rrr_mma_scaled_phase<K_PHASE>(cA, a, b0, a0_scale_packs, b0_scale_packs);
+    __builtin_amdgcn_s_setprio(0);
+    __builtin_amdgcn_s_barrier();
+    RRR_SCHED_BARRIER();
+    // Caller is responsible for the prefetch + barrier between cA and cB.
+    asm volatile("s_waitcnt lgkmcnt(0)");
+    __builtin_amdgcn_s_setprio(1);
+    rrr_mma_scaled_phase<K_PHASE>(cB, a, b1, a0_scale_packs, b1_scale_packs);
+    __builtin_amdgcn_s_setprio(0);
+    __builtin_amdgcn_s_barrier();
+}
+
+template<int K_PHASE, int A_PACK_COUNT, int B_PACK_COUNT>
+__attribute__((noinline)) __device__
+void do_mma_quartet_second_half(
+    rt_fl<RBM, RBN, col_l, rt_16x16_s>& cC,
+    rt_fl<RBM, RBN, col_l, rt_16x16_s>& cD,
+    const A_row_reg& a,
+    const B_col_reg& b0,
+    const B_col_reg& b1,
+    const fp8e8m0_4 (&a1_scale_packs)[A_PACK_COUNT],
+    const fp8e8m0_4 (&b0_scale_packs)[B_PACK_COUNT],
+    const fp8e8m0_4 (&b1_scale_packs)[B_PACK_COUNT])
+{
+    asm volatile("s_waitcnt lgkmcnt(0)");
+    __builtin_amdgcn_s_setprio(1);
+    rrr_mma_scaled_phase<K_PHASE>(cC, a, b0, a1_scale_packs, b0_scale_packs);
+    __builtin_amdgcn_s_setprio(0);
+    __builtin_amdgcn_s_barrier();
+    RRR_SCHED_BARRIER();
+    asm volatile("s_waitcnt lgkmcnt(0)");
+    __builtin_amdgcn_s_setprio(1);
+    rrr_mma_scaled_phase<K_PHASE>(cD, a, b1, a1_scale_packs, b1_scale_packs);
+    __builtin_amdgcn_s_setprio(0);
+    __builtin_amdgcn_s_barrier();
+}
+#endif // MXFP8_RRR_PHASE_SPLIT
 
 static_assert(BLK == 256, "MXFP8 exact 8-wave fast path requires BLK=256");
 static_assert(BK == 128, "MXFP8 exact 8-wave fast path requires BK=128");
@@ -415,6 +496,68 @@ void rrr_exact_8wave_scaled_kernel(const layout_globals g) {
     auto do_k_iter = [&](int k, auto phase_tag) __attribute__((always_inline)) {
         constexpr int phase = decltype(phase_tag)::value;
 
+#if MXFP8_RRR_PHASE_SPLIT
+        // R49 Dev B: Phase-split path. The MFMA quartet is delivered through
+        // two noinline halves (cA+cB use a0_scale_packs; cC+cD use
+        // a1_scale_packs). The function-call boundary forces the compiler to
+        // drop a0 scale-pack live ranges before a1 scale-pack live ranges
+        // become live, breaking the bimodal spill threshold (R48 Dev E/G).
+        //
+        // Loads needed for the first MFMA pair (cA, cB) are issued before
+        // the first noinline call. Loads needed for the second MFMA pair
+        // (cC, cD) are issued between the two noinline calls.
+        load_b(b0, Bs[tic][0], wn);
+#if RRR_B_REG_ROW_LOAD_TRANSPOSE && RRR_B_REG_ROW_LOAD_ALIAS
+        const auto b0_keep = b0;
+#endif
+        load_a(a, As[tic][0], wm);
+        G::load(As[toc][1], g.a, a_co(br * 2 + 1, k + 1), soA);
+        TK_WAIT_LGKM(RRR_PREFETCH_LGKM);
+        __builtin_amdgcn_s_barrier();
+
+        // Pre-issue loads for cB so the first half can issue both MFMAs
+        // back-to-back.
+        load_b(b1, Bs[tic][1], wn);
+#if RRR_B_REG_ROW_LOAD_TRANSPOSE && RRR_B_REG_ROW_LOAD_ALIAS
+        const auto b1_keep = b1;
+#endif
+#if RRR_ROW_SHARED_TRANSPOSE
+        load_transpose<_NUM_THREADS>(Bs[tic][0], g.b, b_co(bc * 2, k + 2), soB);
+#else
+        G::load(Bs[tic][0], g.b, b_co(bc * 2, k + 2), soB);
+#endif
+
+#if RRR_B_REG_ROW_LOAD_TRANSPOSE && RRR_B_REG_ROW_LOAD_ALIAS
+        do_mma_quartet_first_half<phase>(
+            cA, cB, a, b0_keep, b1_keep,
+            a0_scale_packs, b0_scale_packs, b1_scale_packs);
+#else
+        do_mma_quartet_first_half<phase>(
+            cA, cB, a, b0, b1,
+            a0_scale_packs, b0_scale_packs, b1_scale_packs);
+#endif
+
+        // Loads for cC and cD.
+        load_a(a, As[tic][1], wm);
+#if RRR_ROW_SHARED_TRANSPOSE
+        load_transpose<_NUM_THREADS>(Bs[tic][1], g.b, b_co(bc * 2 + 1, k + 2), soB);
+#else
+        G::load(Bs[tic][1], g.b, b_co(bc * 2 + 1, k + 2), soB);
+#endif
+        G::load(As[tic][0], g.a, a_co(br * 2, k + 2), soA);
+        TK_WAIT_VMCNT(RRR_STEADY_VMCNT);
+        __builtin_amdgcn_s_barrier();
+
+#if RRR_B_REG_ROW_LOAD_TRANSPOSE && RRR_B_REG_ROW_LOAD_ALIAS
+        do_mma_quartet_second_half<phase>(
+            cC, cD, a, b0_keep, b1_keep,
+            a1_scale_packs, b0_scale_packs, b1_scale_packs);
+#else
+        do_mma_quartet_second_half<phase>(
+            cC, cD, a, b0, b1,
+            a1_scale_packs, b0_scale_packs, b1_scale_packs);
+#endif
+#else // !MXFP8_RRR_PHASE_SPLIT — original baseline body
         load_b(b0, Bs[tic][0], wn);
 #if RRR_B_REG_ROW_LOAD_TRANSPOSE && RRR_B_REG_ROW_LOAD_ALIAS
         const auto b0_keep = b0;
@@ -484,6 +627,7 @@ void rrr_exact_8wave_scaled_kernel(const layout_globals g) {
 #endif
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
+#endif // MXFP8_RRR_PHASE_SPLIT
     };
 
     {

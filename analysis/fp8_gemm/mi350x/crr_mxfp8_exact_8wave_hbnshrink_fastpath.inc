@@ -486,7 +486,12 @@ __host__ inline bool crr_can_use_exact_8wave_scaled_hbnshrink(const layout_globa
     // proven on additional wide-N shapes.
     const bool is_8b_gateup  = (g.m == 4096 && g.n == 14336 && g.k == 4096);
     const bool is_70b_gateup = (g.m == 4096 && g.n == 28672 && g.k == 8192);
-    return is_8b_gateup || is_70b_gateup;
+    // R49 Dev E — extend allow-list to 70B Down (4096x4096x14336) for the
+    // CRR-variant re-eval sweep. Note 70B Down is K-heavy (not strictly
+    // wide-N), so HB-N is paradigm-questionable here; benchmark documents
+    // the result rather than claiming a win.
+    const bool is_70b_down   = (g.m == 4096 && g.n == 4096 && g.k == 14336);
+    return is_8b_gateup || is_70b_gateup || is_70b_down;
 }
 
 template<bool PRESHUFFLED_QUANT>

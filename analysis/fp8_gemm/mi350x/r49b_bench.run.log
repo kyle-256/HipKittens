@@ -1,0 +1,86 @@
+==========
+>>> tag=baseline shape=8192x8192x8192 (8192cube) Sun Apr 19 07:55:17 UTC 2026
+  Avg time: 0.3744 ms, TFLOPS: 2936.82
+  Avg time: 0.3739 ms, TFLOPS: 2940.60
+  Avg time: 0.3731 ms, TFLOPS: 2946.74
+  Avg time: 0.3744 ms, TFLOPS: 2936.98
+  Avg time: 0.3745 ms, TFLOPS: 2936.09
+==========
+>>> tag=baseline shape=4096x4096x4096 (8B_QO) Sun Apr 19 07:59:19 UTC 2026
+  Avg time: 0.0623 ms, TFLOPS: 2204.38
+  Avg time: 0.0617 ms, TFLOPS: 2225.80
+  Avg time: 0.0620 ms, TFLOPS: 2217.50
+  Avg time: 0.0615 ms, TFLOPS: 2234.82
+  Avg time: 0.0611 ms, TFLOPS: 2248.58
+==========
+>>> tag=baseline shape=4096x14336x4096 (8B_GateUp) Sun Apr 19 08:03:21 UTC 2026
+  Avg time: 0.1962 ms, TFLOPS: 2451.99
+  Avg time: 0.1958 ms, TFLOPS: 2456.95
+  Avg time: 0.1959 ms, TFLOPS: 2456.07
+  Avg time: 0.1965 ms, TFLOPS: 2447.94
+  Avg time: 0.1961 ms, TFLOPS: 2453.31
+==========
+>>> tag=baseline shape=4096x4096x14336 (8B_Down) Sun Apr 19 08:07:23 UTC 2026
+  Avg time: 0.1683 ms, TFLOPS: 2858.61
+  Avg time: 0.1680 ms, TFLOPS: 2863.34
+  Avg time: 0.1678 ms, TFLOPS: 2866.09
+  Avg time: 0.1676 ms, TFLOPS: 2870.56
+  Avg time: 0.1678 ms, TFLOPS: 2866.94
+==========
+>>> tag=baseline shape=4096x8192x8192 (70B_QO) Sun Apr 19 08:11:30 UTC 2026
+  Avg time: 0.1947 ms, TFLOPS: 2824.29
+  Avg time: 0.1920 ms, TFLOPS: 2863.89
+  Avg time: 0.1940 ms, TFLOPS: 2833.17
+  Avg time: 0.1943 ms, TFLOPS: 2829.94
+  Avg time: 0.1962 ms, TFLOPS: 2801.80
+==========
+>>> tag=baseline shape=4096x28672x8192 (70B_GateUp) Sun Apr 19 08:15:44 UTC 2026
+  Avg time: 0.6955 ms, TFLOPS: 2766.37
+  Avg time: 0.6979 ms, TFLOPS: 2756.96
+  Avg time: 0.6941 ms, TFLOPS: 2772.27
+  Avg time: 0.6978 ms, TFLOPS: 2757.54
+  Avg time: 0.6964 ms, TFLOPS: 2763.03
+==========
+>>> tag=baseline shape=4096x8192x28672 (70B_Down) Sun Apr 19 08:19:46 UTC 2026
+  Avg time: 0.6540 ms, TFLOPS: 2942.21
+  Avg time: 0.6540 ms, TFLOPS: 2942.27
+  Avg time: 0.6530 ms, TFLOPS: 2946.41
+  Avg time: 0.6531 ms, TFLOPS: 2946.03
+  Avg time: 0.6559 ms, TFLOPS: 2933.52
+==========
+>>> tag=phasesplit shape=8192x8192x8192 (8192cube) Sun Apr 19 08:23:46 UTC 2026
+  Avg time: 14.3037 ms, TFLOPS: 76.87
+  Avg time: 14.2996 ms, TFLOPS: 76.89
+  Avg time: 14.2528 ms, TFLOPS: 77.14
+==========
+>>> tag=phasesplit shape=4096x4096x4096 (8B_QO) Sun Apr 19 08:29:06 UTC 2026
+  Avg time: 1.7845 ms, TFLOPS: 77.02
+  Avg time: 1.7866 ms, TFLOPS: 76.93
+  Avg time: 1.7884 ms, TFLOPS: 76.85
+  Avg time: 1.7912 ms, TFLOPS: 76.73
+==========
+>>> tag=phasesplit shape=4096x14336x4096 (8B_GateUp) Sun Apr 19 08:33:20 UTC 2026
+  Avg time: 0.1986 ms, TFLOPS: 2422.21
+  Avg time: 0.1964 ms, TFLOPS: 2448.71
+  Avg time: 0.1978 ms, TFLOPS: 2431.75
+  Avg time: 0.1950 ms, TFLOPS: 2466.34
+  Avg time: 0.1965 ms, TFLOPS: 2447.56
+==========
+>>> tag=phasesplit shape=4096x4096x14336 (8B_Down) Sun Apr 19 08:37:30 UTC 2026
+==========
+>>> tag=phasesplit shape=4096x8192x8192 (70B_QO) Sun Apr 19 08:43:16 UTC 2026
+  Avg time: 6.9080 ms, TFLOPS: 79.58
+  Avg time: 6.9116 ms, TFLOPS: 79.54
+  Avg time: 6.8968 ms, TFLOPS: 79.71
+  Avg time: 6.8541 ms, TFLOPS: 80.21
+  Avg time: 6.8857 ms, TFLOPS: 79.84
+==========
+>>> tag=phasesplit shape=4096x28672x8192 (70B_GateUp) Sun Apr 19 08:47:24 UTC 2026
+==========
+>>> tag=phasesplit shape=4096x8192x28672 (70B_Down) Sun Apr 19 08:57:32 UTC 2026
+  Avg time: 705.5499 ms, TFLOPS: 2.73
+  Avg time: 705.5968 ms, TFLOPS: 2.73
+  Avg time: 705.6905 ms, TFLOPS: 2.73
+  Avg time: 705.6110 ms, TFLOPS: 2.73
+  Avg time: 705.6415 ms, TFLOPS: 2.73
+ALL DONE Sun Apr 19 09:10:22 UTC 2026
