@@ -97,6 +97,30 @@
 #define MXFP8_RRR_PHASE_SPLIT 0
 #endif
 
+// R52 Dev H: Soft scheduler barrier alternative to R49 Dev B's noinline
+// phase split. The R49 Dev B noinline boundary (between do_mma_quartet_first_half
+// = cA+cB consuming a0_scale_packs and do_mma_quartet_second_half = cC+cD
+// consuming a1_scale_packs) caused catastrophic spills (-97%) on most cells
+// because clang materializes a real call frame. R49 Dev B's findings.md
+// suggested replacing the noinline with `asm volatile("" ::: "memory")` —
+// a compiler barrier with no call frame, just a scheduler-ordering boundary.
+// This is intended to gate the LLVM scheduler at the natural cB→cC boundary
+// without forcing a stack frame, hopefully allowing scale-pack v_lshrrev
+// issue to overlap better with VMEM/LDS latency.
+//
+// Default OFF (=0). When MXFP8_RRR_SOFT_BARRIER=1, an empty inline asm
+// barrier is emitted at the cB→cC boundary in the baseline (non-phase-split)
+// body of do_k_iter.
+#ifndef MXFP8_RRR_SOFT_BARRIER
+#define MXFP8_RRR_SOFT_BARRIER 0
+#endif
+
+#if MXFP8_RRR_SOFT_BARRIER
+#define MXFP8_RRR_SOFT_BAR() __asm__ volatile("" ::: "memory")
+#else
+#define MXFP8_RRR_SOFT_BAR() do {} while (0)
+#endif
+
 #if MXFP8_RRR_EXACT_8WAVE_FAST_ENABLE
 
 #if MXFP8_RRR_PHASE_SPLIT
@@ -628,6 +652,9 @@ void rrr_exact_8wave_scaled_kernel(const layout_globals g) {
 #endif
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
+        // R52 Dev H: soft scheduler barrier at the cB->cC quartet boundary
+        // (the same boundary R49 Dev B's noinline used). Default OFF.
+        MXFP8_RRR_SOFT_BAR();
 
         load_a(a, As[tic][1], wm);
 #if RRR_ROW_SHARED_TRANSPOSE
