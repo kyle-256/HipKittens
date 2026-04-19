@@ -1,0 +1,2 @@
+./rrr_mxfp8_exact_8wave_fastpath.inc:64:1: remark:     VGPRs: 254 [-Rpass-analysis=kernel-resource-usage]
+./rrr_mxfp8_exact_8wave_fastpath.inc:64:1: remark:     ScratchSize [bytes/lane]: 0 [-Rpass-analysis=kernel-resource-usage]
