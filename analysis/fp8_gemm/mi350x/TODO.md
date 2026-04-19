@@ -1,18 +1,30 @@
 # MXFP4 GEMM Optimization TODO
 
-## Current State (2026-04-19, post-R39 Opt B; Opt A in flight)
+## Current State (2026-04-19, post-R40 reviewer GO)
 
-**HEADLINE — VERIFIED CORRECT COUNT IS LOWER THAN PRIOR HEADLINES SUGGESTED.**
+**HEADLINE — R40 Opt B is the largest correctness gain in the R37+ era.**
 
-**R39 Opt B re-bench under random-scale + wrong_cell_frac gate**:
-- **R37**: 14 → really only 6 verified-correct
-- **R38E**: 16 → really only 6 verified-correct
-- The uniform scale=-4 finite gate was MASKING wrong cells. Under realistic random scales, all the 17%-deterministic-wrong cells surface (matches R34/R35 project memo signature).
-- All 6 truly-correct shapes are small-K (K ∈ {2048, 3072, 4096}). All large-K shapes (K ≥ 7168) are structurally broken.
+**R40 leaderboard (5-run consensus, R39B random-scale gate)**:
+- **R40B (FUSED_STEP34=1 fork, build-flag-only)**: **24/42 stable verified-correct + 2 flake-risk = 24-26/42** (vs R39B baseline 6/42; **0 regressions**, -0.74% avg perf cost on shared shapes).
+- 7 WIN (>=comp), 17 LOSE_CORRECT, 16 WRONG, 2 CRASH.
+- R40A (PF_FENCE) and R40C (LDS_DRAIN): both PARTIAL (+1 / +3 net), **don't default-on** (each regresses (128256, 32768, 4096) when applied broadly). Stage as per-shape overrides only.
+- R40D (NO_PREFETCH diagnostic): REFUTED — bug is NOT in K-loop data-tile prefetch path. Strips down to 3/42 with no systematic sign.
 
-**Bench harness now `bench_all_42_R39B.py`**: random scale [-2, 2], wrong_cell_frac < 2% AND snr_med ≥ 10 dB AND finite ≥ 0.99. The 40 dB SNR target was unreachable (bf16 + K=thousands + random scales caps intrinsic SNR at 20-25 dB).
+**R40 NEW KNOWLEDGE (durable, 2026-04-19)**:
+- **FUSED_STEP34=1 + drop R25C tail-pf-off + strip `-mllvm -amdgpu-sched-strategy=max-memory-clause` is the correctness path**. R37_FIX_B was an INCOMPLETE backport of the same ideas; the original FUSED branch (already in source) is the right thing once the memc flag is stripped. Build-flag-only fork — no kernel source edit required.
+- **Per-shape R40A/R40C overrides are the path to 26/42**: R40A (R40A_PF_FENCE=1) rescues `(4096, 32768, 128256)`; R40C (R40C_LDS_DRAIN=1) rescues `(16384, 4096, 14336)`. Both must be gated per-shape (broad enable causes regressions).
+- **The remaining 16 broken shapes split into 3 sub-clusters**:
+  - Cluster C-catastrophic (5 shapes, K=32768, ~97% wrong): FUSED_STEP34 doesn't help. Likely R35 hypothesis 3 (MFMA register-file race / `acc_A0Bl` reuse across deep-K iters).
+  - Cluster B-near-gate (~9 shapes, wrong 1-4%): close to gate; some may pass with re-tuned step34 boundary fence or different variant flags.
+  - CRASH (2 shapes — `(16384, 4096, 28672)`, `(4096, 32768, 28672)`): aperture violation, FUSED path didn't help.
+- **5-run consensus is the new reviewer floor** (3-run inflated R40B by +1 due to (32768, 4096, 2048) gate-flake).
+- **bf16 saturates SNR at K=thousands** — wrong_cell_frac is the dominant correctness signal; SNR_med >= 10 dB is sanity only.
 
-**R39 Opt A (TAIL_SCALE_CLAMP)** is in flight — if hypothesis holds, it should fix the structural large-K bug and re-lift verified-correct count toward 14+19+9 = 42.
+### R41 candidates (post R40)
+1. **R41 Opt A** — Cluster C MFMA register-file audit: instrument `acc_A0Bl` reads/writes across deep K-iter unroll boundaries; test if 5 K=32768 catastrophic shapes are an `acc_A0Bl` aliasing issue. Likely needs to add a register-file barrier or reschedule the LDS double-buffer slot allocation. Highest leverage (5 catastrophic shapes).
+2. **R41 Opt B** — Cluster B-near-gate variant re-tune: 9 shapes are 1-4% wrong (close to 2% gate). Re-sweep variant flags (drop `_btw_all`, alternate gm/lgk/v widths) on R40B base + see how many tip across.
+3. **R41 Opt C** — CRASH shapes aperture fix: `(16384, 4096, 28672)` + `(4096, 32768, 28672)` need either SRD bounds widening or a different tile-stride decomposition.
+4. **R41 Opt D** — perf follow-up on the 7 LOSE_CORRECT 80-90%-of-comp shapes (correctness-first so far; once 26/42 is locked, claw back perf).
 
 ### R39 NEW KNOWLEDGE (durable, 2026-04-19)
 - **R39 Opt B (random-scale gate)**: REFRAMING WIN, leaderboard LOSS. Adopted as the project's new correctness gate. The R37/R38 "16/42" headlines were inflated by the brittle uniform-(-4) probe; reality is ~6/42 verified-correct, all small-K. Per-cell wrong_cell_frac map (in `bench_all42_results_R39_optB.json`) can be used to bisect the actual bug.

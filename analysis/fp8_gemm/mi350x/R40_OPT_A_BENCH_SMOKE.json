@@ -1,0 +1,97 @@
+{
+  "timestamp": "2026-04-19 07:00:52",
+  "round": "R40_optA",
+  "warmup": 200,
+  "iters": 500,
+  "trim_frac": 0.1,
+  "snr_threshold_db": 10.0,
+  "finite_gate": 0.99,
+  "random_seed": 42,
+  "n_shapes": 2,
+  "n_runs": 1,
+  "consensus_wins": 0,
+  "consensus_losses_correct": 1,
+  "consensus_wrong": 1,
+  "consensus_errors": 0,
+  "verified_correct": 1,
+  "gpus": [
+    0,
+    1
+  ],
+  "consensus_results": [
+    {
+      "M": 16384,
+      "N": 6144,
+      "K": 2048,
+      "tflops": null,
+      "avg_ms": null,
+      "comp": 3047.6,
+      "status": "WRONG_OUTPUT",
+      "kernel_finite": 0.97643,
+      "snr_db": 0.5157110333299743,
+      "snr_med_db": 0.7014612168119406,
+      "snr_n_valid": 1033874,
+      "wrong_cell_frac": 0.119762,
+      "best_variant": "ts_lgk2_gm6_v12_memc_pfoff4_R40A_PF_FENCE1_R40A",
+      "consensus": "WRONG_1/1"
+    },
+    {
+      "M": 6144,
+      "N": 32768,
+      "K": 4096,
+      "tflops": 4035.2,
+      "avg_ms": 0.4087,
+      "comp": 4291.0,
+      "status": "OK",
+      "kernel_finite": 0.991491,
+      "snr_db": 16.01,
+      "snr_med_db": 49.62,
+      "snr_n_valid": 1045888,
+      "wrong_cell_frac": 0.003704,
+      "best_variant": "ts_lgk2_v24_R40A_PF_FENCE1_R40A",
+      "consensus": "PASS_1/1"
+    }
+  ],
+  "per_run": [
+    {
+      "run": 1,
+      "wins": 0,
+      "losses": 1,
+      "wrong_output": 1,
+      "errors": 0,
+      "elapsed_minutes": 0.1,
+      "results": [
+        {
+          "M": 16384,
+          "N": 6144,
+          "K": 2048,
+          "tflops": null,
+          "avg_ms": null,
+          "comp": 3047.6,
+          "status": "WRONG_OUTPUT",
+          "kernel_finite": 0.97643,
+          "snr_db": 0.5157110333299743,
+          "snr_med_db": 0.7014612168119406,
+          "snr_n_valid": 1033874,
+          "wrong_cell_frac": 0.119762,
+          "best_variant": "ts_lgk2_gm6_v12_memc_pfoff4_R40A_PF_FENCE1_R40A"
+        },
+        {
+          "M": 6144,
+          "N": 32768,
+          "K": 4096,
+          "tflops": 4035.2,
+          "avg_ms": 0.4087,
+          "comp": 4291.0,
+          "status": "OK",
+          "kernel_finite": 0.991491,
+          "snr_db": 16.01,
+          "snr_med_db": 49.62,
+          "snr_n_valid": 1045888,
+          "wrong_cell_frac": 0.003704,
+          "best_variant": "ts_lgk2_v24_R40A_PF_FENCE1_R40A"
+        }
+      ]
+    }
+  ]
+}

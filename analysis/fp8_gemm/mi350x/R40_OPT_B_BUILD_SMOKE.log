@@ -1,0 +1,12 @@
+R40B builder [SMOKE]: 5 shape entries, 5 unique builds
+  Forced macros: {'FUSED_STEP34': 1, 'R25C_TAIL_PF_OFF_ITERS': 0}
+  memc sched-strategy stripped from CPPFLAGS
+  module suffix: _R40B_safe (vs base _memc tag)
+  [  1/5] BUILT N=28672,K=32768,ts_v12_tv0_memc_dc_gm7_pfoff120_kx32768_btw_all->ts_v12_tv0_dc_gm7_pfoff120_kx32768_btw_all_R40B_safe (4.6s)
+  [  2/5] BUILT N=6144,K=2048,ts_lgk2_gm6_v12_memc_pfoff4->ts_lgk2_gm6_v12_pfoff4_R40B_safe (4.6s)
+  [  3/5] BUILT N=4096,K=8192,ts_v12_tv0_gm7_memc_pfoff28_kx8192_btw_all->ts_v12_tv0_gm7_pfoff28_kx8192_btw_all_R40B_safe (5.0s)
+  [  4/5] BUILT N=4096,K=14336,ts_gm8_v12_btw_all->ts_gm8_v12_btw_all_R40B_safe (5.6s)
+  [  5/5] BUILT N=4096,K=16384,ts_lgk2_gm7_memc_pfoff56_kx16384_btw_all->ts_lgk2_gm7_pfoff56_kx16384_btw_all_R40B_safe (6.1s)
+
+Done in 6.2s: built=5, cached=0, failed=0
+Manifest: R40B_BUILD_MANIFEST_SMOKE.json

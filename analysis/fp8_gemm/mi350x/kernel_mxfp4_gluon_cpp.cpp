@@ -184,6 +184,64 @@ using namespace kittens;
 #error "R38F_TAIL_DRAIN and R38C_TAIL_L2ONLY are mutually exclusive (different prefetch targets)"
 #endif
 
+// R39 Opt A (2026-04-19): TAIL_SCALE_CLAMP. Per R38_OPT_F_VERDICT root-cause
+// analysis: in R37_FIX_B + R25-C, the data-tile prefetch is suppressed on the
+// last R25C_TAIL_PF_OFF_ITERS iters (`if (!_r25c_tail_no_pf) emit_pf_tail<0>`),
+// while `load_pq_scale_x2_async(... bt+1 ...)` keeps advancing the scale index.
+// On those tail iters the next-iter MFMA reads STALE data (the last-prefetched
+// tile, which is iter `k_byte_iters - 1 - R25C_TAIL_PF_OFF_ITERS`) but a FRESH
+// scale (pointing at iter `bt+1` past the last fetched data tile). Scale-vs-data
+// mismatch under uniform scale=-4 produces BF16-overflow garbage on ~17% of
+// cells (matches the project memory `MXFP4 17%-deterministic-wrong cells`).
+//
+// R39A clamps the `nxt_scale` index to match the data-tile clamp pattern: when
+// `_r25c_tail_no_pf` is true, do not advance the scale; reuse the current iter's
+// scale slot (idx = bt). When R25-C is inactive (default tail_off=0), the
+// natural `bt+1` index is preserved (no behavior change on R37 WIN shapes).
+//
+// Macro is gated `R37_FIX_B && !FUSED_STEP34` (same scope as R38B/C/F). Default
+// OFF; the R39A builder sets `R39A_TAIL_SCALE_CLAMP=1` explicitly.
+//
+// Mutex: independent of R38B/C/F (operates on scale-load index, not data-pf
+// emission). May be combined with any of them if needed for incremental tests.
+#ifndef R39A_TAIL_SCALE_CLAMP
+#define R39A_TAIL_SCALE_CLAMP 0
+#endif
+
+// R40 Opt A (2026-04-19): per-iter PF FENCE for the R37_FIX_B path.
+//
+// Hypothesis: the compiler reorders the per-iter `buffer_load_to_lds` issue
+// (driven by `pf_*_p` struct construction at the TOP of the iter +
+// `emit_pf_tail` after step34) ACROSS the `kpair_64mfma_step12` asm boundary.
+// R37 added a fence AFTER step34, but did NOT add one BEFORE step12 — and the
+// pf_*_p struct construction sits free in scheduler-land at the top of the
+// iter, before step12. Result: a buffer_load_to_lds may land in an LDS slot
+// the in-flight MFMA is reading. Manifests as the cluster-A "borderline"
+// 24-50 dB SNR / 0.5-1.5% wrong cells on ~7 shapes.
+//
+// R40A surgical change in the `R37_FIX_B && !FUSED_STEP34` branch:
+//   1) Insert `asm volatile("" ::: "memory")` IMMEDIATELY BEFORE every call to
+//      `kpair_64mfma_step12` in the R37_FIX_B branch (TAIL_SPLIT and
+//      no-TAIL_SPLIT main loops).
+//   2) MOVE the `make_pf_params` block from the TOP of the iter to AFTER
+//      `kpair_64mfma_step34` returns. Construction is then folded into the
+//      same pre-emit_pf_tail span the R38B_TAIL_FIX branch already uses.
+//
+// Default OFF. The R40A builder sets `-DR40A_PF_FENCE=1` explicitly. Has no
+// effect on the R37_FIX_B == 0 legacy path nor on FUSED_STEP34 == 1.
+//
+// Notes:
+//  - When R40A_PF_FENCE && !R38B_TAIL_FIX: skip the per-iter top-of-loop
+//    `make_pf_params` (defer to inside the R37_FIX_B branch, mirroring R38B's
+//    deferred-construction pattern). When R38B_TAIL_FIX is ON, R38B already
+//    defers the construction, so R40A only adds the pre-step12 fence.
+//  - This change is INDEPENDENT of R39A/R38C/R38F. It can be combined with
+//    R38B (R38B already builds the params after step34 inside the always-emit
+//    branch); R40A then only adds the pre-step12 fence on top.
+#ifndef R40A_PF_FENCE
+#define R40A_PF_FENCE 0
+#endif
+
 // R38 Opt A (2026-04-19): replace the `__builtin_amdgcn_raw_buffer_load_lds`
 // intrinsic in emit_one_pf with an `asm volatile("buffer_load_dwordx4 ... lds")`
 // block carrying a "memory" clobber. The intrinsic, being a regular call, is
@@ -2912,6 +2970,12 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         // of struct construction (and the resulting VGPR/scratch pressure)
         // on tail iters, fixing intermittent HSA aperture violations on the
         // 9 R37 CRASH shapes.
+#elif R40A_PF_FENCE && R37_FIX_B && !FUSED_STEP34
+        // R40A: defer make_pf_params construction until AFTER kpair_64mfma_step34
+        // returns (see R37_FIX_B branch below). Combined with the explicit
+        // pre-step12 `asm volatile` fence, this prevents the compiler from
+        // hoisting the per-iter buffer_load_to_lds prefetches across the
+        // step12 asm boundary.
 #else
         tile_pf_params pf_a0_p = make_pf_params(A0_db[cur], g.a, coord<ST_tile>(0,0,br*2,     pf_bt), so_a, srd_a, base_a, lb_a0[cur], R22B_A_HINT_VAL);
         tile_pf_params pf_a1_p = make_pf_params(A1_db[cur], g.a, coord<ST_tile>(0,0,br*2+1,   pf_bt), so_a, srd_a, base_a, lb_a1[cur], R22B_A_HINT_VAL);
@@ -2919,7 +2983,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         tile_pf_params pf_bl_p = make_pf_params(Bl_db[cur], g.b, coord<ST_tile>(0,0,bc*2,     pf_bt), so_b, srd_b, base_b, lb_bl[cur], R22B_B_HINT_VAL);
 #endif
         tile_pf_params pf_br_p = make_pf_params(Br_db[cur], g.b, coord<ST_tile>(0,0,bc*2+1,   pf_bt), so_b, srd_b, base_b, lb_br[cur], R22B_B_HINT_VAL);
-#endif // R38B_TAIL_FIX
+#endif // R38B_TAIL_FIX / R40A_PF_FENCE
 
 #if OUTER_K_PF_DEPTH > 1 && OUTER_K_PF_MODE == 1
         // R24C: pull-forward L2-only prefetch for K+OUTER_K_PF_DEPTH (>=K+3 for depth=2).
@@ -2967,15 +3031,64 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         }
 #endif
 
+        // R39A: skip the scale-pf advance on R25-C tail iters where the data
+        // prefetch is suppressed. Without this, the next iter's MFMA reads STALE
+        // data (last fetched tile, frozen by R25-C) but a FRESH scale (advancing
+        // past the data), causing scale-vs-data mismatch and BF16-overflow garbage.
+        //
+        // Variants (compile-time):
+        //   R39A_VARIANT=0 (default): freeze scale loads entirely on tail iters
+        //                              (skip the load, keep previous pf_* values).
+        //   R39A_VARIANT=1:           clamp scale index to (k_byte_iters - 1 -
+        //                              R25C_TAIL_PF_OFF_ITERS) on tail iters
+        //                              (re-load same scale every tail iter).
+        //   R39A_VARIANT=2:           clamp to bt (one-back of natural bt+1).
+        //
+        // When R25-C is inactive (default tail_off=0) or R39A=0, the natural
+        // `bt+1` index is preserved (no behavior change on R37 WIN shapes).
+#ifndef R39A_VARIANT
+#define R39A_VARIANT 0
+#endif
+#if R39A_TAIL_SCALE_CLAMP && R37_FIX_B && !FUSED_STEP34 && R25C_ACTIVE
+        const bool _r39a_in_tail = (bt >= k_byte_iters - 1 - R25C_TAIL_PF_OFF_ITERS);
+#else
+        constexpr bool _r39a_in_tail = false;
+#endif
+#if R39A_VARIANT == 1
+        const uint32_t _r39a_scale_idx = _r39a_in_tail
+            ? static_cast<uint32_t>(k_byte_iters - 1 - R25C_TAIL_PF_OFF_ITERS)
+            : static_cast<uint32_t>(bt + 1);
+#elif R39A_VARIANT == 2
+        const uint32_t _r39a_scale_idx = _r39a_in_tail ? static_cast<uint32_t>(bt) : static_cast<uint32_t>(bt + 1);
+#else
+        const uint32_t _r39a_scale_idx = static_cast<uint32_t>(bt + 1);
+#endif
+
 #if EARLY_SCALE_PF
         fp8e8m0_4 nxt_pf_a0[a_packs], nxt_pf_a1[a_packs], nxt_pf_bl[b_packs], nxt_pf_br[b_packs];
-        {
+#if R39A_VARIANT == 0
+        if (!_r39a_in_tail) {
             const uint32_t nxt_scale = static_cast<uint32_t>(bt + 1) << 9;
             load_pq_scale_x2_async(a0_srd, lane_soff_x2, nxt_scale, nxt_pf_a0[0], nxt_pf_a0[1]);
             load_pq_scale_x2_async(a1_srd, lane_soff_x2, nxt_scale, nxt_pf_a1[0], nxt_pf_a1[1]);
             load_pq_scale_x2_async(bl_srd, lane_soff_x2, nxt_scale, nxt_pf_bl[0], nxt_pf_bl[1]);
             load_pq_scale_x2_async(br_srd, lane_soff_x2, nxt_scale, nxt_pf_br[0], nxt_pf_br[1]);
+        } else {
+            // Carry forward existing pf_* (treated as nxt_pf_* shadow)
+            #pragma unroll
+            for (int p = 0; p < a_packs; ++p) { nxt_pf_a0[p] = pf_a0[p]; nxt_pf_a1[p] = pf_a1[p]; }
+            #pragma unroll
+            for (int p = 0; p < b_packs; ++p) { nxt_pf_bl[p] = pf_bl[p]; nxt_pf_br[p] = pf_br[p]; }
         }
+#else
+        {
+            const uint32_t nxt_scale = _r39a_scale_idx << 9;
+            load_pq_scale_x2_async(a0_srd, lane_soff_x2, nxt_scale, nxt_pf_a0[0], nxt_pf_a0[1]);
+            load_pq_scale_x2_async(a1_srd, lane_soff_x2, nxt_scale, nxt_pf_a1[0], nxt_pf_a1[1]);
+            load_pq_scale_x2_async(bl_srd, lane_soff_x2, nxt_scale, nxt_pf_bl[0], nxt_pf_bl[1]);
+            load_pq_scale_x2_async(br_srd, lane_soff_x2, nxt_scale, nxt_pf_br[0], nxt_pf_br[1]);
+        }
+#endif // R39A_VARIANT == 0
 #endif
 
         fp8e8m0_4 a0_raw[a_packs], a1_raw[a_packs], bl_raw[b_packs], br_raw[b_packs];
@@ -2985,17 +3098,36 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         for (int p = 0; p < b_packs; ++p) { bl_raw[p] = pf_bl[p]; br_raw[p] = pf_br[p]; }
 
 #if !EARLY_SCALE_PF
-        {
+#if R39A_VARIANT == 0
+        if (!_r39a_in_tail) {
             const uint32_t nxt_scale = static_cast<uint32_t>(bt + 1) << 9;
             load_pq_scale_x2_async(a0_srd, lane_soff_x2, nxt_scale, pf_a0[0], pf_a0[1]);
             load_pq_scale_x2_async(a1_srd, lane_soff_x2, nxt_scale, pf_a1[0], pf_a1[1]);
             load_pq_scale_x2_async(bl_srd, lane_soff_x2, nxt_scale, pf_bl[0], pf_bl[1]);
             load_pq_scale_x2_async(br_srd, lane_soff_x2, nxt_scale, pf_br[0], pf_br[1]);
         }
+        // else: leave pf_* alone (frozen scale)
+#else
+        {
+            const uint32_t nxt_scale = _r39a_scale_idx << 9;
+            load_pq_scale_x2_async(a0_srd, lane_soff_x2, nxt_scale, pf_a0[0], pf_a0[1]);
+            load_pq_scale_x2_async(a1_srd, lane_soff_x2, nxt_scale, pf_a1[0], pf_a1[1]);
+            load_pq_scale_x2_async(bl_srd, lane_soff_x2, nxt_scale, pf_bl[0], pf_bl[1]);
+            load_pq_scale_x2_async(br_srd, lane_soff_x2, nxt_scale, pf_br[0], pf_br[1]);
+        }
+#endif // R39A_VARIANT == 0
 #endif
 
         // Steps 1+2 merged: A0*Bl (32 MFMAs) + ds_read Br + A0*Br (32 MFMAs) + ds_read A1
         float4 br_d[8], a1_d[8];
+#if R40A_PF_FENCE && R37_FIX_B && !FUSED_STEP34
+        // R40A: pre-step12 fence — prevent the compiler from hoisting any
+        // upcoming buffer_load_to_lds prefetches (constructed AFTER step34)
+        // across the step12 asm boundary. Combined with the deferred
+        // make_pf_params (see top-of-iter block) this guarantees the LDS
+        // prefetch issue cannot land in a slot mid-MFMA-read.
+        asm volatile("" ::: "memory");
+#endif
         kpair_64mfma_step12(acc_A0Bl, acc_A0Br, tA0, tBl,
             a0_raw, bl_raw, br_raw, br_d, a1_d,
             sel_br_p0, sel_br_p1, sel_a1_p0, sel_a1_p1);
@@ -3029,6 +3161,19 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         // the LDS double-buffer state because the next iter's s_barrier vmcnt count
         // is now wrong. Plain memory clobber asm volatile prevents the hoist.
         asm volatile("" ::: "memory");
+#if R40A_PF_FENCE && !R38B_TAIL_FIX
+        // R40A: build pf_*_p AFTER step34 (deferred from top-of-iter). With the
+        // pre-step12 fence above, the compiler cannot hoist the constructed
+        // emit_pf_tail loads back across step12. The construction itself is
+        // free of memory side effects; only the subsequent emit_pf_tail issues
+        // the buffer_load_to_lds intrinsics.
+        tile_pf_params pf_a0_p = make_pf_params(A0_db[cur], g.a, coord<ST_tile>(0,0,br*2,     pf_bt), so_a, srd_a, base_a, lb_a0[cur], R22B_A_HINT_VAL);
+        tile_pf_params pf_a1_p = make_pf_params(A1_db[cur], g.a, coord<ST_tile>(0,0,br*2+1,   pf_bt), so_a, srd_a, base_a, lb_a1[cur], R22B_A_HINT_VAL);
+#if !DIRECT_BL
+        tile_pf_params pf_bl_p = make_pf_params(Bl_db[cur], g.b, coord<ST_tile>(0,0,bc*2,     pf_bt), so_b, srd_b, base_b, lb_bl[cur], R22B_B_HINT_VAL);
+#endif
+        tile_pf_params pf_br_p = make_pf_params(Br_db[cur], g.b, coord<ST_tile>(0,0,bc*2+1,   pf_bt), so_b, srd_b, base_b, lb_br[cur], R22B_B_HINT_VAL);
+#endif // R40A_PF_FENCE && !R38B_TAIL_FIX
 
         // R25-C: in the last R25C_TAIL_PF_OFF_ITERS iters, drop global prefetch.
         // Branch folds to compile-time when K-loop fully unrolls (R25C_ACTIVE
@@ -3296,12 +3441,17 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 #endif
 
         const int pf_bt = (bt + 2 < k_byte_iters) ? (bt + 2) : (k_byte_iters - 1);
+#if R40A_PF_FENCE && R37_FIX_B && !FUSED_STEP34 && !DIRECT_BL
+        // R40A: defer make_pf_params construction until AFTER kpair_64mfma_step34
+        // returns (see R37_FIX_B branch below).
+#else
         tile_pf_params pf_a0_p = make_pf_params(A0_db[cur], g.a, coord<ST_tile>(0,0,br*2,     pf_bt), so_a, srd_a, base_a, lb_a0[cur], R22B_A_HINT_VAL);
         tile_pf_params pf_a1_p = make_pf_params(A1_db[cur], g.a, coord<ST_tile>(0,0,br*2+1,   pf_bt), so_a, srd_a, base_a, lb_a1[cur], R22B_A_HINT_VAL);
 #if !DIRECT_BL
         tile_pf_params pf_bl_p = make_pf_params(Bl_db[cur], g.b, coord<ST_tile>(0,0,bc*2,     pf_bt), so_b, srd_b, base_b, lb_bl[cur], R22B_B_HINT_VAL);
 #endif
         tile_pf_params pf_br_p = make_pf_params(Br_db[cur], g.b, coord<ST_tile>(0,0,bc*2+1,   pf_bt), so_b, srd_b, base_b, lb_br[cur], R22B_B_HINT_VAL);
+#endif // R40A_PF_FENCE
 
 #if EARLY_SCALE_PF
         fp8e8m0_4 nxt_pf_a0[a_packs], nxt_pf_a1[a_packs], nxt_pf_bl[b_packs], nxt_pf_br[b_packs];
@@ -3341,6 +3491,10 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 #endif
 
         float4 br_d[8], a1_d[8];
+#if R40A_PF_FENCE && R37_FIX_B && !FUSED_STEP34 && !DIRECT_BL
+        // R40A: pre-step12 fence — see top-of-iter comment block.
+        asm volatile("" ::: "memory");
+#endif
         kpair_64mfma_step12(acc_A0Bl, acc_A0Br, tA0, tBl,
             a0_raw, bl_raw, br_raw, br_d, a1_d,
             sel_br_p0, sel_br_p1, sel_a1_p0, sel_a1_p1);
@@ -3370,6 +3524,16 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         kpair_64mfma_step34(acc_A1Bl, acc_A1Br, tA1, tBl, tBr,
             a1_raw, bl_raw, br_raw, nxt_a0_d, nxt_bl_d,
             sel_a0_p0, sel_a0_p1, sel_bl_p0, sel_bl_p1);
+#if R40A_PF_FENCE
+        // R40A: build pf_*_p AFTER step34 (deferred from top-of-iter); see
+        // top-of-iter comment block. Plain memory clobber prevents the compiler
+        // from sinking the construction back across step12.
+        asm volatile("" ::: "memory");
+        tile_pf_params pf_a0_p = make_pf_params(A0_db[cur], g.a, coord<ST_tile>(0,0,br*2,     pf_bt), so_a, srd_a, base_a, lb_a0[cur], R22B_A_HINT_VAL);
+        tile_pf_params pf_a1_p = make_pf_params(A1_db[cur], g.a, coord<ST_tile>(0,0,br*2+1,   pf_bt), so_a, srd_a, base_a, lb_a1[cur], R22B_A_HINT_VAL);
+        tile_pf_params pf_bl_p = make_pf_params(Bl_db[cur], g.b, coord<ST_tile>(0,0,bc*2,     pf_bt), so_b, srd_b, base_b, lb_bl[cur], R22B_B_HINT_VAL);
+        tile_pf_params pf_br_p = make_pf_params(Br_db[cur], g.b, coord<ST_tile>(0,0,bc*2+1,   pf_bt), so_b, srd_b, base_b, lb_br[cur], R22B_B_HINT_VAL);
+#endif // R40A_PF_FENCE
         emit_pf_tail<0>(pf_a0_p, pf_a1_p);
         emit_pf_tail<0>(pf_bl_p, pf_br_p);
 #else // R37_FIX_B == 0 OR DIRECT_BL → legacy non-fused path

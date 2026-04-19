@@ -2,11 +2,30 @@
 
 你在继续推进 `HipKittens` 的 MXFP4 GEMM 优化工作，跟 Cursor (Hipkittens2) 竞赛。
 
-## ⚠️ 当前优化目标 (2026-04-19, post-R39 Opt B; Opt A in flight)
+## ⚠️ 当前优化目标 (2026-04-19, post-R40 reviewer GO)
 
-> **REFRAMING**: R39 Opt B 用 random-scale + wrong_cell_frac gate 重测 → **真正 verified-correct 只有 6/42**。R37 的 14 和 R38E 的 16 都被 uniform scale=-4 的 mask 效应抬高了。所有 6 个真正正确的 shape 都是 small-K (K ∈ {2048, 3072, 4096})。所有 large-K (K≥7168) 都被结构 bug 挡住。
-> **新 bench harness: `bench_all_42_R39B.py`** (random scale [-2,2], wrong_cell_frac < 2% AND snr_med ≥ 10 dB AND finite ≥ 0.99, 3-run majority vote)。bf16+K=thousands+random scale 的 intrinsic SNR 上限 ~20-25 dB，40 dB 目标不现实。
-> **R39 Opt A (TAIL_SCALE_CLAMP)** 进行中 — 如果 hypothesis 对 (load_pq_scale_x2_async 在 tail iters 推进 scale index 但 data tile 被 clamp)，可能一次救回所有 large-K shape，把 verified-correct 推到 14+19+9 = 42 范围。
+> **R40 是 R37+ 时代最大的一次 correctness 跃迁**: R39B 6/42 → R40B 24/42 (5-run consensus, 0 regressions, -0.74% avg perf cost)。+ R40A/R40C per-shape overrides 投影到 26/42。
+>
+> **R40 子项结果**:
+> - **R40_OPT_B (FUSED_STEP34=1 + drop R25C tail-pf-off + strip `-mllvm -amdgpu-sched-strategy=max-memory-clause`, build-flag-only fork)**: CONFIRMED MAJOR WIN, 6/42 → 25/42 (3-run) → 24/42 (5-run, 1 shape gate-flake)。`build_R40B.py` + `bench_all_42_R40B.py`，suffix `_R40B_safe`。无需改 kernel 源码。
+> - **R40_OPT_A (R40A_PF_FENCE)**: PARTIAL +1 净增。在 step12 前插 `asm volatile("" ::: "memory")` + 把 `make_pf_params` 移到 step34 后。Per-shape override 救 `(4096, 32768, 128256)`。**不要 default-on** — 全局开会 regress `(128256, 32768, 4096)`。
+> - **R40_OPT_C (R40C_LDS_DRAIN)**: REFUTED hypothesis (smoke 还是 R35 上左 128x128 signature)，但 +3 incidental net。Per-shape override 救 `(16384, 4096, 14336)`。**不要 default-on** — 同样 regress `(128256, 32768, 4096)`。
+> - **R40_OPT_D (R40D_NO_PREFETCH 诊断)**: REFUTED — 拿掉 K-loop data-tile prefetch 后正确性反而下降到 3/42，证明 bug **不在** prefetch path。kills R40A 的 hypothesis direction at root；R40A 的 1 个 incidental win 是 fence 顺带影响其他东西。
+>
+> **R40 NEW KNOWLEDGE (durable, 2026-04-19)**:
+> - **FUSED_STEP34=1 path is the correctness path**, R37_FIX_B 是不完整的 backport。FUSED branch 已经在 source 里，只要 strip 掉 memc flag + drop R25C tail-pf-off 就工作。Build-flag-only fork — 无需改 kernel 源码。
+> - **5-run consensus is the new reviewer floor** (3-run 把 R40B 抬高了 +1 由于 `(32768, 4096, 2048)` gate-flake)。任何 leaderboard claim 必须 5-run 验证。
+> - **剩余 16 个 broken shape 分 3 个 sub-cluster**:
+>   - Cluster C-catastrophic (5 shapes, K=32768, ~97% wrong): FUSED 不救，likely R35 hypothesis 3 — MFMA register-file race / `acc_A0Bl` reuse across deep-K unroll。**R41 最高 leverage 目标**。
+>   - Cluster B-near-gate (~9 shapes, wrong 1-4%): 接近 gate；R41 variant re-tune 可能 tip 过去几个。
+>   - CRASH (2 shapes — `(16384, 4096, 28672)`, `(4096, 32768, 28672)`): aperture violation，FUSED 路径没救。
+> - **bf16 saturates SNR at K=thousands** — `wrong_cell_frac` 是主信号；`snr_med >= 10 dB` 只是 sanity gate。
+
+### R41 候选 (post R40)
+1. **R41 Opt A** (highest leverage) — Cluster C MFMA 寄存器文件审计: instrument `acc_A0Bl` reads/writes across deep K-iter unroll；测试 5 个 K=32768 catastrophic shape 是否 `acc_A0Bl` aliasing。可能需要 register-file barrier 或重排 LDS double-buffer slot 分配。
+2. **R41 Opt B** — Cluster B-near-gate variant 重 sweep: 9 个 shape 1-4% wrong (gate=2%)。在 R40B base 上 drop `_btw_all` / 换 gm/lgk/v 宽度，看多少能 tip 过去。
+3. **R41 Opt C** — CRASH 2 个 shape aperture 修: `(16384, 4096, 28672)` + `(4096, 32768, 28672)` 要么 SRD bound 加宽，要么换 tile-stride decomposition。
+4. **R41 Opt D** — perf follow-up on 7 个 LOSE_CORRECT 80-90%-of-comp shapes (correctness-first 已锁 26/42 后再 claw back perf)。
 
 > **R38 history (post-R37)**:
 > - WIN: 12, LOSE_CORRECT: 4, WRONG_OUTPUT: 26, CRASH: 0 (under uniform-scale gate; INFLATED — 见上面 R39 重测)。
