@@ -113,6 +113,46 @@
 #define MXFP8_CRR_SCALE_LEAD 0
 #endif
 
+// R53 Dev A: CRR scale-cache layout-V2 lever — opsel-keyed K-phase MMA dispatch.
+// Eliminates the 6 v_lshrrev_b32/K-pair (R48 Dev D structural CRR floor) by
+// using crr_mma_scaled_phase<K_PHASE> on odd K-iters (opsel<2,2>..<3,3> reads
+// bytes 2/3 of the scale-pack VGPR directly, NO shift required) instead of
+// shifting bytes 2/3 down to 0/1 and re-using crr_mma_scaled_from_packs_fixed_phase
+// (which uses opsel<0,0>..<1,1>).
+//
+// Distinct from R49 Dev A (REFUTED -14.16%): R49A re-packed scales at the HOST
+// preshuffle stage so MMA opsel could consume them in a layout-friendly form;
+// the failure mode was extra v_perm_b32 lane permutations + occupancy collapse.
+// R53A leaves the host-side scale layout BIT-IDENTICAL and changes only the
+// MMA-side opsel encoding the kernel emits. The byte-2/3 selection mode is
+// already proven correct in the kernel — the TAIL block at k_iters-2..k_iters-1
+// already uses crr_mma_scaled_phase<0> + crr_mma_scaled_phase<1> on the same
+// scale packs, so we know opsel<2/3> reads the right bytes without any
+// host-side change.
+//
+// VGPR projection (R50A's failure mode = 5 VGPR spill from extending live
+// ranges): R53A does NOT extend any live range. The scale packs already live
+// across both phases of a K-pair (current code shifts them in place). R53A
+// simply READS bytes 2/3 instead of shifting them down to 0/1 first. Net
+// instruction count drops by 6/K-pair (~3%), VGPR pressure unchanged,
+// scale-pack live range identical.
+//
+// Falsifiable predictions:
+//   P1: VGPR usage at LAYOUT_V2=1 == VGPR at LAYOUT_V2=0 within +/-2 VGPR.
+//       (No spill regression; if spill appears, the bail trigger fires.)
+//   P2: Static instr count drops by ~6 per K-pair body (12 per K-pair if both
+//       cA/cB AND cC/cD swap to phase, but cA path uses interleave variant).
+//   P3: ≥ +2% on 70B Gate/Up CRR (target: 89.0% → 91%+).
+//   P4: ≤ -2% regression on 8192³ CRR (worst-case no-regression check).
+//   P5: SNR ≥ 45 dB, det 3/3 PASS (no numeric drift; opsel just selects bytes).
+#ifndef MXFP8_CRR_SCALE_LAYOUT_V2
+#define MXFP8_CRR_SCALE_LAYOUT_V2 0
+#endif
+
+#if MXFP8_CRR_SCALE_LAYOUT_V2 && MXFP8_CRR_SCALE_LEAD
+#error "MXFP8_CRR_SCALE_LAYOUT_V2 incompatible with MXFP8_CRR_SCALE_LEAD"
+#endif
+
 #ifndef CRR_USE_EXACT_8WAVE_FASTPATH
 #define CRR_USE_EXACT_8WAVE_FASTPATH 1
 #endif
@@ -927,7 +967,17 @@ void crr_exact_8wave_scaled_kernel(const layout_globals g)
 
     TK_PRAGMA_UNROLL(CRR_MAIN_UNROLL)
     for (int k = 0; k < k_iters - 2; k++, tic ^= 1, toc ^= 1) {
-#if MXFP8_CRR_SCALE_LEAD
+#if MXFP8_CRR_SCALE_LAYOUT_V2
+        // R53 Dev A: opsel-keyed K-phase MMA dispatch. Even iters load fresh
+        // scales (same as baseline); odd iters re-use the SAME scale packs
+        // unmodified — the MMA dispatcher reads bytes 2/3 directly via
+        // crr_mma_scaled_phase<1> (opsel<2/3>), eliminating the 6 v_lshrrev_b32
+        // shifts/K-pair that were the structural CRR ~92% floor (R48 Dev D).
+        if ((k & 1) == 0) {
+            load_raw_scales(k >> 1);
+        }
+        // No shift needed when (k & 1) == 1 — phase template handles it.
+#elif MXFP8_CRR_SCALE_LEAD
         // LEAD=1: scales for even iters are already in regs (preloaded once
         // before the loop, and re-issued at end of each odd iter). Odd iters
         // shift in place (uses second half of the same k_pair's b128/b64
@@ -970,7 +1020,41 @@ void crr_exact_8wave_scaled_kernel(const layout_globals g)
         TK_WAIT_LGKM(CRR_EXACT_PREFETCH_LGKM);
         __builtin_amdgcn_s_barrier();
         asm volatile("s_waitcnt lgkmcnt(0)");
-#if CRR_EXACT_INTERLEAVE_B1_LDS
+#if MXFP8_CRR_SCALE_LAYOUT_V2
+        // R53 Dev A: phase-templated MMA dispatch. Even/odd iters use the
+        // SAME scale packs but different opsel encoding (bytes 0/1 vs 2/3).
+        // The compiler will template-specialize the loop body into 2 copies
+        // (k%2==0 and k%2==1) under CRR_MAIN_UNROLL ≥ 2 — no runtime branch.
+#  if CRR_EXACT_INTERLEAVE_B1_LDS
+        if ((k & 1) == 0) {
+            crr_exact_cA_with_b1_interleave_raw_phase<0, CRR_EXACT_B1_LDS_INSERT_AFTER, crr_a_pack_count, crr_b_pack_count>(
+                cA, a, b0, b1, Bs[tic][1], wn, a0_scale_packs, b0_scale_packs);
+        } else {
+            crr_exact_cA_with_b1_interleave_raw_phase<1, CRR_EXACT_B1_LDS_INSERT_AFTER, crr_a_pack_count, crr_b_pack_count>(
+                cA, a, b0, b1, Bs[tic][1], wn, a0_scale_packs, b0_scale_packs);
+        }
+        asm volatile("s_waitcnt lgkmcnt(0)");
+        __builtin_amdgcn_s_setprio(1);
+        if ((k & 1) == 0) {
+            crr_mma_scaled_phase<0>(cB, a, b1, a0_scale_packs, b1_scale_packs);
+        } else {
+            crr_mma_scaled_phase<1>(cB, a, b1, a0_scale_packs, b1_scale_packs);
+        }
+        __builtin_amdgcn_s_setprio(0);
+        CRR_SCHED_BARRIER();
+#  else
+        CRR_MMA_BEGIN();
+        if ((k & 1) == 0) {
+            crr_mma_scaled_phase<0>(cA, a, b0, a0_scale_packs, b0_scale_packs);
+            crr_mma_scaled_phase<0>(cB, a, b1, a0_scale_packs, b1_scale_packs);
+        } else {
+            crr_mma_scaled_phase<1>(cA, a, b0, a0_scale_packs, b0_scale_packs);
+            crr_mma_scaled_phase<1>(cB, a, b1, a0_scale_packs, b1_scale_packs);
+        }
+        CRR_MMA_END();
+#  endif
+#else
+#  if CRR_EXACT_INTERLEAVE_B1_LDS
         crr_exact_cA_with_b1_interleave_fixed_phase<CRR_EXACT_B1_LDS_INSERT_AFTER, crr_a_pack_count, crr_b_pack_count>(
             cA, a, b0, b1, Bs[tic][1], wn, a0_scale_packs, b0_scale_packs);
         asm volatile("s_waitcnt lgkmcnt(0)");
@@ -978,11 +1062,12 @@ void crr_exact_8wave_scaled_kernel(const layout_globals g)
         crr_mma_scaled_from_packs_fixed_phase(cB, a, b1, a0_scale_packs, b1_scale_packs);
         __builtin_amdgcn_s_setprio(0);
         CRR_SCHED_BARRIER();
-#else
+#  else
         CRR_MMA_BEGIN();
         crr_mma_scaled_from_packs_fixed_phase(cA, a, b0, a0_scale_packs, b0_scale_packs);
         crr_mma_scaled_from_packs_fixed_phase(cB, a, b1, a0_scale_packs, b1_scale_packs);
         CRR_MMA_END();
+#  endif
 #endif
         CRR_STEADY_MID_BARRIER();
         CRR_SCHED_BARRIER();
@@ -994,8 +1079,18 @@ void crr_exact_8wave_scaled_kernel(const layout_globals g)
         __builtin_amdgcn_s_barrier();
         asm volatile("s_waitcnt lgkmcnt(0)");
         CRR_MMA_BEGIN();
+#if MXFP8_CRR_SCALE_LAYOUT_V2
+        if ((k & 1) == 0) {
+            crr_mma_scaled_phase<0>(cC, a, b0, a1_scale_packs, b0_scale_packs);
+            crr_mma_scaled_phase<0>(cD, a, b1, a1_scale_packs, b1_scale_packs);
+        } else {
+            crr_mma_scaled_phase<1>(cC, a, b0, a1_scale_packs, b0_scale_packs);
+            crr_mma_scaled_phase<1>(cD, a, b1, a1_scale_packs, b1_scale_packs);
+        }
+#else
         crr_mma_scaled_from_packs_fixed_phase(cC, a, b0, a1_scale_packs, b0_scale_packs);
         crr_mma_scaled_from_packs_fixed_phase(cD, a, b1, a1_scale_packs, b1_scale_packs);
+#endif
         CRR_MMA_END();
 #if MXFP8_CRR_SCALE_LEAD
         // R50 Dev A: lead-distance scale prefetch. After cD MMA on an odd

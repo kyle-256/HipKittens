@@ -1,0 +1,9 @@
+./crr_mxfp8_exact_8wave_fastpath.inc:333:1: remark: Function Name: _Z29crr_exact_8wave_scaled_kernelILb1ELi2EEv14layout_globals [-Rpass-analysis=kernel-resource-usage]
+  333 | {
+      | ^
+./crr_mxfp8_exact_8wave_fastpath.inc:333:1: remark:     TotalSGPRs: 52 [-Rpass-analysis=kernel-resource-usage]
+./crr_mxfp8_exact_8wave_fastpath.inc:333:1: remark:     VGPRs: 256 [-Rpass-analysis=kernel-resource-usage]
+./crr_mxfp8_exact_8wave_fastpath.inc:333:1: remark:     AGPRs: 0 [-Rpass-analysis=kernel-resource-usage]
+./crr_mxfp8_exact_8wave_fastpath.inc:333:1: remark:     ScratchSize [bytes/lane]: 144 [-Rpass-analysis=kernel-resource-usage]
+./crr_mxfp8_exact_8wave_fastpath.inc:333:1: remark:     Dynamic Stack: False [-Rpass-analysis=kernel-resource-usage]
+./crr_mxfp8_exact_8wave_fastpath.inc:333:1: remark:     Occupancy [waves/SIMD]: 2 [-Rpass-analysis=kernel-resource-usage]
