@@ -47,6 +47,114 @@
 
 **baseline 建立**：首次需在每个 LLaMA shape 上跑 FP8 per-tensor + MXFP8 V2 baseline 各 5x，记录 median TFLOPS 作为后续对照。
 
+## R55 cycle 完结 (2026-04-20, 6 devs + 1 reviewer carry-over) ★ 0 SHIP + 5 REFUTATIONS + 1 DIAGNOSTIC + 1 BASELINE — 70B Down RCR DIAGNOSTIC-SCALE-FETCH-WAIT class attacked on FOUR axes (P1 interleave, P2 SALU hoist, P3 VALU dep-break, P4 L2 residency); all four REFUTED-EMPIRICAL or REFUTED-PASS-CRITERION. Convergent evidence: V2 RCR HEADROOM is not addressable by source-level scale-load reordering — LLVM scheduler + LICM + strength reduction already optimize the obvious levers; CRR LDS-V2 COMPRESSED retry also REFUTED (LDS round-trip dominates 6-cycle v_lshrrev saving)
+
+R55 派 6 devs (A P1 scale-fetch interleave, B P2 SALU hoist, C P3 VALU dep break, D P4 scale L2 residency, E CRR LDS V2 retry on compressed layout, F PMC replication on 8B GU RRR -1.0pp HEADROOM). Bottleneck targets driven by R54 Dev B's DIAGNOSTIC-SCALE-FETCH-WAIT class identification on 70B Down RCR. All 6 devs delivered REFUTED, REFUTED-PASS-CRITERION, or DIAGNOSTIC. Reviewer was carry-over from R54 (9-cell baseline check at HEAD `9ab79eff`).
+
+### R55 commits on `feat/mxfp8-only`
+- `4c099d62` R55 Dev F — 8B Gate/Up RRR PMC diagnostic — DIAGNOSTIC-SCALE-FETCH-WAIT-SALU-DOMINANT — new V2 RRR bottleneck class identified (SALU 3.4× R54B's RCR signature); 70B_Down RRR INVERTED 110.3% MX/FP8 (over-shoots FP8 baseline)
+- `9acb5fdf` R54 Reviewer — 9-cell baseline at `9ab79eff` — 2/9 PASS, 7/9 HEADROOM (regression vs prior 5/9 PASS); 7 HEADROOM cells in 94.15-94.89% noise-band drift; dominant gap remains 70B_GateUp/CRR at 88.95%; SNR 49.59-49.61 dB and det all PASS
+- `21d2656b` R55 Dev C — P3 VALU dependency break — REFUTED-PASS-CRITERION-EMPIRICAL — `sched_barrier(0)` before 11 setprio(1) sites yielded clean monotonic +0.65% (median 2930.69 → 2949.67 TFLOPS, every treatment run ≥ best baseline) with VGPRs 254 → 250, but +0.65% < +1% pass threshold; Phase 0 proved no broadcast→MFMA chain exists
+- `eb7483c2` R55 Dev B — P2 SALU hoist — REFUTED-EMPIRICAL-COMPILER-ALREADY-HOISTED — V2-RCR K-loop body byte-identical SALU/MFMA between baseline and macro1 (15 s_add + 13 s_addc + 3 s_addk_i32 + 128 v_mfma); compiler already strength-reduces `k_pair<<N` to single `s_addk_i32` stride accumulator and LICM-hoists scale SRDs to prologue
+- `47e63d70` R55 Dev E — 70B Gate/Up CRR LDS-resident scale layout COMPRESSED retry (R54A successor) — REFUTED-EMPIRICAL — LDS round-trip dominates 6-cycle v_lshrrev saving (median -7.98%, monotonic regression, SNR 49.60 dB / det 3/3 PASS preserved)
+- `10632347` R55 Dev D — P4 scale L2 residency — REFUTED-EMPIRICAL — B-scale-only cachepolicy bias closes the unswept half of cachepolicy axis (R47C unified, R48F A-only, R55D B-only); all four configs (default_off/GLC/SLC/GLC|SLC) within ~10 TFLOPS noise (2960-2967 TFLOPS); cachepolicy axis TRIPLY CLOSED for V2 RCR scale loads
+- `eeec1255` R55 Dev A — P1 scale-fetch interleave — REFUTED-EMPIRICAL-LLVM-RESCHEDULES — 4 INTERLEAVE source-permutation variants V0-V3 across 3 cells all collapse within ±0.5% noise band (70B_Down 2988-3001 TFLOPS, 8B_Down 2966-2989, 70B_QO 2920-2927 partial); ISA inspection confirms LLVM scheduler hoists b64 scale loads back next to b128 mantissa loads regardless of source order — defeats source-level scale/data interleaving
+
+### R55 Dev results (P1-P4 attack on DIAGNOSTIC-SCALE-FETCH-WAIT)
+- **Dev A** (P1 scale-fetch interleave, GPU 0) REFUTED-EMPIRICAL-LLVM-RESCHEDULES: 4 source-permutation variants `MXFP8_RCR_SCALE_INTERLEAVE=0..3` reorder b64 scale loads relative to b128 mantissa loads in K-loop. ISA `kernel_mxfp8_layouts.s` shows AMDGPU scheduler clusters all scale loads back together regardless of source order. Phase 2 bench across 70B Down + 8B Down + 70B QO RCR: all 4 variants within ±0.5% noise. Macro `MXFP8_RCR_SCALE_INTERLEAVE` (values 0-3) kept default-OFF.
+- **Dev B** (P2 SALU hoist, GPU 1) REFUTED-EMPIRICAL-COMPILER-ALREADY-HOISTED: hoist scale base-address arithmetic out of K-loop body. Disassembly comparison: K-loop body byte-identical (15 s_add + 13 s_addc + 3 s_addk_i32 + 128 v_mfma) between baseline and macro1. Compiler already strength-reduces `(k_pair<<N) + base` → single `s_addk_i32` stride accumulator AND LICM-hoists scale SRD descriptor setup to prologue. Macro `MXFP8_RCR_SCALE_SALU_HOIST` no-op vs compiler. Default-OFF.
+- **Dev C** (P3 VALU dep-break, GPU 2) REFUTED-PASS-CRITERION-EMPIRICAL: `sched_barrier(0)` before 11 `s_setprio(1)` sites compresses VALU issue window. Strict-SCLK 5-run/arm: median 2930.69 → 2949.67 TFLOPS (+0.65%, every treatment run ≥ best baseline run). VGPR 254 → 250 (-4 VGPR). Phase 0 ISA proved NO broadcast→MFMA chain exists (would have been the rationale). Clean signal but +0.65% < +1% pass threshold. Macro `MXFP8_RCR_VALU_DEP_BREAK` default-OFF.
+- **Dev D** (P4 L2 residency, GPU 3) REFUTED-EMPIRICAL: B-scale cachepolicy bias (the unswept half of the cachepolicy axis: R47C swept unified, R48F swept A-only, R55D sweeps B-only). All four configs default_off/GLC/SLC/GLC|SLC sit within ~10 TFLOPS noise (2960-2967 TFLOPS). Macro `MXFP8_RCR_BSCALE_CACHEPOLICY` (in `r55d_workspace`, never wired into production) default-OFF. **Cachepolicy axis TRIPLY CLOSED for V2 RCR scale loads** (R47C/R48F/R55D).
+- **Dev E** (CRR LDS V2 retry, GPU 4) REFUTED-EMPIRICAL: re-attempt LDS-resident scale layout on COMPRESSED scale layout (after R54A overflow at 188416 B vs 163840 B CU limit). New COMPRESSED layout fits in LDS but LDS round-trip latency dominates the 6-cycle v_lshrrev saving. Median -7.98% monotonic regression. SNR 49.60 dB / det 3/3 PASS preserved (numerics fine; perf REFUTED). Macro `MXFP8_CRR_SCALE_LDS_V2` default-OFF. **LDS-resident scale layout family DOUBLY CLOSED** (R54A capacity + R55E latency).
+- **Dev F** (8B GU RRR PMC diagnostic, GPU 5) DIAGNOSTIC-SCALE-FETCH-WAIT-SALU-DOMINANT: PMC profiling on -1.0pp HEADROOM cell using R54B's method. Identifies new V2 RRR bottleneck class with **SALU pressure 3.4× R54B's RCR signature** — distinct from RCR's SCALE-FETCH-WAIT. Bonus finding: 70B_Down RRR is INVERTED 110.3% MX/FP8 (over-shoots FP8 baseline). Suggests RRR/RCR have orthogonal bottlenecks; SALU-DOMINANT class needs its own R56+ attack vector (NOT scale-load reordering).
+
+### R55 cycle outcome
+**0 new SHIP + 5 REFUTATIONS + 1 DIAGNOSTIC + 1 BASELINE** (Reviewer 2/9 PASS). Cumulative deliverable:
+1. **70B Down RCR DIAGNOSTIC-SCALE-FETCH-WAIT class attacked on FOUR axes** (P1/P2/P3/P4 from R54 Dev B prediction). All four mechanisms REFUTED-EMPIRICAL: LLVM scheduler defeats source-level interleave (P1), compiler already hoists SALU (P2), VALU dep-break clean but sub-threshold (P3), cachepolicy axis closed (P4).
+2. **Cachepolicy axis TRIPLY CLOSED** for V2 RCR scale loads (R47C unified, R48F A-only, R55D B-only).
+3. **LDS-resident scale layout DOUBLY CLOSED** (R54A capacity overflow, R55E latency dominance on COMPRESSED retry).
+4. **New SALU-DOMINANT bottleneck class identified** on 8B Gate/Up RRR (Dev F) — distinct from RCR class, requires new attack family.
+5. **9-cell baseline drift to 2/9 PASS** (Reviewer): 7 HEADROOM cells in 94.15-94.89% noise-band marginally below 95% gate (vs prior 5/9 PASS); dominant structural gap remains 70B_GateUp/CRR at 88.95%. Likely thermal/SCLK noise drift; not regression from R54/R55 source changes (all macros default-OFF).
+6. **Production tree byte-identical post-R55** — all 6 added macros default-OFF; baseline ISA preserved.
+
+### R55 closure ledger (what is now exhausted)
+- ~~Source-level scale-fetch reordering (P1)~~ — LLVM reschedules
+- ~~SALU base-address hoist (P2)~~ — compiler already does it (LICM + strength reduce)
+- ~~Cachepolicy axis V2 RCR~~ — TRIPLY CLOSED (R47C/R48F/R55D)
+- ~~LDS-resident scale layout~~ — DOUBLY CLOSED (R54A capacity + R55E latency)
+- ~~CRR opsel rewrite~~, ~~K-superblock~~, ~~70B Down CRR~~, ~~N-tile shrink~~ — closed pre-R55
+- ~~V2 RRR K-loop body restructure~~ — QUADRUPLY closed (R49A/R53A/R53B/R54C)
+- ~~v_pk_lshrrev_b32 ISA opcode~~ — closed by R54E (opcode doesn't exist on gfx950)
+- ~~V2 RRR wider memory loads (dwordx4)~~ — closed by R54H (already at gfx950 max width)
+- ~~CRR XCD swizzle granularity tuning~~ — closed by R54F (default on flat plateau)
+
+### R56+ candidate levers (post-R55)
+1. **8B Gate/Up RRR SALU-DOMINANT class** (R55F new) — orthogonal to RCR; needs SALU-pressure-reducing transforms (NOT scale-load reordering). PMC-driven new attack family.
+2. **VALU dep-break sub-threshold +0.65% (R55C)** — keep macro available; if combined with another sub-threshold lever could cross +1%. Co-pilot candidate for stacking.
+3. **70B Gate/Up CRR -5.7pp** still open but increasingly looks structural (CRR scale-shift floor 6× closed across R49A/R50A/R53A/R54A/R54E/R54F/R54I/R55E).
+4. **PMC profile of 70B Gate/Up CRR** (analog to R54B's RCR PMC + R55F's RRR PMC) — only un-PMC'd HEADROOM cell. Could surface third bottleneck class.
+5. **Cell-pair stacking**: combine R55C VALU dep-break (+0.65%) with another sub-threshold lever; production-default-OFF stays default-OFF until joint signal exceeds gate.
+6. ~~Compiler-flag exploration~~ — CLOSED by R54C (41 flags swept on V2 RRR, all collapse to identical 254 VGPR).
+7. ~~LDS-resident scale layout~~ — DOUBLY CLOSED.
+8. ~~Cachepolicy axis V2 RCR~~ — TRIPLY CLOSED.
+
+### R55 Cherry-pick status (7/7 on `feat/mxfp8-only`)
+- `4c099d62` Dev F — 8B GU RRR PMC DIAGNOSTIC-SALU-DOMINANT
+- `9acb5fdf` Reviewer (R54 carry) — 9-cell baseline 2/9 PASS
+- `21d2656b` Dev C — VALU dep-break REFUTED-PASS-CRITERION (+0.65%)
+- `eb7483c2` Dev B — SALU hoist REFUTED-COMPILER-ALREADY-HOISTED
+- `47e63d70` Dev E — CRR LDS V2 COMPRESSED REFUTED-LATENCY (-7.98%)
+- `10632347` Dev D — cachepolicy B-only REFUTED (axis TRIPLY CLOSED)
+- `eeec1255` Dev A — P1 scale-fetch interleave REFUTED-LLVM-RESCHEDULES
+
+## R54 cycle 完结 (2026-04-19, 9 devs + 1 reviewer; Dev G MIA) ★ 0 SHIP + 7 REFUTATIONS + 2 DIAGNOSTICS — V2 RRR ceiling QUADRUPLY closed (R54C compiler-flag axis); CRR scale-shift family 6× closed (R54A/R54E/R54F/R54I add to R49A/R50A/R53A); **R54B identifies new bottleneck class DIAGNOSTIC-SCALE-FETCH-WAIT on 70B Down RCR — drives R55 attack plan**
+
+R54 派 9 devs (A CRR LDS-resident pre-shifted scale, B 70B Down RCR PMC, C V2 RRR -mllvm flag sweep, D 8B Q/O wave-tail diagnostic, E v_pk_lshrrev_b32 ISA substitution, F CRR XCD swizzle granularity, G 8B GU RRR cache prefetch builtins, H V2 RRR dwordx4 wider loads, I CRR branchless unconditional shift) + 1 Reviewer. **Dev G MIA**: launched on GPU 6 but produced no artifacts after 3+ hours, declared MIA in cycle wrap. R54 outcome: 0 SHIP, 7 REFUTATIONS + 2 DIAGNOSTICS; key deliverable is R54B's new bottleneck class identification that became the R55 attack target.
+
+### R54 commits on `feat/mxfp8-only`
+- `975ce723` R54 Dev A — 70B Gate/Up CRR LDS-resident pre-shifted scale layout — REFUTED-EMPIRICAL — LDS overflow (188416 B vs 163840 B CU limit)
+- `9ab79eff` R54 Dev B — 70B Down RCR PMC diagnostic — DIAGNOSTIC-SCALE-FETCH-WAIT — new bottleneck class identified, structurally distinct from CRR scale-shift floor (DROVE R55 P1-P4 ATTACK)
+- `a5e9f1ae` R54 Dev C — V2 RRR -mllvm compiler-flag exploration — REFUTED-EMPIRICAL — V2 RRR 254/256 VGPR ceiling QUADRUPLY closed (41 flags swept, 33 built clean, all collapse to 254 VGPR / 0 spill / 0 scratch; best flag +0.122% inside noise band)
+- `3ac0fd0e` R54 Dev D — 8B Q/O small-shape wave-tail diagnostic — DIAGNOSTIC-COMPLETE-NOT-A-GAP — all 8B Q/O cells already PASS 95% gate, no wave-tail gap exists
+- `34809fa2` R54 Dev E — 70B Gate/Up CRR `v_pk_lshrrev_b32` packed-shift instruction substitution — REFUTED-EMPIRICAL-ISA — opcode does not exist on gfx950 ISA
+- `46e73f8f` R54 Dev F — 70B Gate/Up CRR XCD swizzle granularity tuning (NUM_XCDS, GROUP_M sweep) — REFUTED-EMPIRICAL — default (NUM_XCDS=8, GROUP_M=4) sits on flat granularity plateau, no neighbor improves
+- `ced8b68c` R54 Dev H — V2 RRR wider memory loads (`buffer_load_dwordx4` coalescing) — REFUTED-EMPIRICAL-ISA — V2 RRR already at gfx950 maximum load width
+- `2499ce90` R54 Dev I — 70B Gate/Up CRR branchless unconditional shift block — REFUTED-DIAGNOSTIC — control-flow change SUCCEEDS (no `s_bitcmp0_b32`/`s_cbranch` in body) but compiler still refuses to unroll; CRR ~92% structural floor confirmed independent of conditional control flow
+
+### R54 Dev results
+- **Dev A** REFUTED: pre-shifted scale layout in LDS for 70B Gate/Up CRR (avoid the 6× v_lshrrev_b32 K-loop shifts). LDS footprint 188416 B exceeds 163840 B CU limit (gfx950 160 KB LDS/CU). Cannot land at this CTA shape. **Drove R55 Dev E retry on COMPRESSED layout** (also REFUTED, latency this time).
+- **Dev B** DIAGNOSTIC-SCALE-FETCH-WAIT: PMC profiling on 70B Down RCR (the -3.4pp HEADROOM cell). Identifies new bottleneck class structurally distinct from CRR's scale-shift floor: **scale-fetch waitcnt dominates K-loop tail**. Predicts P1-P4 attack plan: P1 scale-fetch interleave with mantissa, P2 SALU hoist of scale base addr, P3 VALU dep-chain compression, P4 scale L2 residency hint. **All four P1-P4 mechanisms became R55 dev assignments**.
+- **Dev C** REFUTED-EMPIRICAL: 41 -mllvm compiler flag combinations swept on 8B Gate/Up RRR. 33 of 41 built clean → all collapsed to identical 254 VGPR / 0 spill / 0 scratch. Only allocator-mover (`sched_iterative_minreg`) moved wrong direction (more spill). Phase 2 bench: best flag (`max_occ_plus_trackers`) +0.122% — 8× below SHIP gate, inside noise band. **LLVM is schedule-locked at this VGPR pressure point — V2 RRR ceiling QUADRUPLY closed** (R49A/R53A/R53B/R54C).
+- **Dev D** DIAGNOSTIC-COMPLETE-NOT-A-GAP: 8B Q/O cells (256 CTA, 0.42 wave) re-validated. All cells already PASS 95% gate; no wave-tail HEADROOM gap exists to close. R49C "wave-tail" framing was misidentified. Removes a phantom target from the open-headroom list.
+- **Dev E** REFUTED-EMPIRICAL-ISA: substitute 6× v_lshrrev_b32 (CRR scale shifts) with packed `v_pk_lshrrev_b32`. Opcode does not exist on gfx950 ISA — confirmed via LLVM target table + manual disassembly. ISA-axis closed.
+- **Dev F** REFUTED-EMPIRICAL: XCD swizzle granularity sweep on 70B Gate/Up CRR. Default `NUM_XCDS=8, GROUP_M=4` sits on flat plateau — no neighbor (NUM_XCDS=4/8/16, GROUP_M=2/4/8) improves. R47B's CRR XCD swizzle ship continues to hold at default settings.
+- **Dev G** MIA: 8B Gate/Up RRR cache prefetch builtins on GPU 6. Launched but produced no artifacts on disk after 3+ hours. Declared MIA — no findings to harvest. Cache prefetch axis remains unswept (R56+ candidate if revisited).
+- **Dev H** REFUTED-EMPIRICAL-ISA: V2 RRR `buffer_load_dwordx4` wider memory loads. V2 RRR already uses dwordx4 (16-byte) loads — gfx950 maximum load width. No wider load instruction exists. ISA-axis closed.
+- **Dev I** REFUTED-DIAGNOSTIC: branchless unconditional shift block on 70B Gate/Up CRR. Control-flow change SUCCEEDS (verified no `s_bitcmp0_b32` / `s_cbranch` in K-loop body) but compiler STILL refuses to unroll body. **Confirms CRR ~92% structural floor is NOT control-flow gated**; the unroll refusal is independent of `s_bitcmp0_b32`. CRR scale-shift floor closure now 6× across R49A/R50A/R53A/R54A/R54E/R54F/R54I.
+
+### R54 Reviewer audit
+9-cell baseline check committed at `9acb5fdf` against HEAD `9ab79eff` (after Dev B PMC commit, before any R55 dev landed). 2/9 PASS, 7/9 HEADROOM. 7 HEADROOM cells in 94.15-94.89% band — marginally below 95% gate, mostly noise-band drift from prior 5/9 PASS R53 baseline. Dominant structural gap remains 70B_GateUp/CRR at 88.95%. SNR 49.59-49.61 dB / det all PASS. **Not regression from R54 source changes** — all R54 macros default-OFF.
+
+### R54 cycle outcome
+**0 new SHIP + 7 REFUTATIONS + 2 DIAGNOSTICS + 1 MIA**. Cumulative deliverable:
+1. **V2 RRR ceiling QUADRUPLY CLOSED** (R49A/R53A/R53B/R54C). Compiler-flag axis added by R54C. R55+ must NOT propose K-loop body restructure adding inter-iteration state OR new `-mllvm` scheduler/allocator flag exploration.
+2. **CRR scale-shift floor 6× CLOSED** (R49A/R50A/R53A/R54A/R54E/R54F/R54I). Includes ISA-opcode-axis (R54E), XCD swizzle granularity (R54F), control-flow / branchless variant (R54I), LDS layout (R54A capacity).
+3. **NEW BOTTLENECK CLASS IDENTIFIED** by R54B: DIAGNOSTIC-SCALE-FETCH-WAIT on 70B Down RCR — first concrete optimization path for an open RCR HEADROOM cell. **Drove the entire R55 P1-P4 attack plan**.
+4. **Phantom target removed** (R54D): 8B Q/O wave-tail not a gap — all cells PASS.
+5. **Production tree byte-identical post-R54** — all R54 macros default-OFF; baseline ISA preserved.
+
+### R54 Cherry-pick status (8/9 on `feat/mxfp8-only`; Dev G MIA)
+- `975ce723` Dev A CRR LDS-resident REFUTED (overflow)
+- `9ab79eff` Dev B 70B Down RCR PMC DIAGNOSTIC-SCALE-FETCH-WAIT
+- `a5e9f1ae` Dev C compiler-flag REFUTED (V2 RRR QUADRUPLY closed)
+- `3ac0fd0e` Dev D wave-tail DIAGNOSTIC-NOT-A-GAP
+- `34809fa2` Dev E v_pk_lshrrev_b32 REFUTED-ISA (opcode missing)
+- `46e73f8f` Dev F CRR XCD granularity REFUTED (flat plateau)
+- (Dev G MIA — no commit)
+- `ced8b68c` Dev H dwordx4 REFUTED-ISA (already max width)
+- `2499ce90` Dev I CRR branchless REFUTED-DIAGNOSTIC (unroll refusal not control-flow gated)
+- (Reviewer baseline `9acb5fdf` listed under R55 commits since it was committed during R55 cycle)
+
 ## R53 cycle 完结 (2026-04-19, 3 devs + 1 reviewer) ★ 0 new SHIP + 0 CONFIRM-SHIPPED + 3 REFUTATIONS + 1 DIAGNOSTIC + 9-cell baseline holds (5/9 PASS) — closes K-loop body restructure family (triply ceiling-bound at 254 VGPR); 70B Down CRR ruled out as recoverable; **R52 ships re-validated**
 
 R53 派 3 devs (A CRR opsel-keyed K-phase MMA dispatch, B K-superblock persistent CTA, C 70B Down CRR vs RRR PMC+ISA diagnostic) + 1 Reviewer (R52 audit + 9-cell baseline + R52O/R52G ship re-validation). All 3 devs delivered REFUTED-or-DIAGNOSTIC, 0 new SHIP, but Reviewer re-confirmed all R52 ships and 9-cell baseline holds bit-identically post R53.
