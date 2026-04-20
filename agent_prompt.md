@@ -36,29 +36,34 @@ You are the lead agent for an autonomous MXFP4 GEMM optimization session on MI35
 - R63 closures: `STEP3_PF_N>8` (static_assert), `STEP3_BARRIER_VMCNT∈{4,12}` (≤0.5pp), `R25C_TAIL_PF_OFF_ITERS` (dead at FUSED=1, crashes at FUSED=0 K=14336), `STEP4_EXTERNAL_BR_PREFETCH` (macro removed), `192×256` tile path (architectural rewrite, defer to R65+)
 - R64 closures: `R50A_AITER_INTERLEAVE` (macro removed in a70e4a15 — re-implementing equals the axis-A inner-loop rewrite anyway), `AGPR_REGS_HINT_192` (neutral/weak), `WAVES_PER_EU_1`+`{GM=8,AGPR192}` combos (regress); R64 isolated boundary "WINs" on 4096x4096x8192 / 16384x4096x6144 / 32768x28672x2048 reverted to LOSE in full sweep (contention noise) — confirm any future WIN in BOTH isolated AND full sweep.
 
-## Highest-value next axes (R67+ — R66 LANDED axis A)
+## Highest-value next axes (R68+ — R66 axis A, R67 cross-product LANDED)
 
-R66 landed `STEP34_PF_INTERLEAVE` (commit 9b83a0e8): 12/42 → 19/42 WIN, mean 93.6% → 100.4%. New `kpair_64mfma_step34_pf_interleaved` helper inlines all 16 `buffer_load_dwordx4 ... lds` prefetches into the existing single asm block (4:1:1 MFMA:ds_read:bufload, mirroring aiter ISA). Operand pool 82 → 122. Single asm block (avoids R62/R65 AGPR-allocator hazard).
+R66 landed `STEP34_PF_INTERLEAVE` (commit 9b83a0e8): 12/42 → 19/42 WIN, mean 93.6% → 100.4%. New `kpair_64mfma_step34_pf_interleaved` helper inlines all 16 `buffer_load_dwordx4 ... lds` prefetches into the existing single asm block.
 
-1. **Knob × step34pf cross-product on 14 close-boundary shapes** (R67, cheap try). Existing knobs (gm6, gm8, gb, unr2/16, we1, tbv16) were tuned ON TOP of OLD step34. With step34pf as new base, same knobs may unlock different shapes. Add `step34pf_gm6`, `step34pf_gm8`, `step34pf_unr2`, `step34pf_we1`, `step34pf_tbv16` to bench autotune. Expect 2-5 NEW WINs from boundary shapes within 1-3pp of WIN.
-2. **STEP34_PF_INTERLEAVE for kpair_64mfma_step12** (untried). Step1+Step2 pair still uses post-block prefetch. Symmetric extension may yield +1-2pp on tail shapes.
-3. **Orphan dead-code cleanup** (R65 Opt-Orphan, ~700 LOC). Pure clarity, no perf. Optional alongside R67.
-4. **Axis A Option 2 — full data-flow flip (Global→VGPR for A)** — only attempt for the 5 hard losers (<90%) that didn't budge in R66. ~600 LOC. High risk.
-5. **Axis B (MFMA 32×32×64)** — defer to R70+. R66 confirmed 4:1:1 schedule was the lever, not MFMA size.
-6. **Axis C (192×256 tile)** — defer; 4096×K-large cluster benefited from step34pf, motivation weaker.
+R67 landed step34pf×knob cross-product (commit 3cc7f92a): 19/42 → 23/42 WIN, mean 100.4% → 102.5%. Added 5 cross-product variants (gm6/gm8/unr2/we1/tbv16). Cross-product wins on 18/42 shapes. NEW WINs from `step34pf_unr2`, `step34pf_gm6`, and bare `step34pf` on shapes where R66 sweep mis-attributed.
+
+R67 step12pf SPLIT design FAILED Gate 2 (5632 row-clustered NaN cells, see `project_mxfp4_R67_step12pf_failed.md`). DON'T retry SPLIT; build isolated test harness first.
+
+1. **`kpair_64mfma_step12` interleave NON-SPLIT retry** (R68 candidate, untried; SPLIT is now closed). Put ALL 16 prefetches in step12, 0 in step34. Build isolated K=64/PF_DEPTH=1 test FIRST to bisect any bug before integration.
+2. **Axis A Option 2 — full data-flow flip (Global→VGPR for A)** — only attempt for the 4 hard losers (<90%): 14336×4096×32768, 4096×28672×32768, 4096×32768×128256, 32768×4096×14336. ~600 LOC. High risk.
+3. **Triple cross-product** (`step34pf_gm6_unr2`, `step34pf_gm8_we1`, etc.) for boundary residue at 95-99% (10 shapes after R67). Cheap; ~30 min round.
+4. **Orphan dead-code cleanup** (R65 Opt-Orphan, ~700 LOC). Pure clarity, no perf.
+5. **Axis B (MFMA 32×32×64)** — defer to R70+. R66/R67 confirmed 4:1:1 schedule was the lever, not MFMA size.
+6. **Axis C (192×256 tile)** — defer; cross-product unlocked enough that motivation is weaker.
 
 ## Don't reopen — R65 closures (still valid)
 - `KPAIRS_PER_ITER` is not a knob (R65 Opt-D).
 - `kpair_64mfma_step34_interleaved` orphan (line 1414-1755): compile-broken. **R66 rewrote the production helper** (`kpair_64mfma_step34_pf_interleaved` at ~line 872) — keep this orphan as historical reference but do NOT try to revive in-place.
 
-## R66 lesson learned
+## R66/R67 lessons learned
 - The R65 scoping report (project_mxfp4_R65_axis_a_scoped.md) called the upside "4-8pp mean uplift" — actual was +6.8pp. Scoping reports were accurate; future scoping rounds are worth the cycle.
 - Operand pool overflow at 82+48=130 was the predicted blocker; mitigation (4 srds + 4 soffs reused per tile-group, voffs as per-prefetch operand) worked exactly as scoped. R65 BLOCKER analysis was load-bearing.
+- **R67: cross-product axis (existing knob × new base) is HIGH-LEVERAGE after a structural change.** R66 introduced step34pf as the new base; R67 simply added 5 macro combos and unlocked 4 NEW WINs in ~30 min. Always re-run autotune knobs across new structural axes — don't assume previous knob ranking holds.
+- **R67 step12pf SPLIT failure**: Gate 1 PASS / Gate 2 FAIL with 5632 row-clustered NaN cells. Reverted entirely; root cause unknown. Lesson: for asm-block restructuring beyond a single-block-rewrite (e.g., split prefetches across step12 and step34), build an isolated single-iter LDS-byte-comparison test BEFORE full kernel integration. Multiple unfalsified hypotheses (m0 clobber, operand pool, LDS race, vmcnt barrier mistuning) means we couldn't bisect within the time budget.
 
-## Knob ceiling reached for boundary shapes
-After R62+R63+R64, boundary shapes (95-99.5%) have been swept across:
-GROUP_SIZE_M ∈ {4,6,8}, UNROLL_K ∈ {2,16}, STEP3_PF_N/STEP4_PF_N ∈ {4,8}, STEP3_BARRIER_VMCNT ∈ {4,8,12}, GLOBAL_B ∈ {0,1}, WAVES_PER_EU_1, TAIL_BARRIER_VMCNT ∈ {8,16}, AGPR_REGS_HINT_192, plus all 2-knob combos thereof.
-R63 unlocked 16384×6144×4096 via gm8 (only NEW WIN since R45B). R64 added autotune coverage (mean +0.5pp) but **no NEW WIN** — boundary "WINs" from isolated runs reverted under full-sweep contention. **Knob ceiling at 12/42 confirmed twice.** Path to >12 requires the inner-loop rewrite (axis A).
+## Knob ceiling raised by structural change
+Boundary shapes (95-99.5%) had been knob-ceilinged at 12/42 after R62-R64.
+R66 structural change (step34pf) raised the ceiling to 19/42. R67 cross-product on top raised it to 23/42. The lesson: structural changes UNBLOCK knob axes. Don't claim "knob ceiling reached" without first confirming knobs were re-swept on top of the latest base.
 
 ## Standing user commitments
 - Full GitHub push permission (no asking)

@@ -1,9 +1,9 @@
 # MXFP4 Optimization TODO
 
-**Last update:** 2026-04-20 (R66 — axis-A landed, MAJOR breakthrough)
-**Status:** **19/42 WIN, mean ~100.4%** of aiter. R66 implemented axis-A Option 1 (`STEP34_PF_INTERLEAVE`); first time mean crosses 100%.
-**Bench harness:** `analysis/fp8_gemm/mi350x/bench_all_42.py` (HipKittens-only, **12 variants**, parallel-GPU)
-**Kernel commit:** 9b83a0e8
+**Last update:** 2026-04-20 (R67 — step34pf×knob cross-product LANDED, +4 WINs; step12pf SPLIT failed correctness)
+**Status:** **23/42 WIN, mean ~102.5%** of aiter. R67 added 5 cross-product variants on top of R66's `STEP34_PF_INTERLEAVE` base.
+**Bench harness:** `analysis/fp8_gemm/mi350x/bench_all_42.py` (HipKittens-only, **17 variants**, parallel-GPU)
+**Kernel commits:** 9b83a0e8 (R66 helper) + 3cc7f92a (R67 bench cross-product)
 
 ---
 
@@ -14,47 +14,28 @@
 3. **Compete against `competitor_tflops`** (aiter ASM via Python dispatcher) embedded in `bench_all_42.py`.
 4. **Commit only when there is measurable effect.** Inert scaffolding stays out of git.
 
-## Current standing (R66 verified bench, independent re-run)
+## Current standing (R67 verified bench, full sweep)
 
 | Cluster | Shapes | Status |
 |---|---:|---|
-| WIN | 19 | step34pf wins 18 shapes; gm8 wins 1 (32768×6144×2048) |
-| Boundary close (95-99.5%) | 14 | many within 1-3pp of WIN; knob×step34pf cross-product not yet tried |
-| Boundary mid (90-95%) | 7 | LOSE shapes 14336/32768 N or K — may benefit from step34pf+knob combos |
-| Hard LOSE (<90%) | 2 | 14336x4096x32768 (87.2%), 4096x28672x32768 (82.2%), 4096x32768x14336 (91.6%), 4096x32768x128256 (87.0%), 32768x4096x14336 (82.5%) |
+| WIN | 23 | step34pf + 4 cross-product NEW WINs (gm6, unr2) |
+| Boundary close (95-99.5%) | 10 | residue after R67 cross-product; knob ceiling on top of step34pf reached |
+| Boundary mid (90-95%) | 5 | 14336/32768 N or K — needs structural rewrite (axis A Opt-2 or step12pf) |
+| Hard LOSE (<90%) | 4 | 14336x4096x32768, 4096x28672x32768, 4096x32768x128256, 32768x4096x14336 |
 
-R66 verified WIN list (`step34pf` unless noted):
-  16384×6144×2048    111.9%
-  32768×4096×3072    109.6%
-  16384×4096×2048    109.3%
-  16384×4096×3072    108.9%
-  32768×4096×2048    107.7%
-  16384×14336×2048   104.7%
-  32768×14336×2048   104.0%
-  4096×4096×8192     104.0%
-  4096×6144×32768    119.4%
-  4096×14336×8192    102.3%
-  4096×32768×4096    100.7%
-  4096×128256×32768  156.9%
-  6144×4096×8192     104.2%
-  6144×32768×4096    100.9%
-  16384×4096×4096    104.7%
-  16384×4096×7168    105.7%
-  16384×6144×4096    103.7%
-  16384×14336×4096   103.6%
-  32768×6144×2048    103.1%  [gm8]
+R67 NEW WINs (4) on top of R66:
+  16384×4096×6144     96.4% → 109.2%   [step34pf_unr2]
+  16384×28672×2048    96.1% → 101.4%   [step34pf_gm6]
+  32768×28672×2048    99.3% → 106.7%   [step34pf_gm6]
+  4096×4096×16384     98.4% → 101.1%   [step34pf]
 
-Closest boundary LOSE residue (R67 candidates):
-  32768×28672×2048    99.3%
-  4096×4096×16384     98.4%
+Closest boundary LOSE residue after R67 (R68 candidates):
   28672×4096×8192     97.8%
   32768×4096×7168     97.6%
   14336×32768×4096    97.4%
   4096×4096×32768     97.4%
   16384×4096×14336    97.2%
   6144×4096×16384     96.5%
-  16384×4096×6144     96.4%
-  16384×28672×2048    96.1%
   4096×14336×16384    95.7%
   16384×28672×4096    94.3%
   4096×32768×6144     93.7%
@@ -126,37 +107,35 @@ R66 BLOCKERS to anticipate:
 - **`KPAIRS_PER_ITER` macro** (R65 Opt-D): does NOT exist as a knob. "KPair" names the fundamental MFMA primitive; the 4-step×32-MFMA pipeline is architectural. Don't try to add `-DKPAIRS_PER_ITER={1,4}` to bench autotune — there's nothing to gate. The TODO entry suggesting this as "cheap to try" was misleading; reclassified as part of axis-A.
 - **`kpair_64mfma_step34_interleaved` orphan** (R62 + R65 re-confirmed): function at line 1414-1755 emits `ds_read_b128` with AGPR-address operands due to AGPR pressure in separate-asm-block design. Compile-broken. Useful as STRUCTURAL REFERENCE only — do not try to revive in-place. R66 axis-A rewrite must be from-scratch in a SINGLE asm block (mirror existing `kpair_64mfma_step34` block structure).
 - **15 other orphan functions in kernel** (R65 Opt-Orphan, ~700 LOC): `store_bf16x2_packed`, `extract_dsread_tile`, `load_pq_scale_srd`, `compute_lds_base_addrs`, `emit_full_pf_l2only`, `emit_l2_pf_block`, `kpair_32mfma_with_pf`, `kpair_32mfma_pure`, `kpair_32mfma_with_16lds_and_pf`, `kpair_32mfma_with_pf_swapped_sel`, `kpair_32mfma_pure_swapped_plain`, `kpair_64mfma_step12_swapped_sel`, `kpair_32mfma_with_lds_and_pf_swapped_sel`, plus the dead `R37_FIX_B==0` else-branches (lines 2466-2528 and 2654-2680). Pure clarity cleanup, no perf. Optional R66 task.
+- **`STEP12_PF_INTERLEAVE` SPLIT design** (R67 Opt-2, 2026-04-20): symmetric extension of R66 4:1:1 trick into `kpair_64mfma_step12` with a0+bl prefetches in step12 and a1+br post-step34. Compiled clean (Gate 1 PASS, SGPR 82, VGPR 240, no spills) but produced 5632 row-clustered NaN cells in correctness test (Gate 2 FAIL). Sampled cells [0,0]/[100,100]/[1024,2048] matched baseline; specific row ranges (13201-13215, 13265-13279, 15252-15255) corrupted. Root cause unidentified within time budget — hypotheses: (a) m0 clobber interaction across step12/step34 boundary, (b) operand-pool/SGPR rename pressure at 94 operands, (c) missed LDS race, (d) STEP3_BARRIER_VMCNT(8) tuned for 16 outstanding bufloads but step12 issued 8 already. Reverted entirely. **Don't re-attempt SPLIT design without first building isolated single-iter test (K=64, PF_DEPTH=1) to bisect the bug**, or try NON-SPLIT design (all 16 prefetches in step12, 0 in step34) to simplify dataflow at cost of doubled operand pool ~150. See `project_mxfp4_R67_step12pf_failed.md`.
 
 ---
 
-## R67+ priorities
+## R68+ priorities
 
-R66 LANDED axis-A Option 1 with +6.8pp mean and +7 NEW WINs. The remaining 23 LOSE shapes split into two clusters:
+R67 LANDED step34pf×knob cross-product with +4 WINs (commit 3cc7f92a). step12pf SPLIT design failed Gate 2 correctness (see closures). Remaining 19 LOSE shapes:
 
-1. **Knob×step34pf cross-product on boundary shapes** (R67 cheap try): the existing autotune knobs (gm6, gm8, gb, unr2, unr16, we1, tbv16, etc.) were tuned ON TOP OF the OLD step34 path. With step34pf as the new base, the same knobs may unlock different shapes. Add 4-6 cross-product variants:
-   - `step34pf_gm6` (-DSTEP34_PF_INTERLEAVE=1 -DGROUP_SIZE_M=6)
-   - `step34pf_gm8` (...)
-   - `step34pf_unr2`, `step34pf_unr16`
-   - `step34pf_we1`
-   - `step34pf_tbv16`
-   Expect 2-5 of the 14 close-boundary shapes to cross WIN. ~30 min round.
+1. **`kpair_64mfma_step12` interleave — NON-SPLIT retry** (R68 candidate, untried):
+   - SPLIT design (a0+bl in step12, a1+br post-step34) FAILED with row-clustered NaNs. Don't repeat.
+   - NON-SPLIT design: put ALL 16 prefetches in step12, 0 in step34 (and remove `emit_pf_tail<0>`). Simpler dataflow (step12 = "issue", step34 = "drain") at cost of operand pool ~150.
+   - Pre-work REQUIRED: build isolated K=64 / PF_DEPTH=1 test to bisect bug before kernel integration. See `project_mxfp4_R67_step12pf_failed.md`.
 
-2. **Orphan dead-code cleanup** (R65 Opt-Orphan audit, ~700 LOC removable) — pure clarity gain, no perf. Optional; do alongside or after R67 to reduce future agent-search noise.
+2. **Axis A Option 2 (full data-flow rewrite — Global→VGPR for A tiles)** — for the 4 hard losers (<90%): 14336×4096×32768, 4096×28672×32768, 4096×32768×128256, 32768×4096×14336. ~600 LOC. Risk: VGPR pressure, LDS swizzle re-derivation. Bench cluster shapes specifically before committing.
 
-3. **Axis A Option 2 (full data-flow rewrite — Global→VGPR for A tiles)** — only attempt for the hard losers in 14336×4096×K-large / 32768×4096×K-large / 4096×32768×K-large clusters that didn't budge in R66. ~600 LOC. Risk: VGPR pressure, LDS swizzle re-derivation. Bench cluster shapes specifically before committing.
+3. **Orphan dead-code cleanup** (R65 Opt-Orphan audit, ~700 LOC removable) — pure clarity gain, no perf. Optional alongside R68 to reduce future agent-search noise.
 
-4. **Axis B (MFMA 32×32×64)** — still defer to R70+. R66 success means the 4:1:1 schedule was the lever, not the MFMA size.
+4. **Triple cross-product (step34pf × 2 knobs)**: e.g., `step34pf_gm6_unr2`, `step34pf_gm8_we1`, `step34pf_tbv16_unr2`. Some boundary residue (e.g., 32768×4096×7168 at 97.6%, 28672×4096×8192 at 97.8%) may cross with stacked knobs. Cheap; ~30 min round.
 
-5. **Axis C (192×256 tile)** — defer; the 4096×K-large cluster benefited a lot from step34pf so the original motivation for 192×256 is weaker.
+5. **Axis B (MFMA 32×32×64)** — still defer to R70+. R66/R67 confirmed the 4:1:1 schedule was the lever, not the MFMA size.
 
-6. **STEP34_PF_INTERLEAVE for kpair_64mfma_step12?** Untried. The Step1+Step2 pair currently uses post-block prefetch too. Symmetric extension may yield another +1-2pp on tail shapes.
+6. **Axis C (192×256 tile)** — defer; cross-product unlocked enough 4096×K-large that the motivation is weaker.
 
-## Bench script (R66 working set)
-`bench_all_42.py` variants (12 total):
-  `default | gm6 | gb | gb_gm6 | unr2 | unr16 | gm8 | we1 | tbv16 | unr2_gm6 | gb_unr2 | step34pf`
-Run: `BENCH_GPUS=0,1,2,3,4,5,6,7 python3 bench_all_42.py` (~10 min for build+full sweep).
+## Bench script (R67 working set)
+`bench_all_42.py` variants (17 total):
+  `default | gm6 | gb | gb_gm6 | unr2 | unr16 | gm8 | we1 | tbv16 | unr2_gm6 | gb_unr2 | step34pf | step34pf_gm6 | step34pf_gm8 | step34pf_unr2 | step34pf_we1 | step34pf_tbv16`
+Run: `BENCH_GPUS=0,1,2,3,4,5,6,7 python3 bench_all_42.py` (~10-15 min for build+full sweep with 17 variants).
 Single-shape autotune: `python3 bench_all_42.py M N K` picks best variant.
-**step34pf is autotune-best on 31/42 shapes after R66.**
+**Cross-product variants (`step34pf_*`) are autotune-best on 18/42 shapes after R67.**
 
 ## Standing GPU/timing protocol
 - GPUs 0-7 all available on this MI355X box; check with `rocm-smi --showuse` first.
