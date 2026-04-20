@@ -92,12 +92,12 @@ using namespace kittens;
 #define R25C_ACTIVE ((R25C_TAIL_PF_OFF_ITERS > 0) && (K_DIM <= R25C_K_LIMIT) \
                      && (R25C_K_EXACT == 0 || K_DIM == R25C_K_EXACT))
 
-// BpreShuffle: load B tiles directly from global memory (pre-shuffled) via
+// GlobalB: load B tiles directly from global memory (pre-shuffled) via
 // buffer_load_dwordx4 → VGPRs, bypassing LDS for B entirely.
 // Requires B tensor to be pre-shuffled with aiter's shuffle_weight(layout=(16,16)).
 // When enabled: no Bl_db/Br_db shared memory, no B barrier waits, no B ds_reads.
-#ifndef BPRESHUFFLE
-#define BPRESHUFFLE 0
+#ifndef GLOBAL_B
+#define GLOBAL_B 0
 #endif
 
 #define MXFP4_STR_IMPL(x) #x
@@ -227,7 +227,7 @@ __device__ __forceinline__ void extract_dsread_tile(const float4 d[8], fp4_intx8
     }
 }
 
-// ── BpreShuffle: direct B tile load from pre-shuffled global memory ──
+// ── GlobalB: direct B tile load from global memory ──
 // Pre-shuffled layout (aiter shuffle_weight layout=(16,16)):
 //   flat[n_block, k_block, k_phase, n_row, byte] =
 //     n_block*16*K_bytes + k_block*512 + k_phase*256 + n_row*16 + byte
@@ -237,9 +237,9 @@ __device__ __forceinline__ void extract_dsread_tile(const float4 d[8], fp4_intx8
 // 8 loads per half-tile: 4 tile-rows x 2 k-phases (lo4 + hi4 of fp4_intx8_t).
 // Output d[0..3] = k_phase=0 (lo4), d[4..7] = k_phase=1 (hi4).
 // Feeds directly into extract_dsread_tile (same d[8] → fp4_intx8_t[4] mapping).
-#if BPRESHUFFLE
+#if GLOBAL_B
 
-__device__ __forceinline__ void load_b_preshuffle_8(
+__device__ __forceinline__ void load_b_global_8(
     float4 d[8],
     const i32x4 &b_srd,
     const uint32_t voff[8],
@@ -274,7 +274,7 @@ __device__ __forceinline__ void load_b_preshuffle_8(
 //
 // voff[0..3] = tile-rows 0..3 at lo half (column groups 0..3 → swizzled)
 // voff[4..7] = tile-rows 0..3 at hi half (column groups 4..7 → swizzled)
-__device__ __forceinline__ void compute_b_preshuffle_voffs(
+__device__ __forceinline__ void compute_b_global_load_voffs(
     uint32_t voff[8],
     int n_block_start,
     int K_bytes_full)
@@ -300,11 +300,11 @@ __device__ __forceinline__ void compute_b_preshuffle_voffs(
     }
 }
 
-#endif // BPRESHUFFLE
+#endif // GLOBAL_B
 
 // ── Scale helpers ──
 
-__device__ __forceinline__ const uint8_t* preshuffled_scale_row_base_ptr(
+__device__ __forceinline__ const uint8_t* global_loadd_scale_row_base_ptr(
     const _gl_scale& src, int row_group) {
     return reinterpret_cast<const uint8_t*>(src.raw_ptr + src.idx(coord<>(row_group, 0)));
 }
@@ -326,7 +326,7 @@ __device__ __forceinline__ fp8e8m0_4 load_pq_scale_srd(
         llvm_amdgcn_raw_buffer_load_b32(srsrc, voffset, soffset, 0));
 }
 
-// Load two consecutive scale dwords via buffer_load_dwordx2 (merged preshuffle format).
+// Load two consecutive scale dwords via buffer_load_dwordx2 (merged global_load format).
 // Non-volatile asm allows compiler scheduling flexibility while preserving dwordx2.
 __device__ __forceinline__ void load_pq_scale_x2_async(
     i32x4 srsrc, uint32_t voffset, uint32_t soffset,
@@ -1990,7 +1990,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     constexpr int A1_SLOTS = 2;
     constexpr int BL_SLOTS = 2;
     constexpr int BR_SLOTS = 2;
-#if BPRESHUFFLE
+#if GLOBAL_B
     __shared__ ST_tile A0_db[2], A1_db[2];  // B tiles loaded directly from global
 #else
     __shared__ ST_tile A0_db[2], A1_db[2], Bl_db[2], Br_db[2];
@@ -2035,24 +2035,24 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 
     uint32_t so_a[PF_MPT], so_b[PF_MPT];
     G::prefill_swizzled_offsets(A0_db[0], g.a, so_a);
-#if !BPRESHUFFLE
+#if !GLOBAL_B
     G::prefill_swizzled_offsets(Bl_db[0], g.b, so_b);
 #endif
 
-    // Scale SRDs — merged preshuffle format (64-row super-groups, dwordx2 loads)
+    // Scale SRDs — merged global_load format (64-row super-groups, dwordx2 loads)
     // lane_soff_x2: doubled offsets for merged format where each dword position is 8 bytes
     const uint32_t lane_soff_x2 =
         (static_cast<uint32_t>(kittens::laneid() / 16) << 7) |
         (static_cast<uint32_t>(kittens::laneid() % 16) << 3);
 
     // One SRD per tile-half, pointing to the 64-row super-group base
-    i32x4 a0_srd = make_scale_srd(preshuffled_scale_row_base_ptr(
+    i32x4 a0_srd = make_scale_srd(global_loadd_scale_row_base_ptr(
         g.a_scale, (br * BLK + wm * RBM) >> 6));
-    i32x4 a1_srd = make_scale_srd(preshuffled_scale_row_base_ptr(
+    i32x4 a1_srd = make_scale_srd(global_loadd_scale_row_base_ptr(
         g.a_scale, (br * BLK + HB + wm * RBM) >> 6));
-    i32x4 bl_srd = make_scale_srd(preshuffled_scale_row_base_ptr(
+    i32x4 bl_srd = make_scale_srd(global_loadd_scale_row_base_ptr(
         g.b_scale, (bc * BLK + wn * RBN) >> 6));
-    i32x4 br_srd = make_scale_srd(preshuffled_scale_row_base_ptr(
+    i32x4 br_srd = make_scale_srd(global_loadd_scale_row_base_ptr(
         g.b_scale, (bc * BLK + HB + wn * RBN) >> 6));
 
     fp4_floatx4_t acc_A0Bl[16]={}, acc_A0Br[16]={}, acc_A1Bl[16]={}, acc_A1Br[16]={};
@@ -2078,7 +2078,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
             reinterpret_cast<uintptr_t>(&t.data[0]) + wlo));
     };
     uint32_t lb_a0[A0_SLOTS], lb_a1[A1_SLOTS];
-#if !BPRESHUFFLE
+#if !GLOBAL_B
     uint32_t lb_br[BR_SLOTS];
     uint32_t lb_bl[BL_SLOTS];
 #endif
@@ -2088,7 +2088,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     for (int d = 0; d < A1_SLOTS; ++d) {
         lb_a1[d]=lb(A1_db[d]);
     }
-#if !BPRESHUFFLE
+#if !GLOBAL_B
     for (int d = 0; d < BR_SLOTS; ++d) {
         lb_br[d]=lb(Br_db[d]);
     }
@@ -2100,7 +2100,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     auto load_tiles = [&](int bt, int db) {
         emit_tile_pf(A0_db[db], g.a, coord<ST_tile>(0,0,br*2,    bt), so_a, srd_a, base_a, lb_a0[db], static_cast<int>(kittens::coherency::cache_all));
         emit_tile_pf(A1_db[db], g.a, coord<ST_tile>(0,0,br*2+1,  bt), so_a, srd_a, base_a, lb_a1[db], static_cast<int>(kittens::coherency::cache_all));
-#if !BPRESHUFFLE
+#if !GLOBAL_B
         emit_tile_pf(Bl_db[db], g.b, coord<ST_tile>(0,0,bc*2,    bt), so_b, srd_b, base_b, lb_bl[db], static_cast<int>(kittens::coherency::cache_all));
         emit_tile_pf(Br_db[db], g.b, coord<ST_tile>(0,0,bc*2+1,  bt), so_b, srd_b, base_b, lb_br[db], static_cast<int>(kittens::coherency::cache_all));
 #endif
@@ -2110,14 +2110,14 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     // Avoids runtime-indexed [2][2] arrays that compiler spills to LDS + ds_read_b64.
     // Selection via ternary (compiles to v_cndmask). No swap needed.
     uint32_t a0_0_p0, a0_0_p1, a0_1_p0, a0_1_p1;
-#if !BPRESHUFFLE
+#if !GLOBAL_B
     uint32_t bl_0_p0, bl_0_p1, bl_1_p0, bl_1_p1;
     uint32_t br_0_p0, br_0_p1, br_1_p0, br_1_p1;
 #endif
     uint32_t a1_0_p0, a1_0_p1, a1_1_p0, a1_1_p1;
     compute_lds_base_addrs<A_row_reg>(kittens::subtile_inplace<RBM, BK>(A0_db[0], {wm, 0}), a0_0_p0, a0_0_p1);
     compute_lds_base_addrs<A_row_reg>(kittens::subtile_inplace<RBM, BK>(A0_db[1], {wm, 0}), a0_1_p0, a0_1_p1);
-#if !BPRESHUFFLE
+#if !GLOBAL_B
     compute_lds_base_addrs<B_row_reg>(kittens::subtile_inplace<RBN, BK>(Bl_db[0], {wn, 0}), bl_0_p0, bl_0_p1);
     compute_lds_base_addrs<B_row_reg>(kittens::subtile_inplace<RBN, BK>(Bl_db[1], {wn, 0}), bl_1_p0, bl_1_p1);
     compute_lds_base_addrs<B_row_reg>(kittens::subtile_inplace<RBN, BK>(Br_db[0], {wn, 0}), br_0_p0, br_0_p1);
@@ -2138,21 +2138,21 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     };
 
 
-#if BPRESHUFFLE
-    // BpreShuffle: pre-compute per-lane voffsets for Bl and Br half-tiles.
+#if GLOBAL_B
+    // GlobalB: pre-compute per-lane voffsets for Bl and Br half-tiles.
     // These are constant across K-iterations; K advance uses soffset.
     const int bl_n_block_start = bc * (BLK / 16) + wn * (RBN / 16);
     const int br_n_block_start = bc * (BLK / 16) + (BLK / 2 / 16) + wn * (RBN / 16);
     uint32_t bl_voffs[8], br_voffs[8];
-    compute_b_preshuffle_voffs(bl_voffs, bl_n_block_start, K_BYTES);
-    compute_b_preshuffle_voffs(br_voffs, br_n_block_start, K_BYTES);
+    compute_b_global_load_voffs(bl_voffs, bl_n_block_start, K_BYTES);
+    compute_b_global_load_voffs(br_voffs, br_n_block_start, K_BYTES);
 #endif
 
     // ═══════════ Prologue ═══════════
     load_tiles(0, 0);
     if (k_byte_iters > 1) load_tiles(1, 1);
-#if BPRESHUFFLE
-    // BPS: no LDS load for B tiles — loaded via buffer_load in prologue
+#if GLOBAL_B
+    // GLOBALB: no LDS load for B tiles — loaded via buffer_load in prologue
 #endif
 
     fp8e8m0_4 pf_a0[a_packs], pf_a1[a_packs], pf_bl[b_packs], pf_br[b_packs];
@@ -2171,8 +2171,8 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     A_row_reg a0_rt;
     fp4_load_st_to_rt(a0_rt, kittens::subtile_inplace<RBM, BK>(A0_db[0], {wm, 0}));
     fp4_intx8_t tA0[4], tBl[4];
-#if BPRESHUFFLE
-    // Load Bl directly from preshuffled global via buffer_load (NOT LDS)
+#if GLOBAL_B
+    // Load Bl directly from global_loadd global via buffer_load (NOT LDS)
     {
         // First extract A0 from LDS (done before any buffer_load to avoid VGPR conflict)
         asm volatile("s_waitcnt lgkmcnt(0)");
@@ -2180,9 +2180,9 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         for (int i = 0; i < 4; i++) tA0[i] = fp4_extract_tile(a0_rt, i);
         // Force A0 data to be consumed (prevent compiler from reusing a0_rt VGPRs)
         asm volatile("" :: "v"(tA0[0]), "v"(tA0[1]), "v"(tA0[2]), "v"(tA0[3]));
-        // Now load Bl from preshuffled global
+        // Now load Bl from global_loadd global
         float4 bl_d0[8];
-        load_b_preshuffle_8(bl_d0, srd_b, bl_voffs, 0);
+        load_b_global_8(bl_d0, srd_b, bl_voffs, 0);
         asm volatile("s_waitcnt vmcnt(0)");
         extract_tile(bl_d0, tBl);
     }
@@ -2208,9 +2208,9 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     // entry to reduce inter-wave de-schedule jitter. Placed BEFORE the
     // #pragma unroll so the pragma stays adjacent to the for-loop (clang
     // requires that adjacency).
-#if BPRESHUFFLE
-    // ═══ BPRESHUFFLE K-loop: B tiles loaded via buffer_load_dwordx4 from global ═══
-    // Pipeline: each iteration loads Br(cur) and nxt_Bl from pre-shuffled global,
+#if GLOBAL_B
+    // ═══ GLOBAL_B K-loop: B tiles loaded via buffer_load_dwordx4 from global ═══
+    // Pipeline: each iteration loads Br(cur) and nxt_Bl from global,
     // A0 and A1 from LDS (same as baseline), prefetches only A tiles to LDS.
     // Preshuffle flat-byte stride per K-iteration:
     // BK=128 raw bytes = BK/32 k_blocks, each k_block = 512 flat bytes
@@ -2256,10 +2256,10 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
             load_pq_scale_x2_async(br_srd, lane_soff_x2, nxt_scale, pf_br[0], pf_br[1]);
         }
 
-        // Load Br from pre-shuffled global memory
+        // Load Br from global memory
         float4 br_d[8];
         const uint32_t br_k_soff = (uint32_t)bt * BK_PRESHUFFLE_STRIDE;
-        load_b_preshuffle_8(br_d, srd_b, br_voffs, br_k_soff);
+        load_b_global_8(br_d, srd_b, br_voffs, br_k_soff);
 
         // Step 1: A0*Bl (32 pure MFMAs, Bl already in tBl)
         tile_pf_params dummy_pf = {};
@@ -2287,7 +2287,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         // Issue nxt_Bl buffer_load EARLY — before Step3+4's 64 MFMAs to hide latency
         float4 nxt_bl_d[8];
         const uint32_t nxt_bl_k_soff = (uint32_t)(bt + 1) * BK_PRESHUFFLE_STRIDE;
-        load_b_preshuffle_8(nxt_bl_d, srd_b, bl_voffs, nxt_bl_k_soff);
+        load_b_global_8(nxt_bl_d, srd_b, bl_voffs, nxt_bl_k_soff);
 
         // Step 3: A1*Bl (32 MFMAs) + ds_read nxt_A0
         // nxt_Bl buffer_loads are in-flight, overlapping with these MFMAs
@@ -2311,7 +2311,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         extract_tile(nxt_bl_d, tBl);
     }
 
-    // ── BPRESHUFFLE Tail iteration ──
+    // ── GLOBAL_B Tail iteration ──
     {
         const int bt = k_byte_iters - 1;
         const int cur = bt & 1;
@@ -2324,10 +2324,10 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         #pragma unroll
         for (int p = 0; p < b_packs; ++p) { bl_raw[p] = pf_bl[p]; br_raw[p] = pf_br[p]; }
 
-        // Load Br from pre-shuffled global
+        // Load Br from global
         float4 br_d[8];
         const uint32_t br_k_soff = (uint32_t)bt * BK_PRESHUFFLE_STRIDE;
-        load_b_preshuffle_8(br_d, srd_b, br_voffs, br_k_soff);
+        load_b_global_8(br_d, srd_b, br_voffs, br_k_soff);
 
         // Step 1: A0*Bl
         tile_pf_params dummy_pf = {};
@@ -2357,7 +2357,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         kpair_32mfma_with_pf<0>(acc_A1Br, tA1, tBr, a1_raw, br_raw, dummy_pf, dummy_pf);
     }
 
-#else // !BPRESHUFFLE — original LDS-based K-loop
+#else // !GLOBAL_B — original LDS-based K-loop
 
 #ifdef UNROLL_K
   #if UNROLL_K == 0
@@ -2569,7 +2569,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         kpair_32mfma_with_pf<0>(acc_A1Br, tA1, tBr, a1_raw, br_raw, dummy_pf, dummy_pf);
     }
 
-#endif // BPRESHUFFLE
+#endif // GLOBAL_B
 
 #else // TAIL_SPLIT == 0: original single-loop (better for large K)
 
