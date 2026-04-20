@@ -1,0 +1,1 @@
+/shared_nfs/kyle/test/Hipkittens2/analysis/fp8_gemm/mi350x/mxfp8_smallm_b32_fastpath.inc

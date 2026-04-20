@@ -1,8 +1,0 @@
-{"cell":"70b_kv_crr","gpu":4,"M":4096,"N":1024,"K":8192,"samples":[
-{"tag":"prod","rep":0,"gate_path":"G1+G2a+G2b","attempt":2,"md5":"ac1b12be9c499444ebbe988ca0bb1676","median":984.64,"mean":981.86,"stdev":9.00,"cv":0.009166,"preMhz":2260,"benchMhz":2386},
-{"tag":"base","rep":1,"gate_path":"G1+G2a+G2b","attempt":1,"md5":"b912c51d878e7621d0d92f5de239db29","median":766.82,"mean":766.00,"stdev":1.87,"cv":0.002441,"preMhz":2289,"benchMhz":2386},
-{"tag":"prod","rep":2,"gate_path":"G1+G2a+G2b","attempt":2,"md5":"ac1b12be9c499444ebbe988ca0bb1676","median":987.78,"mean":984.50,"stdev":8.97,"cv":0.009111,"preMhz":2229,"benchMhz":2383},
-{"tag":"base","rep":3,"gate_path":"G1+G2a+G2b","attempt":1,"md5":"b912c51d878e7621d0d92f5de239db29","median":766.50,"mean":765.77,"stdev":2.54,"cv":0.003317,"preMhz":2235,"benchMhz":2389},
-{"tag":"prod","rep":4,"gate_path":"G1+G2a+G2b","attempt":1,"md5":"ac1b12be9c499444ebbe988ca0bb1676","median":989.53,"mean":987.59,"stdev":8.45,"cv":0.008556,"preMhz":2318,"benchMhz":2386},
-{"tag":"base","rep":5,"gate_path":"G1+G2a+G2b","attempt":1,"md5":"b912c51d878e7621d0d92f5de239db29","median":795.41,"mean":795.08,"stdev":3.13,"cv":0.003937,"preMhz":2342,"benchMhz":2388}
-]}

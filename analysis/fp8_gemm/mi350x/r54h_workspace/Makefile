@@ -1,0 +1,47 @@
+# Compiler
+GPU_TARGET=CDNA4
+
+TARGET ?= tk_fp8_layouts
+SRC ?= kernel_fp8_layouts.cpp
+
+# HIP variables
+ROCM_INSTALL_DIR := $(ROCM_PATH)
+HIP_INCLUDE_DIR  := /opt/rocm/include/hip
+
+HIPCXX ?= /opt/rocm/bin/hipcc
+
+# Compiler flags based on GPU target
+ifeq ($(GPU_TARGET),CDNA4)
+HIPFLAGS+= -DKITTENS_CDNA4 --offload-arch=gfx950 -DHIP_ENABLE_WARP_SYNC_BUILTINS -ffast-math -I/opt/rocm/include/rocrand
+endif
+
+# Common variables and flags
+CXX_STD   := c++20
+ICXXFLAGS := -std=$(CXX_STD)
+ICPPFLAGS := -I${THUNDERKITTENS_ROOT}/include -I$(HIP_INCLUDE_DIR)
+ILDFLAGS  :=
+ILDLIBS   :=
+
+CXXFLAGS ?= -Wall -Wextra
+CXXFLAGS := -w
+
+ICXXFLAGS += $(CXXFLAGS) 
+ICPPFLAGS += $(CPPFLAGS)
+ILDFLAGS  += $(LDFLAGS)
+ILDLIBS   += $(LDLIBS)
+
+PY_LDFLAGS := $(shell python3-config --ldflags | sed 's/-lcrypt//g')
+ICXXFLAGS += $(PY_LDFLAGS)
+ICXXFLAGS+= -I${THUNDERKITTENS_ROOT}/include -I${THUNDERKITTENS_ROOT}/prototype $(shell python3 -m pybind11 --includes) -shared -fPIC -Rpass-analysis=kernel-resource-usage
+
+
+# Default target
+all: $(TARGET)
+
+$(TARGET): $(SRC)
+	$(HIPCXX) $(SRC) $(HIPFLAGS) $(ICXXFLAGS) $(ICPPFLAGS) $(ILDFLAGS) \
+	    -o $(TARGET)$(shell python3-config --extension-suffix) 
+
+# Clean target
+clean:
+	rm -f $(TARGET)

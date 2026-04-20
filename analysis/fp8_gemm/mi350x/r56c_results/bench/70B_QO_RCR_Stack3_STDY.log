@@ -1,0 +1,50 @@
+=== MXFP8 GEMM Layout Benchmark (preshuffle-quant): M=4096, N=8192, K=8192 ===
+Warmup=100, iters=200, correctness=on
+SNR threshold=48.0 dB, determinism_runs=3
+Layouts=rcr
+
+--- RCR Layout: C = A @ B^T ---
+Memory access fault by GPU node-4 (Agent handle: 0x558869663a60) on address 0x7f0319000000. Reason: Unknown.
+GPU core dump created: gpucore.3147472
+timeout: the monitored command dumped core
+  (timeout)
+=== MXFP8 GEMM Layout Benchmark (preshuffle-quant): M=4096, N=8192, K=8192 ===
+Warmup=100, iters=200, correctness=on
+SNR threshold=48.0 dB, determinism_runs=3
+Layouts=rcr
+
+--- RCR Layout: C = A @ B^T ---
+Memory access fault by GPU node-4 (Agent handle: 0x562c595b20a0) on address 0x7f6461400000. Reason: Unknown.
+GPU core dump created: gpucore.3147656
+timeout: the monitored command dumped core
+  (timeout)
+=== MXFP8 GEMM Layout Benchmark (preshuffle-quant): M=4096, N=8192, K=8192 ===
+Warmup=100, iters=200, correctness=on
+SNR threshold=48.0 dB, determinism_runs=3
+Layouts=rcr
+
+--- RCR Layout: C = A @ B^T ---
+Memory access fault by GPU node-4 (Agent handle: 0x5646cc28e1b0) on address 0x7f1271000000. Reason: Unknown.
+GPU core dump created: gpucore.3147838
+timeout: the monitored command dumped core
+  (timeout)
+=== MXFP8 GEMM Layout Benchmark (preshuffle-quant): M=4096, N=8192, K=8192 ===
+Warmup=100, iters=200, correctness=on
+SNR threshold=48.0 dB, determinism_runs=3
+Layouts=rcr
+
+--- RCR Layout: C = A @ B^T ---
+Memory access fault by GPU node-4 (Agent handle: 0x55af7b1711d0) on address 0x7efcb7600000. Reason: Unknown.
+GPU core dump created: gpucore.3148022
+timeout: the monitored command dumped core
+  (timeout)
+=== MXFP8 GEMM Layout Benchmark (preshuffle-quant): M=4096, N=8192, K=8192 ===
+Warmup=100, iters=200, correctness=on
+SNR threshold=48.0 dB, determinism_runs=3
+Layouts=rcr
+
+--- RCR Layout: C = A @ B^T ---
+Memory access fault by GPU node-4 (Agent handle: 0x5580753b2a30) on address 0x7ef000e00000. Reason: Unknown.
+GPU core dump created: gpucore.3148207
+timeout: the monitored command dumped core
+  (timeout)

@@ -1,7 +1,0 @@
-W20260418 19:29:29.347863 140055787261952 agent.cpp:461] Attempt to enable hip visiblity for agent-2 which is not visible to HSA (ROCR)
-[sclk-pre-preheat] phys_gpu=6 GPU[6]		: sclk clock level: S: (95Mhz)
-[preheat] sustained 8s 16k matmul...
-[preheat] done 5116 iters
-[sclk-post-preheat] phys_gpu=6 GPU[6]		: sclk clock level: 1: (2258Mhz)
-[sclk-pre-bench] phys_gpu=6 GPU[6]		: sclk clock level: 1: (2351Mhz)
-[sclk-post-bench] phys_gpu=6 GPU[6]		: sclk clock level: 1: (2389Mhz)

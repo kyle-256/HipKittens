@@ -1,6 +1,0 @@
-W20260418 19:24:38.573829 140710221086720 agent.cpp:461] Attempt to enable hip visiblity for agent-2 which is not visible to HSA (ROCR)
-[sclk-pre-preheat] phys_gpu=2 GPU[2]		: sclk clock level: S: (94Mhz)
-[preheat] sustained 8s 16k matmul...
-[preheat] done 5116 iters
-[sclk-post-preheat] phys_gpu=2 GPU[2]		: sclk clock level: 1: (2255Mhz)
-Memory access fault by GPU node-4 (Agent handle: 0x55b0fa433910) on address 0x7fefa6410000. Reason: Unknown.

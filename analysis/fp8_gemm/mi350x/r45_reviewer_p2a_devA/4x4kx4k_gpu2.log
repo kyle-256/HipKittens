@@ -1,5 +1,0 @@
-===== R45 Phase 2a cell=4x4kx4k M=4 N=4096 K=4096 phys_gpu=2 =====
-[rep=1 mxfp8_tf=0.3517 fp8_tf=0.2976]
-[rep=2 mxfp8_tf=0.2361 fp8_tf=0.2241]
-[rep=3 mxfp8_tf=0.2416 fp8_tf=0.1501]
-[BEST cell=4x4kx4k mxfp8_tf=0.3517 fp8_tf=0.2976 ratio=118.18%]

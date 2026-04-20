@@ -1,4 +1,0 @@
-W20260418 16:09:25.010230 139866151731200 agent.cpp:461] Attempt to enable hip visiblity for agent-2 which is not visible to HSA (ROCR)
-[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=1024, K=4096) is +8.13% to +8.63% faster on V2-RRR (R33 Dev C 8B KV SHIP, 4-GPU triangulated; min Δ% +8.13). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r33c_findings.md.
-[tk_mxfp8_layouts] gemm_crr_pq_v2: shape (M=4096, N=1024, K=4096) is +8.13% to +8.63% faster on V2-RRR (R33 Dev C 8B KV SHIP, 4-GPU triangulated; min Δ% +8.13). Prefer gemm_rrr_pq_v2 with A row-major (M,K). See analysis/fp8_gemm/mi350x/r33c_findings.md.
-[tk_mxfp8_layouts] gemm_crr_pq_v2: HB shrink Stage B1 (BLK_M=128, PIPE=1) ACTIVE for N=1024 tall-thin (M=4096, N=1024, K=4096) — R37 Dev A/B SHIP, R38 wire-in fix. See analysis/fp8_gemm/mi350x/r38_reviewer_findings.md.

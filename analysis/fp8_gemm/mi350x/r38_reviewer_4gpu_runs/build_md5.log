@@ -1,4 +1,0 @@
-[build_mxfp8 gpu=2 4096x1024x8192 rc=0 md5=0a9ffda773d51f722e178a4fd0f8be2f]
-[build_mxfp8 gpu=3 4096x1024x8192 rc=0 md5=0a9ffda773d51f722e178a4fd0f8be2f]
-[build_mxfp8 gpu=6 4096x1024x8192 rc=0 md5=0a9ffda773d51f722e178a4fd0f8be2f]
-[build_mxfp8 gpu=7 4096x1024x8192 rc=0 md5=0a9ffda773d51f722e178a4fd0f8be2f]

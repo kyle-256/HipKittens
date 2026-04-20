@@ -121,45 +121,6 @@
 #define MXFP8_RRR_SOFT_BAR() do {} while (0)
 #endif
 
-// R53 Dev B: K-superblock persistent CTA. Each CTA processes K_SUPERBLOCK
-// consecutive (br, bc) tiles serially in K. Goal: amortize per-tile epilogue/
-// output write across stripes and smooth TC-return backpressure across the
-// K-dimension by keeping per-CTA wall-clock larger and reducing the granularity
-// at which CTAs release their L2 working sets.
-//
-// Lever motivation (r52p_findings.md §5.2):
-//   PMC measurement on 8B Gate/Up RRR (M=4096 N=14336 K=4096) showed
-//   TA_DATA_STALLED_BY_TC/GRBM = 1.4968 (vs 70B QO 0.9501 = +57%). K=4096 is
-//   the discriminator: only 64 K-iters/tile vs 128 at K=8192 means each tile's
-//   L2 demand is hit twice as hard per MFMA-cycle. K-superblock folds multiple
-//   tiles per CTA so per-tile epilogue is amortized and TC-return-pipe demand
-//   averages over a longer interval.
-//
-// Orthogonality to R49C (tile-redistribution persistent — REFUTED):
-//   R49C analytical floor (0.011% per-tile prologue) addressed prologue
-//   amortization specifically. K-superblock targets epilogue store ↔ next-tile
-//   prologue VMEM overlap and TC-return-pipe smoothing, not prologue cost.
-//   The mechanism is different.
-//
-// Default = 1 (OFF, byte-identical to baseline). Values 2/3/4 enable K=2/3/4
-// stripes per CTA. The host dispatch divides the grid by K_SUPERBLOCK; the
-// kernel re-derives (br, bc) per stripe from a base bid.
-//
-// Constraints:
-//   - total_tiles MUST be divisible by K_SUPERBLOCK (compile-time check via
-//     M_DIM, N_DIM, BLK).
-//   - Per-stripe re-init: scale-row-base ptr arrays, V2 slab SRDs, accumulators
-//     (cA/cB/cC/cD), prologue VMEM, tic/toc index — all reset.
-//   - LDS slabs (As, Bs) reused across stripes (same physical allocation).
-//   - VGPR: zero growth (same per-stripe accumulator state); per-stripe SRD
-//     re-derive uses already-allocated scalar regs.
-#ifndef MXFP8_RRR_K_SUPERBLOCK
-#define MXFP8_RRR_K_SUPERBLOCK 1
-#endif
-
-#if MXFP8_RRR_K_SUPERBLOCK < 1 || MXFP8_RRR_K_SUPERBLOCK > 8
-#error "MXFP8_RRR_K_SUPERBLOCK must be in [1, 8]"
-#endif
 
 // R52 Dev L: Manually peel the last K-pair out of the main K-pair loop body.
 // At K=4096, k_pairs=15. Default OFF (no peel). When MXFP8_RRR_PEEL_TAIL=1,
@@ -185,62 +146,12 @@
 #define MXFP8_RRR_PEEL_TAIL 0
 #endif
 
-// R56 Dev A: SALU-pressure reduction for V2 RRR (8B Gate/Up RRR HEADROOM cell).
-// REFUTED-EMPIRICAL-SETPRIO-LOAD-BEARING. Macro retained default-OFF for
-// reproducibility — see r56a_findings.md for the per-MFMA priority bursting
-// load-bearing analysis. Phase 0 ISA inspection confirmed the V2 RRR steady
-// K-loop body is byte-identical between 8B Gate/Up (K=4096) and 70B Q/O
-// (K=8192) — same 162 SALU per K-pair body. The R55F PMC SALU-DOMINANT
-// signature is therefore from FEWER K-iterations failing to amortize the
-// per-iter SALU footprint, not from any per-iter SALU growth at small K.
-//
-// SALU breakdown per K-pair iter:
-//   162 total SALU
-//   31 s_barrier   (correctness-required wave sync)
-//   30 s_setprio   (per-MMA-quartet priority toggling — load-bearing per R56A)
-//   24 s_waitcnt   (memory ordering)
-//   21 s_mov_b32   (18 = m0 setup for buffer_load_to_lds DMA; 3 = SGPR copies)
-//   15 s_add + 9 s_addc_u32  (12 64-bit pointer adds, ~6 carry chains)
-//   10 s_nop       (LLVM-emitted scheduling stall)
-//
-// Strategy axes for R56A (all REFUTED on 8B GU primary):
-//   V0 = baseline (per-quartet setprio, byte-identical to HEAD)
-//   V1 = single-pair-per-do_k_iter (-20 SALU/iter via -12 setprio -8 nops)
-//                                  → REGRESSED -12.17% (5-run median)
-//   V2 = drop ALL setprio in do_k_iter (+VGPR 254→256, more s_waitcnt)
-//                                  → REGRESSED -37.92% (5-run median)
-//
-// Conclusion: the per-MFMA `s_setprio(1)/setprio(0)` priority bursting around
-// each MMA segment is load-bearing — removing it lets non-MFMA SALU (m0
-// setup, scale-fetch ptr arith) float into the MMA issue window, starving
-// the MFMA dispatch unit. The 30 setprio per K-iter aren't dead weight; they
-// are an active wave-arbiter signal that protects MMA throughput.
-//
-// Default OFF preserves byte-identity to HEAD for the production build.
-#ifndef MXFP8_RRR_SALU_SETPRIO_R56A
-#define MXFP8_RRR_SALU_SETPRIO_R56A 0
-#endif
-
-#if MXFP8_RRR_SALU_SETPRIO_R56A == 0
+// R56A setprio macros: per-MFMA priority bursting is load-bearing
+// (R56 Dev A verified). These are the production definitions.
 #define R56A_SETPRIO_HI() __builtin_amdgcn_s_setprio(1)
 #define R56A_SETPRIO_LO() __builtin_amdgcn_s_setprio(0)
 #define R56A_DKI_ENTRY()  do {} while (0)
 #define R56A_DKI_EXIT()   do {} while (0)
-#elif MXFP8_RRR_SALU_SETPRIO_R56A == 1
-// Consolidate: setprio per do_k_iter call instead of per quartet.
-#define R56A_SETPRIO_HI() do {} while (0)
-#define R56A_SETPRIO_LO() do {} while (0)
-#define R56A_DKI_ENTRY()  __builtin_amdgcn_s_setprio(1)
-#define R56A_DKI_EXIT()   __builtin_amdgcn_s_setprio(0)
-#elif MXFP8_RRR_SALU_SETPRIO_R56A == 2
-// Drop all setprio in do_k_iter.
-#define R56A_SETPRIO_HI() do {} while (0)
-#define R56A_SETPRIO_LO() do {} while (0)
-#define R56A_DKI_ENTRY()  do {} while (0)
-#define R56A_DKI_EXIT()   do {} while (0)
-#else
-#error "MXFP8_RRR_SALU_SETPRIO_R56A must be 0/1/2"
-#endif
 
 #if MXFP8_RRR_EXACT_8WAVE_FAST_ENABLE
 
@@ -330,12 +241,6 @@ void rrr_exact_8wave_scaled_kernel(const layout_globals g) {
     constexpr int blocks_per_row = M_DIM / BLK;
     constexpr int blocks_per_col = N_DIM / BLK;
     constexpr int k_iters = K_DIM / BK;
-    constexpr int k_superblock = MXFP8_RRR_K_SUPERBLOCK;
-    // R53 Dev B: K-superblock requires total_tiles divisible by k_superblock.
-    static_assert(MXFP8_RRR_K_SUPERBLOCK == 1 ||
-                  (blocks_per_row * blocks_per_col) % MXFP8_RRR_K_SUPERBLOCK == 0,
-                  "MXFP8_RRR_K_SUPERBLOCK must divide total_tiles "
-                  "(blocks_per_row * blocks_per_col)");
 
     __shared__ ST_row As[2][2];
 #if RRR_ROW_SHARED_TRANSPOSE
@@ -371,44 +276,20 @@ void rrr_exact_8wave_scaled_kernel(const layout_globals g) {
     // R22 V2 wave-tile SRDs: 1 SRD per wave for A, 1 per wave for B.
     i32x4 a_v2_srsrc = {}, b_v2_srsrc = {};
 
-    // R53 Dev B: outer K-superblock loop. When k_superblock == 1, the loop
-    // runs exactly once and the compiler should DCE the loop control,
-    // producing byte-identical ISA to the baseline. When > 1, each iteration
-    // processes one (br, bc) tile and the LDS slabs are reused across iters.
-    //
-    // bid_stripe_base = blockIdx.x * k_superblock; per-stripe bid = base + s.
-    // The host dispatch divides the grid by k_superblock so the kernel covers
-    // exactly the same set of tiles as the baseline, just with k_superblock
-    // tiles handled per CTA instead of one.
-    const int bid_stripe_base = static_cast<int>(blockIdx.x) * k_superblock;
-    int br = 0, bc = 0;
+    zero(cA); zero(cB); zero(cC); zero(cD);
+
+    int bid = static_cast<int>(blockIdx.x);
+    int br, bc;
+
     auto rrr_scale_a_base = [&](int half) {
         return br * BLK + half * HB + wm * RBM;
     };
     auto rrr_scale_b_base = [&](int half) {
         return bc * BLK + half * HB + wn * RBN;
     };
-
-    #pragma unroll 1
-    for (int sb = 0; sb < k_superblock; ++sb) {
-
-    // R53 Dev B: barrier between stripes so LDS double-buffer state from the
-    // previous stripe's epilogue does not race with this stripe's prologue
-    // loads (As[0][*]/Bs[0][*] are about to be overwritten).
-    if (k_superblock > 1 && sb > 0) {
-        asm volatile("s_waitcnt vmcnt(0) lgkmcnt(0)");
-        __builtin_amdgcn_s_barrier();
-    }
-
-    zero(cA); zero(cB); zero(cC); zero(cD);
-
-    int bid = bid_stripe_base + sb;
 #if MXFP8_RRR_BLOCK_SWIZZLE
     // R46 Dev D: XCD-aware chiplet swizzle + grouped-M swizzle.
     // Chiplet swizzle: interleave blocks across XCDs for better L2 locality.
-    // R53 Dev B: with K-superblock, gridDim.x = total_tiles / k_superblock,
-    // so swizzle the per-stripe bid against the actual total_tiles count to
-    // preserve the bijective remapping invariant the swizzle requires.
     {
         constexpr int total_tiles_compile = blocks_per_row * blocks_per_col;
         const int num_wgs = total_tiles_compile;
@@ -1023,7 +904,6 @@ void rrr_exact_8wave_scaled_kernel(const layout_globals g) {
     store(g.c, cC, {0, 0, br * WARPS_M * 2 + WARPS_M + wm, bc * WARPS_N * 2 + wn});
     store(g.c, cD, {0, 0, br * WARPS_M * 2 + WARPS_M + wm, bc * WARPS_N * 2 + WARPS_N + wn});
 
-    } // R53 Dev B: end of K-superblock outer loop (sb in [0, k_superblock))
 }
 
 template<bool PRESHUFFLED_QUANT>
@@ -1038,22 +918,7 @@ __host__ inline void dispatch_rrr_exact_8wave_scaled(const layout_globals& g) {
 // preshuffle_scale_matrix_mfma16_v2_rcr_a/b — same layout works for RRR).
 template<bool PRESHUFFLED_QUANT>
 __host__ inline void dispatch_rrr_exact_8wave_scaled_v2(const layout_globals& g) {
-    // R53 Dev B: K-superblock divides the grid by MXFP8_RRR_K_SUPERBLOCK so
-    // each CTA handles k_superblock consecutive (br, bc) tiles. The kernel
-    // body's outer loop iterates k_superblock times.
-    const int total_tiles = (g.m / BLK) * (g.n / BLK);
-    // Compile-time + runtime guard: total_tiles must be divisible by
-    // MXFP8_RRR_K_SUPERBLOCK. The kernel static_assert sometimes does not fire
-    // under HIPCC's lazy device-template instantiation, so we guard at host
-    // dispatch.
-    if (MXFP8_RRR_K_SUPERBLOCK > 1 && total_tiles % MXFP8_RRR_K_SUPERBLOCK != 0) {
-        std::fprintf(stderr,
-                     "[r53b] FATAL: MXFP8_RRR_K_SUPERBLOCK=%d does not divide "
-                     "total_tiles=%d (m=%d n=%d BLK=%d).\n",
-                     MXFP8_RRR_K_SUPERBLOCK, total_tiles, g.m, g.n, BLK);
-        std::abort();
-    }
-    const dim3 grid(total_tiles / MXFP8_RRR_K_SUPERBLOCK);
+    const dim3 grid((g.m / BLK) * (g.n / BLK));
     rrr_exact_8wave_scaled_kernel<PRESHUFFLED_QUANT, 2>
         <<<grid, dim3(_NUM_THREADS), 0, g.stream>>>(g);
 }

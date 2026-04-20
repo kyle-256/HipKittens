@@ -1,4 +1,0 @@
-Traceback (most recent call last):
-  File "/shared_nfs/kyle/test/Hipkittens2/analysis/fp8_gemm/mi350x/test_mxfp8_python.py", line 12, in <module>
-    import tk_mxfp8_layouts
-ModuleNotFoundError: No module named 'tk_mxfp8_layouts'

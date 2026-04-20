@@ -1,4 +1,0 @@
-W20260418 16:50:35.173693 139949891268608 agent.cpp:461] Attempt to enable hip visiblity for agent-2 which is not visible to HSA (ROCR)
-[mxfp8_dispatch] crr_v2: shape=(M=4096,N=8192,K=8192) -> ADVISE-V2-RCR-70B-QO (R36C +8.20-8.32%)
-[mxfp8_dispatch] crr_v2: shape=(M=4096,N=8192,K=8192) -> CRR-V2-EXACT-8WAVE-DEFAULT
-[mxfp8_dispatch] rcr_v2: shape=(M=4096,N=8192,K=8192) -> RCR-V2-EXACT-8WAVE

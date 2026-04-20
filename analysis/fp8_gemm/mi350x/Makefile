@@ -1,8 +1,8 @@
 # Compiler
 GPU_TARGET=CDNA4
 
-TARGET ?= tk_fp8_layouts
-SRC ?= kernel_fp8_layouts.cpp
+TARGET ?= tk_mxfp8_layouts
+SRC ?= kernel_mxfp8_layouts.cpp
 
 # HIP variables
 ROCM_INSTALL_DIR := $(ROCM_PATH)

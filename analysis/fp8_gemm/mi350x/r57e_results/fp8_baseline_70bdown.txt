@@ -1,4 +1,0 @@
-  Avg time: 0.5889 ms, TFLOPS: 3267.62
-  Avg time: 0.7071 ms, TFLOPS: 2721.12
-  Avg time: 0.6449 ms, TFLOPS: 2983.58
-Layout     Time (ms)    TFLOPS     % of RCR  

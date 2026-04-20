@@ -1,8 +1,0 @@
-[r32d-A1b] starting GPU-fault test M=4096 N=4096 K=4096
-[r32d-A1b] As.shape=torch.Size([32, 16384]) Bs.shape=torch.Size([128, 4096])
-[r32d-A1b] As.numel=524288 Bs.numel=524288
-[r32d-A1b] calling gemm_rcr_pq_v2 (rect kernel via R32D dispatcher)...
-[r32d-A1b] PASS — kernel completed in 0.001s, no GPU fault.
-[r32d-A1b] C[0, :8] = [1.6530389308438418e-39, 9.183549615799121e-41, -1.8367099231598242e-40, 3.2142423655296924e-39, 1.1938614500538858e-39, 0.0, 1.744874427001833e-39, 8.265194654219209e-40]
-[r32d-A1b] C abs sum = 0.0000
-[r32d-A1b] STAGE_A1b_RESULT: NO_FAULT

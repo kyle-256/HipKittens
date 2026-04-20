@@ -1,5 +1,0 @@
-4:Loads two .so files (MOD_A from SO_A, MOD_B from SO_B). Same inputs are
-50:# R39 Dev D defensive guard — duplicate PY_MODULE_NAME causes Python to alias both
-52:# Build the two .so with distinct -DPY_MODULE_NAME (e.g. *_default and *_b1).
-54:    f'PY_MODULE_NAME collision: MOD_A={mod_a!r} MOD_B={mod_b!r} resolved to the same '
-55:    f'in-memory module — both .so must be built with distinct -DPY_MODULE_NAME')

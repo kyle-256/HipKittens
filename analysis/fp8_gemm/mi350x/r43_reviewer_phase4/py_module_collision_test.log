@@ -1,5 +1,0 @@
-W20260418 20:08:37.429788 140077848997888 agent.cpp:461] Attempt to enable hip visiblity for agent-2 which is not visible to HSA (ROCR)
-Traceback (most recent call last):
-  File "/shared_nfs/kyle/test/Hipkittens2/analysis/fp8_gemm/mi350x/r37_paired_bench_2so.py", line 53, in <module>
-    assert mod_A is not mod_B, (
-AssertionError: PY_MODULE_NAME collision: MOD_A='tk_mxfp8_r42_70bkv_default' MOD_B='tk_mxfp8_r42_70bkv_default' resolved to the same in-memory module — both .so must be built with distinct -DPY_MODULE_NAME

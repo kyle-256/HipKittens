@@ -1,3 +1,0 @@
-W20260418 19:31:31.125936 139797235142656 agent.cpp:461] Attempt to enable hip visiblity for agent-2 which is not visible to HSA (ROCR)
-[mxfp8_dispatch] rcr_pq: shape=(M=0,N=0,K=0) -> V1-PQ-DEFAULT
-[mxfp8_dispatch] rcr_pq_v1: shape=(M=1,N=4096,K=4096) -> SMALLM-DECODE-M1-RCR (R42A)

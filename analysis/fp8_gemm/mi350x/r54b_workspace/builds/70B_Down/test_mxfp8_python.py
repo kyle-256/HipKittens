@@ -1,0 +1,1 @@
+/shared_nfs/kyle/test/Hipkittens2/analysis/fp8_gemm/mi350x/r54b_workspace/test_mxfp8_python.py

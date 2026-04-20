@@ -1,4 +1,0 @@
-{"cell":"g1p_demo","gpu":4,"M":4096,"N":1024,"K":8192,"samples":[
-{"tag":"prod","rep":0,"gate_path":"G1'_fallback","attempt":2,"md5":"ac1b12be9c499444ebbe988ca0bb1676","median":985.91,"mean":983.18,"stdev":9.49,"cv":0.009652,"preMhz":2298,"benchMhz":2388},
-{"tag":"base","rep":1,"gate_path":"G1'_fallback","attempt":3,"md5":"b912c51d878e7621d0d92f5de239db29","median":768.18,"mean":766.57,"stdev":3.10,"cv":0.004044,"preMhz":2165,"benchMhz":2385}
-]}

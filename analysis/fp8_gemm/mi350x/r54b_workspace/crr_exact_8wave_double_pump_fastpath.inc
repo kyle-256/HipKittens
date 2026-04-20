@@ -1,0 +1,1 @@
+/shared_nfs/kyle/test/Hipkittens2/analysis/fp8_gemm/mi350x/crr_exact_8wave_double_pump_fastpath.inc
