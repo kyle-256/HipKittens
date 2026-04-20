@@ -1,0 +1,512 @@
+{
+  "round": "R59",
+  "opt": "R",
+  "cohort": "J-1",
+  "verdict": "POLICY_ONLY",
+  "policy_question": "Adopt ITERS=500 default + L1 footnote (A), ITERS=1000 default (B), or mixed-protocol L1-only ITERS=1000 (C)?",
+  "recommendation": "A",
+  "recommendation_label": "ITERS=500 default + L1 footnote (current R58 disposition)",
+  "inputs": {
+    "r57_iters": 1000,
+    "r58_iters": 500,
+    "r57_warmup": 200,
+    "r58_warmup": 200,
+    "trim_frac": 0.1,
+    "p2_swap_cell": "16384x4096x3072",
+    "p2_swap_note": "EXCLUDED from drift analysis (R57=R40B HK, R58=R58P2_AITER 128x256; delta dominated by swap not ITERS)",
+    "unchanged_cells": 41
+  },
+  "drift_aggregate": {
+    "n_cells": 41,
+    "mean_delta_pp": 0.1021,
+    "abs_mean_delta_pp": 0.3232,
+    "max_pos_delta_pp": 2.0902,
+    "max_neg_delta_pp": -1.1458,
+    "hk_count": 2,
+    "hk_mean_delta_pp": 1.0645,
+    "aiter_count": 39,
+    "aiter_mean_delta_pp": 0.0527,
+    "delta_definition": "R57(ITERS=1000) - R58(ITERS=500), positive => longer ITERS scored higher pct_comp"
+  },
+  "drift_table": [
+    {
+      "cell": "16384x4096x2048",
+      "source": "R40B",
+      "r58_pct": 107.4758,
+      "r57_pct": 109.5659,
+      "delta": 2.0902,
+      "r58_fin_min": 0.997145,
+      "r58_wcf_max": 0.000586
+    },
+    {
+      "cell": "14336x4096x32768",
+      "source": "R51D1_AITER",
+      "r58_pct": 104.1579,
+      "r57_pct": 103.0122,
+      "delta": -1.1458,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "4096x4096x8192",
+      "source": "R55D5A_3_AITER",
+      "r58_pct": 120.4879,
+      "r57_pct": 121.5814,
+      "delta": 1.0935,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "6144x4096x8192",
+      "source": "R54D4A_3_AITER",
+      "r58_pct": 117.967,
+      "r57_pct": 118.8619,
+      "delta": 0.8948,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "16384x14336x2048",
+      "source": "R55E3_1_AITER",
+      "r58_pct": 106.9548,
+      "r57_pct": 106.343,
+      "delta": -0.6119,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "4096x32768x128256",
+      "source": "R52D2B_AITER",
+      "r58_pct": 98.2789,
+      "r57_pct": 97.7461,
+      "delta": -0.5328,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "16384x4096x6144",
+      "source": "R54E2_3_AITER",
+      "r58_pct": 115.6576,
+      "r57_pct": 116.1858,
+      "delta": 0.5282,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "6144x4096x16384",
+      "source": "R53D3A_2_AITER",
+      "r58_pct": 105.4109,
+      "r57_pct": 105.919,
+      "delta": 0.5081,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "32768x6144x2048",
+      "source": "R55D5B_3_AITER",
+      "r58_pct": 106.673,
+      "r57_pct": 106.1699,
+      "delta": -0.5031,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "6144x32768x4096",
+      "source": "R55E4_2_AITER",
+      "r58_pct": 106.1011,
+      "r57_pct": 105.6747,
+      "delta": -0.4265,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "4096x14336x16384",
+      "source": "R54D4A_1_AITER",
+      "r58_pct": 106.928,
+      "r57_pct": 107.297,
+      "delta": 0.369,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "32768x4096x2048",
+      "source": "R54E1_1_AITER",
+      "r58_pct": 106.9577,
+      "r57_pct": 106.6064,
+      "delta": -0.3512,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "16384x6144x4096",
+      "source": "R55E4_1_AITER",
+      "r58_pct": 114.5108,
+      "r57_pct": 114.8448,
+      "delta": 0.334,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "4096x4096x16384",
+      "source": "R54D4B_1_AITER",
+      "r58_pct": 113.2569,
+      "r57_pct": 113.5758,
+      "delta": 0.3188,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "16384x4096x7168",
+      "source": "R54D4B_3_AITER",
+      "r58_pct": 113.3507,
+      "r57_pct": 113.6658,
+      "delta": 0.3151,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "4096x128256x32768",
+      "source": "R56G4_C1_AITER",
+      "r58_pct": 178.5122,
+      "r57_pct": 178.2368,
+      "delta": -0.2754,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "28672x32768x4096",
+      "source": "R56G2_L4_AITER",
+      "r58_pct": 102.7224,
+      "r57_pct": 102.4538,
+      "delta": -0.2687,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "16384x14336x4096",
+      "source": "R55E3_2_AITER",
+      "r58_pct": 108.5342,
+      "r57_pct": 108.7904,
+      "delta": 0.2561,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "14336x32768x4096",
+      "source": "R56G2_L5_AITER",
+      "r58_pct": 103.666,
+      "r57_pct": 103.415,
+      "delta": -0.251,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "32768x4096x3072",
+      "source": "R54E1_2_AITER",
+      "r58_pct": 118.5892,
+      "r57_pct": 118.8206,
+      "delta": 0.2314,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "32768x28672x2048",
+      "source": "R55D5B_2_AITER",
+      "r58_pct": 103.2027,
+      "r57_pct": 103.4204,
+      "delta": 0.2177,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "16384x4096x14336",
+      "source": "R56G1_L6_AITER",
+      "r58_pct": 107.0808,
+      "r57_pct": 107.2947,
+      "delta": 0.2139,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "32768x4096x7168",
+      "source": "R54D4A_2_AITER",
+      "r58_pct": 106.0748,
+      "r57_pct": 106.2827,
+      "delta": 0.2079,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "128256x32768x4096",
+      "source": "R56G2_L3_AITER",
+      "r58_pct": 102.6056,
+      "r57_pct": 102.8106,
+      "delta": 0.205,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "4096x4096x32768",
+      "source": "R52D2C_AITER",
+      "r58_pct": 108.1975,
+      "r57_pct": 108.3954,
+      "delta": 0.198,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "28672x4096x8192",
+      "source": "R54E1_3_AITER",
+      "r58_pct": 105.79,
+      "r57_pct": 105.9563,
+      "delta": 0.1663,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "16384x28672x4096",
+      "source": "R55E3_4_AITER",
+      "r58_pct": 104.3226,
+      "r57_pct": 104.4314,
+      "delta": 0.1088,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "4096x32768x14336",
+      "source": "R57J1_L1_AITER",
+      "r58_pct": 99.9377,
+      "r57_pct": 100.0434,
+      "delta": 0.1057,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "4096x32768x4096",
+      "source": "R54E2_1_AITER",
+      "r58_pct": 105.321,
+      "r57_pct": 105.4242,
+      "delta": 0.1032,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "16384x4096x28672",
+      "source": "R51D2_AITER",
+      "r58_pct": 102.979,
+      "r57_pct": 102.8813,
+      "delta": -0.0977,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "16384x28672x2048",
+      "source": "R55E3_3_AITER",
+      "r58_pct": 102.1767,
+      "r57_pct": 102.2715,
+      "delta": 0.0948,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "4096x6144x32768",
+      "source": "R53D3A_3_AITER",
+      "r58_pct": 130.5771,
+      "r57_pct": 130.5296,
+      "delta": -0.0476,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "32768x4096x14336",
+      "source": "R56G1_L2_AITER",
+      "r58_pct": 103.9744,
+      "r57_pct": 104.0204,
+      "delta": 0.0459,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "32768x14336x2048",
+      "source": "R40B",
+      "r58_pct": 100.4923,
+      "r57_pct": 100.5311,
+      "delta": 0.0388,
+      "r58_fin_min": 0.910771,
+      "r58_wcf_max": 0.011147
+    },
+    {
+      "cell": "4096x32768x6144",
+      "source": "R54E2_2_AITER",
+      "r58_pct": 105.826,
+      "r57_pct": 105.8567,
+      "delta": 0.0308,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "16384x4096x4096",
+      "source": "R55D5A_1_AITER",
+      "r58_pct": 113.1965,
+      "r57_pct": 113.2168,
+      "delta": 0.0202,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "16384x6144x2048",
+      "source": "R55D5A_2_AITER",
+      "r58_pct": 111.8716,
+      "r57_pct": 111.8913,
+      "delta": 0.0197,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "4096x14336x8192",
+      "source": "R54D4B_2_AITER",
+      "r58_pct": 115.8475,
+      "r57_pct": 115.8383,
+      "delta": -0.0092,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "28672x4096x16384",
+      "source": "R51D3_AITER",
+      "r58_pct": 103.908,
+      "r57_pct": 103.9024,
+      "delta": -0.0056,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "4096x28672x32768",
+      "source": "R52D2A_AITER",
+      "r58_pct": 102.4974,
+      "r57_pct": 102.4921,
+      "delta": -0.0053,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    },
+    {
+      "cell": "4096x32768x28672",
+      "source": "R50D_AITER",
+      "r58_pct": 101.1727,
+      "r57_pct": 101.1745,
+      "delta": 0.0018,
+      "r58_fin_min": 1.0,
+      "r58_wcf_max": 0.0
+    }
+  ],
+  "win_flip_band": {
+    "lower_pct": 99.5,
+    "upper_pct": 100.5,
+    "n_cells": 2,
+    "n_flip_eligible": 1,
+    "flip_cell": "4096x32768x14336",
+    "flip_cell_source": "R57J1_L1_AITER",
+    "flip_cell_r58_pct": 99.94,
+    "flip_cell_r57_pct": 100.04,
+    "flip_cell_wcf_max": 0.0,
+    "flip_cell_fin_min": 1.0,
+    "non_flip_in_band": [
+      {
+        "cell": "32768x14336x2048",
+        "source": "R40B",
+        "r58_pct": 100.49,
+        "r57_pct": 100.53,
+        "note": "Both sides numerically WIN; in-band but classification does not flip on ITERS. Issue is VC (fin_min 0.911 R58 vs 0.9847 R57), not pct_comp. Addressed by R59 Opt S alt-tile probe."
+      }
+    ],
+    "cells": [
+      {
+        "cell": "4096x32768x14336",
+        "source": "R57J1_L1_AITER",
+        "r58_pct": 99.9377,
+        "r57_pct": 100.0434,
+        "delta": 0.1057,
+        "wcf_max": 0.0,
+        "fin_min": 1.0
+      },
+      {
+        "cell": "32768x14336x2048",
+        "source": "R40B",
+        "r58_pct": 100.4923,
+        "r57_pct": 100.5311,
+        "delta": 0.0388,
+        "wcf_max": 0.011147,
+        "fin_min": 0.910771
+      }
+    ]
+  },
+  "options": [
+    {
+      "id": "A",
+      "label": "ITERS=500 default + L1 footnote",
+      "cost": [
+        "L1 stays at 99.94% LOSE-edge (1 visible LOSE-edge cell)",
+        "Footnote required in each round verdict"
+      ],
+      "benefit": [
+        "Bench wall-clock unchanged (~17 min reviewer integration)",
+        "Single uniform protocol across 42 cells",
+        "No manifest schema changes",
+        "No protocol-mixing precedent"
+      ],
+      "wall_clock_min_per_round": 17,
+      "incremental_budget_min": 0
+    },
+    {
+      "id": "B",
+      "label": "ITERS=1000 default (R57 bump made permanent)",
+      "cost": [
+        "2x wall per round (~17 -> ~34 min reviewer integration)",
+        "Incremental ~+90 min budget across 6+ planned rounds (R59-R64+)",
+        "AITER cells drift ~-0.05pp on average (negligible)"
+      ],
+      "benefit": [
+        "L1 +1 WIN cell stable across rounds",
+        "HK survivors get tighter trim distributions (+1.06pp mean on 2 cells)",
+        "May protect VC on worst-margin survivor 32768x14336x2048"
+      ],
+      "wall_clock_min_per_round": 34,
+      "incremental_budget_min": 90
+    },
+    {
+      "id": "C",
+      "label": "Mixed-protocol L1-only ITERS=1000 (per-cell protocol annotation in manifest)",
+      "cost": [
+        "Leaderboard inconsistency: different ITERS per cell complicates row-to-row comparison",
+        "Manifest schema gains per-cell bench_iters field",
+        "First protocol-mixed leaderboard in project history; sets precedent for further per-cell tuning",
+        "Erodes 'single protocol gate' property held since R45"
+      ],
+      "benefit": [
+        "Minimal incremental wall (~+1 min for one cell @ ITERS=1000)",
+        "L1 +1 WIN cell stable"
+      ],
+      "wall_clock_min_per_round": 18,
+      "incremental_budget_min": 6
+    }
+  ],
+  "recommendation_justification": [
+    "Leaderboard consistency value > single-cell flip; uniform protocol enables cross-round aggregate metrics.",
+    "R57 ITERS=1000 already validated as one-shot mechanism for <=0.5pp boundary cells; mechanism characterized; no need to repeat every round.",
+    "L1 is bit-deterministic at 99.94% (wcf_max=0); LOSE classification is measurement-noise not real perf gap.",
+    "HK fin_min benefit of (B) is concentrated on 1 cell (32768x14336x2048); correct fix is structural (R59 Opt S), not protocol band-aid."
+  ],
+  "future_iters_bump_validity_envelope": {
+    "criteria_all_four_must_hold": [
+      "Cell is bit-deterministic: wcf_max == 0 across 10 INDEPENDENT seeds at ITERS=500",
+      "Boundary proximity: pct_comp within <=0.5pp of WIN/LOSE line (100%) OR strict-VC fin_min gate (0.97)",
+      "Documented in round verdict with both ITERS=500 and ITERS=1000 numbers, flagged as one-off probe",
+      "NOT merged into manifest as permanent per-cell bench_iters annotation; default remains ITERS=500"
+    ],
+    "escalation_rule": "If a cell repeatedly fails criterion (1) or (2) across multiple rounds, the correct disposition is a structural mechanism fix (alt-tile, kernel rebuild, .co swap), not a protocol band-aid."
+  },
+  "axis_closure": {
+    "axis": "L1 ITERS=1000 one-off bump (per R59 decider plan section 2 row 41)",
+    "status": "CLOSED by Opt R policy (option A adopted; future bumps gated by validity envelope)"
+  }
+}

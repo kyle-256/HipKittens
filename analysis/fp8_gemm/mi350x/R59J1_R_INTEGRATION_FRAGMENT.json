@@ -1,0 +1,16 @@
+{
+  "round": "R59",
+  "opt": "R",
+  "cohort": "J-1",
+  "verdict": "POLICY_ONLY",
+  "verdict_reason": "Mixed-protocol policy decision; recommended (A) ITERS=500 default + L1 footnote. Single flip-eligible cell (L1 4096x32768x14336) is bit-deterministic at 99.94%; LOSE classification is measurement-noise. Closes 'L1 ITERS=1000 one-off bump' axis per decider plan section 2 row 41. Validity envelope defined for future one-off bump probes (4 criteria; all must hold).",
+  "recommendation": "A",
+  "win_flip_band_total": 2,
+  "win_flip_band_eligible": 1,
+  "promote_count": 0,
+  "dead_count": 0,
+  "manifest_changes": false,
+  "kernel_changes": false,
+  "artifact_md": "R59_OPT_R_POLICY.md",
+  "artifact_json": "R59_OPT_R_POLICY.json"
+}
