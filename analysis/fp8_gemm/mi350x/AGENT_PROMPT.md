@@ -2,7 +2,83 @@
 
 你在继续推进 `HipKittens` 的 MXFP4 GEMM 优化工作，跟 Cursor (Hipkittens2) 竞赛。
 
-## ⚠️ 当前优化目标 (2026-04-20, post-R60 — METHODOLOGY 轮, **42/42 严格 VC 持平 (3 连 = R59 → R60 byte-identical binary entries)**, **40/42 WIN (-1 vs R59 由 L1 noise-edge 振荡, per Opt R policy A 预测)**, **AITER bit-deterministic 份额 40/42 持平 (项目史上最大, 第 3 连)**, **HK pool 2 持平 (项目史上最少, 第 3 连)**, **连续第 12 次 R50D AS-IS 复用**, 0 PROMOTE / 0 SMOKE_DEAD / 1 POLICY_ONLY (Opt U) / 1 MEASUREMENT_ONLY (Opt Y), 0 cohort-race churn on 42 个 UNCHANGED-binary cell, **Opt W 永久降级**, 项目史上第 5 个 100% 排行榜轮 (非连续 — R55, R56, R57, R59, R60; 仅 R58 中断))
+## ⚠️ 当前优化目标 (2026-04-20, post-R61 — METHODOLOGY + MONITORING 轮, **42/42 严格 VC 持平 (4 连)**, **41/42 WIN RESTORED (+1 vs R60; L1 noise-edge 跨回 WIN @ 100.15%; STRETCH TIER MET)**, **AITER bit-deterministic 份额 40/42 持平 (项目史上最大, 第 4 连)**, **HK pool 2 持平 (项目史上最少, 第 4 连)**, **连续第 13 次 R50D AS-IS 复用**, 0 PROMOTE / 0 SMOKE_DEAD / 1 POLICY_ONLY (Opt U₂) / 1 ARTIFACT (Opt Z) / 1 MEASUREMENT_ONLY (Opt Y₂), 0 cohort-race churn on 42 个 UNCHANGED-binary cell (第 3 连干净 churn outcome on DISJOINT seed set), **Opt W 强化永久降级 (4-of-4 Opt Y PASS on L3)**, 项目史上第 6 个 100% 排行榜轮 (非连续 — R55, R56, R57, R59, R60, R61; 仅 R58 中断))
+
+**HEADLINE**: R61 达到 **METHODOLOGY + MONITORING ROUND: 4-of-4 Opt Y PASS on L3 worst-margin HK survivor 经验性收紧 cohort-race tail-draw 率到 ≤1/4 sweep with high-confidence recovery — Opt W 强化永久降级。L1 noise-edge 跨回 WIN @ 100.15% restoring 41/42 WIN (Stretch tier MET)。5 轮 Opt R policy A 振荡 envelope characterized**。R61 跑 3 个 worker cohort (L-1 Opt Y₂ cohort-race 表面监控 on disjoint seeds [303..3030 step 303], L-2 Opt U₂ 出版大纲 602 行, L-3 Opt Z 每形分解 1091 行)。**0/3 PROMOTE / 1 POLICY_ONLY / 1 ARTIFACT / 1 MEASUREMENT_ONLY**。Manifest **byte-identical 到 R60 binary entries** (第 3 连 binary-identical; 仅 metadata + axis_closures_R61 + policy_artifacts_R61 + cohort_race_validation_R61 + L1_noise_edge_oscillation_R61 字段)。Reviewer 10-run @ 80% on 4 GPU (4-7), ITERS=500 default per Opt R policy A, INDEPENDENT seeds DISJOINT from R58/R59/R60, ~17 分钟 wall, 420 runs: **42/42 严格 VC 持平**; **41/42 WIN RESTORED** (+1 vs R60 由 L1 noise-edge 99.98% → 100.15% 跨回 WIN, STRETCH TIER MET); **40/40 AITER cell bit-deterministic** (第 4 连 perfect bit-det); **2/2 HK cell PASS** (L3 32768x14336x2048 R40B 100.55% n_OK=10/10 fin_min=**0.9883** = 第 4 连成功 sweep)。连续第 13 轮 R50D shim AS-IS 复用 (no rebuild, no kernel modification, no new .co)。
+
+**R61 cohort-race 4-of-4 PASS on DISJOINT seed set (R61 中心问题, Opt W 强化永久降级)**: L3 (32768x14336x2048) R40B HK 256×256 cell 在 UNCHANGED binary, ITERS=500 default 协议下 4 连 sweep:
+| Sweep | Round | Seed set | n_OK | fin_min | 结论 |
+|---|---|---|---:|---:|---|
+| 1 | R58 | [101..1010] | 9/10 | **0.911** (低于 0.97 gate) | lone tail-draw |
+| 2 | R59 | [101..1010] | 10/10 | **0.988** | RECOVERED |
+| 3 | R60 | DISJOINT [202..2020 step 202] | 10/10 | **0.985** | HELD |
+| **4** | **R61** | **DISJOINT [303..3030 step 303]** | **10/10** | **0.988** | **HELD on 4th disjoint seeds** |
+
+**R61 4-of-4 PASS on DISJOINT seed set 经验性收紧 per-sweep tail-draw 率到 ≤1/4 sweep**。**Opt W (HK kernel 重建 with R44D FINITE_GATE 0.97→0.95) 强化永久降级** — 取代 R60 已有的 deprioritization, locked at 3rd-tier。
+
+**R61 L1 noise-edge 5 轮振荡 envelope + WIN restored (Opt R policy A 第 5 次验证)**: L1 (4096x32768x14336) R57J1_L1 AITER 256×256 reviewer p50 在 UNCHANGED binary 上 5 轮 sweep:
+| Sweep | Round | ITERS | pct_comp p50 | 分类 | wcf_max |
+|---|---|---:|---:|---|---:|
+| 1 | R57 | 1000 (Opt J one-off) | 100.04% | WIN-edge | 0.0 |
+| 2 | R58 | 500 (revert) | 99.94% | LOSE-edge | 0.0 |
+| 3 | R59 | 500 | 100.08% | WIN | 0.0 |
+| 4 | R60 | 500 | 99.98% | LOSE-edge | 0.0 |
+| **5** | **R61** | **500** | **100.15%** | **WIN** | **0.0** |
+
+5 轮 envelope span 99.94% (R58) ↔ 100.15% (R61) = 0.21pp around WIN-line; 全 5 sweep bit-deterministic (wcf_max=0); 分类 flip 模式 = WIN-edge / LOSE-edge / WIN / LOSE-edge / **WIN**。**Opt R policy A operationally validated for the 5th distinct measurement** — full 5-round envelope; per Opt R policy A 无协议干预; 100.15% R61 是 production answer; **41/42 WIN restored**。
+
+**R61 attempts 总结** (0 个 PROMOTE; 0 SMOKE_DEAD; 1 POLICY_ONLY + 1 ARTIFACT + 1 MEASUREMENT_ONLY; 连续第 13 次 R50D AS-IS):
+
+- **R61 L-1 Opt Y₂ — Cohort-race 表面监控第 4 sweep (worker L-1, GPUs 4-7, MEASUREMENT_ONLY PASS)**:
+  - Manifest used: `R60_INTEGRATION_MANIFEST.json` AS-IS (0 binary modification, 0 new .co, 0 shim rebuild)
+  - Bench: warmup=200, iters=500 (R45+ default), trim=0.10, 10-run @ 80%, DISJOINT seeds [303..3030 step 303]
+  - Outcome: **42/42 strict 10-run VC under 4th fresh disjoint seed set**; **40/40 AITER bit-deterministic**; **L3 R40B HK PASS_10/10 fin_min=0.9883 (第 4 连成功 sweep)**; **L1 R57J1_L1 AITER 100.15% WIN (跨回 WIN; 41/42 WIN restored)**
+  - Cohort-race delta vs R60: 平均 -0.020pp; 范围 -1.17pp 到 +0.53pp; **0 VC lost / 0 VC gained** (第 3 连干净 churn outcome on DISJOINT seed sets)
+- **R61 L-2 Opt U₂ — 持续文档化 pivot (worker L-2, NO GPU, POLICY_ONLY)**:
+  - Artifact: `R61_OPT_U2_PUBLICATION_OUTLINE.md` (602 行, 5 必需 sections)
+  - 覆盖: §1 出版大纲 (12 页 SC25 格式; HPCA27/ISCA27/ASPLOS27 Q3 2026 截止) + §2 11+ citations across 7 topic clusters (cuBLAS/CUTLASS, AITER, rocBLAS, OCP MX, FP8 prior, CDNA1-CDNA4, MFMA, schedulers, dispatch/dlopen, reproducible-BLAS) + §3 methods 6 subsections (kernel arch + R50D shim 13-round AS-IS streak + Opt R policy A verbatim + INDEPENDENT seed sweep + GPU isolation) + §4 3 results tables (42-cell perf + R43→R60 18-round arc + R54→R60 AITER bit-det evolution) + §5 9-subsection limitations
+  - 决定: **POLICY_ONLY** — artifact 是交付物
+- **R61 L-3 Opt Z — Per-shape decomposition appendix (worker L-3, NO GPU, ARTIFACT)**:
+  - Artifact: `R61_OPT_Z_PER_SHAPE_DECOMPOSITION.md` (1091 行)
+  - 覆盖: §0 header + §1 42 H3 cell subsections sorted by (M, N, K) with cohort/source/pct_comp/TFLOPS/wcf/fin_min/strict-VC/bit-det/tried-axes/closed-axes/why-best for each cell + §2 25-row aggregate axis-closure summary + §3 cells-by-cohort summary + §4 verbatim closed-axis carry-forward + §5 R43→R60 17-round arc digest table + §6 closing notes
+  - 决定: **ARTIFACT** — appendix 交付物
+
+**R61 reviewer integration (10-run @ 80%, DISJOINT INDEPENDENT seeds [303..3030 step 303] @ ITERS=500 default per Opt R policy A; 4 GPU 4-7, ~17 分钟 wall, 420 runs)**:
+- Manifest: 40 AITER + 2 HK = 42 (**0 binary deltas vs R60** — byte-identical entries; 第 3 连 binary-identical)
+- AITER cell: **40/40 PASS, 全部 bit-deterministic** (项目史上最大 第 4 连持平)
+- HK cell: **2/2 PASS** (L3 32768x14336x2048 100.55% n_OK=10/10 fin_min=0.9883; 16384x4096x2048 HOLD WIN+VC)
+- Cohort-race churn 审计 42 个 UNCHANGED-binary cell: **VC retention 42/42**; 0 lost VC; 0 gained VC; 平均 perf drift -0.020pp/cell
+- WIN flip: 1 LOSE→WIN (L1 R57J1_L1 99.98% → 100.15%; per Opt R policy A 振荡); 0 WIN→LOSE
+- **最终 VC count: 42/42 strict 10-run (项目史上第 6 个 100% 排行榜轮; 非连续 — R55, R56, R57, R59, R60, R61; 仅 R58 中断)**
+- WIN cell (>=100% comp): 40 → **41 RESTORED** (+1 from L1 noise-edge crossback per Opt R policy A; STRETCH TIER MET)
+- LOSE cell: 2 → **1** (仅 L8 4096x32768x128256 at 98.34% 剩余; 结构性 floored)
+- 文件: `R61_INTEGRATION_VERDICT.md`, `R61_INTEGRATION_MANIFEST.json`, `bench_all_42_R61_INTEGRATION.py`, `R61_INTEGRATION_{10RUN,SMOKE1}.{json,log,console}`, `R61_DECIDER_PLAN.md`, `R61_OPT_U2_PUBLICATION_OUTLINE.md`, `R61_OPT_Z_PER_SHAPE_DECOMPOSITION.md`, `R61L1_Y2_INTEGRATION_FRAGMENT.json`
+
+**R61 net result**: **4-of-4 Opt Y PASS on L3 (Opt W 强化永久降级) + L1 noise-edge 跨回 WIN restoring 41/42 WIN (STRETCH TIER MET) + 5 轮 Opt R policy A envelope characterized + Opt U₂ 出版大纲 602 行 + Opt Z 每形分解 1091 行 (~1700 行 pub-prep artifacts) + 连续第 13 次 R50D AS-IS + 0 cohort churn + 42/42 strict VC HELD + AITER bit-det 40/40 第 4 连持平 + HK pool 2 第 4 连持平 + 项目史上第 6 个 100% 排行榜轮 (非连续)**。
+
+### R61 LOSE/注意力 cell 剩余 (1 hard LOSE 结构性 floored, 1 noise-edge 振荡 cell 现 WIN)
+- `(4096,32768,128256)` 98.34% (L8; R52D2B AITER 256×256; aiter alt-tile axis FULLY CLOSED + HK 256×256 axis CLOSED by correctness; 仅 Opt T from-scratch HK build 剩余; 1.66pp 距 aiter-internal ceiling)
+- `(4096,32768,14336)` 100.15% (L1; R57J1_L1 AITER 256×256; **当前 WIN**; 5 轮 ±0.10pp 振荡 around WIN-line under ITERS=500; alt-tile 空间 EXHAUSTED; per Opt R policy A 记录 per-sweep value 无协议干预)
+- L3 `(32768,14336,2048)` HK R40B 在 R61 第 4 连 PASS 后 NOT 注意力 cell: 100.55% n_OK=10/10 fin_min=0.9883; per-sweep tail-draw 率 ≤1/4 经验性收紧; Opt Y₃ 可选每 2-3 轮 monitoring。
+
+### R62 候选 (post-R61, 推荐排序)
+1. **R62 Opt U₃ — 持续文档化 pivot (推荐 ELECT)** — Methods-section 更深 drafts (R50D shim flow diagram + Opt R policy A statistical justification + 10-run @ 80% gate analysis), Results section publication-quality charts (8 figure designs from R61 §1.4 figure list), Discussion section drafts。NO GPU, ~30-60 分钟/轮。
+2. **R62 Opt Z₂ — Per-shape decomposition table extensions (推荐 ELECT)** — Per-shape mechanism diagrams for 3 attention cells (L1/L3/L8); per-cohort archetype analysis (K-bucket grouping); R50D shim invocation traces with kernel-launch invariants。NO GPU, ~30-60 分钟。
+3. **R62 Opt Y₃ — 第 5 连 cohort-race 监控 sweep (可选 ELECT)** — 第 5 连 sweep on R61 manifest with another DISJOINT seed set (e.g. [404, 808, 1212, 1616, 2020, 2424, 2828, 3232, 3636, 4040])。~17 分钟 wall。每 2-3 轮 while no other work happening; 为 publication appendix 建 longitudinal cohort-race dataset。
+4. **R62 Opt T — L8 from-scratch HK kernel build for K=128256 (非常低信心, ~3 R-rounds, 默认 defer)** — Port R39A TAIL_SCALE_CLAMP + R44A back-edge drain + R44D FINITE_GATE 进 new K=128256 HK build。关闭 L8 1.66pp gap 唯一路径。除非用户明确选择否则 defer。
+
+### R62+ 不要尝试的轴 (R45-R61 关闭)
+- 全部 R60 关闭列表加上:
+- **Opt W — HK kernel 重建 with FINITE_GATE 0.97→0.95 STRENGTHENED PERMANENTLY DEPRIORITIZED** — R61 4-of-4 Opt Y PASS 经验性收紧 per-sweep tail-draw 率到 ≤1/4 with high-confidence recovery; cost 不合理。3rd-tier locked。
+- **L1 ITERS=1000 一次性 bump 轴 CLOSED by Opt R 政策** — operationally validated across 5 sweeps R57/R58/R59/R60/R61。
+- **L1 (4096x32768x14336) AITER alt-tile 空间 EXHAUSTED** (256×256 R57J1_L1 是 best; 振荡 ±0.10pp around WIN-line)
+- **L3 (32768x14336x2048) AITER alt-tile 空间 EXHAUSTED**
+- **L8 HK 256×256 axis CLOSED by correctness**
+- **L8 AITER alt-tile 空间 CLOSED**
+
+---
+
+## 上一轮目标 (2026-04-20, post-R60 — METHODOLOGY 轮, **42/42 严格 VC 持平 (3 连 = R59 → R60 byte-identical binary entries)**, **40/42 WIN (-1 vs R59 由 L1 noise-edge 振荡, per Opt R policy A 预测)**, **AITER bit-deterministic 份额 40/42 持平 (项目史上最大, 第 3 连)**, **HK pool 2 持平 (项目史上最少, 第 3 连)**, **连续第 12 次 R50D AS-IS 复用**, 0 PROMOTE / 0 SMOKE_DEAD / 1 POLICY_ONLY (Opt U) / 1 MEASUREMENT_ONLY (Opt Y), 0 cohort-race churn on 42 个 UNCHANGED-binary cell, **Opt W 永久降级**, 项目史上第 5 个 100% 排行榜轮 (非连续 — R55, R56, R57, R59, R60; 仅 R58 中断))
 
 **HEADLINE**: R60 达到 **METHODOLOGY ROUND: 第 3 连 Opt Y PASS on L3 R40B HK 经验性确立 cohort-race 表面为 single-sweep tail-draw (≤1/3 sweep 概率) 而非 intrinsic kernel 行为 — Opt W (HK kernel 重建 with FINITE_GATE 0.97→0.95) 永久降级**。R60 跑 2 个 worker cohort (K-1 Opt Y cohort-race 表面监控 re-bench, K-2 Opt U 文档化 pivot for SC/MICRO publication-prep)。**0/2 PROMOTE / 0 SMOKE_DEAD / 1 POLICY_ONLY (Opt U) / 1 MEASUREMENT_ONLY (Opt Y)**。Manifest **byte-identical 到 R59 binary entries** (第 2 连 binary-identical; 仅 version metadata + axis_closures_R60 + policy_artifacts_R60 + cohort_race_validation_R60 + L1_noise_edge_oscillation_R60 元数据)。Reviewer 10-run @ 80% on 4 GPU (4-7), ITERS=500 default per Opt R policy A, INDEPENDENT seeds **[202, 404, 606, 808, 1010, 1212, 1414, 1616, 1818, 2020]** (DISJOINT from R59 [101..1010]), ~17 分钟 wall, 420 runs: **42/42 严格 VC 持平**; **40/42 WIN** (-1 vs R59 由 L1 noise-edge 100.08% → 99.98% 振荡, per Opt R policy A 预测); **40/40 AITER cell bit-deterministic** (第 3 连 perfect bit-det); **2/2 HK cell PASS** (L3 32768x14336x2048 R40B 100.45% n_OK=10/10 fin_min=**0.985** = 第 3 连成功 sweep)。连续第 12 轮 R50D shim AS-IS 复用 (no rebuild, no kernel modification, no new .co)。
 
@@ -73,7 +149,7 @@
 
 ---
 
-## 上一轮目标 (2026-04-20, post-R59 — RECOVERY 轮, **42/42 严格 VC RECOVERED (+1 vs R58)**, **41/42 WIN (+1 vs R58)**, **AITER bit-deterministic 份额 40/42 持平 (项目史上最大)**, **HK pool 2 持平 (项目史上最少)**, **连续第 11 次 R50D AS-IS 复用**, 0 PROMOTE / 4 SMOKE_DEAD / 1 POLICY_ONLY (Opt R), 0 cohort-race churn on 42 个 UNCHANGED-binary cell, 4 个 alt-tile 轴关闭, 项目史上第 4 个 100% 排行榜轮 (非连续 — R58 中断))
+## 上上轮目标 (2026-04-20, post-R59 — RECOVERY 轮, **42/42 严格 VC RECOVERED (+1 vs R58)**, **41/42 WIN (+1 vs R58)**, **AITER bit-deterministic 份额 40/42 持平 (项目史上最大)**, **HK pool 2 持平 (项目史上最少)**, **连续第 11 次 R50D AS-IS 复用**, 0 PROMOTE / 4 SMOKE_DEAD / 1 POLICY_ONLY (Opt R), 0 cohort-race churn on 42 个 UNCHANGED-binary cell, 4 个 alt-tile 轴关闭, 项目史上第 4 个 100% 排行榜轮 (非连续 — R58 中断))
 
 **HEADLINE**: R59 达到 **RECOVERY ROUND: L3 cohort-race tail-draw on UNCHANGED L3 R40B HK binary 在同 ITERS=500 协议下 fresh INDEPENDENT seed sweep 恢复 — 确认 R58 唯一 VC drop 是 single-sweep artifact，不是 intrinsic surface**。R59 跑 3 个 worker cohort (J-1 Opt R 政策决策, J-2 Opt S L3 alt-tile 救援 96×640+64×1024, J-3 Opt V L1 alt-tile 再攻击 96×640+64×1024)。**0/5 PROMOTE / 4 SMOKE_DEAD / 1 POLICY_ONLY**。Manifest **byte-identical 到 R58 binary entries** (仅 version metadata + 4 个 axis closure docs + Opt R policy linkage)。Reviewer 10-run @ 80% on 4 GPU (4-7), ITERS=500 default, INDEPENDENT seeds [101..1010], ~17 分钟 wall, 420 runs: **42/42 严格 VC RECOVERED** (R58 41/42; +1); **41/42 WIN** (R58 40/42; +1 from L1 noise-edge 在同 ITERS=500 协议下从 99.94% LOSE-edge → 100.08% WIN on UNCHANGED R57J1_L1 binary); **40/40 AITER cell bit-deterministic** (wcf_max=0, wcf_std=0, fin_min=1.0; 持平); **2/2 HK cell PASS** (16384x4096x2048 R40B 108.52% +1.04pp seed-sweep drift; 32768x14336x2048 R40B 100.56% **VC RECOVERED** n_OK=10/10 fin_min=0.988 was 9/10 fin_min=0.911 in R58)。连续第 11 轮 R50D shim AS-IS 复用 (no rebuild, no kernel modification, no new .co)。
 
@@ -130,7 +206,7 @@
 
 ---
 
-## 上上轮目标 (2026-04-19, post-R58 — WIN 1 PROMOTE 结构性 P-2 HK→AITER 128×256 swap +4.37pp, **AITER bit-deterministic 份额 40/42 (项目史上最大)**, **HK pool 3→2 (项目史上最少)**, **连续第 10 次 R50D AS-IS 复用**, 41/42 严格 VC (3 连 100% 排行榜结束; 1 个 cohort-race tail-draw on UNCHANGED L3 R40B HK 由 R57 fin_min=0.9847 + R58 Opt N 预测), ITERS=500 default 从 R57 一次性 ITERS=1000 revert)
+## 更早轮历史 (2026-04-19, post-R58 — WIN 1 PROMOTE 结构性 P-2 HK→AITER 128×256 swap +4.37pp, **AITER bit-deterministic 份额 40/42 (项目史上最大)**, **HK pool 3→2 (项目史上最少)**, **连续第 10 次 R50D AS-IS 复用**, 41/42 严格 VC (3 连 100% 排行榜结束; 1 个 cohort-race tail-draw on UNCHANGED L3 R40B HK 由 R57 fin_min=0.9847 + R58 Opt N 预测), ITERS=500 default 从 R57 一次性 ITERS=1000 revert)
 
 **HEADLINE**: R58 达到 **结构性 WIN: P-2 HK→AITER 128×256 swap 交付 +4.37pp perf 追赶并将唯一中边距 Opt N dropper 转为完美 bit-determinism**。R58 攻击唯一 LOSE cell L8 (Opt O HK probe), 3 个 HK 存活 cell via 128×256 alt-tile (Opt P), AND 运行方法论 cohort 收紧 strict-VC gate (Opt N analysis-only)。**1/5 PROMOTE / 4 ACCEPT_FALLBACK / 0 DEAD**。1 个 PROMOTE 是 I-3 Opt P P-2: `(16384,4096,3072)` HK R40B 103.25% → AITER 128×256 **107.62%** 在 reviewer (+4.37pp; n_OK=10/10, wcf_max=0, fin_min=1.0 完美 bit-determinism)。Worker 报告 106.75%; reviewer p50 落在 +0.87pp 更高。**AITER 份额 39→40 (项目史上最大)**; **HK pool 3→2 (项目史上最少)**; 存活 HK cell 是 `16384x4096x2048` (107.48% HOLD VC+WIN) 和 `32768x14336x2048` (100.49% 数值 WIN 但 VC-flipped 在此 ITERS)。4 个 ACCEPT_FALLBACK: I-1 Opt N (analysis-only, 40/42 通过收紧 gate, 推荐 = 不要采用为 default); I-2 Opt O L8 HK probe (R40B + R37 fallback 都 WRONG_OUTPUT fin=0.78-0.80 wcf=0.07-0.13 — 它们在著名的 "17% deterministic-wrong cohort" 从未为 K=128256 修补; HK 256×256 axis on L8 K=128256 因正确性关闭); I-3 Opt P P-1 (16384x4096x2048 128×256 SMOKE 105.89%, -3.68pp vs HK; D-3A-1 STOP); I-3 Opt P P-3 (32768x14336x2048 128×256 SMOKE 75.49%, -25.04pp 灾难性; STOP_DEAD)。3 连 100% 排行榜结束但 cohort-race 表面**永久** 3→1 cell。连续第 10 轮 R50D shim AS-IS 复用。
 
