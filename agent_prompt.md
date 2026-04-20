@@ -62,12 +62,17 @@ R70 implementation plan (per `project_mxfp4_R69_axis_a_opt2_scoped.md`):
 8. Use 10-run @ 80% cohort-race protocol (FINITE_GATE 0.97).
 9. Commit only on ≥+1 NEW WIN AND no regression on the 19 R66 winners.
 
-R71+ deferred:
-- **Triple/quad knob cross-product OVER GLOBAL_A** (only after R70 lands).
-- **step12pf SPLIT closed by correctness** (R67). Don't reopen without isolated bisect harness.
+R71+ pre-scoped (R69 staged-gate pattern, R71 read-only scoping landed in R70 window):
+
+- **R71 OPTION A — GLOBAL_A knob cross-product** (`project_mxfp4_R71_globalA_xprod_scoped.md`): replay R67/R68 cross-product over GLOBAL_A base. Top-3 single: `globalA_we1` / `_gm6` / `_tbv16` (we1 promoted because GLOBAL_A pushes VGPR=253). Top-2 doubles: `globalA_gm6_tbv16`, `globalA_we1_gm6`. RULE OUT a-priori: `globalA + gb` (operand pool overflow), `globalA + unr16` (VGPR spill), `globalA + AGPR_REGS_HINT_*` (AGPR hazard). GO trigger: ≥1 NEW WIN at R70. Projected: +1-4 NEW WINs (27-30/42).
+- **R71 OPTION B — Hard-loser ISA-diff portable findings** (`project_mxfp4_R71_hardloser_isa_diff.md`): aiter loop body is 231 lines vs HK 726 lines (3.1× longer); aiter spreads bufloads 1-per-8-mfma, HK frontloads. Three actionable items:
+  - **F1: LDS-addr swizzle hoist** — eliminate 49 in-loop XOR ops/iter (~80-120 LOC, +1-3pp, **orthogonal to GLOBAL_A**, low risk; under R70 only B-side needs hoisting).
+  - **F2: step12 PF interleave** — only safe POST-GLOBAL_A; R67 SPLIT failure was likely A-side LDS race that GLOBAL_A removes (~250 LOC, +2-4pp, synergistic).
+  - **F3: Per-shape 128×512 tile template** — only path to closing K=128256 gap (~800-1500 LOC, +3-6pp). Defer to R72+ unless R70 leaves K=128256 <90%.
+- **step12pf SPLIT closed by correctness** (R67). Don't reopen without isolated bisect harness (or pair with GLOBAL_A → F2).
 - **step12pf NON-SPLIT closed by dominance** (R68). Don't reopen unless we find a shape cluster step34pf can't reach.
 - **Axis B (MFMA 32×32×64)** — defer; cross-product confirmed 4:1:1 schedule (and now data-flow) is the lever, not MFMA size.
-- **Axis C (192×256 tile)** — defer; motivation weaker after R66-R68.
+- **Axis C (192×256 tile)** — defer; F3 (128×512) is more targeted at the actual losers (K=128256 strips).
 
 ## Don't reopen — R65 closures (still valid)
 - `KPAIRS_PER_ITER` is not a knob (R65 Opt-D).

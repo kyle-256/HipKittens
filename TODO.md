@@ -130,11 +130,15 @@ R70 implementation plan (per `project_mxfp4_R69_axis_a_opt2_scoped.md`):
 8. Use 10-run @ 80% cohort-race protocol (FINITE_GATE 0.97).
 9. Commit only on ≥+1 NEW WIN AND no regression on the 19 R66 winners.
 
-R71+ deferred:
-- **Triple/quad knob cross-product over GLOBAL_A** (only after R70 lands; R69 showed knobs over step34pf-LDS were exhausted).
+R71+ pre-scoped (R69 staged-gate pattern, R71 read-only scoping landed in R70 window):
+- **R71 OPTION A — Knob cross-product OVER GLOBAL_A** (`project_mxfp4_R71_globalA_xprod_scoped.md`): top-3 single-knobs are `globalA_we1` / `_gm6` / `_tbv16`. **`we1` is promoted to highest-EV** because GLOBAL_A pushes VGPR to ~252/256 — `we1` is the safety net that unblocks the rest. Top-2 doubles: `globalA_gm6_tbv16` and `globalA_we1_gm6`. **RULE OUT: `globalA + gb` (operand pool 146→170, infeasible), `globalA + unr16` (VGPR spill), `globalA + AGPR_REGS_HINT_*` (R62/R65/R66 AGPR hazard). GO trigger: ≥1 NEW WIN at R70 + no R66-winner regression. Projected: +1-4 NEW WINs (27-30/42).**
+- **R71 OPTION B — Hard-loser ISA-diff findings** (`project_mxfp4_R71_hardloser_isa_diff.md`): aiter loop body 231 lines vs HK 726 lines (3.1× longer). Three portable findings:
+  - **F1: Hoist LDS-addr swizzle out of K-loop** (~80-120 LOC, +1-3pp, **orthogonal to GLOBAL_A**, low risk). Eliminate 49 in-loop v_or/v_lshl/v_bitop3 ops/iter on the B-side. Note: GLOBAL_A removes A-side automatically; F1 only need address B-side under R70.
+  - **F2: step12 PF interleave** (~250 LOC, +2-4pp, **only safe POST-GLOBAL_A** because R67 SPLIT failure mode was likely A-side LDS race; A on global path makes it safe). Synergistic with R70.
+  - **F3: Per-shape 128×512 tile template** (~800-1500 LOC + build infra, +3-6pp on K=128256 strip shapes). The only path to closing the K=128256 gap that GLOBAL_A won't touch. Defer to R72+ unless R70 shows K=128256 still <90%.
 - **`kpair_64mfma_step12` interleave SPLIT** (R67 closure): row-clustered NaN, don't reopen without isolated bisect harness.
 - **Axis B (MFMA 32×32×64)** — still defer; cross-product confirms 4:1:1 schedule (and now data-flow) is the lever, not MFMA size.
-- **Axis C (192×256 tile)** — defer; cross-product unlocked enough 4096×K-large that motivation is weak.
+- **Axis C (192×256 tile)** — defer; F3 (128×512) is more targeted at the actual losers (K=128256 strips).
 
 ## Bench script (R68 working set)
 `bench_all_42.py` variants (23 total):
