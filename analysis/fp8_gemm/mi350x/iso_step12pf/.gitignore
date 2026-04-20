@@ -1,0 +1,5 @@
+build/
+work/
+*.log
+*.pt
+results.json
