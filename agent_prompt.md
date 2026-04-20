@@ -68,7 +68,7 @@ R71+ pre-scoped (R69 staged-gate pattern, R71 read-only scoping landed in R70 wi
 - **R71 OPTION B — Hard-loser ISA-diff portable findings** (`project_mxfp4_R71_hardloser_isa_diff.md`): aiter loop body is 231 lines vs HK 726 lines (3.1× longer); aiter spreads bufloads 1-per-8-mfma, HK frontloads. Three actionable items:
   - **F1: LDS-addr swizzle hoist** — eliminate 49 in-loop XOR ops/iter (~80-120 LOC, +1-3pp, **orthogonal to GLOBAL_A**, low risk; under R70 only B-side needs hoisting).
   - **F2: step12 PF interleave** — only safe POST-GLOBAL_A; R67 SPLIT failure was likely A-side LDS race that GLOBAL_A removes (~250 LOC, +2-4pp, synergistic).
-  - **F3: Per-shape 128×512 tile template** — only path to closing K=128256 gap (~800-1500 LOC, +3-6pp). Defer to R72+ unless R70 leaves K=128256 <90%.
+  - **F3: Per-shape 128×512 tile template** — DEEP-SCOPED (`project_mxfp4_R72_F3_per_shape_tile_scoped.md`). LOC refined to ~1340 (NOT 800-1500). Helps only 5 strip shapes (`4096×{32768×128256, 32768×28672, 32768×14336, 28672×32768, 128256×32768}`). 14336×4096×32768 hard loser stays 256×256 → F3 doesn't help; needs F1+GLOBAL_A. VGPR=480 fits, **LDS=160KB at gfx950 cap (TIGHT)**, mitigation = single-buffered B risks -5-10pp regression. GO trigger: R70 LANDED + 4096×32768×128256 still < 95% + 4096×28672×32768 still < 95%.
 - **step12pf SPLIT closed by correctness** (R67). Don't reopen without isolated bisect harness (or pair with GLOBAL_A → F2).
 - **step12pf NON-SPLIT closed by dominance** (R68). Don't reopen unless we find a shape cluster step34pf can't reach.
 - **Axis B (MFMA 32×32×64)** — defer; cross-product confirmed 4:1:1 schedule (and now data-flow) is the lever, not MFMA size.
