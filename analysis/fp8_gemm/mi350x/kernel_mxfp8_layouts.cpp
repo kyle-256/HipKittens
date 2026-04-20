@@ -177,6 +177,15 @@ using namespace kittens;
 #define MXFP8_RCR_V2_PERSISTENT_GRID 608
 #endif
 
+// R57E: interleave global_load between MMA pairs in double-buffer CRR K-loop
+// 0 = production baseline (no interleaving)
+// 1 = V1: move global_load_b(Bs[tic][1]) between cA/cB and cC/cD
+// 2 = V2: move global_load_b(Bs[tic][0]) from end to between cA/cB and cC/cD
+// 3 = V3: move both global_load_b to between cA/cB and cC/cD
+#ifndef MXFP8_CRR_DB_INTERLEAVE_R57E
+#define MXFP8_CRR_DB_INTERLEAVE_R57E 0
+#endif
+
 #ifndef CRR_INIT0_VMCNT
 #define CRR_INIT0_VMCNT 2
 #endif
@@ -5437,6 +5446,96 @@ void gemm_kernel(const layout_globals g) {
             mma_AB(cD, a, b1, cD);
             CRR_MMA_END();
             reencode_a(As[toc][0]);
+#elif MXFP8_CRR_DB_INTERLEAVE_R57E == 1
+            // R57E V1: interleave global_load_b(Bs[tic][1]) between MMA pairs
+            // Moves 1 of 3 mid-loop global loads to after cA/cB, before cC/cD
+            // Pattern: LDS reads -> gload_a(toc[1]) -> barrier -> cA,cB ->
+            //          gload_b(tic[1]) -> mid_barrier -> LDS read -> gload_a(tic[0]) ->
+            //          vmcnt barrier -> cC,cD -> barrier -> gload_b(tic[0])
+            load_b(b0, Bs[tic][0], wn);
+            load_b(b1, Bs[tic][1], wn);
+            load_a(a, As[tic][0], wm);
+            global_load_a(As[toc][1], br*2+1, k+1);
+            TK_WAIT_LGKM(CRR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            CRR_MMA_BEGIN();
+            CRR_DO_MMA(cA, a, b0, 0, 0, k);
+            CRR_DO_MMA(cB, a, b1, 0, 1, k);
+            CRR_MMA_END();
+
+            global_load_b(Bs[tic][1], bc*2+1, k+2);
+            CRR_STEADY_MID_BARRIER();
+
+            load_a(a, As[tic][1], wm);
+            global_load_a(As[tic][0], br*2, k+2);
+            TK_WAIT_VMCNT(CRR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            CRR_MMA_BEGIN();
+            CRR_DO_MMA(cC, a, b0, 1, 0, k);
+            CRR_DO_MMA(cD, a, b1, 1, 1, k);
+            CRR_MMA_END();
+            __builtin_amdgcn_s_barrier();
+            global_load_b(Bs[tic][0], bc*2, k+2);
+#elif MXFP8_CRR_DB_INTERLEAVE_R57E == 2
+            // R57E V2: interleave global_load_b(Bs[tic][0]) from end to between MMA pairs
+            // Moves the end-of-iteration load earlier, between cA/cB and cC/cD
+            // Pattern: LDS reads -> gload_a(toc[1]) -> barrier -> cA,cB ->
+            //          gload_b(tic[0]) -> mid_barrier -> LDS read -> gload_a(tic[0]) ->
+            //          gload_b(tic[1]) -> vmcnt barrier -> cC,cD -> barrier
+            load_b(b0, Bs[tic][0], wn);
+            load_b(b1, Bs[tic][1], wn);
+            load_a(a, As[tic][0], wm);
+            global_load_a(As[toc][1], br*2+1, k+1);
+            TK_WAIT_LGKM(CRR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            CRR_MMA_BEGIN();
+            CRR_DO_MMA(cA, a, b0, 0, 0, k);
+            CRR_DO_MMA(cB, a, b1, 0, 1, k);
+            CRR_MMA_END();
+
+            global_load_b(Bs[tic][0], bc*2, k+2);
+            CRR_STEADY_MID_BARRIER();
+
+            load_a(a, As[tic][1], wm);
+            global_load_a(As[tic][0], br*2, k+2);
+            global_load_b(Bs[tic][1], bc*2+1, k+2);
+            TK_WAIT_VMCNT(CRR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            CRR_MMA_BEGIN();
+            CRR_DO_MMA(cC, a, b0, 1, 0, k);
+            CRR_DO_MMA(cD, a, b1, 1, 1, k);
+            CRR_MMA_END();
+            __builtin_amdgcn_s_barrier();
+#elif MXFP8_CRR_DB_INTERLEAVE_R57E == 3
+            // R57E V3: interleave both B loads between MMA pairs
+            // Moves both global_load_b to between cA/cB and cC/cD
+            // Pattern: LDS reads -> gload_a(toc[1]) -> barrier -> cA,cB ->
+            //          gload_b(tic[0]) + gload_b(tic[1]) -> mid_barrier ->
+            //          LDS read -> gload_a(tic[0]) -> vmcnt barrier -> cC,cD -> barrier
+            load_b(b0, Bs[tic][0], wn);
+            load_b(b1, Bs[tic][1], wn);
+            load_a(a, As[tic][0], wm);
+            global_load_a(As[toc][1], br*2+1, k+1);
+            TK_WAIT_LGKM(CRR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            CRR_MMA_BEGIN();
+            CRR_DO_MMA(cA, a, b0, 0, 0, k);
+            CRR_DO_MMA(cB, a, b1, 0, 1, k);
+            CRR_MMA_END();
+
+            global_load_b(Bs[tic][0], bc*2, k+2);
+            global_load_b(Bs[tic][1], bc*2+1, k+2);
+            CRR_STEADY_MID_BARRIER();
+
+            load_a(a, As[tic][1], wm);
+            global_load_a(As[tic][0], br*2, k+2);
+            TK_WAIT_VMCNT(CRR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            CRR_MMA_BEGIN();
+            CRR_DO_MMA(cC, a, b0, 1, 0, k);
+            CRR_DO_MMA(cD, a, b1, 1, 1, k);
+            CRR_MMA_END();
+            __builtin_amdgcn_s_barrier();
 #else
             load_b(b0, Bs[tic][0], wn);
             load_b(b1, Bs[tic][1], wn);

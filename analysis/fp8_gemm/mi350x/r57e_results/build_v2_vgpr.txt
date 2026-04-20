@@ -1,0 +1,7 @@
+In file included from kernel_mxfp8_layouts.cpp:4082:
+./crr_mxfp8_exact_8wave_fastpath.inc:515:1: remark: Function Name: _Z29crr_exact_8wave_scaled_kernelILb1ELi2EEv14layout_globals [-Rpass-analysis=kernel-resource-usage]
+  515 | {
+      | ^
+./crr_mxfp8_exact_8wave_fastpath.inc:515:1: remark:     TotalSGPRs: 50 [-Rpass-analysis=kernel-resource-usage]
+./crr_mxfp8_exact_8wave_fastpath.inc:515:1: remark:     VGPRs: 227 [-Rpass-analysis=kernel-resource-usage]
+./crr_mxfp8_exact_8wave_fastpath.inc:515:1: remark:     AGPRs: 0 [-Rpass-analysis=kernel-resource-usage]

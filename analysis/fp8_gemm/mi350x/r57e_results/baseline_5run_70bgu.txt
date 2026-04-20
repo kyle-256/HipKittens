@@ -1,0 +1,10 @@
+--- Run 1 ---
+  Avg time: 2.2974 ms, TFLOPS: 837.52
+--- Run 2 ---
+  Avg time: 2.3011 ms, TFLOPS: 836.19
+--- Run 3 ---
+  Avg time: 2.2994 ms, TFLOPS: 836.79
+--- Run 4 ---
+  Avg time: 2.2998 ms, TFLOPS: 836.66
+--- Run 5 ---
+  Avg time: 2.2995 ms, TFLOPS: 836.78
