@@ -121,6 +121,14 @@ DEFAULT_VARIANTS = [
     ("step34pf_unr2",  _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DUNROLL_K=2"),
     ("step34pf_we1",   _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DWAVES_PER_EU_1"),
     ("step34pf_tbv16", _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DTAIL_BARRIER_VMCNT=16"),
+    # R68 OPT-1: triple-knob cross-product variants on top of step34pf to
+    # capture boundary residue at 95-99.5% (10 candidate shapes).
+    ("step34pf_gm6_unr2",   _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DGROUP_SIZE_M=6 -DUNROLL_K=2"),
+    ("step34pf_gm8_we1",    _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DGROUP_SIZE_M=8 -DWAVES_PER_EU_1"),
+    ("step34pf_gm6_tbv16",  _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DGROUP_SIZE_M=6 -DTAIL_BARRIER_VMCNT=16"),
+    ("step34pf_unr2_tbv16", _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DUNROLL_K=2 -DTAIL_BARRIER_VMCNT=16"),
+    ("step34pf_gb_gm6",     _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DGLOBAL_B=1 -DGROUP_SIZE_M=6"),
+    ("step34pf_we1_unr2",   _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DWAVES_PER_EU_1 -DUNROLL_K=2"),
 ]
 
 
@@ -326,8 +334,8 @@ def main():
     print(f"GPUs: {gpu_list}")
     print("=" * 70)
 
-    build_dir = os.path.join(SCRIPT_DIR, "build_all42")
-    work_dir = os.path.join(SCRIPT_DIR, "work_all42")
+    build_dir = os.environ.get("BENCH_BUILD_DIR", os.path.join(SCRIPT_DIR, "build_all42"))
+    work_dir = os.environ.get("BENCH_WORK_DIR", os.path.join(SCRIPT_DIR, "work_all42"))
     os.makedirs(build_dir, exist_ok=True)
     os.makedirs(work_dir, exist_ok=True)
 
