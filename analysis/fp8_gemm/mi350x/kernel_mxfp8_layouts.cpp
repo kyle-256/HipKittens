@@ -453,8 +453,114 @@ constexpr int RBN_RECT  = BLK_N / WARPS_N / 2;  // 32 default, 16 rect
 #if MXFP8_RCR_ASCALE_FIRST && MXFP8_RCR_COOPERATIVE_BSCALE
 #error "MXFP8_RCR_ASCALE_FIRST and MXFP8_RCR_COOPERATIVE_BSCALE are mutually exclusive"
 #endif
+// R55 Dev B P2: SALU hoist for scale-tensor base-address arithmetic.
+// Targets R54 Dev B PMC diagnostic (SQ_INSTS_SALU +15.1%; SQ_WAIT_ANY +71.6%
+// dominant). Hypothesis: scale-tensor base-address arithmetic (a_voff,
+// a_soff = k_pair << 10; b_voff, b_soff = k_pair << 9) is recomputed inside
+// the K-loop instead of hoisted to prologue; manual hoist + stateful
+// `s_add_u32` increment (one per K-pair) should reduce SALU and free
+// VALU/MFMA issue. Default OFF (production tree byte-identical).
+// NOTE (R55B Phase 0): ISA inspection of baseline V2-RCR kernel showed the
+// compiler ALREADY fully hoists the SRDs (s[0:3], s[20:23] are loop-invariant)
+// AND already strength-reduces `k_pair << 10` / `k_pair << 9` into a single
+// `s_addk_i32 sX, 0x400` / `s_addk_i32 sX, 0x200` per body iteration. This
+// macro is therefore a control experiment to confirm LICM identity; if the
+// compiled ISA matches baseline byte-for-byte the verdict is
+// REFUTED-EMPIRICAL-COMPILER-ALREADY-HOISTED.
+#ifndef MXFP8_RCR_SCALE_SALU_HOIST
+#define MXFP8_RCR_SCALE_SALU_HOIST 0
+#endif
+// R55 Dev A: scale-fetch interleave macro.
+// Targets the 70B Down RCR -3.4pp HEADROOM gap identified by R54 Dev B PMC
+// diagnostic (DIAGNOSTIC-SCALE-FETCH-WAIT: SQ_WAIT_ANY +71.6%, MfmaUtil
+// -16pp). Hypothesis: scale-tensor VMEM loads (1× b128 A-scale + 1× b64
+// B-scale per kpair, both issued back-to-back at top of kpair body) cluster
+// the VMEM issue stream and force serialised L2/TCC return arrivals,
+// expanding the s_waitcnt(vmcnt(N)) drain BEFORE MMA segment 0. Interleaving
+// scale-issuance with data-tile load issuance should overlap the two streams
+// in the L2/TCC return path, reducing SQ_WAIT_ANY.
+//
+// Values:
+//   0 = baseline (back-to-back A b128 then B b64 in load_scale_buffer)
+//   1 = insert __builtin_amdgcn_sched_barrier(0) BETWEEN A and B inside
+//       load_scale_buffer (lets the LLVM scheduler interleave data-tile
+//       buffer_load_dwordx4 lds issuance between the two scale loads)
+//   2 = source-level split: A-scale b128 stays in load_scale_buffer; B-scale
+//       b64 is emitted via a separate `load_scale_buffer_b_late()` callable
+//       invoked from inside `do_k_iter_body` AFTER the first per-kpair
+//       ds_read sequence and BEFORE the segment-0 MFMA. Provides a strict
+//       compile-time temporal separation that schedbar alone cannot guarantee.
+//   3 = like 2 PLUS schedbar after the b64 issue (firewall the late B-scale
+//       from being re-floated by the scheduler back to the top).
+// Default OFF preserves baseline byte-identity. Mutually exclusive with
+// COOPERATIVE_BSCALE and ASCALE_FIRST (those orderings work on the same
+// b128/b64 pair from inside load_scale_buffer; INTERLEAVE values 2/3
+// physically remove the b64 from that site).
+#ifndef MXFP8_RCR_SCALE_INTERLEAVE
+#define MXFP8_RCR_SCALE_INTERLEAVE 0
+#endif
+#if MXFP8_RCR_SCALE_INTERLEAVE != 0 && (MXFP8_RCR_COOPERATIVE_BSCALE || MXFP8_RCR_ASCALE_FIRST)
+#error "MXFP8_RCR_SCALE_INTERLEAVE is mutually exclusive with COOPERATIVE_BSCALE and ASCALE_FIRST"
+#endif
 #ifndef MXFP8_RCR_EXACT_PQ_HOIST_HI_ENABLE
 #define MXFP8_RCR_EXACT_PQ_HOIST_HI_ENABLE 1
+#endif
+// R55 Dev C: VALU dependency-chain break.
+// Targets the +76.7% SQ_ACTIVE_INST_VALU expansion identified by R54 Dev B
+// PMC diagnostic on 70B Down RCR. Phase 0 ISA inspection revealed the
+// SQUARE RCR scaled K-loop body contains 128 v_mfma_scale instructions and
+// only 6 v_lshrrev_b32 / 22 s_mov / 18 v_readfirstlane VALU/SALU ops, with
+// scales (v146/v147/v148/v149 A-side, v158/v159 B-side) feeding MFMAs
+// directly from buffer_load result registers — no v_mov_b32 broadcasts.
+// However, the LLVM scheduler is FREE to interleave v_lshrrev_b32 / scale
+// remap / address-arithmetic VALU into the middle of the per-cell 8-MFMA
+// burst (between s_setprio(1) and s_setprio(0)) because the existing
+// sched_barrier(0) calls only sit OUTSIDE the burst boundary.
+//
+// Lever: insert sched_barrier(0) IMMEDIATELY BEFORE each s_setprio(1)
+// gating the MFMA burst. This forces the scheduler to emit ALL VALU
+// dependencies (scale remap, address compute, ds_read setup) BEFORE the
+// burst begins, ensuring the burst is pure-MFMA so the MMA pipe sees a
+// dense issue stream uninterrupted by VALU. The expected effect on the
+// PMC counters: SQ_ACTIVE_INST_VALU drops because VALU activity collapses
+// to the inter-burst pre-roll instead of stretching across the burst,
+// MfmaUtil rises because the MMA pipe is no longer paused by VALU
+// interleave, SQ_WAIT_ANY drops because the post-MFMA waits are no
+// longer blocked by mid-burst VALU instructions.
+//
+// Values:
+//   0 = baseline (LLVM scheduler is free to interleave VALU into the
+//       MFMA burst — production behavior preserved byte-identical)
+//   1 = insert __builtin_amdgcn_sched_barrier(0) before each s_setprio(1)
+//       in the steady-state K loop body (cells cA, cB, cC, cD). This is
+//       a SCHEDULING DIRECTIVE ONLY — no source-level reordering, no
+//       added live state, no impact on VGPR usage. Stays within the V2
+//       RRR ceiling constraint (256 VGPR @ occ=2, no spill).
+//   2 = like 1 PLUS sched_group_barrier(0x8, 8, 0) AFTER each
+//       s_setprio(1) to assert "exactly 8 MFMAs in this scheduling
+//       group" — this is the strongest constraint, may fail to schedule
+//       on some K-iter unrolls.
+// Default OFF preserves baseline byte-identity.
+#ifndef MXFP8_RCR_VALU_DEP_BREAK
+#define MXFP8_RCR_VALU_DEP_BREAK 0
+#endif
+// Cell-burst entry barrier: forces all VALU work to land BEFORE the MFMA
+// burst. Mask 0 = block ALL reordering across this point. Equivalent to a
+// pure scheduling fence (no runtime cost).
+#if MXFP8_RCR_VALU_DEP_BREAK >= 1
+#define MXFP8_RCR_VALU_DEP_BREAK_PRE() do { __builtin_amdgcn_sched_barrier(0); } while (0)
+#else
+#define MXFP8_RCR_VALU_DEP_BREAK_PRE() do {} while (0)
+#endif
+// Cell-burst exit assertion: declares the just-issued group of 8 MFMAs
+// must form one scheduling group. Used in MODE 2 to assert compiler
+// must emit exactly 8 MFMA instructions in this group with no
+// VALU/SALU interleaved. MASK_MFMA = 0x8 per AMDGPU intrinsics.
+#if MXFP8_RCR_VALU_DEP_BREAK >= 2
+#define MXFP8_RCR_VALU_DEP_BREAK_GROUP_8MFMA() \
+    do { __builtin_amdgcn_sched_group_barrier(0x8, 8, 0); } while (0)
+#else
+#define MXFP8_RCR_VALU_DEP_BREAK_GROUP_8MFMA() do {} while (0)
 #endif
 #ifndef MXFP8_RCR_EXACT_PQ_OPSEL_PHASE_ENABLE
 #define MXFP8_RCR_EXACT_PQ_OPSEL_PHASE_ENABLE 0
@@ -2553,6 +2659,25 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
     const uint32_t lane_scale_byte_offset =
         (static_cast<uint32_t>(lane_kblk) << 6) |
         (static_cast<uint32_t>(lane_nonk) << 2);
+#if MXFP8_RCR_SCALE_SALU_HOIST
+    // R55 Dev B P2 — prologue-hoisted scale base addresses for V2-RCR.
+    // _hoist_a_voff and _hoist_b_voff are loop-invariant (depend only on
+    // per-lane lane_kblk/lane_nonk constants — same as the inline form).
+    // _hoist_a_soff_state and _hoist_b_soff_state are stateful K-pair
+    // counters: initialised to 0 in the prologue, advanced by 0x400 / 0x200
+    // by `advance_scale_soff_for_pair` after each load. The advance is the
+    // single `s_add_u32` step the brief asks for; voff load is one prologue
+    // SALU sequence per pack (executed once).
+    const uint32_t _hoist_a_voff =
+        (static_cast<uint32_t>(lane_kblk) << 8) |
+        (static_cast<uint32_t>(lane_nonk) << 4);
+    const uint32_t _hoist_b_voff =
+        (static_cast<uint32_t>(lane_kblk) << 7) |
+        (static_cast<uint32_t>(lane_nonk) << 3);
+    uint32_t _hoist_a_soff_state = 0;
+    uint32_t _hoist_b_soff_state = 0;
+    int _hoist_last_k_pair = -1;
+#endif
     const uint8_t* a0_scale_row_bases[RBM / 32];
     const uint8_t* a1_scale_row_bases[RBM / 32];
     const uint8_t* b0_scale_row_bases[(RBN + 31) / 32];
@@ -2871,18 +2996,50 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
                 // load logic in load_scale_buffer to ensure warmup,
                 // pre-tail, and tail iterations consume V2-packed data
                 // correctly (g.a_scale / g.b_scale point at V2 buffers).
+#if MXFP8_RCR_SCALE_SALU_HOIST
+                // R55 Dev B P2 — manual SALU hoist for scale soff/voff.
+                // Hypothesis: by referencing prologue-cached `_hoist_a_voff`
+                // (loop-invariant) and `_hoist_a_soff_state` (stateful
+                // strided counter), the inner loop avoids recomputing
+                // scale base addresses each iteration. NOTE: ISA inspection
+                // showed compiler ALREADY hoists both — the SRD is fully
+                // loop-invariant (s[0:3], s[20:23]) and the soff is
+                // already strength-reduced to `s_addk_i32 s38, 0x400`
+                // (one instruction per iter). This macro is a control
+                // experiment to confirm LICM identity (default OFF).
+                // Strength-reduce: only advance state when k_pair changes
+                // (matches the compiler's `s_addk_i32 sX, 0x400` pattern).
+                if (k_pair != _hoist_last_k_pair) {
+                    if (_hoist_last_k_pair == k_pair - 1 && k_pair > 0) {
+                        _hoist_a_soff_state += 0x400u;
+                        _hoist_b_soff_state += 0x200u;
+                    } else {
+                        _hoist_a_soff_state = static_cast<uint32_t>(k_pair) << 10;
+                        _hoist_b_soff_state = static_cast<uint32_t>(k_pair) << 9;
+                    }
+                    _hoist_last_k_pair = k_pair;
+                }
+                const uint32_t a_voff = _hoist_a_voff;
+                const uint32_t a_soff = _hoist_a_soff_state;
+#else
                 const uint32_t a_voff =
                     (static_cast<uint32_t>(lane_kblk) << 8) |
                     (static_cast<uint32_t>(lane_nonk) << 4);
                 const uint32_t a_soff = static_cast<uint32_t>(k_pair) << 10;
+#endif
 #if MXFP8_RCR_COOPERATIVE_BSCALE
                 // R48 Dev B: pre-issue B-scale b64 BEFORE the A-scale b128.
                 // Compute B offsets early; emit b64 first; sched_barrier
                 // prevents the scheduler from re-floating the order.
+#if MXFP8_RCR_SCALE_SALU_HOIST
+                const uint32_t _coop_b_voff = _hoist_b_voff;
+                const uint32_t _coop_b_soff = _hoist_b_soff_state;
+#else
                 const uint32_t _coop_b_voff =
                     (static_cast<uint32_t>(lane_kblk) << 7) |
                     (static_cast<uint32_t>(lane_nonk) << 3);
                 const uint32_t _coop_b_soff = static_cast<uint32_t>(k_pair) << 9;
+#endif
                 const uint64_t _coop_b_raw =
                     llvm_amdgcn_raw_buffer_load_b64(b_v2_srsrc, _coop_b_voff, _coop_b_soff, MXFP8_RCR_V2_SCALE_CACHEPOLICY);
                 __builtin_amdgcn_sched_barrier(0);
@@ -2921,10 +3078,15 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
                 const uint32_t b_w0 = static_cast<uint32_t>(_coop_b_raw      );
                 const uint32_t b_w1 = static_cast<uint32_t>(_coop_b_raw >> 32);
 #else
+#if MXFP8_RCR_SCALE_SALU_HOIST
+                const uint32_t b_voff = _hoist_b_voff;
+                const uint32_t b_soff = _hoist_b_soff_state;
+#else
                 const uint32_t b_voff =
                     (static_cast<uint32_t>(lane_kblk) << 7) |
                     (static_cast<uint32_t>(lane_nonk) << 3);
                 const uint32_t b_soff = static_cast<uint32_t>(k_pair) << 9;
+#endif
                 const uint64_t b_raw =
                     llvm_amdgcn_raw_buffer_load_b64(b_v2_srsrc, b_voff, b_soff, MXFP8_RCR_V2_SCALE_CACHEPOLICY);
                 const uint32_t b_w0 = static_cast<uint32_t>(b_raw      );
@@ -3140,6 +3302,7 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
+        MXFP8_RCR_VALU_DEP_BREAK_PRE();
         __builtin_amdgcn_s_setprio(1);
 #if MXFP8_RCR_EXACT_PQ_SCALAR_PHASE_PACKS_ENABLE
         if constexpr (PRESHUFFLED_QUANT) {
@@ -3196,6 +3359,7 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
+        MXFP8_RCR_VALU_DEP_BREAK_PRE();
         __builtin_amdgcn_s_setprio(1);
 #if MXFP8_RCR_EXACT_PQ_SCALAR_PHASE_PACKS_ENABLE
         if constexpr (PRESHUFFLED_QUANT) {
@@ -3251,6 +3415,7 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
+        MXFP8_RCR_VALU_DEP_BREAK_PRE();
         __builtin_amdgcn_s_setprio(1);
 #if MXFP8_RCR_EXACT_PQ_SCALAR_PHASE_PACKS_ENABLE
         if constexpr (PRESHUFFLED_QUANT) {
@@ -3305,6 +3470,7 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
         TK_WAIT_VMCNT(6);
         __builtin_amdgcn_s_barrier();
 
+        MXFP8_RCR_VALU_DEP_BREAK_PRE();
         __builtin_amdgcn_s_setprio(1);
 #if MXFP8_RCR_EXACT_PQ_SCALAR_PHASE_PACKS_ENABLE
         if constexpr (PRESHUFFLED_QUANT) {
@@ -3409,10 +3575,19 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
                         a0_scale_packs[1] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw >> 64));
                         a1_scale_packs[1] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw >> 96));
                     }
+#if MXFP8_RCR_SCALE_INTERLEAVE == 1
+                    // R55 Dev A V1: insert sched_barrier between A-scale b128
+                    // (above) and B-scale b64 (below). Lets LLVM float B-scale
+                    // b64 down into the data-load stream rather than emitting
+                    // it back-to-back after A-scale at top of kpair body.
+                    __builtin_amdgcn_sched_barrier(0);
+#endif
+#if MXFP8_RCR_SCALE_INTERLEAVE < 2
                     const uint64_t b_raw =
                         llvm_amdgcn_raw_buffer_load_b64(b_v2_srsrc, b_voff, b_soff, MXFP8_RCR_V2_SCALE_CACHEPOLICY);
                     b0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(b_raw      ));
                     b1_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(b_raw >> 32));
+#endif
 #endif
                 } else {
                     const uint32_t soff = static_cast<uint32_t>(k_pair) << 8;
@@ -3429,6 +3604,31 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
                 load_scale_packs_for_pair(k_pair);
             }
         };
+#if MXFP8_RCR_SCALE_INTERLEAVE >= 2
+        // R55 Dev A V2/V3: B-scale b64 is split out of load_scale_buffer and
+        // emitted via this separate callable, invoked in do_k_iter_body so
+        // the LLVM scheduler must place it AFTER the data-tile loads and
+        // ds_reads for kpair seg-0. INTERLEAVE=3 adds a sched_barrier
+        // firewall around it to prevent re-floating.
+        auto load_scale_buffer_b_late = [&](int k_pair) __attribute__((always_inline)) {
+            if constexpr (PRESHUFFLED_QUANT && SCALE_VERSION == 2) {
+                const uint32_t b_voff =
+                    (static_cast<uint32_t>(lane_kblk) << 7) |
+                    (static_cast<uint32_t>(lane_nonk) << 3);
+                const uint32_t b_soff = static_cast<uint32_t>(k_pair) << 9;
+#if MXFP8_RCR_SCALE_INTERLEAVE == 3
+                __builtin_amdgcn_sched_barrier(0);
+#endif
+                const uint64_t b_raw =
+                    llvm_amdgcn_raw_buffer_load_b64(b_v2_srsrc, b_voff, b_soff, MXFP8_RCR_V2_SCALE_CACHEPOLICY);
+                b0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(b_raw      ));
+                b1_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(b_raw >> 32));
+#if MXFP8_RCR_SCALE_INTERLEAVE == 3
+                __builtin_amdgcn_sched_barrier(0);
+#endif
+            }
+        };
+#endif
 #if MXFP8_RCR_V2_SCALE_PREFETCH
         // R31 Dev C: VGPR-prefetch second-buffer experiment.
         // Next-iter scale_packs (separate VGPR set). Load (k_pair+1) at
@@ -3512,6 +3712,14 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
 #else
         for (int k_pair = 0; k_pair < k_pairs; k_pair++) {
             load_scale_buffer(k_pair);
+#if MXFP8_RCR_SCALE_INTERLEAVE >= 2
+            // R55 Dev A V2/V3: physical-split B-scale b64 issue. Source-level
+            // separation from A-scale b128 (inside load_scale_buffer) gives
+            // the LLVM scheduler an interleavable position; the b64 can
+            // float into the kpair body adjacent to data-tile loads/MFMAs
+            // rather than clustering at top with A-scale.
+            load_scale_buffer_b_late(k_pair);
+#endif
             do_k_iter_body.template operator()<0>(k_pair * 2);
             tic ^= 1; toc ^= 1;
             do_k_iter_body.template operator()<1>(k_pair * 2 + 1);
@@ -3519,6 +3727,9 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
         }
         if (k_remainder) {
             load_scale_buffer(k_pairs);
+#if MXFP8_RCR_SCALE_INTERLEAVE >= 2
+            load_scale_buffer_b_late(k_pairs);
+#endif
             do_k_iter_body.template operator()<0>(k_pairs * 2);
             tic ^= 1; toc ^= 1;
         }
@@ -3574,6 +3785,7 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
+        MXFP8_RCR_VALU_DEP_BREAK_PRE();
         __builtin_amdgcn_s_setprio(1);
 #if MXFP8_RCR_EXACT_PQ_PHASE_U16_CACHE_ENABLE
         if constexpr (PRESHUFFLED_QUANT) {
@@ -3599,6 +3811,7 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
+        MXFP8_RCR_VALU_DEP_BREAK_PRE();
         __builtin_amdgcn_s_setprio(1);
 #if MXFP8_RCR_EXACT_PQ_PHASE_U16_CACHE_ENABLE
         if constexpr (PRESHUFFLED_QUANT) {
@@ -3624,6 +3837,7 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
+        MXFP8_RCR_VALU_DEP_BREAK_PRE();
         __builtin_amdgcn_s_setprio(1);
 #if MXFP8_RCR_EXACT_PQ_PHASE_U16_CACHE_ENABLE
         if constexpr (PRESHUFFLED_QUANT) {
@@ -3648,6 +3862,7 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
+        MXFP8_RCR_VALU_DEP_BREAK_PRE();
         __builtin_amdgcn_s_setprio(1);
 #if MXFP8_RCR_EXACT_PQ_PHASE_U16_CACHE_ENABLE
         if constexpr (PRESHUFFLED_QUANT) {
@@ -3696,6 +3911,7 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
+        MXFP8_RCR_VALU_DEP_BREAK_PRE();
         __builtin_amdgcn_s_setprio(1);
 #if MXFP8_RCR_EXACT_PQ_PHASE_U16_CACHE_ENABLE
         if constexpr (PRESHUFFLED_QUANT) {
@@ -3721,6 +3937,7 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
         __builtin_amdgcn_sched_barrier(0);
 
         asm volatile("s_waitcnt lgkmcnt(0)");
+        MXFP8_RCR_VALU_DEP_BREAK_PRE();
         __builtin_amdgcn_s_setprio(1);
 #if MXFP8_RCR_EXACT_PQ_PHASE_U16_CACHE_ENABLE
         if constexpr (PRESHUFFLED_QUANT) {
@@ -3745,6 +3962,7 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
+        MXFP8_RCR_VALU_DEP_BREAK_PRE();
         __builtin_amdgcn_s_setprio(1);
 #if MXFP8_RCR_EXACT_PQ_PHASE_U16_CACHE_ENABLE
         if constexpr (PRESHUFFLED_QUANT) {
@@ -3815,6 +4033,12 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
 }
 
 __host__ inline bool rcr_can_use_exact_8wave_scaled(const layout_globals& g) {
+    static int once = 0;
+    if (!once) {
+        once = 1;
+        std::fprintf(stderr, "[R55B-DEBUG] rcr_can_use_exact_8wave_scaled: g.m=%d g.n=%d g.k=%d M_DIM=%d N_DIM=%d K_DIM=%d\n",
+            g.m, g.n, g.k, M_DIM, N_DIM, K_DIM);
+    }
     return g.m == M_DIM && g.n == N_DIM && g.k == K_DIM;
 }
 
@@ -6055,11 +6279,27 @@ void dispatch_pq(layout_globals g) {
 // between RCR and CRR).
 template<Layout L>
 void dispatch_pq_v2(layout_globals g) {
+    {
+        static int once3 = 0;
+        if (!once3) {
+            once3 = 1;
+            std::fprintf(stderr, "[R55B-DEBUG-3] dispatch_pq_v2 entry: L=%d g.m=%d g.n=%d g.k=%d a.cols=%d c.rows=%d c.cols=%d\n",
+                (int)L, g.m, g.n, g.k, (int)g.a.cols(), (int)g.c.rows(), (int)g.c.cols());
+        }
+    }
 #if MXFP8_RCR_EXACT_8WAVE_FAST_ENABLE
     if constexpr (L == Layout::RCR) {
         g.m = static_cast<int>(g.c.rows());
         g.n = static_cast<int>(g.c.cols());
         g.k = static_cast<int>(g.a.cols());
+        {
+            static int once2 = 0;
+            if (!once2) {
+                once2 = 1;
+                std::fprintf(stderr, "[R55B-DEBUG-2] dispatch_pq_v2<RCR>: g.m=%d g.n=%d g.k=%d M_DIM=%d N_DIM=%d K_DIM=%d FAST_ENABLE=%d\n",
+                    g.m, g.n, g.k, M_DIM, N_DIM, K_DIM, MXFP8_RCR_EXACT_8WAVE_FAST_ENABLE);
+            }
+        }
         // R32 Dev D — Stage A1: rect-V2 RCR fastpath. Routes the gemm_rcr_pq_v2
         // entry point to the rect kernel when MXFP8_RECT_BLK_N=64 and the
         // shape predicate matches. Default build (MXFP8_RECT_BLK_N=128) sees
