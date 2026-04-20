@@ -1,9 +1,9 @@
 # MXFP4 Optimization TODO
 
-**Last update:** 2026-04-20 (R67 — step34pf×knob cross-product LANDED, +4 WINs; step12pf SPLIT failed correctness)
-**Status:** **23/42 WIN, mean ~102.5%** of aiter. R67 added 5 cross-product variants on top of R66's `STEP34_PF_INTERLEAVE` base.
-**Bench harness:** `analysis/fp8_gemm/mi350x/bench_all_42.py` (HipKittens-only, **17 variants**, parallel-GPU)
-**Kernel commits:** 9b83a0e8 (R66 helper) + 3cc7f92a (R67 bench cross-product)
+**Last update:** 2026-04-20 (R68 — triple cross-product LANDED, +3 WINs; step12pf NON-SPLIT iso-harness CLOSED-by-dominance; orphan cleanup -703 LOC)
+**Status:** **26/42 WIN, mean ~103.2%** of aiter. R68 added 6 triple-knob cross-product variants on top of R67's step34pf×single-knob base.
+**Bench harness:** `analysis/fp8_gemm/mi350x/bench_all_42.py` (HipKittens-only, **23 variants**, parallel-GPU)
+**Kernel commits:** 9b83a0e8 (R66 helper) + 3cc7f92a (R67 bench cross-product) + fc0e6ef1 (R68 orphan cleanup -703 LOC) + d0778ba6 (R68 step12pf NON-SPLIT iso harness, dominated) + 830ae4c9 (R68 triple cross-product)
 
 ---
 
@@ -14,40 +14,38 @@
 3. **Compete against `competitor_tflops`** (aiter ASM via Python dispatcher) embedded in `bench_all_42.py`.
 4. **Commit only when there is measurable effect.** Inert scaffolding stays out of git.
 
-## Current standing (R67 verified bench, full sweep)
+## Current standing (R68 verified bench, full sweep)
 
 | Cluster | Shapes | Status |
 |---|---:|---|
-| WIN | 23 | step34pf + 4 cross-product NEW WINs (gm6, unr2) |
-| Boundary close (95-99.5%) | 10 | residue after R67 cross-product; knob ceiling on top of step34pf reached |
-| Boundary mid (90-95%) | 5 | 14336/32768 N or K — needs structural rewrite (axis A Opt-2 or step12pf) |
-| Hard LOSE (<90%) | 4 | 14336x4096x32768, 4096x28672x32768, 4096x32768x128256, 32768x4096x14336 |
+| WIN | 26 | step34pf + R67 single-knob cross-product + R68 triple-knob cross-product NEW WINs (gm6, gm8, gm6_tbv16) |
+| Boundary close (95-99.5%) | ~10 | residue after R68 triple cross-product; gm6_we1 / gb_unr2 / gm8_unr2 untried (R69 candidates) |
+| Boundary mid (90-95%) | ~3 | 32768/14336 K — needs structural rewrite (axis A Opt-2) or quad cross-product |
+| Hard LOSE (<90%) | 3 | 14336×4096×32768 (88.1%), 4096×32768×128256 (86.9%), 4096×28672×32768 (92.0% borderline) |
 
-R67 NEW WINs (4) on top of R66:
-  16384×4096×6144     96.4% → 109.2%   [step34pf_unr2]
-  16384×28672×2048    96.1% → 101.4%   [step34pf_gm6]
-  32768×28672×2048    99.3% → 106.7%   [step34pf_gm6]
-  4096×4096×16384     98.4% → 101.1%   [step34pf]
+R68 NEW WINs (3) on top of R67 (all confirmed in isolated re-bench, GATE 2):
+  28672×4096×8192     97.8% → 100.8%   [step34pf_gm6]            (iso 100.9%)
+  32768×4096×7168     97.6% → 100.7%   [step34pf_gm8]            (iso 101.7% on step34pf_gm6_tbv16)
+  16384×28672×4096    94.3% → 100.1%   [step34pf_gm6_tbv16]      (iso 101.3%, triple-only WIN)
 
-Closest boundary LOSE residue after R67 (R68 candidates):
-  28672×4096×8192     97.8%
-  32768×4096×7168     97.6%
-  14336×32768×4096    97.4%
-  4096×4096×32768     97.4%
-  16384×4096×14336    97.2%
-  6144×4096×16384     96.5%
-  4096×14336×16384    95.7%
-  16384×28672×4096    94.3%
-  4096×32768×6144     93.7%
-  128256×32768×4096   92.6%
-  28672×4096×16384    92.4%
-  4096×32768×28672    91.8%
-  16384×4096×28672    91.8%
-  4096×32768×14336    91.6%
-  4096×32768×128256   87.0%
-  14336×4096×32768    87.2%
-  32768×4096×14336    82.5%
-  4096×28672×32768    82.2%
+R68 big LOSE uplifts (no WIN flip, but knob-ceiling extension demonstrated on hard losers):
+  32768×4096×14336    82.5% → 95.1%   (+12.6pp) [step34pf_gm6_tbv16]
+  4096×28672×32768    82.2% → 92.0%   (+9.8pp)  [step34pf_unr2_tbv16]
+
+Closest boundary LOSE residue after R68 (R69 candidates):
+  14336×32768×4096    ~97.4%   (re-confirm with quad)
+  4096×4096×32768     ~97.4%
+  16384×4096×14336    ~97.2%
+  6144×4096×16384     ~96.5%
+  4096×14336×16384    ~95.7%
+  4096×32768×6144     ~93.7%
+  128256×32768×4096   ~92.6%
+  28672×4096×16384    ~92.4%
+  16384×4096×28672    ~91.8%
+  4096×32768×28672    ~91.8%
+  4096×32768×14336    ~91.6%
+  4096×32768×128256   ~86.9%
+  14336×4096×32768    ~88.1%
 
 ---
 
@@ -111,34 +109,37 @@ R66 BLOCKERS to anticipate:
 
 ---
 
-## R68+ priorities
+## R69+ priorities
 
-R67 LANDED step34pf×knob cross-product with +4 WINs (commit 3cc7f92a). step12pf SPLIT design failed Gate 2 correctness (see closures). Remaining 19 LOSE shapes:
+R68 LANDED triple cross-product with +3 WINs (commit 830ae4c9), orphan cleanup -703 LOC (commit fc0e6ef1), and step12pf NON-SPLIT iso harness (commit d0778ba6, verdict: correctness-SAFE but perf-DOMINATED — closed). Remaining 16 LOSE shapes:
 
-1. **`kpair_64mfma_step12` interleave — NON-SPLIT retry** (R68 candidate, untried):
-   - SPLIT design (a0+bl in step12, a1+br post-step34) FAILED with row-clustered NaNs. Don't repeat.
-   - NON-SPLIT design: put ALL 16 prefetches in step12, 0 in step34 (and remove `emit_pf_tail<0>`). Simpler dataflow (step12 = "issue", step34 = "drain") at cost of operand pool ~150.
-   - Pre-work REQUIRED: build isolated K=64 / PF_DEPTH=1 test to bisect bug before kernel integration. See `project_mxfp4_R67_step12pf_failed.md`.
+1. **Quadruple cross-product** (`step34pf_gm6_tbv16_we1`, `step34pf_gm6_unr2_tbv16`, `step34pf_gb_gm6_unr2`, etc.) — extend the R68 lever further; ~30 min round. R68 demonstrated that triple combos unlocked 3 more WINs after R67 cross-producted single knobs; quad may yield another 1-3.
+2. **Boundary residue at 95-99% (~10 shapes)** — try untried triple combos: `step34pf_gm6_we1`, `step34pf_gb_unr2`, `step34pf_gm8_unr2`, `step34pf_we1_tbv16`. Cheap.
+3. **Axis A Option 2 (full data-flow rewrite — Global→VGPR for A tiles)** — for the 3 hard losers <90%: 14336×4096×32768 (88.1%), 4096×32768×128256 (86.9%), 4096×28672×32768 (92.0% borderline). ~600 LOC. High-risk. Note: 4096×28672×32768 jumped from 82.2% → 92.0% via step34pf_unr2_tbv16, so it may not need axis-A.
+4. **`kpair_64mfma_step12` interleave — NON-SPLIT** (R68 step12pf_nonsplit iso harness): the standalone helper compiles and produces correct output, but in the integrated kernel it is DOMINATED by step34pf+R68 triples on every benched shape. Don't reopen unless we find a shape cluster step34pf can't reach.
+5. **`kpair_64mfma_step12` interleave — SPLIT** (R67 closure): row-clustered NaN, root cause unidentified. Don't reopen without isolated bisect harness.
+6. **Triple/quad knob extensions across other base helpers** (e.g., `gb_gm6_unr2` cluster). Some non-step34pf bases may still have unmined boundary shapes.
+7. **Axis B (MFMA 32×32×64)** — still defer to R71+. R66-R68 confirmed the 4:1:1 schedule was the lever, not the MFMA size.
+8. **Axis C (192×256 tile)** — defer; cross-product unlocked enough 4096×K-large that the motivation is weaker.
 
-2. **Axis A Option 2 (full data-flow rewrite — Global→VGPR for A tiles)** — for the 4 hard losers (<90%): 14336×4096×32768, 4096×28672×32768, 4096×32768×128256, 32768×4096×14336. ~600 LOC. Risk: VGPR pressure, LDS swizzle re-derivation. Bench cluster shapes specifically before committing.
-
-3. **Orphan dead-code cleanup** (R65 Opt-Orphan audit, ~700 LOC removable) — pure clarity gain, no perf. Optional alongside R68 to reduce future agent-search noise.
-
-4. **Triple cross-product (step34pf × 2 knobs)**: e.g., `step34pf_gm6_unr2`, `step34pf_gm8_we1`, `step34pf_tbv16_unr2`. Some boundary residue (e.g., 32768×4096×7168 at 97.6%, 28672×4096×8192 at 97.8%) may cross with stacked knobs. Cheap; ~30 min round.
-
-5. **Axis B (MFMA 32×32×64)** — still defer to R70+. R66/R67 confirmed the 4:1:1 schedule was the lever, not the MFMA size.
-
-6. **Axis C (192×256 tile)** — defer; cross-product unlocked enough 4096×K-large that the motivation is weaker.
-
-## Bench script (R67 working set)
-`bench_all_42.py` variants (17 total):
-  `default | gm6 | gb | gb_gm6 | unr2 | unr16 | gm8 | we1 | tbv16 | unr2_gm6 | gb_unr2 | step34pf | step34pf_gm6 | step34pf_gm8 | step34pf_unr2 | step34pf_we1 | step34pf_tbv16`
-Run: `BENCH_GPUS=0,1,2,3,4,5,6,7 python3 bench_all_42.py` (~10-15 min for build+full sweep with 17 variants).
+## Bench script (R68 working set)
+`bench_all_42.py` variants (23 total):
+  `default | gm6 | gb | gb_gm6 | unr2 | unr16 | gm8 | we1 | tbv16 | unr2_gm6 | gb_unr2 | step34pf | step34pf_gm6 | step34pf_gm8 | step34pf_unr2 | step34pf_we1 | step34pf_tbv16 | step34pf_gm6_unr2 | step34pf_gm8_we1 | step34pf_gm6_tbv16 | step34pf_unr2_tbv16 | step34pf_gb_gm6 | step34pf_we1_unr2`
+Run: `BENCH_GPUS=0,1,2,3,4,5,6,7 python3 bench_all_42.py` (~12-18 min for build+full sweep with 23 variants).
 Single-shape autotune: `python3 bench_all_42.py M N K` picks best variant.
-**Cross-product variants (`step34pf_*`) are autotune-best on 18/42 shapes after R67.**
+Optional env: `BENCH_BUILD_DIR` / `BENCH_WORK_DIR` to isolate parallel runs from the shared `build_all42`/`work_all42` dirs.
+**Cross-product variants (`step34pf_*`) are autotune-best on 21+/42 shapes after R68.**
 
 ## Standing GPU/timing protocol
 - GPUs 0-7 all available on this MI355X box; check with `rocm-smi --showuse` first.
 - Bench result variance: ±2pp on borderline shapes is normal. Boundary WINs (within 1pp of 100%) need re-bench on isolated GPU to confirm.
 - The 16384×4096×28672 shape showed a 43% reading in one full sweep that re-benched at 74.5% — interpret single-cell anomalies as contention noise, not regression.
 - **R64 lesson**: full-sweep contention systematically depresses borderline TFLOPS by 2-4pp vs isolated runs. A WIN must show in BOTH isolated re-bench AND full sweep before being claimed — see R64 closures for three "WINs" that didn't survive.
+
+## R66/R67/R68 lessons learned
+
+- **R66 / R67**: structural change (step34pf) unblocked 7 WINs; cross-product on top added 4 more. Always re-sweep knob axes across new structural axes — don't assume previous knob ranking holds.
+- **R68 lesson 1 (TRIPLE CROSS-PRODUCT VALIDATED)**: another +3 WINs after R66/R67 cross-producted single knobs. Largest gains on `step34pf_gm6_tbv16` and `step34pf_gm8`. Confirms gm6+tbv16 and gm8 alone are strong on tail-shape clusters.
+- **R68 lesson 2 (HARD-LOSER UPLIFT)**: 32768×4096×14336 jumped 82.5% → 95.1% (+12.6pp) and 4096×28672×32768 jumped 82.2% → 92.0% (+9.8pp) via triple combos — knob ceiling on hard losers was NOT yet reached after R67. Don't claim "structural rewrite required" until quad cross-product has been tried.
+- **R68 lesson 3 (step12pf NON-SPLIT closed by dominance)**: the iso harness (commit d0778ba6) proved the standalone helper is correctness-SAFE, but in the integrated kernel it is uniformly DOMINATED by step34pf+R68 triples. Different from R67 SPLIT (correctness-unsafe). Don't reopen unless we find a shape cluster step34pf can't reach.
+- **R68 lesson 4 (orphan cleanup, -703 LOC)**: removed the 15 orphan helpers from R65 audit (commit fc0e6ef1). Pure clarity gain; reduces future agent-search noise.
