@@ -249,7 +249,7 @@ __device__ __forceinline__ void load_b_preshuffle_8(
     for (int i = 0; i < 8; ++i) {
         asm volatile(
             "buffer_load_dwordx4 %0, %1, %2, %3 offen\n"
-            : "=v"(d[i])
+            : "=&v"(d[i])
             : "v"(voff[i]), "s"(b_srd), "s"(k_soffset)
         );
     }
@@ -258,17 +258,22 @@ __device__ __forceinline__ void load_b_preshuffle_8(
 // n_block_start = first n-block index for this half-tile (each n-block = 16 rows)
 // K_bytes_full = K_DIM/2 (total K dimension in bytes)
 //
-// MFMA 16x16x128 FP4 lane mapping (verified by POC):
-//   row = laneid % 16           (n-row within 16-row block)
-//   group = laneid / 16         (0..3)
-//   k_block_local = group / 2   (0 or 1: which 32-byte k_block within BK)
-//   k_phase = group % 2         (0 or 1: which 16-byte half within k_block)
+// Preshuffle format: aiter shuffle_weight(layout=(16,16)):
+//   flat = n_block * 16 * K_bytes + col_group * 256 + n_row * 16 + byte
+//   where col_group ∈ {0..K_bytes/16-1} indexes 16-byte columns.
 //
-// Preshuffle flat offset:
-//   n_block * 16 * K_bytes + k_block * 512 + k_phase * 256 + row * 16
+// TK's LDS path applies a swizzle on ds_read: addr ^ (((addr % 2048) >> 8) << 4)
+// This XORs the 16-byte column group index with (n_row // 2).
+// To match, we apply the same XOR when computing buffer_load voffsets:
+//   swizzled_col_group = original_col_group ^ (row >> 1)
 //
-// voff[0..3] = tile-rows 0..3 at k_phase=0 (k_block_local selects k_block)
-// voff[4..7] = tile-rows 0..3 at k_phase=1
+// MFMA lane mapping:
+//   row = laneid % 16, group = laneid / 16 (0..3)
+//   lo (voff[r]):   original_col_group = group
+//   hi (voff[r+4]): original_col_group = group + 4
+//
+// voff[0..3] = tile-rows 0..3 at lo half (column groups 0..3 → swizzled)
+// voff[4..7] = tile-rows 0..3 at hi half (column groups 4..7 → swizzled)
 __device__ __forceinline__ void compute_b_preshuffle_voffs(
     uint32_t voff[8],
     int n_block_start,
@@ -277,15 +282,21 @@ __device__ __forceinline__ void compute_b_preshuffle_voffs(
     const int laneid = kittens::laneid();
     const int row = laneid % 16;
     const int group = laneid / 16;
-    const int k_block_local = group / 2;
-    const int k_phase = group % 2;
+    const int row_half = row >> 1;  // 0..7: LDS swizzle XOR key
+
+    // Apply TK LDS swizzle: XOR column group index with (row // 2)
+    const uint32_t lo_cg = (uint32_t)(group ^ row_half);        // swizzled col group for lo half
+    const uint32_t hi_cg = (uint32_t)((group + 4) ^ row_half);  // swizzled col group for hi half
+
+    // col_group * 256 + row * 16 gives the offset within one n_block's 2048-byte region
+    const uint32_t lo_kb = lo_cg * 256u + (uint32_t)row * 16u;
+    const uint32_t hi_kb = hi_cg * 256u + (uint32_t)row * 16u;
 
     #pragma unroll
     for (int r = 0; r < 4; ++r) {
         const uint32_t n_base = (uint32_t)(n_block_start + r) * 16u * (uint32_t)K_bytes_full;
-        const uint32_t kb_base = (uint32_t)k_block_local * 512u + (uint32_t)k_phase * 256u + (uint32_t)row * 16u;
-        voff[r]     = n_base + kb_base;
-        voff[r + 4] = n_base + kb_base + 1024u;  // next 2 k_blocks (+2*512)
+        voff[r]     = n_base + lo_kb;
+        voff[r + 4] = n_base + hi_kb;
     }
 }
 
@@ -2156,14 +2167,16 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     fp4_load_st_to_rt(a0_rt, kittens::subtile_inplace<RBM, BK>(A0_db[0], {wm, 0}));
     fp4_intx8_t tA0[4], tBl[4];
 #if BPRESHUFFLE
-    // Load Bl from pre-shuffled global memory directly into VGPRs
+    // BPS prologue: use BASELINE A0 path + buffer_load Bl path
+    // Strictly serialize: first complete A0, then load Bl
     {
-        float4 bl_d0[8];
-        load_b_preshuffle_8(bl_d0, srd_b, bl_voffs, 0);
-        asm volatile("s_waitcnt vmcnt(0)");
-        asm volatile("s_waitcnt lgkmcnt(0)");
+        asm volatile("s_waitcnt lgkmcnt(0)");  // ensure A0 ds_reads from fp4_load_st_to_rt done
         #pragma unroll
         for (int i = 0; i < 4; i++) tA0[i] = fp4_extract_tile(a0_rt, i);
+        // Now A0 is fully extracted. Load Bl from pre-shuffled global.
+        float4 bl_d0[8];
+        load_b_preshuffle_8(bl_d0, srd_b, bl_voffs, 0);
+        asm volatile("s_waitcnt vmcnt(0)");  // wait for Bl buffer_loads
         extract_tile(bl_d0, tBl);
     }
 #else
