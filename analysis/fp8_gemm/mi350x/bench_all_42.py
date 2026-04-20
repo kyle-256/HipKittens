@@ -100,6 +100,16 @@ DEFAULT_VARIANTS = [
     # R63 OPT-1: GM=8 unlocks new WIN on 16384x6144x4096 (99.5% -> 102.2%).
     # Regresses some other shapes (per-shape autotune protects them).
     ("gm8",       _BASE + " -DGROUP_SIZE_M=8"),
+    # R64 OPT-1+4: 3 NEW WINs unlocked via newly-discovered macro switches
+    # and 2-knob combos.
+    #   we1       locks 16384x4096x6144  (98.1% -> 100.6%)  via -DWAVES_PER_EU_1
+    #   tbv16     locks 4096x4096x8192   (98.8% -> 101.3%)  via -DTAIL_BARRIER_VMCNT=16
+    #   unr2_gm6  locks 32768x28672x2048 (99.1% -> 100.3%)  via UNROLL_K=2 + GM=6
+    #   gb_unr2   backup for 16384x4096x6144 (100.2%)
+    ("we1",       _BASE + " -DWAVES_PER_EU_1"),
+    ("tbv16",     _BASE + " -DTAIL_BARRIER_VMCNT=16"),
+    ("unr2_gm6",  _BASE + " -DUNROLL_K=2 -DGROUP_SIZE_M=6"),
+    ("gb_unr2",   _BASE + " -DGLOBAL_B=1 -DUNROLL_K=2"),
 ]
 
 
