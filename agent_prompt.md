@@ -34,6 +34,7 @@ You are the lead agent for an autonomous MXFP4 GEMM optimization session on MI35
 - `UNROLL_K={2,16}` per-shape (R62 — added to bench autotune, 0 new wins from variants alone)
 - `asm_inline` "5084 TFLOPS" reference REVOKED (numerically incorrect)
 - R63 closures: `STEP3_PF_N>8` (static_assert), `STEP3_BARRIER_VMCNT∈{4,12}` (≤0.5pp), `R25C_TAIL_PF_OFF_ITERS` (dead at FUSED=1, crashes at FUSED=0 K=14336), `STEP4_EXTERNAL_BR_PREFETCH` (macro removed), `192×256` tile path (architectural rewrite, defer to R65+)
+- R64 closures: `R50A_AITER_INTERLEAVE` (macro removed in a70e4a15 — re-implementing equals the axis-A inner-loop rewrite anyway), `AGPR_REGS_HINT_192` (neutral/weak), `WAVES_PER_EU_1`+`{GM=8,AGPR192}` combos (regress); R64 isolated boundary "WINs" on 4096x4096x8192 / 16384x4096x6144 / 32768x28672x2048 reverted to LOSE in full sweep (contention noise) — confirm any future WIN in BOTH isolated AND full sweep.
 
 ## Highest-value next axes (R64+)
 1. **Full inner-loop rewrite** matching aiter's 4:1:1 MFMA:buffer_load:ds_read schedule (not a knob — replace `kpair_64mfma_step34` body wholesale, see `project_mxfp4_aiter_disasm_findings.md`)
@@ -41,9 +42,9 @@ You are the lead agent for an autonomous MXFP4 GEMM optimization session on MI35
 3. **192×256 tile path** for 4096×K-large LOSE cluster — defer to R65+ after axis 1 makes the kpair body template-friendly
 
 ## Knob ceiling reached for boundary shapes
-After R62+R63, boundary shapes (95-99.5%) have been swept across:
-GROUP_SIZE_M ∈ {4,6,8}, UNROLL_K ∈ {2,16}, STEP3_PF_N/STEP4_PF_N ∈ {4,8}, STEP3_BARRIER_VMCNT ∈ {4,8,12}, GLOBAL_B ∈ {0,1}.
-1 NEW WIN unlocked in R63 (16384×6144×4096). Remaining 6 boundary shapes need structural changes.
+After R62+R63+R64, boundary shapes (95-99.5%) have been swept across:
+GROUP_SIZE_M ∈ {4,6,8}, UNROLL_K ∈ {2,16}, STEP3_PF_N/STEP4_PF_N ∈ {4,8}, STEP3_BARRIER_VMCNT ∈ {4,8,12}, GLOBAL_B ∈ {0,1}, WAVES_PER_EU_1, TAIL_BARRIER_VMCNT ∈ {8,16}, AGPR_REGS_HINT_192, plus all 2-knob combos thereof.
+R63 unlocked 16384×6144×4096 via gm8 (only NEW WIN since R45B). R64 added autotune coverage (mean +0.5pp) but **no NEW WIN** — boundary "WINs" from isolated runs reverted under full-sweep contention. **Knob ceiling at 12/42 confirmed twice.** Path to >12 requires the inner-loop rewrite (axis A).
 
 ## Standing user commitments
 - Full GitHub push permission (no asking)

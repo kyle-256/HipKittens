@@ -1,8 +1,8 @@
 # MXFP4 Optimization TODO
 
-**Last update:** 2026-04-20 (R63)
-**Status:** 12/42 WIN, mean ~93.1% of aiter (+1 WIN from R62 via `gm8` variant on 16384x6144x4096)
-**Bench harness:** `analysis/fp8_gemm/mi350x/bench_all_42.py` (HipKittens-only, **7 variants**, parallel-GPU)
+**Last update:** 2026-04-20 (R64)
+**Status:** 12/42 WIN, mean ~93.6% of aiter (+0.5pp from R63 via expanded autotune; **no NEW WIN**)
+**Bench harness:** `analysis/fp8_gemm/mi350x/bench_all_42.py` (HipKittens-only, **11 variants**, parallel-GPU)
 
 ---
 
@@ -69,6 +69,10 @@ R63 boundary residue (still LOSE):
 - **`R25C_TAIL_PF_OFF_ITERS` ∈ {1, 2, 4}** (R63): macro is dead at FUSED_STEP34=1 (R63's `_BASE`). At FUSED_STEP34=0 it activates but causes HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION crashes at K=14336. Bug in tail-PF-off path; don't reopen without first fixing the in-flight buffer_load tracking.
 - **`STEP4_EXTERNAL_BR_PREFETCH`** (R63): macro doesn't exist anymore (removed in cleanup commit a70e4a15 / 5405bdb4). Stale comment at line 2516.
 - **`192×256` tile path** (R63 Opt-3 feasibility): NO-GO for now. Architectural rewrite — `BLK=256` is conflated as both M and N at ~30 sites; 10 `kpair_*` asm functions have 4×4 MFMA grid hard-numbered into operand slots; would need ~500-800 LOC parallel asm bodies. Must follow inner-loop rewrite (axis A) so we don't duplicate code we plan to throw away. `224×256` is strictly less feasible (224 is not a multiple of 64 for scale super-group).
+- **`R50A_AITER_INTERLEAVE` macro** (R64): macro was removed in cleanup commit a70e4a15 along with ~250 lines of asm that resurrecting now would be wasted work — the schedule it implemented is the very same one the inner-loop rewrite (axis A) needs to redo from scratch. Don't resurrect; rewrite.
+- **`AGPR_REGS_HINT_192` macro** (R64): neutral/weak across all sweeps — never sole best on any shape. Don't enable as default.
+- **`WAVES_PER_EU_1`+`GM=8` and `WAVES_PER_EU_1`+`AGPR_REGS_HINT_192` combos** (R64): regress on most shapes; the individual `we1` variant is in autotune but the combos add nothing.
+- **R64 isolated boundary "WINs"** (R64): three shapes (4096x4096x8192, 16384x4096x6144, 32768x28672x2048) crossed 100% on isolated re-bench but reverted to LOSE in the full sweep — boundary noise, not algorithmic progress. Don't claim future WINs without ≥3-run isolated confirmation AND a full-sweep confirmation.
 
 ---
 
@@ -78,8 +82,9 @@ R63 boundary residue (still LOSE):
 2. **MFMA 32×32×64** (Axis B) — exploratory; only if Axis A stalls. Different AGPR forwarding chain.
 3. **192×256 tile path** (Axis C) — defer to R65+ AFTER axis A makes the kpair body template-friendly.
 
-## Bench script (R63 working set)
-`bench_all_42.py` variants: `default | gm6 | gb | gb_gm6 | unr2 | unr16 | gm8`
+## Bench script (R64 working set)
+`bench_all_42.py` variants (11 total):
+  `default | gm6 | gb | gb_gm6 | unr2 | unr16 | gm8 | we1 | tbv16 | unr2_gm6 | gb_unr2`
 Run: `BENCH_GPUS=0,1,2,3,4,5,6,7 python3 bench_all_42.py` (~10 min for build+full sweep).
 Single-shape autotune: `python3 bench_all_42.py M N K` picks best variant.
 
@@ -87,3 +92,4 @@ Single-shape autotune: `python3 bench_all_42.py M N K` picks best variant.
 - GPUs 0-7 all available on this MI355X box; check with `rocm-smi --showuse` first.
 - Bench result variance: ±2pp on borderline shapes is normal. Boundary WINs (within 1pp of 100%) need re-bench on isolated GPU to confirm.
 - The 16384×4096×28672 shape showed a 43% reading in one full sweep that re-benched at 74.5% — interpret single-cell anomalies as contention noise, not regression.
+- **R64 lesson**: full-sweep contention systematically depresses borderline TFLOPS by 2-4pp vs isolated runs. A WIN must show in BOTH isolated re-bench AND full sweep before being claimed — see R64 closures for three "WINs" that didn't survive.
