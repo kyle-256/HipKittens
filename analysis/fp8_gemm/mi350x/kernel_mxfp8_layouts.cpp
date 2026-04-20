@@ -186,6 +186,14 @@ using namespace kittens;
 #define MXFP8_CRR_DB_INTERLEAVE_R57E 0
 #endif
 
+// R57F: noinline MMA pair wrappers to create implicit scheduling barriers
+// in the CRR double-buffer K-loop. The noinline attribute generates
+// s_swappc_b64 call instructions that prevent LLVM from reordering
+// global_load across MMA pairs.
+#ifndef MXFP8_CRR_NOINLINE_MMA_R57F
+#define MXFP8_CRR_NOINLINE_MMA_R57F 0
+#endif
+
 #ifndef CRR_INIT0_VMCNT
 #define CRR_INIT0_VMCNT 2
 #endif
@@ -1939,6 +1947,44 @@ __device__ __forceinline__ void crr_mma(
 #else
     mma_AtB(acc, a, b, acc);
 #endif
+}
+
+// R57F: noinline MMA pair wrapper for CRR double-buffer K-loop.
+// The __attribute__((noinline)) creates a call boundary (s_swappc_b64 in ISA)
+// that prevents LLVM from reordering global_load instructions across the MMA
+// pair. This is the same scheduling-barrier mechanism that made Dev D's
+// single-buffer SB_PIPELINE=4 work (+20%), where function-call
+// crr_mma_scaled_from_packs_fixed_phase() naturally prevented reordering.
+// Dev E proved that inline CRR_DO_MMA macros produce byte-identical ISA
+// regardless of source-level load placement (LLVM sees through them).
+__attribute__((noinline)) __device__
+void crr_noinline_mma_pair(
+    rt_fl<RBM, RBN, col_l, rt_16x16_s>& accX,
+    rt_fl<RBM, RBN, col_l, rt_16x16_s>& accY,
+    const A_col_reg& a,
+    const B_col_reg& b0,
+    const B_col_reg& b1)
+{
+    crr_mma(accX, a, b0);
+    crr_mma(accY, a, b1);
+}
+
+// Scaled variant for MXFP8_CRR_FAST_ENABLE path
+template<int A_PACK_COUNT, int B_PACK_COUNT>
+__attribute__((noinline)) __device__
+void crr_noinline_mma_pair_scaled(
+    rt_fl<RBM, RBN, col_l, rt_16x16_s>& accX,
+    rt_fl<RBM, RBN, col_l, rt_16x16_s>& accY,
+    const A_col_reg& a,
+    const B_col_reg& b0,
+    const B_col_reg& b1,
+    const fp8e8m0_4 (&a_packs)[A_PACK_COUNT],
+    const fp8e8m0_4 (&b0_packs)[B_PACK_COUNT],
+    const fp8e8m0_4 (&b1_packs)[B_PACK_COUNT],
+    int k_phase)
+{
+    crr_mma_scaled_from_packs(accX, a, b0, a_packs, b0_packs, k_phase);
+    crr_mma_scaled_from_packs(accY, a, b1, a_packs, b1_packs, k_phase);
 }
 
 __device__ __forceinline__ float load_fp8_scalar(const _gl_fp8& src, int row, int col) {
@@ -5526,6 +5572,115 @@ void gemm_kernel(const layout_globals g) {
             global_load_b(Bs[tic][0], bc*2, k+2);
             global_load_b(Bs[tic][1], bc*2+1, k+2);
             CRR_STEADY_MID_BARRIER();
+
+            load_a(a, As[tic][1], wm);
+            global_load_a(As[tic][0], br*2, k+2);
+            TK_WAIT_VMCNT(CRR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            CRR_MMA_BEGIN();
+            CRR_DO_MMA(cC, a, b0, 1, 0, k);
+            CRR_DO_MMA(cD, a, b1, 1, 1, k);
+            CRR_MMA_END();
+            __builtin_amdgcn_s_barrier();
+#elif MXFP8_CRR_NOINLINE_MMA_R57F == 1
+            // R57F V1: noinline MMA pair wrappers to create scheduling barriers.
+            // The noinline call boundary (s_swappc_b64) prevents LLVM from
+            // reordering global_load instructions across the MMA pairs.
+            // WARNING: causes 784 bytes/lane scratch spill due to call-frame
+            // save/restore of accumulator tiles across noinline boundary.
+            load_b(b0, Bs[tic][0], wn);
+            load_b(b1, Bs[tic][1], wn);
+            load_a(a, As[tic][0], wm);
+            global_load_a(As[toc][1], br*2+1, k+1);
+            TK_WAIT_LGKM(CRR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            CRR_MMA_BEGIN();
+#if MXFP8_CRR_FAST_ENABLE
+            {
+                const int k_phase = k & 1;
+                crr_load_scale_packs(k >> 1);
+                crr_noinline_mma_pair_scaled(cA, cB, a, b0, b1,
+                    crr_a0_scale_packs, crr_b0_scale_packs, crr_b1_scale_packs, k_phase);
+            }
+#else
+            crr_noinline_mma_pair(cA, cB, a, b0, b1);
+#endif
+            CRR_MMA_END();
+
+            // Interleave global loads between the two noinline MMA pair calls.
+            global_load_b(Bs[tic][1], bc*2+1, k+2);
+            global_load_b(Bs[tic][0], bc*2, k+2);
+            CRR_STEADY_MID_BARRIER(); CRR_SCHED_BARRIER();
+
+            load_a(a, As[tic][1], wm);
+            global_load_a(As[tic][0], br*2, k+2);
+            TK_WAIT_VMCNT(CRR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            CRR_MMA_BEGIN();
+#if MXFP8_CRR_FAST_ENABLE
+            {
+                const int k_phase = k & 1;
+                crr_noinline_mma_pair_scaled(cC, cD, a, b0, b1,
+                    crr_a1_scale_packs, crr_b0_scale_packs, crr_b1_scale_packs, k_phase);
+            }
+#else
+            crr_noinline_mma_pair(cC, cD, a, b0, b1);
+#endif
+            CRR_MMA_END();
+            __builtin_amdgcn_s_barrier();
+#elif MXFP8_CRR_NOINLINE_MMA_R57F == 2
+            // R57F V2: asm volatile memory fence between MMA pairs and global loads.
+            // Lighter than noinline (no call frame, no scratch spill) but uses
+            // "memory" clobber to create a compiler scheduling barrier.
+            load_b(b0, Bs[tic][0], wn);
+            load_b(b1, Bs[tic][1], wn);
+            load_a(a, As[tic][0], wm);
+            global_load_a(As[toc][1], br*2+1, k+1);
+            TK_WAIT_LGKM(CRR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            CRR_MMA_BEGIN();
+            CRR_DO_MMA(cA, a, b0, 0, 0, k);
+            CRR_DO_MMA(cB, a, b1, 0, 1, k);
+            CRR_MMA_END();
+
+            // Memory fence: prevent LLVM from reordering loads across this point
+            asm volatile("" ::: "memory");
+            global_load_b(Bs[tic][1], bc*2+1, k+2);
+            global_load_b(Bs[tic][0], bc*2, k+2);
+            asm volatile("" ::: "memory");
+            CRR_STEADY_MID_BARRIER(); CRR_SCHED_BARRIER();
+
+            load_a(a, As[tic][1], wm);
+            global_load_a(As[tic][0], br*2, k+2);
+            TK_WAIT_VMCNT(CRR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            CRR_MMA_BEGIN();
+            CRR_DO_MMA(cC, a, b0, 1, 0, k);
+            CRR_DO_MMA(cD, a, b1, 1, 1, k);
+            CRR_MMA_END();
+            __builtin_amdgcn_s_barrier();
+#elif MXFP8_CRR_NOINLINE_MMA_R57F == 3
+            // R57F V3: sched_barrier(0x8) VMEM-read fence between MMA pairs
+            // and interleaved global loads. Unlike full sched_barrier(0) which
+            // broke determinism (R57B), mask 0x8 only constrains VMEM read
+            // scheduling while allowing VALU/SALU/MFMA/LDS to reorder freely.
+            load_b(b0, Bs[tic][0], wn);
+            load_b(b1, Bs[tic][1], wn);
+            load_a(a, As[tic][0], wm);
+            global_load_a(As[toc][1], br*2+1, k+1);
+            TK_WAIT_LGKM(CRR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            CRR_MMA_BEGIN();
+            CRR_DO_MMA(cA, a, b0, 0, 0, k);
+            CRR_DO_MMA(cB, a, b1, 0, 1, k);
+            CRR_MMA_END();
+
+            // VMEM read scheduling fence: forces global_load placement
+            __builtin_amdgcn_sched_barrier(0x8);
+            global_load_b(Bs[tic][1], bc*2+1, k+2);
+            global_load_b(Bs[tic][0], bc*2, k+2);
+            __builtin_amdgcn_sched_barrier(0x8);
+            CRR_STEADY_MID_BARRIER(); CRR_SCHED_BARRIER();
 
             load_a(a, As[tic][1], wm);
             global_load_a(As[tic][0], br*2, k+2);
