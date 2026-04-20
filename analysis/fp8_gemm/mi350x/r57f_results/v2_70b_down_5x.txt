@@ -1,0 +1,20 @@
+=== V2 run 1 ===
+SNR threshold=48.0 dB, determinism_runs=1
+  Avg time: 2.2687 ms, TFLOPS: 848.14
+    SNR: 49.60 dB (threshold 48.0 dB)
+=== V2 run 2 ===
+SNR threshold=48.0 dB, determinism_runs=1
+  Avg time: 2.2763 ms, TFLOPS: 845.31
+    SNR: 49.60 dB (threshold 48.0 dB)
+=== V2 run 3 ===
+SNR threshold=48.0 dB, determinism_runs=1
+  Avg time: 2.2776 ms, TFLOPS: 844.82
+    SNR: 49.60 dB (threshold 48.0 dB)
+=== V2 run 4 ===
+SNR threshold=48.0 dB, determinism_runs=1
+  Avg time: 2.2758 ms, TFLOPS: 845.49
+    SNR: 49.60 dB (threshold 48.0 dB)
+=== V2 run 5 ===
+SNR threshold=48.0 dB, determinism_runs=1
+  Avg time: 2.2726 ms, TFLOPS: 846.66
+    SNR: 49.60 dB (threshold 48.0 dB)
