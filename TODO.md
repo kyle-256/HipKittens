@@ -1,8 +1,9 @@
 # MXFP4 Optimization TODO
 
-**Last update:** 2026-04-20 (R65 — scoping round, no kernel changes)
-**Status:** 12/42 WIN, mean ~93.6% of aiter. R65 scoped axes A/B/D + orphan audit; produced concrete R66 plan.
-**Bench harness:** `analysis/fp8_gemm/mi350x/bench_all_42.py` (HipKittens-only, **11 variants**, parallel-GPU)
+**Last update:** 2026-04-20 (R66 — axis-A landed, MAJOR breakthrough)
+**Status:** **19/42 WIN, mean ~100.4%** of aiter. R66 implemented axis-A Option 1 (`STEP34_PF_INTERLEAVE`); first time mean crosses 100%.
+**Bench harness:** `analysis/fp8_gemm/mi350x/bench_all_42.py` (HipKittens-only, **12 variants**, parallel-GPU)
+**Kernel commit:** 9b83a0e8
 
 ---
 
@@ -13,24 +14,59 @@
 3. **Compete against `competitor_tflops`** (aiter ASM via Python dispatcher) embedded in `bench_all_42.py`.
 4. **Commit only when there is measurable effect.** Inert scaffolding stays out of git.
 
-## Current standing
+## Current standing (R66 verified bench, independent re-run)
 
 | Cluster | Shapes | Status |
 |---|---:|---|
-| Easy WINs (M-large, K-small) | 12 | already winning (incl. 16384×6144×4096 R63 unlock via gm8) |
-| Boundary (~95% to ~99.5%) | 6 | needs +0.5pp to +5pp; knob-tuning largely exhausted |
-| LOSE: M=4096 K-large | 8 | -7% to -24% gap (root cause: inner-loop scheduling) |
-| LOSE: K-large general | 16 | -10% to -25% gap |
+| WIN | 19 | step34pf wins 18 shapes; gm8 wins 1 (32768×6144×2048) |
+| Boundary close (95-99.5%) | 14 | many within 1-3pp of WIN; knob×step34pf cross-product not yet tried |
+| Boundary mid (90-95%) | 7 | LOSE shapes 14336/32768 N or K — may benefit from step34pf+knob combos |
+| Hard LOSE (<90%) | 2 | 14336x4096x32768 (87.2%), 4096x28672x32768 (82.2%), 4096x32768x14336 (91.6%), 4096x32768x128256 (87.0%), 32768x4096x14336 (82.5%) |
 
-Worst losers (4096×*×K, K≥16384): 67–82% of aiter. These dominate the headline gap.
+R66 verified WIN list (`step34pf` unless noted):
+  16384×6144×2048    111.9%
+  32768×4096×3072    109.6%
+  16384×4096×2048    109.3%
+  16384×4096×3072    108.9%
+  32768×4096×2048    107.7%
+  16384×14336×2048   104.7%
+  32768×14336×2048   104.0%
+  4096×4096×8192     104.0%
+  4096×6144×32768    119.4%
+  4096×14336×8192    102.3%
+  4096×32768×4096    100.7%
+  4096×128256×32768  156.9%
+  6144×4096×8192     104.2%
+  6144×32768×4096    100.9%
+  16384×4096×4096    104.7%
+  16384×4096×7168    105.7%
+  16384×6144×4096    103.7%
+  16384×14336×4096   103.6%
+  32768×6144×2048    103.1%  [gm8]
 
-R63 boundary residue (still LOSE):
-  16384x14336x4096   95.6%   (no variant tried crosses 100%)
-  4096x32768x4096    96.8%   (gm6 best; +0.5pp from R62)
-  16384x28672x2048   96.1%   (gm6 best; -0.2pp noise from R62)
-  4096x4096x8192     98.8%   (gm8 best; +2.4pp from R62 default)
-  16384x4096x6144    98.1%   (unchanged; gb best now)
-  32768x28672x2048   99.1%   (gm6 best; -0.3pp noise from R62)
+Closest boundary LOSE residue (R67 candidates):
+  32768×28672×2048    99.3%
+  4096×4096×16384     98.4%
+  28672×4096×8192     97.8%
+  32768×4096×7168     97.6%
+  14336×32768×4096    97.4%
+  4096×4096×32768     97.4%
+  16384×4096×14336    97.2%
+  6144×4096×16384     96.5%
+  16384×4096×6144     96.4%
+  16384×28672×2048    96.1%
+  4096×14336×16384    95.7%
+  16384×28672×4096    94.3%
+  4096×32768×6144     93.7%
+  128256×32768×4096   92.6%
+  28672×4096×16384    92.4%
+  4096×32768×28672    91.8%
+  16384×4096×28672    91.8%
+  4096×32768×14336    91.6%
+  4096×32768×128256   87.0%
+  14336×4096×32768    87.2%
+  32768×4096×14336    82.5%
+  4096×28672×32768    82.2%
 
 ---
 
@@ -93,19 +129,34 @@ R66 BLOCKERS to anticipate:
 
 ---
 
-## R66+ priorities
+## R67+ priorities
 
-1. **Axis A Option 1 — interleave buffer_loads into kpair_64mfma_step34** (R65 SCOPED, R66 IMPLEMENT). Single helper rewrite, ~250 LOC. See "Axis A" section above for touch points and BLOCKERS. Expected 4-8pp mean uplift, biggest gains on 4096×*×K-large losers (currently 67-82% of aiter).
-2. **Orphan dead-code cleanup** (R65 Opt-Orphan audit, ~700 LOC removable) — pure clarity gain, no perf. Optional; do alongside or after R66 to reduce future agent-search noise.
-3. **Axis A Option 2 (full data-flow rewrite)** — only if Option 1 lands < 4pp mean uplift.
-4. **Axis B (MFMA 32×32×64)** — defer to R70+. Single-helper PoC first, never wholesale.
-5. **Axis C (192×256 tile)** — defer until after Axis A makes kpair body template-friendly.
+R66 LANDED axis-A Option 1 with +6.8pp mean and +7 NEW WINs. The remaining 23 LOSE shapes split into two clusters:
 
-## Bench script (R64 working set)
-`bench_all_42.py` variants (11 total):
-  `default | gm6 | gb | gb_gm6 | unr2 | unr16 | gm8 | we1 | tbv16 | unr2_gm6 | gb_unr2`
+1. **Knob×step34pf cross-product on boundary shapes** (R67 cheap try): the existing autotune knobs (gm6, gm8, gb, unr2, unr16, we1, tbv16, etc.) were tuned ON TOP OF the OLD step34 path. With step34pf as the new base, the same knobs may unlock different shapes. Add 4-6 cross-product variants:
+   - `step34pf_gm6` (-DSTEP34_PF_INTERLEAVE=1 -DGROUP_SIZE_M=6)
+   - `step34pf_gm8` (...)
+   - `step34pf_unr2`, `step34pf_unr16`
+   - `step34pf_we1`
+   - `step34pf_tbv16`
+   Expect 2-5 of the 14 close-boundary shapes to cross WIN. ~30 min round.
+
+2. **Orphan dead-code cleanup** (R65 Opt-Orphan audit, ~700 LOC removable) — pure clarity gain, no perf. Optional; do alongside or after R67 to reduce future agent-search noise.
+
+3. **Axis A Option 2 (full data-flow rewrite — Global→VGPR for A tiles)** — only attempt for the hard losers in 14336×4096×K-large / 32768×4096×K-large / 4096×32768×K-large clusters that didn't budge in R66. ~600 LOC. Risk: VGPR pressure, LDS swizzle re-derivation. Bench cluster shapes specifically before committing.
+
+4. **Axis B (MFMA 32×32×64)** — still defer to R70+. R66 success means the 4:1:1 schedule was the lever, not the MFMA size.
+
+5. **Axis C (192×256 tile)** — defer; the 4096×K-large cluster benefited a lot from step34pf so the original motivation for 192×256 is weaker.
+
+6. **STEP34_PF_INTERLEAVE for kpair_64mfma_step12?** Untried. The Step1+Step2 pair currently uses post-block prefetch too. Symmetric extension may yield another +1-2pp on tail shapes.
+
+## Bench script (R66 working set)
+`bench_all_42.py` variants (12 total):
+  `default | gm6 | gb | gb_gm6 | unr2 | unr16 | gm8 | we1 | tbv16 | unr2_gm6 | gb_unr2 | step34pf`
 Run: `BENCH_GPUS=0,1,2,3,4,5,6,7 python3 bench_all_42.py` (~10 min for build+full sweep).
 Single-shape autotune: `python3 bench_all_42.py M N K` picks best variant.
+**step34pf is autotune-best on 31/42 shapes after R66.**
 
 ## Standing GPU/timing protocol
 - GPUs 0-7 all available on this MI355X box; check with `rocm-smi --showuse` first.
