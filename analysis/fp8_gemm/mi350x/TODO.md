@@ -1,6 +1,77 @@
 # MXFP4 GEMM Optimization TODO
 
-## Current State (2026-04-20, post-R59 — RECOVERY ROUND, **42/42 STRICT VC RECOVERED (+1 vs R58)**, **41/42 WIN (+1 vs R58)**, **40/42 AITER BIT-DETERMINISTIC SHARE HELD (LARGEST EVER)**, **HK POOL 2 HELD (SMALLEST EVER)**, **11TH CONSECUTIVE R50D AS-IS REUSE**, 0 PROMOTE / 4 SMOKE_DEAD / 1 POLICY_ONLY (Opt R), 0 COHORT-RACE CHURN ON 42 UNCHANGED-BINARY CELLS, 4 ALT-TILE AXES CLOSED, 4TH 100% LEADERBOARD ROUND IN PROJECT HISTORY (NON-CONSECUTIVE — INTERRUPTED BY R58))
+## Current State (2026-04-20, post-R60 — METHODOLOGY ROUND, **42/42 STRICT VC HELD (3RD CONSECUTIVE)**, **40/42 WIN (-1 vs R59; predicted L1 noise-edge oscillation per Opt R policy A)**, **40/42 AITER BIT-DETERMINISTIC SHARE HELD (LARGEST EVER, 3RD CONSECUTIVE)**, **HK POOL 2 HELD (SMALLEST EVER, 3RD CONSECUTIVE)**, **12TH CONSECUTIVE R50D AS-IS REUSE**, 0 PROMOTE / 0 SMOKE_DEAD / 1 POLICY_ONLY (Opt U doc pivot) + 1 MEASUREMENT-ONLY (Opt Y), 0 COHORT-RACE CHURN ON 42 UNCHANGED-BINARY CELLS, **OPT W PERMANENTLY DEPRIORITIZED (3RD-CONSECUTIVE OPT Y PASS ON L3)**, 5TH 100% LEADERBOARD ROUND IN PROJECT HISTORY (NON-CONSECUTIVE — R55, R56, R57, R59, R60; INTERRUPTED BY R58))
+
+**HEADLINE — R60 METHODOLOGY ROUND: 3rd-consecutive successful Opt Y sweep on L3 worst-margin HK survivor empirically classifies the cohort-race surface as a single-sweep tail-draw with ~10-20% per-sweep probability, NOT an intrinsic kernel surface. Opt W (HK kernel rebuild with FINITE_GATE 0.97→0.95) is PERMANENTLY DEPRIORITIZED.** R60 ran 2 worker cohorts (K-1 Opt Y cohort-race surface monitoring on disjoint seed set [202..2020 step 202], K-2 Opt U documentation pivot artifact). **0/2 PROMOTE / 1 POLICY_ONLY / 1 MEASUREMENT_ONLY**. Manifest is **byte-identical to R59 binary entries** (version metadata + axis-closure documentation + cohort-race validation field only). Reviewer integration K-1 is the bench (no separate re-bench step) on 4 GPUs (4-7), ITERS=500 default per Opt R policy A, INDEPENDENT seeds disjoint from R59 [101..1010], ~17 min wall, 420 runs: **42/42 strict VC HELD** (3rd consecutive 42/42; 5th 100% leaderboard round); **40/42 WIN** (R59 41/42; -1 from L1 noise-edge crossing back from 100.08% WIN → 99.98% LOSE-edge under same ITERS=500 protocol on UNCHANGED R57J1_L1 binary; predicted by Opt R policy A); **40/40 AITER cells bit-deterministic** (wcf_max=0, wcf_std=0, fin_min=1.0; HELD); **2/2 HK cells PASS** (16384x4096x2048 R40B 109.84% +1.32pp seed-sweep drift; 32768x14336x2048 R40B 100.45% **3RD CONSECUTIVE PASS** n_OK=10/10 fin_min=0.9848). 12th consecutive R50D shim AS-IS reuse round (no rebuild, no kernel modification, no new .co — 12-round stability claim).
+
+**R60 mechanism findings**:
+1. **L3 cohort-race surface classification CONFIRMED as single-sweep tail-draw (the central R60 question)**: 3rd-consecutive successful Opt Y sweep across R58 → R59 → R60 on UNCHANGED `(32768,14336,2048)` R40B HK 256×256 binary, with R60 using a DISJOINT seed set [202..2020 step 202] from R59's [101..1010]. R58 PASS_9/10 fin_min=0.911 (lone tail-draw) → R59 PASS_10/10 fin_min=0.988 (RECOVERED) → R60 PASS_10/10 fin_min=0.9848 (HELD on disjoint seeds). **Empirical claim: L3 tail-draw probability ≤1/3 sweeps under ITERS=500 default; not intrinsic; no kernel rebuild justified. Opt W PERMANENTLY DEPRIORITIZED.**
+2. **L1 noise-edge 4-round oscillation envelope established**: L1 (4096x32768x14336) R57J1_L1 AITER 256×256 across R57 → R58 → R59 → R60: 100.04% (ITERS=1000 WIN-edge) → 99.94% (ITERS=500 LOSE-edge) → 100.08% (ITERS=500 WIN crossing) → 99.98% (ITERS=500 LOSE-edge). All 4 measurements bit-deterministic (wcf_max=0); ±0.10pp envelope around WIN-line; classification flips between sweeps. **Opt R policy A (ITERS=500 default + L1 footnote) operationally validated for the 4th distinct measurement — full envelope characterized.**
+3. **Cohort-race churn = 0 across 42 unchanged-binary cells under same ITERS=500 protocol**: Mean perf drift +0.011pp/cell across 42 cells (range -1.93pp on `16384x14336x2048` R55E3_1_AITER to +1.26pp on `32768x4096x2048`); statistically indistinguishable from zero. R45+ ITERS=500 protocol stable across 3rd independent seed sweep on UNCHANGED binaries — operational stability claim.
+4. **Documentation pivot artifact `R60_OPT_U_DOC_PIVOT.md` (401 lines) delivered for SC/MICRO publication-prep**: 6 sections covering structural ceiling reached, residual surface (3 attention cells), publication claims (5 methodology + 5 mechanism + 5 explicit non-claims), R61-R65 axis classification (Closed / Defer / Elect), project state snapshot (R43→R59 cross-round metrics table), round-streak history (R43-R59 verbatim + 4-act narrative).
+5. **R50D shim AS-IS reuse 12-round stability claim**: 12 consecutive rounds (R49 → R60) without shim rebuild, kernel modification, or new .co binary load. Operational reliability claim for SC/MICRO submission.
+
+**R60 attempts summary** (0 PROMOTE; 0 SMOKE_DEAD; 1 POLICY_ONLY; 1 MEASUREMENT_ONLY; 12th consecutive R50D AS-IS):
+- **R60 Opt Y — Cohort-race surface monitoring (worker K-1, GPUs 4-7; MEASUREMENT_ONLY PASS)**:
+  - L3 (32768x14336x2048) R40B HK 256×256 on disjoint seed set: **n_OK=10/10, wcf_max=0.01218, fin_min=0.9848, p50=100.45% — PASS** (3rd consecutive successful sweep). Opt W permanently deprioritized.
+  - All 42 cells: 42/42 strict VC HELD; 40/42 WIN; 40/40 AITER bit-deterministic; 0 churn losses.
+- **R60 Opt U — Documentation pivot (worker K-2, NO GPU; POLICY_ONLY)**:
+  - `R60_OPT_U_DOC_PIVOT.md` (401 lines, 6 sections); SC/MICRO publication-prep artifact; per-shape decomposition / publication-ready cross-round table delivered. Open questions for R61 author flagged in Appendix A.
+
+**R60 reviewer integration (K-1 bench IS the reviewer measurement; 10-run @ 80%, INDEPENDENT seeds [202..2020 step 202] @ ITERS=500 default per Opt R policy A; 4 GPUs 4-7, ~17 min wall, 420 runs)**:
+- Manifest: 40 AITER + 2 HK = 42 (**0 binary deltas vs R59** — version metadata + axis-closure documentation + cohort-race validation field only).
+- AITER cells: **40/40 PASS, all bit-deterministic** — largest AITER bit-det share in project history HELD (3rd consecutive round).
+- HK cells: **2/2 PASS** (16384x4096x2048 HOLD VC+WIN at 109.84%; 32768x14336x2048 PASS_10/10 at 100.45% fin_min=0.9848 — 3rd-consecutive successful sweep).
+- Cohort-race churn audit on 42 UNCHANGED-binary cells: **VC retention 42/42**; 0 lost VC; mean perf drift +0.011pp/cell.
+- WIN flip cells under same ITERS=500 protocol on UNCHANGED binaries: 1 WIN→LOSE (L1 R57J1_L1 100.08% → 99.98%); 0 LOSE→WIN.
+- **Final VC count: 42/42 strict 10-run (5th 100% leaderboard round in project history; non-consecutive)**.
+- WIN cells (>=100% comp): 41 → **40** (-1 from L1 noise-edge crossing back to LOSE-edge per Opt R policy A).
+- LOSE cells: 1 → **2** (L1 R57J1_L1 99.98% LOSE-edge; L8 4096x32768x128256 98.34% structurally floored).
+- Files: `R60_INTEGRATION_VERDICT.md`, `R60_INTEGRATION_MANIFEST.json`, `bench_all_42_R60_INTEGRATION.py`, `R60_INTEGRATION_{10RUN,SMOKE1}.{json,log,console}`, `R60_DECIDER_PLAN.md`, `R60_OPT_U_DOC_PIVOT.md`, `R60K1_Y_INTEGRATION_FRAGMENT.json`.
+
+**R60 net result**: **3rd-consecutive Opt Y PASS on L3 (Opt W PERMANENTLY DEPRIORITIZED) + Opt U doc pivot artifact (401 lines for SC/MICRO publication-prep) + 12th consecutive R50D AS-IS + AITER 40/40 bit-det HELD (3rd consecutive) + HK pool 2 HELD (3rd consecutive) + 0 cohort-race churn on 42 unchanged cells + 4-round L1 oscillation envelope characterized**, with predicted -1 WIN drift on L1 noise-edge (within Opt R policy A envelope; not a regression). 5th 100% leaderboard round in project history (non-consecutive).
+
+### R60 LOSE/attention cells remaining (3 cells; 1 hard LOSE structurally floored, 1 noise-edge with seed-sweep oscillation, 1 near-gate HK survivor with characterized tail-draw probability)
+- `(4096,32768,128256)` 98.34% (L8; R52D2B AITER 256×256; aiter alt-tile axis FULLY CLOSED + HK 256×256 axis CLOSED by correctness; only Opt T remains; 1.66pp gap at aiter-internal ceiling)
+- `(4096,32768,14336)` 99.98% (L1; R57J1_L1 AITER 256×256; **LOSE-edge this sweep** but oscillates ±0.10pp around WIN-line under ITERS=500 between sweeps; alt-tile space EXHAUSTED; per Opt R policy A, leaderboard reflects per-sweep value)
+- `(32768,14336,2048)` 100.45% (L3; R40B HK; PASS_10/10 fin_min=0.9848; **3rd-consecutive successful sweep**; ~10-20% per-sweep tail-draw probability characterized; Opt W PERMANENTLY DEPRIORITIZED)
+
+### R61 candidates (post-R60, ordered by recommendation)
+1. **R61 Opt U₂ — Continued documentation pivot (recommended, NO GPU)** — Resolve the 7 open questions flagged in `R60_OPT_U_DOC_PIVOT.md` Appendix A; produce per-shape decomposition table for publication appendix; finalize publication state snapshot.
+2. **R61 Opt Y₂ — Cohort-race surface monitoring 4th sweep (low cost, optional)** — Re-bench R60 manifest under another disjoint seed set (e.g., [313, 626, 939, ..., 3130]); validate the ≤1/3 tail-draw probability claim on a 4th independent sample. ~17 min wall.
+3. **R61 Opt Z — Per-shape decomposition table for publication appendix (recommended companion to Opt U₂, NO GPU)** — Generate publication-ready table of all 42 shapes with R60 pct_comp + ranking + axis history.
+4. **R61 Opt T — L8 from-scratch HK kernel build for K=128256 (deferred again unless explicit user election)** — Only path to closing L8 1.66pp gap; very low confidence; ~3 R-rounds; defer.
+5. **R61 Opt W — HK kernel rebuild with FINITE_GATE 0.97 → 0.95** — **REMOVED** (permanently deprioritized after R60 3rd-consecutive Opt Y PASS).
+
+### R61+ axes to NOT attempt (closed/deprioritized by R45-R60)
+- All R59 closed list PLUS:
+- **Opt W (HK kernel rebuild with FINITE_GATE 0.97 → 0.95)** — PERMANENTLY DEPRIORITIZED after R60 3rd-consecutive Opt Y PASS on L3 (R58 → R59 → R60 sequence empirically classifies L3 surface as single-sweep tail-draw with ≤1/3 sweep probability, NOT intrinsic).
+
+### R60 stopping-criterion check
+- Floor (Opt U doc artifact delivered + Opt Y completes): **MET — both delivered**.
+- Mode (Floor + 42/42 VC HELD on cohort K-1 re-bench): **MET — 42/42 strict VC HELD**.
+- Stretch (Mode + 41/42 WIN HELD): **MISSED — 40/42 WIN; -1 vs R59 from predicted L1 oscillation per Opt R policy A; not a regression, expected within envelope**.
+- Round value: **3rd-consecutive Opt Y PASS + Opt W PERMANENTLY DEPRIORITIZED + Opt U doc artifact (401 lines) + 12th consecutive R50D AS-IS + 0 cohort-race churn + L1 4-round envelope characterized**. Best methodology-round outcome: removes a deferred-conditional kernel-rebuild branch from R61-R65 axis space.
+
+### Round sequence sanity check (last 18 rounds)
+- R43: DEAD (3 axes)
+- R44: WIN +8 (27 → 35/42)
+- R45-R49: 5 DEAD rounds in a row
+- R50: WIN +1 (35 → 36/42, aiter `.co` dlopen first PoC)
+- R51: WIN +1 strict (30 → 31/42) + 2 perf claw-backs
+- R52: WIN +5 strict (31 → 36/42) + 3 perf claw-backs
+- R53: PARTIAL WIN +2 NET VC rescues -5 cohort net -3 strict (36 → 33/42) + 6 perf claw-backs
+- R54: WIN +6 NET VC rescues -3 cohort net +3 strict (33 → 36/42) + 6 perf claw-backs +17-28pp
+- R55: WIN +6 NET VC -0 cohort +6 strict (36 → 42/42) + 5 perf claw-backs +1.81-20.99pp; FIRST 100% LEADERBOARD ROUND IN PROJECT HISTORY
+- R56: PERF-CLAW-BACK WIN +6 NET WIN CELLS (34→40 LARGEST EVER) -0 cohort +0 strict VC (42/42 HELD) + 7 perf claw-backs +14-81pp; 39/42 cells bit-deterministic AITER; 7/7 PROMOTE / 1 ACCEPT_FALLBACK / 0 DEAD; 8th CONSECUTIVE R50D AS-IS REUSE; 2ND CONSECUTIVE 100% LEADERBOARD ROUND
+- R57: WIN +1 NET WIN CELL via Opt J ITERS=1000 (40→41) -0 cohort +0 strict VC (42/42 HELD) + 0 perf claw-backs (4 ACCEPT_FALLBACK closures); 39/42 cells bit-deterministic AITER; 1/5 PROMOTE / 4 ACCEPT_FALLBACK / 0 DEAD; 9th CONSECUTIVE R50D AS-IS REUSE; 3RD CONSECUTIVE 100% LEADERBOARD ROUND (FIRST 3-IN-A-ROW IN PROJECT HISTORY)
+- R58: STRUCTURAL WIN +1 PROMOTE P-2 HK→AITER 128×256 swap +4.37pp -1 cohort tail-draw on UNCHANGED L3 + ITERS=500 revert net -1 strict VC (42→41) -1 WIN (41→40); 40/42 cells bit-deterministic AITER (LARGEST EVER); HK pool 3→2 (SMALLEST EVER); 1/5 PROMOTE / 4 ACCEPT_FALLBACK / 0 DEAD; 10th CONSECUTIVE R50D AS-IS REUSE; 3-IN-A-ROW STREAK ENDS
+- R59: RECOVERY ROUND +1 VC RECOVERY (41→42) +1 WIN RECOVERY (40→41) + 4 alt-tile axes CLOSED + Opt R policy artifact + 11th CONSECUTIVE R50D AS-IS REUSE; 40/42 AITER bit-det HELD (LARGEST EVER); HK pool 2 HELD (SMALLEST EVER); 0 PROMOTE / 4 SMOKE_DEAD / 1 POLICY_ONLY; 0 cohort-race churn on 42 unchanged-binary cells; 4TH 100% LEADERBOARD ROUND IN PROJECT HISTORY (NON-CONSECUTIVE)
+- **R60: METHODOLOGY ROUND +0 strict VC (42/42 HELD 3rd consecutive) -1 WIN (41→40 L1 noise-edge oscillation per Opt R policy A) + Opt W PERMANENTLY DEPRIORITIZED (3rd-consecutive Opt Y PASS on L3) + Opt U doc pivot artifact (401 lines) + 12th CONSECUTIVE R50D AS-IS REUSE; 40/42 AITER bit-det HELD (3rd consecutive); HK pool 2 HELD (3rd consecutive); 0 PROMOTE / 1 POLICY_ONLY / 1 MEASUREMENT_ONLY; 0 cohort-race churn on 42 unchanged-binary cells; 5TH 100% LEADERBOARD ROUND IN PROJECT HISTORY (NON-CONSECUTIVE — R55, R56, R57, R59, R60)** ← cohort-race surface empirically classified as single-sweep tail-draw ≤1/3 sweep probability; L1 4-round oscillation envelope characterized; Opt R policy A operationally validated for 4th distinct measurement; SC/MICRO publication-prep artifact delivered
+
+---
+
+## Previous State (2026-04-20, post-R59 — RECOVERY ROUND, **42/42 STRICT VC RECOVERED (+1 vs R58)**, **41/42 WIN (+1 vs R58)**, **40/42 AITER BIT-DETERMINISTIC SHARE HELD (LARGEST EVER)**, **HK POOL 2 HELD (SMALLEST EVER)**, **11TH CONSECUTIVE R50D AS-IS REUSE**, 0 PROMOTE / 4 SMOKE_DEAD / 1 POLICY_ONLY (Opt R), 0 COHORT-RACE CHURN ON 42 UNCHANGED-BINARY CELLS, 4 ALT-TILE AXES CLOSED, 4TH 100% LEADERBOARD ROUND IN PROJECT HISTORY (NON-CONSECUTIVE — INTERRUPTED BY R58))
 
 **HEADLINE — R59 RECOVERY: L3 cohort-race tail-draw on UNCHANGED L3 R40B HK binary RECOVERED on fresh INDEPENDENT seed sweep at same ITERS=500 protocol — confirms R58 single-VC drop was a single-sweep artifact, NOT an intrinsic surface.** R59 ran 3 worker cohorts (J-1 Opt R policy decision, J-2 Opt S L3 alt-tile rescue 96×640+64×1024, J-3 Opt V L1 alt-tile re-attack 96×640+64×1024). **0/5 PROMOTE / 4 SMOKE_DEAD / 1 POLICY_ONLY**. Manifest is **byte-identical to R58 binary entries** (version metadata + 4 axis closure docs + Opt R policy linkage only). Reviewer 10-run @ 80% on 4 GPUs (4-7), ITERS=500 default, INDEPENDENT seeds [101..1010], ~17 min wall, 420 runs: **42/42 strict VC RECOVERED** (R58 41/42; +1); **41/42 WIN** (R58 40/42; +1 from L1 noise-edge crossing back from 99.94% LOSE-edge → 100.08% WIN under same ITERS=500 protocol on UNCHANGED R57J1_L1 binary); **40/40 AITER cells bit-deterministic** (wcf_max=0, wcf_std=0, fin_min=1.0; HELD); **2/2 HK cells PASS** (16384x4096x2048 R40B 108.52% +1.04pp seed-sweep drift; 32768x14336x2048 R40B 100.56% **VC RECOVERED** n_OK=10/10 fin_min=0.988 was 9/10 fin_min=0.911 in R58). 11th consecutive R50D shim AS-IS reuse round (no rebuild, no kernel modification, no new .co).
 

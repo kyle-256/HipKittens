@@ -1,0 +1,11 @@
+R60 INTEGRATION bench: 42 shapes, runs=1, GPUs=[4, 5, 6, 7]
+  warmup=200, iters=500, trim=0.1, seeds=[202]
+  gates: snr_med>=10.0dB, wcf<0.02, fin>=0.97
+  promote rule: n_OK>=1/1 AND wcf_max<0.02 AND wcf_std<0.01 AND fin_min>=0.97
+
+[run1/1] seed=202 elapsed=1.7 min
+
+=== R60 INTEGRATION SUMMARY ===
+Verified-correct (n_OK>=1/1): 42/42
+WIN (>=100% comp): 40/42
+Output: /shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/R60_INTEGRATION_SMOKE1.json

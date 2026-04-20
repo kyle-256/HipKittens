@@ -1,0 +1,29 @@
+R60 INTEGRATION bench: 42 shapes, runs=10, GPUs=[4, 5, 6, 7]
+  warmup=200, iters=500, trim=0.1, seeds=[202, 404, 606, 808, 1010, 1212, 1414, 1616, 1818, 2020]
+  gates: snr_med>=10.0dB, wcf<0.02, fin>=0.97
+  promote rule: n_OK>=8/10 AND wcf_max<0.02 AND wcf_std<0.01 AND fin_min>=0.97
+
+[run1/10] seed=202 elapsed=1.7 min
+
+[run2/10] seed=404 elapsed=1.7 min
+
+[run3/10] seed=606 elapsed=1.7 min
+
+[run4/10] seed=808 elapsed=1.7 min
+
+[run5/10] seed=1010 elapsed=1.7 min
+
+[run6/10] seed=1212 elapsed=1.7 min
+
+[run7/10] seed=1414 elapsed=1.7 min
+
+[run8/10] seed=1616 elapsed=1.7 min
+
+[run9/10] seed=1818 elapsed=1.7 min
+
+[run10/10] seed=2020 elapsed=1.7 min
+
+=== R60 INTEGRATION SUMMARY ===
+Verified-correct (n_OK>=8/10): 42/42
+WIN (>=100% comp): 40/42
+Output: /shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/R60_INTEGRATION_10RUN.json
