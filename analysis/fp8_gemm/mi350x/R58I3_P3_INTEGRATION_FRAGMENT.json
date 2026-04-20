@@ -1,0 +1,38 @@
+{
+  "round": "R58",
+  "opt": "P",
+  "cohort": "I-3",
+  "cell_label": "P-3",
+  "shape": [32768, 14336, 2048],
+  "current_baseline": {
+    "source": "R40B_HK",
+    "tile": [256, 256],
+    "pct_comp": 100.53
+  },
+  "candidate": {
+    "kind": "AITER_co",
+    "so_path_or_co_path": "/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_128x256.co",
+    "kernel_name": "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_128x256E",
+    "grid": {"gdx_formula": "ceil(M/128)", "gdy_formula": "ceil(N/256)", "gdz": 1, "bdx": 256},
+    "tile": [128, 256]
+  },
+  "shim_so": "build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so",
+  "shim_rebuild_required": false,
+  "smoke_5seed": {
+    "seeds": [101],
+    "warmup": 200,
+    "iters": 500,
+    "trim_frac": 0.10,
+    "n_OK": 1,
+    "pct_comp": 75.49,
+    "tflops": 2529.9,
+    "fin_min": 1.0,
+    "wcf_max": 0.0,
+    "snr_med_db": 55.52
+  },
+  "smoke_decision": "STOP_ACCEPT_FALLBACK",
+  "ten_run": null,
+  "perf_delta_pp": -25.04,
+  "verdict": "ACCEPT_FALLBACK",
+  "verdict_reason": "SMOKE 75.49% catastrophically below threshold 101.53% (HK 100.53 + 1.0pp); -25.04pp from HK and triggers SMOKE-DEAD STOP rule (HK_pct - 5.0pp). 128x256 wholly inadequate for the M=32768/N=14336 grid (likely insufficient grid coverage / wave occupancy). Keep R40B HK baseline; document axis closure."
+}

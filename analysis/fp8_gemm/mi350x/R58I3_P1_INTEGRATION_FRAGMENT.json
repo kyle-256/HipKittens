@@ -1,0 +1,38 @@
+{
+  "round": "R58",
+  "opt": "P",
+  "cohort": "I-3",
+  "cell_label": "P-1",
+  "shape": [16384, 4096, 2048],
+  "current_baseline": {
+    "source": "R40B_HK",
+    "tile": [256, 256],
+    "pct_comp": 109.57
+  },
+  "candidate": {
+    "kind": "AITER_co",
+    "so_path_or_co_path": "/shared_nfs/kyle/test/aiter/hsa/gfx950/f4gemm/f4gemm_bf16_per1x32Fp4_BpreShuffle_128x256.co",
+    "kernel_name": "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_128x256E",
+    "grid": {"gdx_formula": "ceil(M/128)", "gdy_formula": "ceil(N/256)", "gdz": 1, "bdx": 256},
+    "tile": [128, 256]
+  },
+  "shim_so": "build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so",
+  "shim_rebuild_required": false,
+  "smoke_5seed": {
+    "seeds": [101],
+    "warmup": 200,
+    "iters": 500,
+    "trim_frac": 0.10,
+    "n_OK": 1,
+    "pct_comp": 105.89,
+    "tflops": 3171.4,
+    "fin_min": 1.0,
+    "wcf_max": 0.0,
+    "snr_med_db": 55.52
+  },
+  "smoke_decision": "STOP_ACCEPT_FALLBACK",
+  "ten_run": null,
+  "perf_delta_pp": -3.68,
+  "verdict": "ACCEPT_FALLBACK",
+  "verdict_reason": "SMOKE 105.89% < threshold 110.57% (HK 109.57 + 1.0pp). 128x256 alt-tile underperforms HK 256x256 baseline by -3.68pp. D-3A-1 STOP rule triggered. Keep R40B HK baseline; document axis closure for this cell."
+}

@@ -1,6 +1,82 @@
 # MXFP4 GEMM Optimization TODO
 
-## Current State (2026-04-19, post-R57 — WIN +1 NET WIN CELL via Opt J ITERS=1000, **42/42 STRICT VC HELD FOR 3RD CONSECUTIVE ROUND**, **41/42 WIN CELLS (40→41)**, 1/5 PROMOTE / 4 ACCEPT_FALLBACK / 0 DEAD, 9TH CONSECUTIVE R50D AS-IS REUSE, 0 COHORT-RACE CHURN, ONLY 1 LOSE CELL REMAINS (L8 97.75% — AITER ALT-TILE AXIS FULLY CLOSED))
+## Current State (2026-04-19, post-R58 — WIN 1 PROMOTE STRUCTURAL P-2 HK→AITER 128×256 SWAP +4.37pp, **40/42 AITER BIT-DETERMINISTIC SHARE (LARGEST EVER)**, **HK POOL 3→2 (SMALLEST EVER)**, **10TH CONSECUTIVE R50D AS-IS REUSE**, 41/42 STRICT VC (3-IN-A-ROW 100% LEADERBOARD STREAK ENDED; 1 cohort-race tail-draw on UNCHANGED L3 R40B HK predicted by R57 fin_min=0.9847 + R58 Opt N), ITERS=500 DEFAULT REVERTED FROM R57 ONE-TIME ITERS=1000)
+
+**HEADLINE — R58 STRUCTURAL WIN: P-2 HK→AITER 128×256 swap delivers +4.37pp perf claw-back AND converts the only mid-margin Opt N dropper to perfect bit-determinism.** R58 attacked the only LOSE cell L8 (Opt O HK probe), 3 HK survivors via 128×256 alt-tile (Opt P), AND ran a methodology cohort tightening the strict-VC gate (Opt N analysis-only). **1/5 PROMOTE / 4 ACCEPT_FALLBACK / 0 DEAD**. The 1 PROMOTE was I-3 Opt P P-2: `(16384,4096,3072)` HK R40B 103.25% → AITER 128×256 **107.62%** at reviewer (+4.37pp; n_OK=10/10, wcf_max=0, fin_min=1.0 — perfect bit-determinism). Worker reported 106.75%; reviewer p50 lands +0.87pp higher. **AITER share 39→40 (largest in project history)**; **HK pool 3→2 (smallest in project history)**; the surviving HK cells are `16384x4096x2048` (107.48% HOLD VC+WIN) and `32768x14336x2048` (100.49% numerically WIN but VC-flipped at this ITERS). 4 ACCEPT_FALLBACK: I-1 Opt N (analysis-only, 40/42 pass tightened gate, recommendation = do NOT adopt as default); I-2 Opt O L8 HK probe (BOTH R40B + R37 fallback WRONG_OUTPUT fin=0.78-0.80 wcf=0.07-0.13 — they're in the well-known "17% deterministic-wrong cohort" never patched for K=128256; HK 256×256 axis on L8 K=128256 CLOSED); I-3 Opt P P-1 (16384x4096x2048 128×256 SMOKE 105.89%, -3.68pp vs HK; D-3A-1 STOP); I-3 Opt P P-3 (32768x14336x2048 128×256 SMOKE 75.49%, -25.04pp catastrophic; STOP_DEAD). The 4-in-a-row 100% leaderboard streak ENDS but cohort-race surface PERMANENTLY shrinks 3→1 cell. 10th consecutive R50D shim AS-IS reuse round.
+
+**R58 mechanism findings**:
+1. **P-2 mechanism (Opt P PROMOTE)**: HK R40B 256×256 cohort-race intensity is meaningful at (M=16384, N=4096, K=3072) but aiter 128×256 (eff=85.3) holds end-to-end perf — single swap delivers +4.37pp perf AND wcf_max 0.0134→0 AND fin_min 0.9955→1.0. **PROMOTE found in axis the decider rated "low confidence"** — supports principle that bounded-cost axis-closure probes are worth running.
+2. **HK 256×256 axis on L8 K=128256 CLOSED by correctness (Opt O)**: BOTH R40B (build_R40B/) and R37 (build_R37/) HK candidates produce WRONG_OUTPUT (fin=0.78-0.80, wcf=0.07-0.13). The R39A TAIL_SCALE_CLAMP / R44A back-edge drain / R44D FINITE_GATE fixes were NEVER ported into the K=128256 build — explains why L8 is structurally stuck. R59+ cannot use existing HK binaries; would require a from-scratch K=128256 HK build with all post-R39 correctness fixes ported in.
+3. **128×256 axis closed for 2 of 3 HK cells (Opt P P-1, P-3)**: P-1 (M=16384, N=4096, K=2048) -3.68pp; P-3 (M=32768, N=14336, K=2048) -25.04pp catastrophic. Combined with R57 H-2 192×256 closure, the alt-tile space for HK kept-cell pool is largely exhausted for K=2048.
+4. **Opt N gate tightening informational delivered (analysis-only)**: 40/42 pass tightened gate (n_OK≥9/10, wcf_max<0.01, fin_min≥0.99); 2 droppers are HK survivors `16384x4096x3072` (now eliminated by P-2 PROMOTE) and `32768x14336x2048` (the lone R58 VC-flipper). Recommendation: KEEP R45+ default as canonical; carry Opt N as informational secondary gate. Post-R58 Opt N attention list = 1 cell.
+5. **ITERS=500 revert effects predicted by R57 verdict**: L1 (R57J1) 100.04% → 99.94% (LOSE-edge re-emergence; predicted in R57 verdict §"ITERS=1000 protocol observation"); HK survivors' wider trim distribution shifts mean -1 to -2pp (16384x4096x2048 109.57→107.48%); fin_min on `32768x14336x2048` 0.9847 → 0.911 (under 0.97 gate; produces VC flip). **L3 VC drop is COHORT-RACE TAIL-DRAW on UNCHANGED binary, NOT a kernel regression.** REVERT was considered but does NOT apply — P-2 swap candidate strictly passes; L3 is governed by ITERS revert on a different (unchanged) cell.
+
+**R58 attempts summary** (1 PROMOTE; 4 ACCEPT_FALLBACK; 10th consecutive R50D AS-IS):
+- **R58 Opt N — Gate tightening pilot, analysis-only (worker I-1, NO GPU)**:
+  - Re-classify R57_INTEGRATION_10RUN.json under (n_OK≥9, wcf_max<0.01, fin_min≥0.99): 40/42 pass; 2 HK survivors drop on wcf_max tail (`16384x4096x3072`, `32768x14336x2048`); 0 AITER drops (perfect bit-determinism). **Recommendation: do NOT adopt; keep informational.**
+- **R58 Opt O — L8 HK kernel probe (worker I-2, GPUs 0-1, 0/2 PROMOTE 2 ACCEPT_FALLBACK)**:
+  - O-1 `(4096,32768,128256)` HK R40B 256×256: WRONG_OUTPUT fin=0.804 wcf=0.128 SNR=36.25dB. **ACCEPT_FALLBACK (correctness gate)**.
+  - O-1b same shape HK R37 256×256 memc fallback: WRONG_OUTPUT fin=0.775 wcf=0.066 SNR=31.79dB. **ACCEPT_FALLBACK**. **HK 256×256 axis on L8 K=128256 CLOSED by correctness**.
+- **R58 Opt P — 128×256 alt-tile probe on 3 HK survivors (worker I-3, GPUs 2-3, 1/3 PROMOTE 2 ACCEPT_FALLBACK)**:
+  - P-1 `(16384,4096,2048)`: HK 109.57% vs 128×256 SMOKE 105.89% (-3.68pp). **ACCEPT_FALLBACK (D-3A-1)**.
+  - **P-2 `(16384,4096,3072)`: HK R40B 103.25% → AITER 128×256 SMOKE 106.35% (+3.10pp); 10-run 106.75% (+3.50pp), n_OK=10/10, wcf_max=0, fin_min=1.0. PROMOTE.**
+  - P-3 `(32768,14336,2048)`: HK 100.53% vs 128×256 SMOKE 75.49% (-25.04pp catastrophic). **ACCEPT_FALLBACK (STOP_DEAD)**.
+
+The 1 PROMOTE worker AS-IS reuses **EXISTING R50D shim** at `build_R50D/R50D_aiter_shim.cpython-310-x86_64-linux-gnu.so` with new `tile_M=128, tile_N=256` kwargs + `f4gemm_bf16_per1x32Fp4_BpreShuffle_128x256.co`. NO shim rebuild. Kernel UNCHANGED.
+
+**R58 reviewer integration (10-run @ 80%, INDEPENDENT seeds [101..1010] @ ITERS=500 DEFAULT REVERTED; 4 GPUs 4-7, ~17 min wall, 420 runs)**:
+- Manifest: 40 AITER + 2 HK = 42 (1 binary delta vs R57: P-2 swap; only swap, no other manifest changes).
+- All 1 R58 PROMOTE candidate RE-VERIFIED 10/10 PASS at reviewer with perfect bit-determinism (wcf_max=0, wcf_std=0, fin_min=1.0).
+- AITER cells: **40/40 PASS (100% bit-deterministic)** — largest AITER bit-det share in project history.
+- HK cells: **1/2 PASS** (`16384x4096x2048` HOLD VC+WIN at 107.48%; `32768x14336x2048` VC-flipped at n_OK=9/10 fin_min=0.911 but numerically WIN at 100.49%).
+- Cohort-race churn audit on 41 UNCHANGED-binary cells: **VC retention 40/41**; mean perf drift +0.001pp on 39 unchanged AITER cells (range -1.09 to +1.15pp), -1.06pp on 2 unchanged HK cells (predicted ITERS=500 wider-trim effect).
+- WIN flip cells under ITERS=500 revert: 1 (L1 R57J1 100.04% → 99.94% LOSE-edge; predicted in R57 verdict).
+- **Final VC count: 41/42 strict 10-run (3-in-a-row 100% leaderboard streak ENDED at R57; structural wins compound)**.
+- WIN cells (>=100% comp): 41 → 40 (-1; L1 LOSE-edge re-emergence; P-2 +1 cancels).
+- LOSE cells: 1 → 2 (L1 99.94%, L8 98.28%).
+- Files: `R58_INTEGRATION_VERDICT.md`, `R58_INTEGRATION_MANIFEST.json`, `bench_all_42_R58_INTEGRATION.py`, `R58_INTEGRATION_{10RUN,SMOKE1}.{json,log,console}`, `R58_DECIDER_PLAN.md`.
+
+**R58 net result**: **+1 PROMOTE structural swap + AITER bit-det 39→40 (largest ever) + HK pool 3→2 (smallest ever) + 10th consecutive R50D AS-IS + Opt N informational delivered + 4 closed axes documented**, in exchange for: 3-in-a-row 100% streak ends at 41/42 VC + 40/42 WIN under ITERS=500 default. Cohort-race attention surface PERMANENTLY shrinks 3 cells → 1 cell. Net structural progress trumps the streak break.
+
+### R58 LOSE/VC-flipped cells remaining (3 cells of attention; 1 hard LOSE, 1 ITERS-edge LOSE, 1 VC-flipped)
+- `(4096,32768,128256)` 98.28% (L8; R52D2B AITER 256×256; aiter alt-tile axis FULLY CLOSED + HK 256×256 axis CLOSED by correctness; no remaining mechanism axis without from-scratch HK build)
+- `(4096,32768,14336)` 99.94% (L1; R57J1 AITER 256×256; ITERS=500 revert pushed below WIN-line; was 100.04% under R57 ITERS=1000)
+- `(32768,14336,2048)` 100.49% (HK R40B; numerically WIN but VC-flipped n_OK=9/10 fin_min=0.911 under ITERS=500; previously flagged as worst-margin survivor by R57 reviewer fin_min=0.9847 and R58 Opt N)
+
+### R59 candidates (post-R58, ordered by mechanism-confidence)
+1. **R59 Opt R — Mixed-protocol leaderboard policy decision (highest methodology value, lowest perf gain)** — Decide: do we permanently bump ITERS=1000 (cost: 2× wall per round; benefit: L1 +1 WIN cell stable + HK survivors +1.5pp)? OR maintain ITERS=500 default with documented L1 noise-edge LOSE? OR mixed-protocol L1-only ITERS=1000 (cost: leaderboard inconsistency)? **Recommend ITERS=500 default + documented L1 footnote** (current R58 disposition).
+2. **R59 Opt S — `(32768,14336,2048)` HK survivor rescue (medium confidence)** — VC-flipped under R58. Try non-128×256 alt-tile (96×640 eff=83.5, 64×1024 eff=60.2) — both lower-eff than 128×256 which scored 75.49% on this cell. Very low confidence. OR try kernel-rebuild with R44D FINITE_GATE 0.97 → 0.95 (cohort-protocol relax). Estimated +0 to +1 NET VC.
+3. **R59 Opt T — L8 from-scratch HK kernel build for K=128256 (very low confidence, high cost)** — Port R39A TAIL_SCALE_CLAMP + R44A back-edge drain + R44D FINITE_GATE into a new K=128256 HK build. Estimated cost: ~3 R-rounds; very low WIN probability. Only attempt if R59 explicitly elects build-campaign budget.
+4. **R59 Opt U — Accept residual + documentation pivot** — Acknowledge L8 at aiter+HK structural floor; freeze manifest at R58 baseline; pivot R59-R65 to systematic per-shape decompositions for the SC/MICRO publication.
+
+### R59+ axes to NOT attempt (closed by R45-R58)
+- All R57 closed list PLUS:
+- **HK 256×256 lgk2 v12 R40B/R37 fallbacks for L8 K=128256** — both produce WRONG_OUTPUT (R58 Opt O); needs a from-scratch K=128256 HK build with R39A/R44A/R44D fixes ported.
+- **128×256 alt-tile for 16384x4096x2048 HK survivor and 32768x14336x2048 HK survivor** — R58 Opt P confirmed -3.68pp and -25.04pp respectively; only the (16384,4096,3072) cell PROMOTEs.
+- ANY further attempt to ITERS=1000 the L1 noise-edge cell as a one-off — R57 demonstrated the mixed-protocol cost is not worth the single-cell flip.
+
+### R58 stopping-criterion check
+- Floor (Opt N report delivered + 0 PROMOTEs + 42/42 VC HELD): **PARTIAL — Opt N delivered; 1 PROMOTE; 41/42 VC (1 cohort-race tail-draw on UNCHANGED L3 binary)**.
+- Stretch (1 PROMOTE → 42/42 WIN): **NOT MET (L1 reverts under ITERS=500; net 40/42 WIN)**.
+- Round value: **+1 structural PROMOTE (HK→AITER permanent) + +1 AITER bit-det (largest ever) + -1 HK pool (smallest ever) + -2 cohort-race attention cells permanently + Opt N informational + 4 closed axes documented + 10th consecutive R50D AS-IS reuse**. Trade-off: 3-in-a-row 100% streak ends; net VC -1 strict; net WIN -1.
+
+### Round sequence sanity check (last 16 rounds)
+- R43: DEAD (3 axes)
+- R44: WIN +8 (27 → 35/42)
+- R45-R49: 5 DEAD rounds in a row
+- R50: WIN +1 (35 → 36/42, aiter `.co` dlopen first PoC)
+- R51: WIN +1 strict (30 → 31/42) + 2 perf claw-backs
+- R52: WIN +5 strict (31 → 36/42) + 3 perf claw-backs
+- R53: PARTIAL WIN +2 NET VC rescues -5 cohort net -3 strict (36 → 33/42) + 6 perf claw-backs
+- R54: WIN +6 NET VC rescues -3 cohort net +3 strict (33 → 36/42) + 6 perf claw-backs +17-28pp
+- R55: WIN +6 NET VC -0 cohort +6 strict (36 → 42/42) + 5 perf claw-backs +1.81-20.99pp; FIRST 100% LEADERBOARD ROUND IN PROJECT HISTORY
+- R56: PERF-CLAW-BACK WIN +6 NET WIN CELLS (34→40 LARGEST EVER) -0 cohort +0 strict VC (42/42 HELD) + 7 perf claw-backs +14-81pp; 39/42 cells bit-deterministic AITER; 7/7 PROMOTE / 1 ACCEPT_FALLBACK / 0 DEAD; 8th CONSECUTIVE R50D AS-IS REUSE; 2ND CONSECUTIVE 100% LEADERBOARD ROUND
+- R57: WIN +1 NET WIN CELL via Opt J ITERS=1000 (40→41) -0 cohort +0 strict VC (42/42 HELD) + 0 perf claw-backs (4 ACCEPT_FALLBACK closures); 39/42 cells bit-deterministic AITER; 1/5 PROMOTE / 4 ACCEPT_FALLBACK / 0 DEAD; 9th CONSECUTIVE R50D AS-IS REUSE; 3RD CONSECUTIVE 100% LEADERBOARD ROUND
+- **R58: STRUCTURAL WIN +1 PROMOTE P-2 HK→AITER 128×256 swap +4.37pp -1 cohort tail-draw on UNCHANGED L3 (predicted by R57 fin_min=0.9847 + R58 Opt N) + ITERS=500 revert net -1 strict VC (42→41) -1 WIN (41→40); 40/42 cells bit-deterministic AITER (LARGEST EVER); HK pool 3→2 (SMALLEST EVER); 1/5 PROMOTE / 4 ACCEPT_FALLBACK / 0 DEAD; 10th CONSECUTIVE R50D AS-IS REUSE; 3-IN-A-ROW STREAK ENDS** ← NET STRUCTURAL PROGRESS via single HK→AITER swap; cohort-race surface PERMANENTLY 3→1 cell
+
+---
+
+## Previous State (2026-04-19, post-R57 — WIN +1 NET WIN CELL via Opt J ITERS=1000, **42/42 STRICT VC HELD FOR 3RD CONSECUTIVE ROUND**, **41/42 WIN CELLS (40→41)**, 1/5 PROMOTE / 4 ACCEPT_FALLBACK / 0 DEAD, 9TH CONSECUTIVE R50D AS-IS REUSE, 0 COHORT-RACE CHURN, ONLY 1 LOSE CELL REMAINS (L8 97.75% — AITER ALT-TILE AXIS FULLY CLOSED))
 
 **HEADLINE — R57 ACHIEVES 41/42 WIN CELLS (+1, L1 crosses WIN via Opt J ITERS=1000) + 42/42 STRICT VC HELD FOR 3RD CONSECUTIVE 100% LEADERBOARD ROUND.** R57 attacked the 2 R56 LOSE cells (L1, L8) + 3 surviving HK cells via 3 worker cohorts (H-1 Opt J ITERS=1000 re-bench, H-2 Opt L 3 HK→AITER 192×256, H-3 Opt K L8 224×256 token probe). **1/5 PROMOTE / 4 ACCEPT_FALLBACK / 0 DEAD**. The 1 PROMOTE was H-1 Opt J: L1 (4096,32768,14336) at ITERS=1000 = **102.37% worker / 100.04% reviewer p50** (R56 reviewer was 99.98% at ITERS=500). All 10 INDEPENDENT seeds cross 100% WIN line. Mechanism: R56 reviewer's 99.98% sat on the lower noise tail of a bit-deterministic AITER `.co`; doubling ITERS halved measurement noise and exposed the true mean above 100%. No manifest binary changes — only the per-cell source label `R56G1_L1_AITER` → `R57J1_L1_AITER` (annotation only). 4 ACCEPT_FALLBACK candidates: H-2 192×256 axis DEAD on all 3 HK cells (-8 to -14pp at SMOKE; 10-run skipped per STOP rule); H-3 K-1 L8 224×256 SMOKE 87.61% (-10.69pp under threshold; aiter alt-tile axis fully closed). 9th consecutive R50D shim AS-IS reuse round. AITER bit-deterministic share unchanged 39/42. HK cells unchanged 3 (smallest in project history). 0 cohort-race churn on 41 unchanged-binary cells.
 
@@ -69,7 +145,7 @@
 
 ---
 
-## Previous State (2026-04-19, post-R56 — WIN 7/7 PROMOTE PERF CLAW-BACK, **42/42 STRICT VC HELD FOR 2ND CONSECUTIVE ROUND**, **+6 NET WIN CELLS (34→40, LARGEST SINGLE-ROUND WIN-CELL JUMP IN PROJECT HISTORY)**, +198.14pp AGGREGATE PERF CLAW-BACK (2.2× STRETCH), AITER BIT-DETERMINISTIC SHARE 38→39 OF 42, HK CELLS 4→3 (SMALLEST EVER), 0 COHORT-RACE CHURN, 8TH CONSECUTIVE R50D AS-IS REUSE)
+## Earlier State (2026-04-19, post-R56 — WIN 7/7 PROMOTE PERF CLAW-BACK, **42/42 STRICT VC HELD FOR 2ND CONSECUTIVE ROUND**, **+6 NET WIN CELLS (34→40, LARGEST SINGLE-ROUND WIN-CELL JUMP IN PROJECT HISTORY)**, +198.14pp AGGREGATE PERF CLAW-BACK (2.2× STRETCH), AITER BIT-DETERMINISTIC SHARE 38→39 OF 42, HK CELLS 4→3 (SMALLEST EVER), 0 COHORT-RACE CHURN, 8TH CONSECUTIVE R50D AS-IS REUSE)
 
 **HEADLINE — R56 ACHIEVES +6 NET WIN CELLS (34→40), +198.14pp AGGREGATE PERF, 42/42 STRICT VC HELD.** R56 attacked the 8 R55 LOSE cells via aiter alt-tile dispatch through R50D shim AS-IS. **7/7 PROMOTE / 1 ACCEPT_FALLBACK** across 4 worker cohorts (G-1, G-2, G-3 falsification, G-4 HK→AITER + alt-tile probes). All 7 PROMOTEs cleared the +1.0pp D-3C gate by ≥13pp. The 7 R56 PROMOTE cells (deltas R55→R56 pct_comp): L1 +34.30pp, L2 +19.87pp, L3 +15.93pp, L4 +14.38pp, L5 +16.14pp, L6 +16.60pp, L7 +80.92pp (HK→AITER). AITER cells **39/39 PASS (100% bit-deterministic, wcf_max=0.0, wcf_std=0.0, fin_min=1.0)**. 3 surviving HK cells **3/3 PASS, 0 churn**. WIN cells (≥100% comp): **34 → 40** (largest single-round WIN-cell jump in project history). LOSE cells: 8 → 2 (L1 99.98% reviewer-drift edge, L8 98.30% D-3A-1 ACCEPT_FALLBACK). Cohort-race surface at smallest ever (3 HK cells). 8th consecutive R50D shim AS-IS reuse round (no rebuild, no kernel modification).
 

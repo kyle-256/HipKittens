@@ -1,0 +1,51 @@
+{
+  "summary": {
+    "mode": "smoke",
+    "variant": "R40B",
+    "so_path": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R40B/tk_mxfp4_gluon_cpp_n32768_k128256_ts_lgk2_v12_btw_all_R40B_safe.cpython-310-x86_64-linux-gnu.so",
+    "shape": [
+      4096,
+      32768,
+      128256
+    ],
+    "competitor_tflops": 5781.1,
+    "aiter_baseline_pct_comp": 97.75,
+    "n_runs": 1,
+    "n_OK": 0,
+    "fin_min": 0.804352,
+    "fin_max": 0.804352,
+    "wcf_min": 0.12773,
+    "wcf_max": 0.12773,
+    "wcf_std": 0.0,
+    "snr_min": 36.2536013257078,
+    "snr_max": 36.2536013257078,
+    "snr_med": 36.2536013257078,
+    "tflops_first": null,
+    "tflops_max": null,
+    "tflops_p50": null,
+    "pct_comp_first": null,
+    "pct_comp_p50": null,
+    "perf_delta_pp_vs_aiter": null,
+    "passes_10run_strict_gate": false,
+    "smoke_decision": "STOP_DEAD"
+  },
+  "results": [
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 128256,
+      "tflops": null,
+      "avg_ms": null,
+      "comp": 5781.1,
+      "status": "WRONG_OUTPUT",
+      "kernel_finite": 0.804352,
+      "snr_db": -1.0653877114258645,
+      "snr_med_db": 36.2536013257078,
+      "snr_n_valid": 774329,
+      "wrong_cell_frac": 0.12773,
+      "seed": 101,
+      "wall_s": 5.1,
+      "gpu_id": 0
+    }
+  ]
+}

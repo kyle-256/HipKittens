@@ -1,0 +1,51 @@
+{
+  "summary": {
+    "mode": "smoke",
+    "variant": "R37",
+    "so_path": "/shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/build_R37/tk_mxfp4_gluon_cpp_n32768_k128256_ts_lgk2_v12_memc_btw_all_R37.cpython-310-x86_64-linux-gnu.so",
+    "shape": [
+      4096,
+      32768,
+      128256
+    ],
+    "competitor_tflops": 5781.1,
+    "aiter_baseline_pct_comp": 97.75,
+    "n_runs": 1,
+    "n_OK": 0,
+    "fin_min": 0.775436,
+    "fin_max": 0.775436,
+    "wcf_min": 0.065638,
+    "wcf_max": 0.065638,
+    "wcf_std": 0.0,
+    "snr_min": 31.785072748999017,
+    "snr_max": 31.785072748999017,
+    "snr_med": 31.785072748999017,
+    "tflops_first": null,
+    "tflops_max": null,
+    "tflops_p50": null,
+    "pct_comp_first": null,
+    "pct_comp_p50": null,
+    "perf_delta_pp_vs_aiter": null,
+    "passes_10run_strict_gate": false,
+    "smoke_decision": "STOP_DEAD"
+  },
+  "results": [
+    {
+      "M": 4096,
+      "N": 32768,
+      "K": 128256,
+      "tflops": null,
+      "avg_ms": null,
+      "comp": 5781.1,
+      "status": "WRONG_OUTPUT",
+      "kernel_finite": 0.775436,
+      "snr_db": 1.771591645792325,
+      "snr_med_db": 31.785072748999017,
+      "snr_n_valid": 759908,
+      "wrong_cell_frac": 0.065638,
+      "seed": 101,
+      "wall_s": 4.9,
+      "gpu_id": 0
+    }
+  ]
+}
