@@ -27,17 +27,23 @@ You are the lead agent for an autonomous MXFP4 GEMM optimization session on MI35
 - "Win" = `tflops >= competitor_tflops` for that specific shape.
 - Don't claim wins from short runs (<200 warmup or <500 iters).
 
-## What's known closed (don't reopen)
-- All cohort-race / fence-positioning experiments (R45B, R47A, R49A, R49C, R50A — 5 independent closures)
+## What's known closed (don't reopen) — see TODO.md for full list
+- All cohort-race / fence-positioning experiments (R45B, R47A, R49A, R49C, R50A — 5 closures)
 - MFMA↔ds_read 1:3/1:4 interleaving via in-place asm-body rewrite (R50A — ISA-verified but no perf delta)
-- The R62 `STEP34_INTERLEAVED` scaffolding is in TODO; the helper function `kpair_64mfma_step34_interleaved` doesn't compile (AGPR pressure on `ds_read_b128`)
-- `UNROLL_K={2,16}` per-shape (R62 — added to bench, 0 new wins)
-- `asm_inline` "5084 TFLOPS" reference is REVOKED (numerically incorrect)
+- R62 `STEP34_INTERLEAVED` — helper function `kpair_64mfma_step34_interleaved` doesn't compile (AGPR pressure on `ds_read_b128`)
+- `UNROLL_K={2,16}` per-shape (R62 — added to bench autotune, 0 new wins from variants alone)
+- `asm_inline` "5084 TFLOPS" reference REVOKED (numerically incorrect)
+- R63 closures: `STEP3_PF_N>8` (static_assert), `STEP3_BARRIER_VMCNT∈{4,12}` (≤0.5pp), `R25C_TAIL_PF_OFF_ITERS` (dead at FUSED=1, crashes at FUSED=0 K=14336), `STEP4_EXTERNAL_BR_PREFETCH` (macro removed), `192×256` tile path (architectural rewrite, defer to R65+)
 
-## Highest-value next axes (R63+)
+## Highest-value next axes (R64+)
 1. **Full inner-loop rewrite** matching aiter's 4:1:1 MFMA:buffer_load:ds_read schedule (not a knob — replace `kpair_64mfma_step34` body wholesale, see `project_mxfp4_aiter_disasm_findings.md`)
-2. **192×256 tile path** for the 4096×K-large LOSE cluster (current code is locked to 256×256)
-3. **MFMA 32×32×64** as a structural alternative to 16×16×128 (untested)
+2. **MFMA 32×32×64** as a structural alternative to 16×16×128 (untested)
+3. **192×256 tile path** for 4096×K-large LOSE cluster — defer to R65+ after axis 1 makes the kpair body template-friendly
+
+## Knob ceiling reached for boundary shapes
+After R62+R63, boundary shapes (95-99.5%) have been swept across:
+GROUP_SIZE_M ∈ {4,6,8}, UNROLL_K ∈ {2,16}, STEP3_PF_N/STEP4_PF_N ∈ {4,8}, STEP3_BARRIER_VMCNT ∈ {4,8,12}, GLOBAL_B ∈ {0,1}.
+1 NEW WIN unlocked in R63 (16384×6144×4096). Remaining 6 boundary shapes need structural changes.
 
 ## Standing user commitments
 - Full GitHub push permission (no asking)
