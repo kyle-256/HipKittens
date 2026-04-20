@@ -164,19 +164,6 @@ using namespace kittens;
 #define CRR_ENABLE_SCHED_BARRIER 0
 #endif
 
-// R31 Dev D: persistent-CU prototype for V2-RCR.
-// 0 = baseline (grid = (M/BLK)*(N/BLK))
-// 1 = persistent grid (grid = MXFP8_RCR_V2_PERSISTENT_GRID), each block
-//     iterates over multiple (br,bc) tiles via top-level loop.
-#ifndef MXFP8_RCR_V2_PERSISTENT
-#define MXFP8_RCR_V2_PERSISTENT 0
-#endif
-// Persistent grid size — 304 CUs × 2 occupancy = 608 default to maintain
-// occupancy=2 LDS slots when persistent is enabled.
-#ifndef MXFP8_RCR_V2_PERSISTENT_GRID
-#define MXFP8_RCR_V2_PERSISTENT_GRID 608
-#endif
-
 
 #ifndef CRR_INIT0_VMCNT
 #define CRR_INIT0_VMCNT 2
@@ -315,23 +302,6 @@ using namespace kittens;
 #define GEMM_WARPS_N 4
 #endif
 
-// R28 Dev D — rectangular BLK_M=256/BLK_N=128 scaffolding.
-// MXFP8_RECT_BLK_N defines HB_N (half of BLK_N). Default 128 -> BLK_N=256
-// (square baseline, no behavioral change). When set to 64 -> BLK_N=128
-// (rectangular tile: 2x more N-tiles per kernel grid; targets KV-attn
-// N=1024 wave under-occupancy on 304 CUs).
-//
-// SCAFFOLDING ONLY: when MXFP8_RECT_BLK_N=64 the V2-CRR exact-8wave
-// fastpath is force-disabled (mirrors R27 Dev D MXFP8_BLK128 prototype)
-// because its scale slab math + load_col_from_v2_st helpers hardcode
-// HB_N=128. Real perf path requires a dedicated rect-V2 fastpath in a
-// future cycle; this gate ensures clean compile + V1 fallback PASS.
-#ifndef MXFP8_RECT_BLK_N
-#define MXFP8_RECT_BLK_N 128
-#endif
-#if (MXFP8_RECT_BLK_N != 64) && (MXFP8_RECT_BLK_N != 128)
-#error "MXFP8_RECT_BLK_N must be 64 or 128 (only square=128 / rect-N=64 are scaffolded today)"
-#endif
 
 constexpr int BLK = GEMM_BLOCK_SIZE, BK = GEMM_K_BLOCK;
 constexpr int HB  = BLK / 2;
@@ -343,14 +313,6 @@ constexpr int RBN = BLK / WARPS_N / 2;   // 32
 constexpr int TAIL_BLOCK_M = 16;
 constexpr int TAIL_BLOCK_N = 16;
 
-// R28 Dev D — rectangular BLK_N constants. In default (square) mode these
-// equal BLK/HB/RBN. In rect-N mode (MXFP8_RECT_BLK_N=64) BLK_N=128, HB_N=64,
-// RBN_RECT=16. None of these names are used by the existing default fastpath;
-// they are only consumed by the new B-side helper variant below and by any
-// future rect-V2 kernel.
-constexpr int HB_N      = MXFP8_RECT_BLK_N;     // 128 default, 64 rect
-constexpr int BLK_N     = HB_N * 2;             // 256 default, 128 rect
-constexpr int RBN_RECT  = BLK_N / WARPS_N / 2;  // 32 default, 16 rect
 
 #ifndef GEMM_MIN_BLOCKS_PER_CU
 #define GEMM_MIN_BLOCKS_PER_CU 2
@@ -390,21 +352,6 @@ constexpr int RBN_RECT  = BLK_N / WARPS_N / 2;  // 32 default, 16 rect
 #ifndef MXFP8_RCR_V2_SCALE_CACHEPOLICY
 #define MXFP8_RCR_V2_SCALE_CACHEPOLICY 0
 #endif
-// R48 Dev F: A-scale-only cachepolicy override for V2 RCR. The A-scale
-// b128 load (PC=4, 16 bytes/lane/k_pair) is 2× the per-lane bytes of the
-// B-scale b64 (8 bytes), and on 70B Down (M=4096,N=8192,K=28672) the A-scale
-// working set (3.67 MB) fits in L2 per XCD while B-scale (7.34 MB) does not.
-// R47C swept the unified MXFP8_RCR_V2_SCALE_CACHEPOLICY (both A and B) and
-// found p=0 best. This macro lets us test biasing only A's policy (e.g.
-// SLC=2 to keep A out of L2 so B can dominate L2 residency).
-// If left undefined, falls through to MXFP8_RCR_V2_SCALE_CACHEPOLICY (no
-// behaviour change vs baseline). Default OFF (-1 sentinel = inherit).
-#ifndef MXFP8_RCR_ASCALE_CACHEPOLICY
-#define MXFP8_RCR_ASCALE_CACHEPOLICY (-1)
-#endif
-// Resolved A-scale policy: if user-set (>=0), use it; else inherit unified.
-#define MXFP8_RCR_ASCALE_CACHEPOLICY_RESOLVED \
-    ((MXFP8_RCR_ASCALE_CACHEPOLICY) >= 0 ? (MXFP8_RCR_ASCALE_CACHEPOLICY) : (MXFP8_RCR_V2_SCALE_CACHEPOLICY))
 #ifndef MXFP8_RCR_EXACT_PQ_SCALAR_PHASE_PACKS_ENABLE
 #define MXFP8_RCR_EXACT_PQ_SCALAR_PHASE_PACKS_ENABLE 0
 #endif
@@ -422,37 +369,6 @@ constexpr int RBN_RECT  = BLK_N / WARPS_N / 2;  // 32 default, 16 rect
 #endif
 #ifndef MXFP8_RCR_EXACT_PQ_PIPELINE_SCALE_ENABLE
 #define MXFP8_RCR_EXACT_PQ_PIPELINE_SCALE_ENABLE 1
-#endif
-// R31 Dev C: VGPR-prefetch second-buffer for V2-RCR scales.
-// When enabled: maintain a 2nd set of scale_pack VGPRs and issue
-// the (k_pair+1) load at the start of do_k_iter_body<0> for k_pair,
-// rotating buffers at end of do_k_iter_body<1>.
-// This is a VGPR-pipeline lever (NOT an LDS lever — V2-RCR has zero
-// scale LDS path per R31 Dev C SASS audit). Test whether explicit
-// next-iter prefetch beats the LLVM scheduler's natural hoisting.
-#ifndef MXFP8_RCR_V2_SCALE_PREFETCH
-#define MXFP8_RCR_V2_SCALE_PREFETCH 0
-#endif
-// R48 Dev B: cooperative B-scale lever — issue B-scale b64 BEFORE A-scale
-// b128 inside load_scale_buffer (V2-RCR). Hypothesis: smaller B-scale
-// transactions return faster and unblock MMA dispatch sooner; on large-K
-// shapes (70B Down 4096×8192×28672) where B-scale = 7.34 MB > L2 (8 MB
-// per XCD), shifting issue order may help VMEM scheduling.
-// Default OFF.
-#ifndef MXFP8_RCR_COOPERATIVE_BSCALE
-#define MXFP8_RCR_COOPERATIVE_BSCALE 0
-#endif
-// R48 Dev F: A-first issue-order pin — symmetric inverse of Dev B's
-// MXFP8_RCR_COOPERATIVE_BSCALE. Insert sched_barrier(0) AFTER the A-scale
-// b128 issue so the LLVM scheduler cannot re-float B b64 ahead of it.
-// Hypothesis: A-scale (16 B/lane) is the larger / hot-path scale load;
-// pinning it strictly first gives MMA-dispatch the earliest possible
-// scale-pack residency. Default OFF (mutually exclusive with COOP_BSCALE).
-#ifndef MXFP8_RCR_ASCALE_FIRST
-#define MXFP8_RCR_ASCALE_FIRST 0
-#endif
-#if MXFP8_RCR_ASCALE_FIRST && MXFP8_RCR_COOPERATIVE_BSCALE
-#error "MXFP8_RCR_ASCALE_FIRST and MXFP8_RCR_COOPERATIVE_BSCALE are mutually exclusive"
 #endif
 #ifndef MXFP8_RCR_EXACT_PQ_HOIST_HI_ENABLE
 #define MXFP8_RCR_EXACT_PQ_HOIST_HI_ENABLE 1
@@ -542,132 +458,6 @@ __device__ __forceinline__ void load_col_from_v2_st(
 {
     load_col_from_v2_st_half<RT, 0>(dst, tile, col_start);
     load_col_from_v2_st_half<RT, 1>(dst, tile, col_start);
-}
-
-// R28 Dev D — rectangular BLK_N=128 helper variant.
-//
-// SCAFFOLDING for the future rect-V2 fastpath: the existing
-// load_col_from_v2_st_half computes `k_row = row_off + K_HALF*64` which,
-// at K_HALF=1, reads N-rows 64..87 from the ST tile. With HB_N=64 the
-// tile only has 64 rows total, so K_HALF=1 is out-of-bounds.
-//
-// The B-side ST tile in rect mode would be st_fp8e4m3<HB_N=64, BK=128,
-// st_16x128_v2_s>. The existing inline-asm ds_read_b64_tr_b8 offset:1024
-// is a K-direction stride of 8 rows * BK bytes = 1024 — INDEPENDENT of
-// HB. The per-subtile address math (stidx<<11)+(stidx<<7) = stidx*2176
-// reflects 16-row * 128-col subtile + 128 byte padding, also independent
-// of HB. Therefore only the high-half K_HALF=1 is unreachable; the
-// K_HALF=0 path is byte-identical.
-//
-// This variant exposes only K_HALF=0 (loads 24 N-rows; a full BLK_N=128
-// load issues this helper twice with col_start advanced by 64 to cover
-// the 4 contiguous subtiles). Wiring into a full rect-V2 fastpath is
-// scoped to the next cycle. NOT YET CALLED FROM ANY HOT KERNEL — this
-// declaration exists to (a) prove the math is sound and (b) give the
-// next-cycle author a concrete starting point.
-//
-// Stride math notes for future author:
-//   HB_N      = MXFP8_RECT_BLK_N (= 64 in rect mode, 128 in default)
-//   row_count = HB_N rows in the ST tile
-//   The ds_read_b64_tr_b8 offset 1024 = 8 * BK bytes (BK=128) is fixed.
-//   If a future variant uses a different BK, parametrize as
-//   `offset:%[hb_stride]` where `[hb_stride] = 8*BK`.
-template<typename RT, int K_HALF, int RECT_HB_N = HB_N>
-__device__ __forceinline__ void load_col_from_v2_st_half_rect(
-    RT& dst,
-    const st_fp8e4m3<RECT_HB_N, BK, st_16x128_v2_s>& tile,
-    int col_start)
-{
-    static_assert(RECT_HB_N == 64 || RECT_HB_N == 128,
-                  "rect helper only scaffolded for HB_N in {64, 128}");
-    // K_HALF=1 only valid when the tile actually has >= 128 N-rows.
-    static_assert(!(RECT_HB_N == 64 && K_HALF == 1),
-                  "K_HALF=1 invalid for HB_N=64 (out-of-bounds); "
-                  "use two K_HALF=0 calls with col_start offset instead");
-
-    const int laneid = kittens::laneid();
-    const int row_off = ((laneid % 16) / 2) + ((laneid / 16) * 16);
-    const int col_off = (laneid % 2) * 8;
-    const uint32_t tile_base = reinterpret_cast<uintptr_t>(&tile.data[0]);
-
-    constexpr int idx = K_HALF * 4;
-    const int k_row = row_off + K_HALF * 64;
-
-    const uint32_t stidx = k_row >> 4;
-    const uint32_t base_k = tile_base + (stidx << 11) + (stidx << 7) + ((k_row & 15) << 7);
-    const uint32_t sw_k   = (k_row & 7) << 4;
-
-    // Inner-loop K-stride for second ds_read_b64_tr_b8 = 8 rows * BK bytes.
-    // Hardcoded 1024 is correct for BK=128; parametrized constant below
-    // documents the intent for any future BK change.
-    constexpr int hb_stride_bytes = 8 * BK;
-    static_assert(hb_stride_bytes == 1024, "ds_read offset must remain 1024 for BK=128");
-
-    #pragma unroll
-    for (int j = 0; j < RT::width; j++) {
-        const uint32_t nc = col_start + j * 16 + col_off;
-        const uint32_t addr = base_k + (nc ^ sw_k);
-
-        asm volatile(
-            "ds_read_b64_tr_b8 %0, %2 offset:0\n"
-            "ds_read_b64_tr_b8 %1, %2 offset:1024\n"
-            : "=&v"(*reinterpret_cast<float2*>(&dst.tiles[0][j].data[idx])),
-              "=&v"(*reinterpret_cast<float2*>(&dst.tiles[0][j].data[idx + 2]))
-            : "v"(addr)
-            : "memory"
-        );
-    }
-}
-
-// R34 Dev C — Stage A2 Path 2 helper.
-//
-// Same K_HALF=0 read math as load_col_from_v2_st_half_rect<RT, 0, RECT_HB_N>,
-// but the destination data-array index is parameterised explicitly so the
-// kernel can perform two K_HALF=0 reads from TWO separate HB_N=64 LDS tiles
-// (one staging the K=0..63 portion, one staging the K=64..127 portion) and
-// have them write into data[0..3] and data[4..7] of the same register tile.
-//
-// Use case: rect-V2 CRR Path 2 — keep HB_N=64 LDS to halve the per-tile K
-// buffering, but populate a full BK=128 K register tile by serialising two
-// K_HALF=0 reads from two separate tiles. See r34c_findings.md.
-template<typename RT, int IDX_BASE, int RECT_HB_N = HB_N>
-__device__ __forceinline__ void load_col_from_v2_st_half_rect_idx(
-    RT& dst,
-    const st_fp8e4m3<RECT_HB_N, BK, st_16x128_v2_s>& tile,
-    int col_start)
-{
-    static_assert(RECT_HB_N == 64 || RECT_HB_N == 128,
-                  "rect helper only scaffolded for HB_N in {64, 128}");
-    static_assert(IDX_BASE == 0 || IDX_BASE == 4,
-                  "IDX_BASE must be 0 (data[0..3]) or 4 (data[4..7])");
-
-    const int laneid = kittens::laneid();
-    const int row_off = ((laneid % 16) / 2) + ((laneid / 16) * 16);
-    const int col_off = (laneid % 2) * 8;
-    const uint32_t tile_base = reinterpret_cast<uintptr_t>(&tile.data[0]);
-
-    constexpr int idx = IDX_BASE;
-    // K_HALF=0 read math — k_row stays in [0, 63] regardless of IDX_BASE.
-    const int k_row = row_off;
-
-    const uint32_t stidx = k_row >> 4;
-    const uint32_t base_k = tile_base + (stidx << 11) + (stidx << 7) + ((k_row & 15) << 7);
-    const uint32_t sw_k   = (k_row & 7) << 4;
-
-    #pragma unroll
-    for (int j = 0; j < RT::width; j++) {
-        const uint32_t nc = col_start + j * 16 + col_off;
-        const uint32_t addr = base_k + (nc ^ sw_k);
-
-        asm volatile(
-            "ds_read_b64_tr_b8 %0, %2 offset:0\n"
-            "ds_read_b64_tr_b8 %1, %2 offset:1024\n"
-            : "=&v"(*reinterpret_cast<float2*>(&dst.tiles[0][j].data[idx])),
-              "=&v"(*reinterpret_cast<float2*>(&dst.tiles[0][j].data[idx + 2]))
-            : "v"(addr)
-            : "memory"
-        );
-    }
 }
 
 template<typename RT, int K_HALF, typename ST>
@@ -2010,71 +1800,6 @@ __device__ __forceinline__ void load_scale_pair_pack_16x128_preshuffled_v2_b64(
     out1 = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(raw >> 32));
 }
 
-#if MXFP8_RCR_PRESHUFFLE_V2_ENABLE
-// Standalone verifier kernel: for each lane in a wave, compares V2-loaded
-// packs (b128 for A pc=4, b64 for B pc=2) against V1-loaded packs (per
-// row_group). Atomically increments `mismatch_count` on disagreement. Used
-// by `verify_v2_consumer` pybind entry to satisfy the milestone-1 256^3
-// correctness gate without touching the production hot path.
-__global__ void verify_preshuffle_v2_consumer_kernel(
-    _gl_scale v1_a, _gl_scale v1_b,
-    const uint8_t* __restrict__ v2_a, // V2 A layout (pack_count=4)
-    const uint8_t* __restrict__ v2_b, // V2 B layout (pack_count=2)
-    int num_slabs_a, int num_slabs_b,
-    int num_kpairs,
-    int padded_k_blocks,
-    unsigned int* __restrict__ mismatch_count)
-{
-    const int slab_a = blockIdx.x;
-    const int slab_b = blockIdx.y;
-    if (slab_a >= num_slabs_a || slab_b >= num_slabs_b) return;
-    if (threadIdx.x >= 64) return;
-    const int lane_nonk = threadIdx.x % 16;
-    const int lane_kblk = threadIdx.x / 16;
-
-    constexpr int PC_A = 4;
-    constexpr int PC_B = 2;
-    const size_t slab_bytes_a = static_cast<size_t>(PC_A) * 32u * padded_k_blocks;
-    const size_t slab_bytes_b = static_cast<size_t>(PC_B) * 32u * padded_k_blocks;
-    const uint8_t* slab_a_ptr = v2_a + slab_a * slab_bytes_a;
-    const uint8_t* slab_b_ptr = v2_b + slab_b * slab_bytes_b;
-
-    for (int k_pair = 0; k_pair < num_kpairs; ++k_pair) {
-        // V2 b128 fetch, A side.
-        fp8e8m0_4 a_v2[4];
-        load_scale_quad_pack_16x128_preshuffled_v2_b128(
-            slab_a_ptr, k_pair, lane_kblk, lane_nonk,
-            a_v2[0], a_v2[1], a_v2[2], a_v2[3]);
-
-        // V2 b64 fetch, B side.
-        fp8e8m0_4 b_v2[2];
-        load_scale_pair_pack_16x128_preshuffled_v2_b64(
-            slab_b_ptr, k_pair, lane_kblk, lane_nonk,
-            b_v2[0], b_v2[1]);
-
-        #pragma unroll
-        for (int pack = 0; pack < PC_A; ++pack) {
-            const int row_group_a = slab_a * PC_A + pack;
-            const fp8e8m0_4 ref =
-                load_scale_pair_pack_16x128_preshuffled(
-                    v1_a, row_group_a * 32, k_pair, lane_nonk, lane_kblk);
-            if (std::bit_cast<uint32_t>(ref) != std::bit_cast<uint32_t>(a_v2[pack])) {
-                atomicAdd(mismatch_count, 1u);
-            }
-        }
-        #pragma unroll
-        for (int pack = 0; pack < PC_B; ++pack) {
-            const int row_group_b = slab_b * PC_B + pack;
-            const fp8e8m0_4 ref =
-                load_scale_pair_pack_16x128_preshuffled(
-                    v1_b, row_group_b * 32, k_pair, lane_nonk, lane_kblk);
-            if (std::bit_cast<uint32_t>(ref) != std::bit_cast<uint32_t>(b_v2[pack])) {
-                atomicAdd(mismatch_count, 1u);
-            }
-        }
-    }
-}
-#endif // MXFP8_RCR_PRESHUFFLE_V2_ENABLE
 
 __device__ __forceinline__ void store_bf16_scalar(const _gl_bf16& dst, int row, int col, float value) {
     dst[coord<>(row, col)] = base_types::convertor<bf16, float>::convert(value);
@@ -2396,11 +2121,6 @@ static_assert(std::is_same_v<RCR_B_reg, B_row_reg>, "MXFP8 exact RCR fast path a
 //   70B Q/O -0.56%, 8192³ -0.22% (all regressions within -1% noise band).
 // Net-positive (worst -0.58%, four shapes >= +1%) -> ENABLED BY DEFAULT.
 // SNR 49.59-49.60 dB and det 3/3 PASS on 70B Gate/Up + 8192³ gating shapes.
-// NOTE: not safe to combine with MXFP8_RCR_V2_PERSISTENT (the persistent
-// early-exit on `blockIdx.x >= total_tiles` runs before the swizzle remap;
-// with persistent grid > total_tiles, the swizzle could produce out-of-range
-// (br, bc). Default persistent=0 so this is a non-issue today. If persistent
-// is ever turned on, gate the swizzle on `bid < total_tiles_compile` first.)
 #ifndef MXFP8_RCR_BLOCK_SWIZZLE
 #define MXFP8_RCR_BLOCK_SWIZZLE 1
 #endif
@@ -2455,23 +2175,6 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
         zero(cA); zero(cB); zero(cC); zero(cD);
     }
 
-    // R31 Dev D: persistent-CU dispatch wrapper.
-    // When MXFP8_RCR_V2_PERSISTENT=1, the host dispatcher launches with
-    // grid=MXFP8_RCR_V2_PERSISTENT_GRID (608 default = 304 CUs * occ=2)
-    // and each block does the original (br, bc) tile if bid < total_tiles,
-    // else early-exits. This is the simplest possible persistent variant —
-    // tests whether SPI redistributes CTAs to give better effective
-    // wave-fill at occupancy=2. (For 4096^3 with 256 tiles < 608 grid,
-    // strictly cannot improve since 256 < 304 CUs already; documented as
-    // structural ceiling.) For 8192^3 (1024 tiles > 608 grid) it would
-    // require inner-loop persistence which is prohibitively invasive — see
-    // r31d_findings.md for full analysis.
-    constexpr int total_tiles_compile = (M_DIM / BLK) * (N_DIM / BLK);
-#if MXFP8_RCR_V2_PERSISTENT
-    if (blockIdx.x >= total_tiles_compile) {
-        return;
-    }
-#endif
     int bid = blockIdx.x;
 #if MXFP8_RCR_BLOCK_SWIZZLE
     // R47 Dev A: XCD-aware chiplet swizzle + grouped-M swizzle.
@@ -2876,24 +2579,8 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
                     (static_cast<uint32_t>(lane_kblk) << 8) |
                     (static_cast<uint32_t>(lane_nonk) << 4);
                 const uint32_t a_soff = static_cast<uint32_t>(k_pair) << 10;
-#if MXFP8_RCR_COOPERATIVE_BSCALE
-                // R48 Dev B: pre-issue B-scale b64 BEFORE the A-scale b128.
-                // Compute B offsets early; emit b64 first; sched_barrier
-                // prevents the scheduler from re-floating the order.
-                const uint32_t _coop_b_voff =
-                    (static_cast<uint32_t>(lane_kblk) << 7) |
-                    (static_cast<uint32_t>(lane_nonk) << 3);
-                const uint32_t _coop_b_soff = static_cast<uint32_t>(k_pair) << 9;
-                const uint64_t _coop_b_raw =
-                    llvm_amdgcn_raw_buffer_load_b64(b_v2_srsrc, _coop_b_voff, _coop_b_soff, MXFP8_RCR_V2_SCALE_CACHEPOLICY);
-                __builtin_amdgcn_sched_barrier(0);
-#endif
                 const __uint128_t a_raw =
-                    llvm_amdgcn_raw_buffer_load_b128(a_v2_srsrc, a_voff, a_soff, MXFP8_RCR_ASCALE_CACHEPOLICY_RESOLVED);
-#if MXFP8_RCR_ASCALE_FIRST
-                // R48 Dev F: pin A-scale issue ahead of B-scale b64 (below).
-                __builtin_amdgcn_sched_barrier(0);
-#endif
+                    llvm_amdgcn_raw_buffer_load_b128(a_v2_srsrc, a_voff, a_soff, MXFP8_RCR_V2_SCALE_CACHEPOLICY);
                 const uint32_t a_w0 = static_cast<uint32_t>(a_raw      );
                 const uint32_t a_w1 = static_cast<uint32_t>(a_raw >> 32);
                 const uint32_t a_w2 = static_cast<uint32_t>(a_raw >> 64);
@@ -2917,11 +2604,6 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
                     a1_scale_packs[1] = std::bit_cast<fp8e8m0_4>(a_w3);
                 }
 #endif
-#if MXFP8_RCR_COOPERATIVE_BSCALE
-                // R48 Dev B: reuse the pre-issued b64 result.
-                const uint32_t b_w0 = static_cast<uint32_t>(_coop_b_raw      );
-                const uint32_t b_w1 = static_cast<uint32_t>(_coop_b_raw >> 32);
-#else
                 const uint32_t b_voff =
                     (static_cast<uint32_t>(lane_kblk) << 7) |
                     (static_cast<uint32_t>(lane_nonk) << 3);
@@ -2930,7 +2612,6 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
                     llvm_amdgcn_raw_buffer_load_b64(b_v2_srsrc, b_voff, b_soff, MXFP8_RCR_V2_SCALE_CACHEPOLICY);
                 const uint32_t b_w0 = static_cast<uint32_t>(b_raw      );
                 const uint32_t b_w1 = static_cast<uint32_t>(b_raw >> 32);
-#endif
 #if MXFP8_RCR_EXACT_PQ_PHASE_U16_CACHE_ENABLE
                 b0_phase_u16[0][0] = static_cast<uint16_t>(b_w0);
                 b0_phase_u16[1][0] = static_cast<uint16_t>(b_w0 >> 16);
@@ -3381,29 +3062,8 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
                         (static_cast<uint32_t>(lane_kblk) << 7) |
                         (static_cast<uint32_t>(lane_nonk) << 3);
                     const uint32_t b_soff = static_cast<uint32_t>(k_pair) << 9;
-#if MXFP8_RCR_COOPERATIVE_BSCALE
-                    // R48 Dev B: issue B-scale b64 BEFORE A-scale b128.
-                    // Sched-barrier prevents LLVM from re-floating order.
-                    const uint64_t b_raw =
-                        llvm_amdgcn_raw_buffer_load_b64(b_v2_srsrc, b_voff, b_soff, MXFP8_RCR_V2_SCALE_CACHEPOLICY);
-                    __builtin_amdgcn_sched_barrier(0);
                     const __uint128_t a_raw =
-                        llvm_amdgcn_raw_buffer_load_b128(a_v2_srsrc, a_voff, a_soff, MXFP8_RCR_ASCALE_CACHEPOLICY_RESOLVED);
-                    b0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(b_raw      ));
-                    b1_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(b_raw >> 32));
-                    a0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw      ));
-                    a1_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw >> 32));
-                    if constexpr (RBM / 32 > 1) {
-                        a0_scale_packs[1] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw >> 64));
-                        a1_scale_packs[1] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw >> 96));
-                    }
-#else
-                    const __uint128_t a_raw =
-                        llvm_amdgcn_raw_buffer_load_b128(a_v2_srsrc, a_voff, a_soff, MXFP8_RCR_ASCALE_CACHEPOLICY_RESOLVED);
-#if MXFP8_RCR_ASCALE_FIRST
-                    // R48 Dev F: pin A-scale issue ahead of B-scale b64 (below).
-                    __builtin_amdgcn_sched_barrier(0);
-#endif
+                        llvm_amdgcn_raw_buffer_load_b128(a_v2_srsrc, a_voff, a_soff, MXFP8_RCR_V2_SCALE_CACHEPOLICY);
                     a0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw      ));
                     a1_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw >> 32));
                     if constexpr (RBM / 32 > 1) {
@@ -3414,7 +3074,6 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
                         llvm_amdgcn_raw_buffer_load_b64(b_v2_srsrc, b_voff, b_soff, MXFP8_RCR_V2_SCALE_CACHEPOLICY);
                     b0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(b_raw      ));
                     b1_scale_packs[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(b_raw >> 32));
-#endif
                 } else {
                     const uint32_t soff = static_cast<uint32_t>(k_pair) << 8;
                     a0_scale_packs[0] = std::bit_cast<fp8e8m0_4>(llvm_amdgcn_raw_buffer_load_b32(a0p0_srsrc, lane_scale_byte_offset, soff, 0));
@@ -3430,87 +3089,6 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
                 load_scale_packs_for_pair(k_pair);
             }
         };
-#if MXFP8_RCR_V2_SCALE_PREFETCH
-        // R31 Dev C: VGPR-prefetch second-buffer experiment.
-        // Next-iter scale_packs (separate VGPR set). Load (k_pair+1) at
-        // end of iter k_pair so VMEM latency hides under MMA dispatches.
-        fp8e8m0_4 a0_scale_packs_next[RBM / 32];
-        fp8e8m0_4 a1_scale_packs_next[RBM / 32];
-        fp8e8m0_4 b0_scale_packs_next[(RBN + 31) / 32];
-        fp8e8m0_4 b1_scale_packs_next[(RBN + 31) / 32];
-        auto load_scale_buffer_next = [&](int k_pair) __attribute__((always_inline)) {
-            if constexpr (PRESHUFFLED_QUANT) {
-                if constexpr (SCALE_VERSION == 2) {
-                    const uint32_t a_voff =
-                        (static_cast<uint32_t>(lane_kblk) << 8) |
-                        (static_cast<uint32_t>(lane_nonk) << 4);
-                    const uint32_t a_soff = static_cast<uint32_t>(k_pair) << 10;
-                    const __uint128_t a_raw =
-                        llvm_amdgcn_raw_buffer_load_b128(a_v2_srsrc, a_voff, a_soff, MXFP8_RCR_ASCALE_CACHEPOLICY_RESOLVED);
-                    a0_scale_packs_next[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw      ));
-                    a1_scale_packs_next[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw >> 32));
-                    if constexpr (RBM / 32 > 1) {
-                        a0_scale_packs_next[1] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw >> 64));
-                        a1_scale_packs_next[1] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(a_raw >> 96));
-                    }
-                    const uint32_t b_voff =
-                        (static_cast<uint32_t>(lane_kblk) << 7) |
-                        (static_cast<uint32_t>(lane_nonk) << 3);
-                    const uint32_t b_soff = static_cast<uint32_t>(k_pair) << 9;
-                    const uint64_t b_raw =
-                        llvm_amdgcn_raw_buffer_load_b64(b_v2_srsrc, b_voff, b_soff, MXFP8_RCR_V2_SCALE_CACHEPOLICY);
-                    b0_scale_packs_next[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(b_raw      ));
-                    b1_scale_packs_next[0] = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(b_raw >> 32));
-                }
-            }
-        };
-        auto swap_scale_buffer = [&]() __attribute__((always_inline)) {
-            if constexpr (PRESHUFFLED_QUANT && SCALE_VERSION == 2) {
-                #pragma unroll
-                for (int p = 0; p < RBM / 32; ++p) {
-                    a0_scale_packs[p] = a0_scale_packs_next[p];
-                    a1_scale_packs[p] = a1_scale_packs_next[p];
-                }
-                #pragma unroll
-                for (int p = 0; p < (RBN + 31) / 32; ++p) {
-                    b0_scale_packs[p] = b0_scale_packs_next[p];
-                    b1_scale_packs[p] = b1_scale_packs_next[p];
-                }
-            }
-        };
-        // Prime: load k_pair=0 into primary; load k_pair=1 into next.
-        if (k_pairs > 0) {
-            load_scale_buffer(0);
-            if (k_pairs > 1) {
-                load_scale_buffer_next(1);
-            }
-            for (int k_pair = 0; k_pair < k_pairs; k_pair++) {
-                do_k_iter_body.template operator()<0>(k_pair * 2);
-                tic ^= 1; toc ^= 1;
-                do_k_iter_body.template operator()<1>(k_pair * 2 + 1);
-                tic ^= 1; toc ^= 1;
-                if (k_pair + 1 < k_pairs) {
-                    swap_scale_buffer();
-                    if (k_pair + 2 < k_pairs) {
-                        load_scale_buffer_next(k_pair + 2);
-                    } else if (k_remainder) {
-                        // Pre-load the remainder into next buffer, swap before its body
-                        load_scale_buffer_next(k_pairs);
-                    }
-                } else if (k_remainder) {
-                    swap_scale_buffer();
-                }
-            }
-            if (k_remainder) {
-                do_k_iter_body.template operator()<0>(k_pairs * 2);
-                tic ^= 1; toc ^= 1;
-            }
-        } else if (k_remainder) {
-            load_scale_buffer(k_pairs);
-            do_k_iter_body.template operator()<0>(k_pairs * 2);
-            tic ^= 1; toc ^= 1;
-        }
-#else
         for (int k_pair = 0; k_pair < k_pairs; k_pair++) {
             load_scale_buffer(k_pair);
             do_k_iter_body.template operator()<0>(k_pair * 2);
@@ -3523,7 +3101,6 @@ void rcr_exact_8wave_scaled_kernel(const layout_globals g) {
             do_k_iter_body.template operator()<0>(k_pairs * 2);
             tic ^= 1; toc ^= 1;
         }
-#endif
 #else
         for (int k_pair = 0; k_pair < k_pairs; k_pair++) {
 #if !MXFP8_RCR_EXACT_PQ_KPAIR_INLINE_SCALE_ENABLE
@@ -3836,14 +3413,7 @@ __host__ inline void dispatch_rcr_exact_8wave_scaled(const layout_globals& g) {
 // preshuffle_scale_matrix_mfma16_v2_rcr_a/b).
 template<bool PRESHUFFLED_QUANT>
 __host__ inline void dispatch_rcr_exact_8wave_scaled_v2(const layout_globals& g) {
-#if MXFP8_RCR_V2_PERSISTENT
-    // R31 Dev D: persistent-CU dispatch (wave-fill experiment).
-    // grid = MXFP8_RCR_V2_PERSISTENT_GRID (608 default = 304 CUs * occ=2).
-    // Kernel early-exits if bid >= (M/BLK)*(N/BLK).
-    const dim3 grid(MXFP8_RCR_V2_PERSISTENT_GRID);
-#else
     const dim3 grid((g.m / BLK) * (g.n / BLK));
-#endif
     rcr_exact_8wave_scaled_kernel<PRESHUFFLED_QUANT, 2><<<grid, dim3(_NUM_THREADS), 0, g.stream>>>(g);
 }
 
@@ -6054,19 +5624,6 @@ void dispatch_pq_v2(layout_globals g) {
                     g.m, g.n, g.k, M_DIM, N_DIM, K_DIM, MXFP8_RCR_EXACT_8WAVE_FAST_ENABLE);
             }
         }
-        // R32 Dev D — Stage A1: rect-V2 RCR fastpath. Routes the gemm_rcr_pq_v2
-        // entry point to the rect kernel when MXFP8_RECT_BLK_N=64 and the
-        // shape predicate matches. Default build (MXFP8_RECT_BLK_N=128) sees
-        // an empty translation unit for the rect kernel and the rect predicate
-        // helper does not exist, so this block compiles to the square dispatch
-        // only — preserving byte-identical behavior.
-#if defined(MXFP8_RECT_BLK_N) && (MXFP8_RECT_BLK_N == 64)
-        if (rcr_can_use_exact_8wave_scaled_rect(g)) {
-            MXFP8_DISPATCH_TRACE_ONCE("rcr_v2", "RCR-V2-RECT-FAST", g);
-            dispatch_rcr_exact_8wave_scaled_v2_rect<true>(g);
-            return;
-        }
-#endif
         if (rcr_can_use_exact_8wave_scaled(g)) {
             MXFP8_DISPATCH_TRACE_ONCE("rcr_v2", "RCR-V2-EXACT-8WAVE", g);
             dispatch_rcr_exact_8wave_scaled_v2<true>(g);
@@ -6171,91 +5728,11 @@ void dispatch_pq_v2(layout_globals g) {
                 MXFP8_DISPATCH_TRACE_ONCE("crr_v2", "ADVISE-V2-RRR-8B-DOWN (R36B +9.51%)", g);
             }
         }
-        // R35 Dev B — Stage A1 wire-in: HB shrink (BLK_M=128) V2-CRR
-        // fastpath. Internally guarded by MXFP8_CRR_BLK_M=128 so the default
-        // build (BLK_M=256) sees an empty translation unit and the dispatch
-        // chain falls through to the standard v2-CRR call below.
-        //
-        // R37 Dev A — production predicate: HB shrink Stage B1 (PIPE=1
-        // cross-buffer DB) is only positive on N=1024 tall-thin rect shapes
-        // — R36 Dev A measured +28.02% on 70B-KV but -25.03% on 8192³ square,
-        // and R37 Dev B/C measured +24.96% on 8B-KV (K=4096) but -17% to -28%
-        // on wide-N (N=14336, N=28672) shapes. R38 Reviewer found the K=4096
-        // 8B-KV branch was missing here (only K=8192 was wired) — fixed in
-        // R38 cycle wrap to honor R37 Dev B's allow-list `{(4096,1024,8192),
-        // (4096,1024,4096)}`. Default 8192³ build (no HB shrink flags) is
-        // byte-identical because this branch compiles out under
-        // MXFP8_CRR_BLK_M != 128. See analysis/fp8_gemm/mi350x/r37a_findings.md
-        // and analysis/fp8_gemm/mi350x/r38_reviewer_findings.md.
-#if defined(MXFP8_CRR_BLK_M) && (MXFP8_CRR_BLK_M == 128)
-        if (g.m == 4096 && g.n == 1024 && (g.k == 8192 || g.k == 4096) &&
-            crr_can_use_exact_8wave_scaled_hbshrink(g)) {
-            // R39 Dev C — replaced unconditional one-shot stderr with env-gated
-            // trace helper. Predicate name carries SHIP origin (R37 Dev A/B
-            // SHIP, R38 wire-in fix `66ef02d8`). Distinguish K=8192 (70B-KV)
-            // and K=4096 (8B-KV) via the shape captured in the trace tuple.
-            const char* name = (g.k == 8192) ?
-                "CRR-V2-HBSHRINK-B1-70B-KV (R37AB SHIP)" :
-                "CRR-V2-HBSHRINK-B1-8B-KV (R38 wrap fix 66ef02d8)";
-            MXFP8_DISPATCH_TRACE_ONCE("crr_v2", name, g);
-            dispatch_crr_exact_8wave_scaled_v2_hbshrink<true>(g);
-            return;
-        }
-#endif
-        // R38 Dev A — HB-N shrink (BLK_N=128, HB_N=64) V2-CRR fastpath
-        // dispatch. Symmetric mirror of HB-M shrink for wide-N shapes.
-        // **NO-SHIP / NEGATIVE RESULT**: PIPE=0 measured -43% on 8B Gate/Up
-        // (M=4096 N=14336 K=4096) and -45% on 70B Gate/Up (4096×28672×8192)
-        // vs default V2-CRR. Default kernel is already well-tuned for wide-N
-        // (WARPS_N=4 + RBN=32), so HB-N shrink only adds WG-grid + barrier
-        // overhead. Predicate is kept behind MXFP8_CRR_BLK_N=128 macro
-        // (default builds compile to dead code; verified 0 hbnshrink symbols
-        // in default 8192³ build) so future cycles can iterate without
-        // re-deriving the kernel. **DO NOT define MXFP8_CRR_BLK_N=128 in
-        // production .so**. ORTHOGONAL to MXFP8_CRR_BLK_M (R37 Dev A SHIP).
-        // See analysis/fp8_gemm/mi350x/r38a_findings.md.
-#if defined(MXFP8_CRR_BLK_N) && (MXFP8_CRR_BLK_N == 128)
-        if (crr_can_use_exact_8wave_scaled_hbnshrink(g)) {
-            // R39 Dev C — env-gated trace (was unconditional one-shot).
-            // R38 Dev A NO-SHIP / NEGATIVE; predicate kept behind macro for
-            // R39+ V2-RRR HB-N exploration.
-            MXFP8_DISPATCH_TRACE_ONCE("crr_v2",
-                "CRR-V2-HBNSHRINK (R38A NO-SHIP, exploratory)", g);
-            dispatch_crr_exact_8wave_scaled_v2_hbnshrink<true>(g);
-            return;
-        }
-#endif
         if (crr_can_use_exact_8wave_scaled(g)) {
             MXFP8_DISPATCH_TRACE_ONCE("crr_v2", "CRR-V2-EXACT-8WAVE-DEFAULT", g);
             dispatch_crr_exact_8wave_scaled_v2<true>(g);
             return;
         }
-    }
-#endif
-    // R31 Dev A — Stage A1: rect-V2 CRR fastpath dispatch. Replaces the R29
-    // Dev A hard-guard (which printed a host error and returned) with a real
-    // dispatch to the rect kernel. Stage A1a guarantees clean compile + no
-    // GPU fault when the host has provided correctly-sized buffers; Stage A2
-    // will fix the host preshuffle layout to match the new rect slab geometry.
-#if defined(MXFP8_RECT_BLK_N) && (MXFP8_RECT_BLK_N == 64)
-    if constexpr (L == Layout::CRR) {
-        g.m = static_cast<int>(g.c.rows());
-        g.n = static_cast<int>(g.c.cols());
-        g.k = static_cast<int>(g.b.rows());
-        if (crr_can_use_exact_8wave_scaled_rect(g)) {
-            MXFP8_DISPATCH_TRACE_ONCE("crr_v2", "CRR-V2-RECT-FAST", g);
-            dispatch_crr_exact_8wave_scaled_v2_rect<true>(g);
-            return;
-        }
-        // Fall-through to host-side error (no rect kernel applies for this shape).
-        // R39 Dev C: this fprintf is unconditional (it's an error path, not a
-        // tracepoint — leave behavior unchanged).
-        std::fprintf(stderr,
-            "[tk_mxfp8_layouts] gemm_crr_pq_v2 called with MXFP8_RECT_BLK_N=64 "
-            "but shape m=%d n=%d k=%d does not match rect predicate. "
-            "(R31 Dev A Stage A1 — see r31a_findings.md.)\n",
-            g.m, g.n, g.k);
-        return;
     }
 #endif
     // R39 Dev C — final fallback: legacy V1 dispatch (no V2 fastpath matched).
@@ -6345,49 +5822,6 @@ PYBIND11_MODULE(PY_MODULE_NAME, m) {
         &layout_globals::a_scale, &layout_globals::b_scale,
         &layout_globals::c);
 
-#if MXFP8_RCR_PRESHUFFLE_V2_ENABLE
-    m.def("verify_preshuffle_v2_consumer", [](
-        pybind11::object v1_a_obj, pybind11::object v1_b_obj,
-        pybind11::object v2_a_obj, pybind11::object v2_b_obj,
-        int padded_k_blocks,
-        int num_slabs_a, int num_slabs_b,
-        int num_kpairs)
-    {
-        uint64_t v1_a_ptr = v1_a_obj.attr("data_ptr")().cast<uint64_t>();
-        uint64_t v1_b_ptr = v1_b_obj.attr("data_ptr")().cast<uint64_t>();
-        uint64_t v2_a_ptr = v2_a_obj.attr("data_ptr")().cast<uint64_t>();
-        uint64_t v2_b_ptr = v2_b_obj.attr("data_ptr")().cast<uint64_t>();
-
-        auto v1_a_shape = v1_a_obj.attr("shape").cast<pybind11::tuple>();
-        const int v1_a_rows = pybind11::cast<int>(v1_a_shape[0]);
-        const int v1_a_cols = pybind11::cast<int>(v1_a_shape[1]);
-        auto v1_b_shape = v1_b_obj.attr("shape").cast<pybind11::tuple>();
-        const int v1_b_rows = pybind11::cast<int>(v1_b_shape[0]);
-        const int v1_b_cols = pybind11::cast<int>(v1_b_shape[1]);
-
-        _gl_scale gA(reinterpret_cast<fp8e8m0*>(v1_a_ptr), 1, 1, v1_a_rows, v1_a_cols);
-        _gl_scale gB(reinterpret_cast<fp8e8m0*>(v1_b_ptr), 1, 1, v1_b_rows, v1_b_cols);
-
-        unsigned int* d_mismatch = nullptr;
-        hipMalloc(&d_mismatch, sizeof(unsigned int));
-        hipMemset(d_mismatch, 0, sizeof(unsigned int));
-
-        dim3 grid(num_slabs_a, num_slabs_b, 1);
-        dim3 block(64, 1, 1);
-        verify_preshuffle_v2_consumer_kernel<<<grid, block>>>(
-            gA, gB,
-            reinterpret_cast<const uint8_t*>(v2_a_ptr),
-            reinterpret_cast<const uint8_t*>(v2_b_ptr),
-            num_slabs_a, num_slabs_b,
-            num_kpairs, padded_k_blocks,
-            d_mismatch);
-        hipDeviceSynchronize();
-        unsigned int h_mismatch = 0;
-        hipMemcpy(&h_mismatch, d_mismatch, sizeof(unsigned int), hipMemcpyDeviceToHost);
-        hipFree(d_mismatch);
-        return h_mismatch;
-    });
-#endif // MXFP8_RCR_PRESHUFFLE_V2_ENABLE
 
     m.def("diag_load_transpose", [](pybind11::object b_obj, pybind11::object out_obj) {
         uint64_t b_ptr = b_obj.attr("data_ptr")().cast<uint64_t>();

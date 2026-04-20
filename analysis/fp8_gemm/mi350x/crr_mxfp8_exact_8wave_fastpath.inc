@@ -1,22 +1,5 @@
 #pragma once
 
-// R28 Dev D — rectangular BLK_M=256/BLK_N=128 scaffolding gate.
-// When MXFP8_RECT_BLK_N=64, the existing CRR exact 8-wave fastpath is
-// force-disabled because it hardcodes BLK_N=BLK=256 (scale slab math
-// uses (g.n / BLK), load_col_from_v2_st_half uses HB-sized tile). The
-// dispatch falls back to the BLK-parametric V1 PQ path. A dedicated
-// rect-V2 fastpath is the next-cycle work item — see r28d_findings.md.
-//
-// Define MXFP8_RECT_BLK_N here to a sentinel if the user did not set
-// it (we cannot rely on kernel_mxfp8_layouts.cpp's default having been
-// expanded yet because this header is `#pragma once`-included from
-// inside kernel_mxfp8_layouts.cpp AFTER the constexpr is established —
-// so MXFP8_RECT_BLK_N is always defined here).
-#if defined(MXFP8_RECT_BLK_N) && (MXFP8_RECT_BLK_N == 64)
-#undef  MXFP8_CRR_EXACT_8WAVE_FAST_ENABLE
-#define MXFP8_CRR_EXACT_8WAVE_FAST_ENABLE 0
-#endif
-
 // R33 Dev D — sub-RBM operand-tile scaffolding gate.
 // Default 64 (no change). When set to 32, the existing CRR exact 8-wave
 // fastpath is force-disabled because it hardcodes RBM=64 across:
