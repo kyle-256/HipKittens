@@ -114,6 +114,13 @@ DEFAULT_VARIANTS = [
     # into the kpair_64mfma_step34 asm block (true 4:1:1 MFMA:ds_read:bufload
     # pattern, mirrors aiter scheduling). Replaces post-block emit_pf_tail<0>.
     ("step34pf",  _BASE + " -DSTEP34_PF_INTERLEAVE=1"),
+    # R67: cross-product of step34pf with knobs that were tuned on top of OLD
+    # step34. With step34pf as new base, the same knobs may unlock new shapes.
+    ("step34pf_gm6",   _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DGROUP_SIZE_M=6"),
+    ("step34pf_gm8",   _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DGROUP_SIZE_M=8"),
+    ("step34pf_unr2",  _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DUNROLL_K=2"),
+    ("step34pf_we1",   _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DWAVES_PER_EU_1"),
+    ("step34pf_tbv16", _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DTAIL_BARRIER_VMCNT=16"),
 ]
 
 
