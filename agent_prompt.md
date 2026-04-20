@@ -36,32 +36,44 @@ You are the lead agent for an autonomous MXFP4 GEMM optimization session on MI35
 - R63 closures: `STEP3_PF_N>8` (static_assert), `STEP3_BARRIER_VMCNT∈{4,12}` (≤0.5pp), `R25C_TAIL_PF_OFF_ITERS` (dead at FUSED=1, crashes at FUSED=0 K=14336), `STEP4_EXTERNAL_BR_PREFETCH` (macro removed), `192×256` tile path (architectural rewrite, defer to R65+)
 - R64 closures: `R50A_AITER_INTERLEAVE` (macro removed in a70e4a15 — re-implementing equals the axis-A inner-loop rewrite anyway), `AGPR_REGS_HINT_192` (neutral/weak), `WAVES_PER_EU_1`+`{GM=8,AGPR192}` combos (regress); R64 isolated boundary "WINs" on 4096x4096x8192 / 16384x4096x6144 / 32768x28672x2048 reverted to LOSE in full sweep (contention noise) — confirm any future WIN in BOTH isolated AND full sweep.
 
-## Highest-value next axes (R69+ — R66 axis A, R67 cross-product, R68 triple cross-product LANDED)
+## Highest-value next axes (R70+ — R66 axis A, R67/R68 cross-product LANDED, R69 knob ceiling CONFIRMED)
 
-R66 landed `STEP34_PF_INTERLEAVE` (commit 9b83a0e8): 12/42 → 19/42 WIN, mean 93.6% → 100.4%. New `kpair_64mfma_step34_pf_interleaved` helper inlines all 16 `buffer_load_dwordx4 ... lds` prefetches into the existing single asm block.
+R66 landed `STEP34_PF_INTERLEAVE` (commit 9b83a0e8): 12/42 → 19/42 WIN, mean 93.6% → 100.4%.
 
-R67 landed step34pf×knob cross-product (commit 3cc7f92a): 19/42 → 23/42 WIN, mean 100.4% → 102.5%. Added 5 cross-product variants (gm6/gm8/unr2/we1/tbv16). NEW WINs from `step34pf_unr2`, `step34pf_gm6`, and bare `step34pf`.
+R67 landed step34pf×knob cross-product (commit 3cc7f92a): 19/42 → 23/42 WIN, mean 100.4% → 102.5%.
 
-R68 landed triple cross-product (commit 830ae4c9): 23/42 → 26/42 WIN, mean 102.5% → 103.2%. Added 6 triple-knob variants on top of step34pf base (gm6_unr2, gm8_we1, gm6_tbv16, unr2_tbv16, gb_gm6, we1_unr2). NEW WINs on 28672×4096×8192 (step34pf_gm6, +3.0pp), 32768×4096×7168 (step34pf_gm8, +3.1pp), and 16384×28672×4096 (step34pf_gm6_tbv16, +5.8pp — triple-only WIN). All 3 confirmed via isolated re-bench (GATE 2). Big LOSE-side uplift on hard losers: 32768×4096×14336 +12.6pp and 4096×28672×32768 +9.8pp.
+R68 landed triple cross-product (commit 830ae4c9): 23/42 → 26/42 WIN, mean 102.5% → 103.2%. Big LOSE-side uplift on hard losers: 32768×4096×14336 +12.6pp and 4096×28672×32768 +9.8pp.
 
-R68 also landed: (a) orphan dead-code cleanup, -703 LOC (commit fc0e6ef1), and (b) step12pf NON-SPLIT iso harness (commit d0778ba6) — verdict: correctness-SAFE but perf-DOMINATED in the integrated kernel; CLOSED.
+R69 (no commit, three parallel agents):
+- **Opt-A** (quad+triple knob cross-product, 10 new variants): **0 NEW WINs**. Hard losers unchanged. Reverted (no-effect → no-commit). Knob ceiling on the 16 LOSE shapes is now twice-confirmed.
+- **Opt-B** (Axis-A Opt-2 read-only scoping): **GO-WITH-CAVEATS**. 17 touchpoints, ~480 LOC, ~10-14h. Saved as `project_mxfp4_R69_axis_a_opt2_scoped.md`. NEW helper `kpair_64mfma_step34_pf_interleaved_globalA` mirrors R66 with 8 ds_reads for A removed, 4 buffer_load_dwordx4 (no `lds`) interleaved in single asm block.
+- **Opt-C** (GLOBAL_A VGPR stub-compile gate, isolated worktree): **PASS**. VGPR=253 (under 256 ceiling), SGPR=91, 0 spills, occupancy 1 wave/SIMD. Voff-VGPR-reuse mitigation NOT needed at default occupancy.
 
-R67 step12pf SPLIT design (separate, earlier) FAILED Gate 2 (5632 row-clustered NaN cells, see `project_mxfp4_R67_step12pf_failed.md`). DON'T retry SPLIT; correctness root cause unidentified.
+**R70 priority: Axis-A Opt-2 (GLOBAL_A) implementation.** Both gates pass: knob axis exhausted + VGPR fits + concrete touchpoints scoped. No remaining decision blockers.
 
-1. **Quadruple cross-product** (R69 high-priority, cheap ~30 min): `step34pf_gm6_tbv16_we1`, `step34pf_gm6_unr2_tbv16`, `step34pf_gb_gm6_unr2`, etc. R68 demonstrated triple-only WIN on 16384×28672×4096; quad may yield another 1-3 WINs.
-2. **Untried triple combos** for boundary residue at 95-99%: `step34pf_gm6_we1`, `step34pf_gb_unr2`, `step34pf_gm8_unr2`, `step34pf_we1_tbv16`. Cheap.
-3. **Axis A Option 2 — full data-flow flip (Global→VGPR for A)** — only attempt for the 3 hard losers <90%: 14336×4096×32768 (88.1%), 4096×32768×128256 (86.9%), 4096×28672×32768 (92.0% borderline). ~600 LOC. High risk. Note: 4096×28672×32768 jumped 82.2% → 92.0% via triple, may not need axis-A.
-4. **step12pf NON-SPLIT closed by dominance** (R68). Don't reopen unless we find a shape cluster step34pf can't reach.
-5. **step12pf SPLIT closed by correctness** (R67). Don't reopen without isolated bisect harness.
-6. **Triple/quad knob extensions across non-step34pf base helpers** (e.g., `gb_gm6` cluster). Some may have unmined boundary shapes.
-7. **Axis B (MFMA 32×32×64)** — defer to R71+. R66-R68 confirmed the 4:1:1 schedule was the lever, not MFMA size.
-8. **Axis C (192×256 tile)** — defer; cross-product unlocked enough that motivation is weaker.
+R70 implementation plan (per `project_mxfp4_R69_axis_a_opt2_scoped.md`):
+1. Macro `GLOBAL_A` near `kernel_mxfp4_gluon_cpp.cpp:99-101` (default 0).
+2. New helpers `load_a_global_8` + `compute_a_global_load_voffs` near `:287` (B3b raw-row mapping, ~80 LOC).
+3. Driver gates at `:1574-1779` and `:1813-2073` to bypass A LDS path under `#if GLOBAL_A`.
+4. NEW variant `kpair_64mfma_step34_pf_interleaved_globalA` paralleling `:1004-1203` (~250 LOC, single asm volatile block).
+5. Bench `step34pf_globalA = -DSTEP34_PF_INTERLEAVE=1 -DGLOBAL_A=1` (one variant only, NO knob cross-product in PoC).
+6. Preflight: build with `GLOBAL_A=0`, diff `.s` against current main → must be byte-identical.
+7. Bench K=128256 first in isolation (R66 cadence).
+8. Use 10-run @ 80% cohort-race protocol (FINITE_GATE 0.97).
+9. Commit only on ≥+1 NEW WIN AND no regression on the 19 R66 winners.
+
+R71+ deferred:
+- **Triple/quad knob cross-product OVER GLOBAL_A** (only after R70 lands).
+- **step12pf SPLIT closed by correctness** (R67). Don't reopen without isolated bisect harness.
+- **step12pf NON-SPLIT closed by dominance** (R68). Don't reopen unless we find a shape cluster step34pf can't reach.
+- **Axis B (MFMA 32×32×64)** — defer; cross-product confirmed 4:1:1 schedule (and now data-flow) is the lever, not MFMA size.
+- **Axis C (192×256 tile)** — defer; motivation weaker after R66-R68.
 
 ## Don't reopen — R65 closures (still valid)
 - `KPAIRS_PER_ITER` is not a knob (R65 Opt-D).
 - `kpair_64mfma_step34_interleaved` orphan (line 1414-1755): compile-broken. **R66 rewrote the production helper** (`kpair_64mfma_step34_pf_interleaved` at ~line 872) — keep this orphan as historical reference but do NOT try to revive in-place.
 
-## R66/R67/R68 lessons learned
+## R66/R67/R68/R69 lessons learned
 - The R65 scoping report (project_mxfp4_R65_axis_a_scoped.md) called the upside "4-8pp mean uplift" — actual was +6.8pp. Scoping reports were accurate; future scoping rounds are worth the cycle.
 - Operand pool overflow at 82+48=130 was the predicted blocker; mitigation (4 srds + 4 soffs reused per tile-group, voffs as per-prefetch operand) worked exactly as scoped. R65 BLOCKER analysis was load-bearing.
 - **R67: cross-product axis (existing knob × new base) is HIGH-LEVERAGE after a structural change.** R66 introduced step34pf as the new base; R67 simply added 5 macro combos and unlocked 4 NEW WINs in ~30 min.
@@ -75,9 +87,19 @@ Boundary shapes (95-99.5%) had been knob-ceilinged at 12/42 after R62-R64.
 R66 structural change (step34pf) raised the ceiling to 19/42.
 R67 single-knob cross-product on top raised it to 23/42.
 R68 triple-knob cross-product on top raised it to 26/42.
+R69 quad cross-product on top of triples: **0 NEW WINs** — knob ceiling on the 16 LOSE shapes is now twice-confirmed.
 R68 also extended the LOSE-side ceiling: hardest losers improved by +9 to +12pp (still LOSE) before any structural change.
 
-The lesson: structural changes UNBLOCK knob axes, and **knob axes themselves stack multiplicatively** — re-sweep at every cross-product depth (single → double → triple → quad) before claiming knob ceiling reached. Don't conclude "knob ceiling reached" without first confirming knobs were re-swept at the next combo depth on top of the latest base.
+The lesson: structural changes UNBLOCK knob axes, and **knob axes themselves stack multiplicatively** — re-sweep at every cross-product depth (single → double → triple → quad) before claiming knob ceiling reached. R69 stopped at quad (no further yield), so the next round MUST be structural (Axis-A Opt-2 = GLOBAL_A).
+
+## R69 staged-gate pattern (reusable)
+When the next round's pivot is hypothetically known but a cheap axis remains untried:
+- Decider launches all three in parallel:
+  - Opt-A: perf-test the cheap axis (gives definitive "is the cheap axis exhausted?" answer).
+  - Opt-B: read-only scoping of the expensive axis (gives "what does the expensive change touch?").
+  - Opt-C: compile-only gate of the expensive axis (gives "does it fit the register budget?").
+- Cost: ~3 agents × ~1.5h = 4.5h wallclock; payoff: next round can launch with no remaining decision blockers.
+- Used in R69; proceed with R70 GLOBAL_A implementation directly.
 
 ## Standing user commitments
 - Full GitHub push permission (no asking)
