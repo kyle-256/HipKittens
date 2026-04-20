@@ -1,0 +1,12 @@
+{
+    "4096x8192x28672": {
+        "rcr": {
+            "avg_ms": 0.6529225799441337,
+            "tflops": 2946.973205877849,
+            "snr_db": 49.60569290448041,
+            "deterministic": true,
+            "determinism_max_abs_diff": 0.0,
+            "quality_ok": true
+        }
+    }
+}
