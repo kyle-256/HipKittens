@@ -95,10 +95,11 @@ DEFAULT_VARIANTS = [
     # Sweep on 8 worst LOSE shapes (4 GPUs):
     #   unr2  best on (4096,32768,128256): 74.8% -> 76.3% (+1.5pp)
     #   unr16 best on (4096,28672,32768):  81.9% -> 83.3% (+1.4pp)
-    # Pruned (no help / regression on target shapes):
-    #   unr4, pf4, extbr, gm8, gm6_extbr, gb_unr4
     ("unr2",      _BASE + " -DUNROLL_K=2"),
     ("unr16",     _BASE + " -DUNROLL_K=16"),
+    # R63 OPT-1: GM=8 unlocks new WIN on 16384x6144x4096 (99.5% -> 102.2%).
+    # Regresses some other shapes (per-shape autotune protects them).
+    ("gm8",       _BASE + " -DGROUP_SIZE_M=8"),
 ]
 
 
