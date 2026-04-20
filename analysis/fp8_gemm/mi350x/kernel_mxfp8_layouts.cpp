@@ -3854,35 +3854,6 @@ __host__ inline void dispatch_rcr_exact_8wave_scaled_v2(const layout_globals& g)
 #include "rrr_mxfp8_4wave_fastpath.inc"
 #include "rrr_mxfp8_exact_8wave_fastpath.inc"
 #include "crr_mxfp8_exact_8wave_fastpath.inc"
-// R31 Dev A — Stage A1: rect-V2 CRR fastpath kernel. Only defines symbols
-// when MXFP8_RECT_BLK_N=64. Default build (square) sees an empty
-// translation unit (guarded internally) so no behavioral change.
-#include "crr_mxfp8_exact_8wave_rect_fastpath.inc"
-// R32 Dev D — Stage A1: rect-V2 RCR fastpath kernel. Mirrors Dev A's
-// rect-V2 CRR scaffolding for the V2-RCR codepath. Same internal guard
-// (MXFP8_RECT_BLK_N=64) so default build sees an empty translation unit.
-#include "rcr_mxfp8_exact_8wave_rect_fastpath.inc"
-// R33 Dev D — Stage 1b: sub-RBM (RBM=32) V2-CRR fastpath scaffolding.
-// Internally guarded by MXFP8_CRR_RBM=32 so default build (RBM=64) sees
-// an empty translation unit and is byte-identical to pre-R33-D head.
-#include "crr_mxfp8_exact_8wave_subrbm_fastpath.inc"
-// R35 Dev C — Stage A2: WARPS_M=4 (× WARPS_N=2) V2-CRR fastpath scaffolding.
-// Internally guarded by MXFP8_CRR_WARPS_M=4 so default build (WARPS_M=2) sees
-// an empty translation unit and is byte-identical to pre-R35-C head.
-#include "crr_mxfp8_exact_8wave_warpsm4_fastpath.inc"
-// R35 Dev B — Stage A1: HB shrink (BLK_M=128, HB_M=64) V2-CRR fastpath
-// scaffolding. Pivot from R34 Dev D's REFUTED sub-RBM hypothesis: shrink
-// the per-warp M-coverage (HB_M=64, single RBM=64 stride per warp), which
-// actually halves accumulator vector count (cA/cB only, no cC/cD).
-// Internally guarded by MXFP8_CRR_BLK_M=128 so default build (BLK_M=256)
-// sees an empty translation unit and is byte-identical to pre-R35-B head.
-#include "crr_mxfp8_exact_8wave_hbshrink_fastpath.inc"
-// R38 Dev A — HB-N shrink (BLK_N=128, HB_N=64) V2-CRR fastpath. Symmetric
-// mirror of HB-M shrink targeting wide-N shapes (8B Gate/Up, 70B Gate/Up,
-// 8B-Down). Internally guarded by MXFP8_CRR_BLK_N=128 so default build
-// (BLK_N=256) sees an empty translation unit. Orthogonal to MXFP8_CRR_BLK_M
-// — both can be enabled independently in a single production .so.
-#include "crr_mxfp8_exact_8wave_hbnshrink_fastpath.inc"
 // R42 Dev A — M=1 single-token decode MXFP8 fastpath (RCR layout only).
 // Internally guarded by MXFP8_DECODE_M1_ENABLE so default build sees an
 // empty translation unit and is byte-identical to pre-R42-A head. New
