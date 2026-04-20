@@ -36,10 +36,22 @@ You are the lead agent for an autonomous MXFP4 GEMM optimization session on MI35
 - R63 closures: `STEP3_PF_N>8` (static_assert), `STEP3_BARRIER_VMCNT∈{4,12}` (≤0.5pp), `R25C_TAIL_PF_OFF_ITERS` (dead at FUSED=1, crashes at FUSED=0 K=14336), `STEP4_EXTERNAL_BR_PREFETCH` (macro removed), `192×256` tile path (architectural rewrite, defer to R65+)
 - R64 closures: `R50A_AITER_INTERLEAVE` (macro removed in a70e4a15 — re-implementing equals the axis-A inner-loop rewrite anyway), `AGPR_REGS_HINT_192` (neutral/weak), `WAVES_PER_EU_1`+`{GM=8,AGPR192}` combos (regress); R64 isolated boundary "WINs" on 4096x4096x8192 / 16384x4096x6144 / 32768x28672x2048 reverted to LOSE in full sweep (contention noise) — confirm any future WIN in BOTH isolated AND full sweep.
 
-## Highest-value next axes (R64+)
-1. **Full inner-loop rewrite** matching aiter's 4:1:1 MFMA:buffer_load:ds_read schedule (not a knob — replace `kpair_64mfma_step34` body wholesale, see `project_mxfp4_aiter_disasm_findings.md`)
-2. **MFMA 32×32×64** as a structural alternative to 16×16×128 (untested)
-3. **192×256 tile path** for 4096×K-large LOSE cluster — defer to R65+ after axis 1 makes the kpair body template-friendly
+## Highest-value next axes (R66+ — R65 sharpened the plan)
+
+1. **Axis A Option 1 — interleave buffer_loads into kpair_64mfma_step34** (R65 SCOPED, R66 IMPLEMENT).
+   - The current `kpair_64mfma_step34` (line 863-1014) ALREADY does 4:1 MFMA:ds_read interleave (see comment at line 894). What's MISSING is buffer_load interleave (true 4:1:1 like aiter).
+   - Rewrite the helper to inline 16 `buffer_load_dwordx4 ... lds` between MFMA groups, replacing the post-block `emit_pf_tail<0>` calls at lines 2431-2432, 2640-2641, 2652-2653.
+   - **Single asm block** — DO NOT split into multiple asm volatile blocks (R62/R65 confirmed: separate blocks let the AGPR allocator put `ds_read_b128` addresses in AGPRs → invalid operand).
+   - ~250 LOC, expected 4-8pp mean uplift.
+   - BLOCKERS to anticipate: (1) operand pool overflow at 82+48 → reuse one srd per tile-group; (2) scale-load contention on K=128256 — bench DLA1 shapes early.
+2. **Axis A Option 2 — full data-flow flip (Global→VGPR for A)** — only if Option 1 lands < 4pp mean uplift. ~600 LOC. Empirical: `GLOBAL_B` already exists for B and only nets ~1 boundary win, so data-flow flip alone is not the lever.
+3. **Orphan dead-code cleanup** (R65 Opt-Orphan): ~700 LOC removable. Pure clarity, no perf. Optional, do alongside R66.
+4. **MFMA 32×32×64** (Axis B): NO-GO for R66. ISA confirmed but ~1500 LOC rewrite against aiter's chosen 16×16×128 SOTA. Defer to R70+ with single-helper PoC.
+5. **192×256 tile path** (Axis C): defer until after Axis A makes kpair body template-friendly.
+
+## Don't reopen — R65 closures
+- `KPAIRS_PER_ITER` is not a knob (R65 Opt-D). The TODO entry suggesting "cheap to try" was misleading. Adding it requires the same multi-helper rewrite as axis A.
+- `kpair_64mfma_step34_interleaved` orphan (line 1414-1755): compile-broken (R62 + R65 re-confirmed). Useful as structural reference for the 4:1 ds_read interleave. R66 must rewrite from scratch in a single asm block.
 
 ## Knob ceiling reached for boundary shapes
 After R62+R63+R64, boundary shapes (95-99.5%) have been swept across:

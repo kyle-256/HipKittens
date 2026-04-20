@@ -1,7 +1,7 @@
 # MXFP4 Optimization TODO
 
-**Last update:** 2026-04-20 (R64)
-**Status:** 12/42 WIN, mean ~93.6% of aiter (+0.5pp from R63 via expanded autotune; **no NEW WIN**)
+**Last update:** 2026-04-20 (R65 — scoping round, no kernel changes)
+**Status:** 12/42 WIN, mean ~93.6% of aiter. R65 scoped axes A/B/D + orphan audit; produced concrete R66 plan.
 **Bench harness:** `analysis/fp8_gemm/mi350x/bench_all_42.py` (HipKittens-only, **11 variants**, parallel-GPU)
 
 ---
@@ -36,24 +36,38 @@ R63 boundary residue (still LOSE):
 
 ## Productive axes (not yet exhausted)
 
-### A. Inner-loop rewrite (HIGH priority)
-- The current `kpair_64mfma_step34` emits 8 ds_reads then 24 pure MFMAs per Step.
-- aiter emits an evenly-spread MFMA:ds_read:buffer_load 4:1:1 pattern.
-- R50A tried to spread inside the existing asm volatile body but only addressed cohort-race; no perf win.
-- **Next try:** rewrite the entire 64-MFMA inner kernel from scratch using aiter's emission template (see `project_mxfp4_aiter_disasm_findings.md`). Do NOT try to splice — the schedule is fundamental, not a knob.
+### A. Inner-loop rewrite (HIGH priority — scoped in R65, ready for R66)
+**R65 finding** (Opt-A scoping): the current `kpair_64mfma_step34` (line 863-1014) ALREADY emits 4:1 MFMA:ds_read interleaved within its single asm volatile block — comment at line 894 confirms. **What's missing is buffer_load interleaved into the MFMA stream** (true 4:1:1 pattern); currently all 16 prefetches are emitted via `emit_pf_tail<0>` AFTER the fused asm block (lines 2431-2432, 2640-2641, 2652-2653).
 
-### B. Different MFMA shape
-- Current uses 16×16×128. UNTRIED: 32×32×64 with `mfma_scale` cbsz/blgp variants.
-- Structurally different AGPR forwarding chain — would either close cohort race or open a new performance regime.
+Two sub-options identified:
+- **Option 1 (recommended for R66): SCHEDULING ONLY.** Extend `kpair_64mfma_step34`'s asm body to inline 16 `buffer_load_dwordx4 ... lds` between MFMA groups, replacing the post-block `emit_pf_tail<0>` calls. ~250 LOC, single helper.
+- **Option 2: FULL DATA-FLOW REWRITE** (also flip A-tile data flow Global→VGPR). ~600 LOC. NOT recommended first — empirical data: `GLOBAL_B` (the existing Global→VGPR path for B) only nets ~1 boundary win across 42 shapes (per R64 `gb_unr2`), so data-flow flip alone is not the lever.
 
-### C. Per-shape tile dimensions
-- aiter uses 224×256 / 192×256 for the worst clusters.
-- HipKittens is locked to BLK_M=BLK_N=256.
-- Adding a 192×256 tile path may unlock 4096×K-large shapes specifically.
+R66 touch points (Opt-A enumerated):
+- `kernel_mxfp4_gluon_cpp.cpp:863-1014` — rewrite kpair_64mfma_step34
+- `kernel_mxfp4_gluon_cpp.cpp:1414-1755` — DELETE broken orphan kpair_64mfma_step34_interleaved
+- `kernel_mxfp4_gluon_cpp.cpp:2428-2432, 2438-2440, 2456-2463, 2636-2641, 2649-2653` — gut post-block pf emission, pass pf params into helper
+- `bench_all_42.py:88-112` — gate via new STEP34_PF_INTERLEAVE=1 macro for A/B testing
 
-### D. K-pair count tuning
-- Currently 2 KPairs per K iteration. aiter uses different KPair counts per shape.
-- Cheap to try: extend `bench_all_42.py` variants with `-DKPAIRS_PER_ITER={1,2,4}`.
+R66 BLOCKERS to anticipate:
+1. Inline-asm operand pool overflow: helper has 82 operands today; +16 prefetches needs +32-48 more. May exceed clang/LLVM limit. Workaround: reuse one srd per tile-group (4 srds total).
+2. Scale-load contention on K=128256 ultra-loop (DLA1 path). Bench K=128256 shapes early.
+3. AGPR-allocator hazard: separate-asm-block design hit `ds_read_b128` AGPR-address bug in R62. Keep all 64 MFMAs in a SINGLE asm block.
+
+### B. MFMA 32×32×64 (DEFERRED — R65 NO-GO verdict)
+- ISA support CONFIRMED on gfx950 (`v_mfma_scale_f32_32x32x64_f8f6f4`, cbsz=4 blgp=4, see `/opt/rocm/lib/llvm/include/clang/Basic/BuiltinsAMDGPU.def:451`).
+- Cost: rewrite ~1500 lines of asm across 15 kpair helpers + re-derive ds_read interleave + re-tune op_sel.
+- Reward: speculative. aiter (the SOTA) chose 16×16×128 explicitly. Switching against the SOTA's MFMA size is bet-against-the-house with no data.
+- **Defer to R70+**: only revisit if Axis A plateaus, and then start with a single-helper proof-of-concept (`kpair_32mfma_pure` at line 678).
+
+### C. Per-shape tile dimensions (192×256) — DEFERRED
+- Same closure as R63: BLK=256 conflated as both M and N at ~30 sites; ~500-800 LOC parallel asm bodies needed.
+- Defer until after Axis A makes the kpair body template-friendly.
+
+### D. K-pair count tuning — RECLASSIFIED (was misleading TODO entry)
+- **R65 Opt-D investigation: `KPAIRS_PER_ITER` is NOT a knob.** "KPair" is the name for the fundamental MFMA primitive, not a tunable batching count. The 4-step × 32-MFMA pipeline is the architectural choice (one K-tile produces 4 MN sub-tiles A0Bl/A0Br/A1Bl/A1Br).
+- To change "KPair count per iteration" requires rewriting all 4 kpair_64mfma_step* and kpair_32mfma_* helpers (~600 LOC of asm) — i.e., it's not "cheap", it IS axis A.
+- Removed from action list. Don't try to add `-DKPAIRS_PER_ITER` to bench autotune.
 
 ---
 
@@ -73,14 +87,19 @@ R63 boundary residue (still LOSE):
 - **`AGPR_REGS_HINT_192` macro** (R64): neutral/weak across all sweeps — never sole best on any shape. Don't enable as default.
 - **`WAVES_PER_EU_1`+`GM=8` and `WAVES_PER_EU_1`+`AGPR_REGS_HINT_192` combos** (R64): regress on most shapes; the individual `we1` variant is in autotune but the combos add nothing.
 - **R64 isolated boundary "WINs"** (R64): three shapes (4096x4096x8192, 16384x4096x6144, 32768x28672x2048) crossed 100% on isolated re-bench but reverted to LOSE in the full sweep — boundary noise, not algorithmic progress. Don't claim future WINs without ≥3-run isolated confirmation AND a full-sweep confirmation.
+- **`KPAIRS_PER_ITER` macro** (R65 Opt-D): does NOT exist as a knob. "KPair" names the fundamental MFMA primitive; the 4-step×32-MFMA pipeline is architectural. Don't try to add `-DKPAIRS_PER_ITER={1,4}` to bench autotune — there's nothing to gate. The TODO entry suggesting this as "cheap to try" was misleading; reclassified as part of axis-A.
+- **`kpair_64mfma_step34_interleaved` orphan** (R62 + R65 re-confirmed): function at line 1414-1755 emits `ds_read_b128` with AGPR-address operands due to AGPR pressure in separate-asm-block design. Compile-broken. Useful as STRUCTURAL REFERENCE only — do not try to revive in-place. R66 axis-A rewrite must be from-scratch in a SINGLE asm block (mirror existing `kpair_64mfma_step34` block structure).
+- **15 other orphan functions in kernel** (R65 Opt-Orphan, ~700 LOC): `store_bf16x2_packed`, `extract_dsread_tile`, `load_pq_scale_srd`, `compute_lds_base_addrs`, `emit_full_pf_l2only`, `emit_l2_pf_block`, `kpair_32mfma_with_pf`, `kpair_32mfma_pure`, `kpair_32mfma_with_16lds_and_pf`, `kpair_32mfma_with_pf_swapped_sel`, `kpair_32mfma_pure_swapped_plain`, `kpair_64mfma_step12_swapped_sel`, `kpair_32mfma_with_lds_and_pf_swapped_sel`, plus the dead `R37_FIX_B==0` else-branches (lines 2466-2528 and 2654-2680). Pure clarity cleanup, no perf. Optional R66 task.
 
 ---
 
-## R64+ priorities
+## R66+ priorities
 
-1. **Inner-loop rewrite** (Axis A) — biggest unrealized lever; do this before micro-knobs or tile-size variants. The existing `kpair_64mfma_step34` (line 863, 64 MFMAs in one asm body) needs full re-emit using aiter's 4:1:1 MFMA:buffer_load:ds_read schedule. Reference: `project_mxfp4_aiter_disasm_findings.md`.
-2. **MFMA 32×32×64** (Axis B) — exploratory; only if Axis A stalls. Different AGPR forwarding chain.
-3. **192×256 tile path** (Axis C) — defer to R65+ AFTER axis A makes the kpair body template-friendly.
+1. **Axis A Option 1 — interleave buffer_loads into kpair_64mfma_step34** (R65 SCOPED, R66 IMPLEMENT). Single helper rewrite, ~250 LOC. See "Axis A" section above for touch points and BLOCKERS. Expected 4-8pp mean uplift, biggest gains on 4096×*×K-large losers (currently 67-82% of aiter).
+2. **Orphan dead-code cleanup** (R65 Opt-Orphan audit, ~700 LOC removable) — pure clarity gain, no perf. Optional; do alongside or after R66 to reduce future agent-search noise.
+3. **Axis A Option 2 (full data-flow rewrite)** — only if Option 1 lands < 4pp mean uplift.
+4. **Axis B (MFMA 32×32×64)** — defer to R70+. Single-helper PoC first, never wholesale.
+5. **Axis C (192×256 tile)** — defer until after Axis A makes kpair body template-friendly.
 
 ## Bench script (R64 working set)
 `bench_all_42.py` variants (11 total):
