@@ -1,0 +1,53 @@
+=== SALU instruction breakdown for 8B_GateUp (V2 RRR steady K-loop body) ===
+
+--- raw counts of SALU op-mnemonic prefix (top 30) ---
+     31 	s_barrier
+     30 	s_setprio
+     24 	s_waitcnt
+     21 	s_mov_b32
+     10 	s_nop
+      9 	s_addc_u32
+      9 	s_add_u32
+      6 	s_ashr_i32
+      6 	s_add_i32
+      5 	s_addk_i32
+      3 	s_movk_i32
+      1 	s_or_b64
+      1 	s_mul_i32
+      1 	s_mov_b64
+      1 	s_endpgm
+      1 	s_cmpk_eq_i32
+      1 	s_cbranch_scc0
+      1 	s_cbranch_execz
+      1 	s_and_saveexec_b64
+
+--- specific SALU groups ---
+  s_add_*  (s_add_u32/i32/co_u32)  15
+  s_addc_u32                       9
+  s_addk_i32                       5
+  s_sub_*                          0
+  s_lshl_*                         0
+  s_lshr_*                         0
+  s_mul_*                          1
+  s_mov_b32                        21
+  s_mov_b64                        1
+  s_load_dword_*                   0
+  s_load_b*                        0
+  s_and_*                          1
+  s_or_*                           1
+  s_xor_*                          0
+  s_bfe_*                          0
+  s_bfm_*                          0
+  s_min/s_max                      0
+  s_cmp/s_cmpk                     1
+  s_cbranch/s_branch               2
+  s_setprio                        30
+  s_barrier                        31
+  s_waitcnt                        24
+  s_setpc/s_swappc                 0
+  TOTAL SALU (s_*)                 162
+  v_mfma                           128
+  v_lshrrev_b32 (CRR scale shift)  1
+  ds_read_*                        128
+  ds_write_*                       0
+  buffer_load_*                    22

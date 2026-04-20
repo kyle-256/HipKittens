@@ -1,0 +1,45 @@
+=== MXFP8 GEMM Layout Benchmark (preshuffle-quant): M=4096, N=14336, K=4096 ===
+Warmup=100, iters=200, correctness=off
+Layouts=rrr
+
+--- RRR Layout: C = A @ B ---
+[R55B-DEBUG-3] dispatch_pq_v2 entry: L=1 g.m=0 g.n=0 g.k=0 a.cols=4096 c.rows=4096 c.cols=14336
+  Avg time: 0.3058 ms, TFLOPS: 1573.07
+
+Results saved to mxfp8_layout_results_4096x14336x4096_pq.json
+=== MXFP8 GEMM Layout Benchmark (preshuffle-quant): M=4096, N=14336, K=4096 ===
+Warmup=100, iters=200, correctness=off
+Layouts=rrr
+
+--- RRR Layout: C = A @ B ---
+[R55B-DEBUG-3] dispatch_pq_v2 entry: L=1 g.m=0 g.n=0 g.k=0 a.cols=4096 c.rows=4096 c.cols=14336
+  Avg time: 0.3028 ms, TFLOPS: 1588.65
+
+Results saved to mxfp8_layout_results_4096x14336x4096_pq.json
+=== MXFP8 GEMM Layout Benchmark (preshuffle-quant): M=4096, N=14336, K=4096 ===
+Warmup=100, iters=200, correctness=off
+Layouts=rrr
+
+--- RRR Layout: C = A @ B ---
+[R55B-DEBUG-3] dispatch_pq_v2 entry: L=1 g.m=0 g.n=0 g.k=0 a.cols=4096 c.rows=4096 c.cols=14336
+  Avg time: 0.3026 ms, TFLOPS: 1589.87
+
+Results saved to mxfp8_layout_results_4096x14336x4096_pq.json
+=== MXFP8 GEMM Layout Benchmark (preshuffle-quant): M=4096, N=14336, K=4096 ===
+Warmup=100, iters=200, correctness=off
+Layouts=rrr
+
+--- RRR Layout: C = A @ B ---
+[R55B-DEBUG-3] dispatch_pq_v2 entry: L=1 g.m=0 g.n=0 g.k=0 a.cols=4096 c.rows=4096 c.cols=14336
+  Avg time: 0.3027 ms, TFLOPS: 1589.12
+
+Results saved to mxfp8_layout_results_4096x14336x4096_pq.json
+=== MXFP8 GEMM Layout Benchmark (preshuffle-quant): M=4096, N=14336, K=4096 ===
+Warmup=100, iters=200, correctness=off
+Layouts=rrr
+
+--- RRR Layout: C = A @ B ---
+[R55B-DEBUG-3] dispatch_pq_v2 entry: L=1 g.m=0 g.n=0 g.k=0 a.cols=4096 c.rows=4096 c.cols=14336
+  Avg time: 0.3055 ms, TFLOPS: 1574.71
+
+Results saved to mxfp8_layout_results_4096x14336x4096_pq.json

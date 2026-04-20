@@ -185,6 +185,63 @@
 #define MXFP8_RRR_PEEL_TAIL 0
 #endif
 
+// R56 Dev A: SALU-pressure reduction for V2 RRR (8B Gate/Up RRR HEADROOM cell).
+// REFUTED-EMPIRICAL-SETPRIO-LOAD-BEARING. Macro retained default-OFF for
+// reproducibility — see r56a_findings.md for the per-MFMA priority bursting
+// load-bearing analysis. Phase 0 ISA inspection confirmed the V2 RRR steady
+// K-loop body is byte-identical between 8B Gate/Up (K=4096) and 70B Q/O
+// (K=8192) — same 162 SALU per K-pair body. The R55F PMC SALU-DOMINANT
+// signature is therefore from FEWER K-iterations failing to amortize the
+// per-iter SALU footprint, not from any per-iter SALU growth at small K.
+//
+// SALU breakdown per K-pair iter:
+//   162 total SALU
+//   31 s_barrier   (correctness-required wave sync)
+//   30 s_setprio   (per-MMA-quartet priority toggling — load-bearing per R56A)
+//   24 s_waitcnt   (memory ordering)
+//   21 s_mov_b32   (18 = m0 setup for buffer_load_to_lds DMA; 3 = SGPR copies)
+//   15 s_add + 9 s_addc_u32  (12 64-bit pointer adds, ~6 carry chains)
+//   10 s_nop       (LLVM-emitted scheduling stall)
+//
+// Strategy axes for R56A (all REFUTED on 8B GU primary):
+//   V0 = baseline (per-quartet setprio, byte-identical to HEAD)
+//   V1 = single-pair-per-do_k_iter (-20 SALU/iter via -12 setprio -8 nops)
+//                                  → REGRESSED -12.17% (5-run median)
+//   V2 = drop ALL setprio in do_k_iter (+VGPR 254→256, more s_waitcnt)
+//                                  → REGRESSED -37.92% (5-run median)
+//
+// Conclusion: the per-MFMA `s_setprio(1)/setprio(0)` priority bursting around
+// each MMA segment is load-bearing — removing it lets non-MFMA SALU (m0
+// setup, scale-fetch ptr arith) float into the MMA issue window, starving
+// the MFMA dispatch unit. The 30 setprio per K-iter aren't dead weight; they
+// are an active wave-arbiter signal that protects MMA throughput.
+//
+// Default OFF preserves byte-identity to HEAD for the production build.
+#ifndef MXFP8_RRR_SALU_SETPRIO_R56A
+#define MXFP8_RRR_SALU_SETPRIO_R56A 0
+#endif
+
+#if MXFP8_RRR_SALU_SETPRIO_R56A == 0
+#define R56A_SETPRIO_HI() __builtin_amdgcn_s_setprio(1)
+#define R56A_SETPRIO_LO() __builtin_amdgcn_s_setprio(0)
+#define R56A_DKI_ENTRY()  do {} while (0)
+#define R56A_DKI_EXIT()   do {} while (0)
+#elif MXFP8_RRR_SALU_SETPRIO_R56A == 1
+// Consolidate: setprio per do_k_iter call instead of per quartet.
+#define R56A_SETPRIO_HI() do {} while (0)
+#define R56A_SETPRIO_LO() do {} while (0)
+#define R56A_DKI_ENTRY()  __builtin_amdgcn_s_setprio(1)
+#define R56A_DKI_EXIT()   __builtin_amdgcn_s_setprio(0)
+#elif MXFP8_RRR_SALU_SETPRIO_R56A == 2
+// Drop all setprio in do_k_iter.
+#define R56A_SETPRIO_HI() do {} while (0)
+#define R56A_SETPRIO_LO() do {} while (0)
+#define R56A_DKI_ENTRY()  do {} while (0)
+#define R56A_DKI_EXIT()   do {} while (0)
+#else
+#error "MXFP8_RRR_SALU_SETPRIO_R56A must be 0/1/2"
+#endif
+
 #if MXFP8_RRR_EXACT_8WAVE_FAST_ENABLE
 
 #if MXFP8_RRR_PHASE_SPLIT
@@ -709,6 +766,9 @@ void rrr_exact_8wave_scaled_kernel(const layout_globals g) {
             a1_scale_packs, b0_scale_packs, b1_scale_packs);
 #endif
 #else // !MXFP8_RRR_PHASE_SPLIT — original baseline body
+        // R56A: optionally hoist setprio(1) to do_k_iter entry (V1) or drop
+        // entirely (V2). Macros expand to {} when V0 (baseline byte-identical).
+        R56A_DKI_ENTRY();
         load_b(b0, Bs[tic][0], wn);
 #if RRR_B_REG_ROW_LOAD_TRANSPOSE && RRR_B_REG_ROW_LOAD_ALIAS
         const auto b0_keep = b0;
@@ -719,13 +779,13 @@ void rrr_exact_8wave_scaled_kernel(const layout_globals g) {
         __builtin_amdgcn_s_barrier();
         MXFP8_RRR_PHASE_SB();
         asm volatile("s_waitcnt lgkmcnt(0)");
-        __builtin_amdgcn_s_setprio(1);
+        R56A_SETPRIO_HI();
 #if RRR_B_REG_ROW_LOAD_TRANSPOSE && RRR_B_REG_ROW_LOAD_ALIAS
         rrr_mma_scaled_phase<phase>(cA, a, b0_keep, a0_scale_packs, b0_scale_packs);
 #else
         rrr_mma_scaled_phase<phase>(cA, a, b0, a0_scale_packs, b0_scale_packs);
 #endif
-        __builtin_amdgcn_s_setprio(0);
+        R56A_SETPRIO_LO();
         __builtin_amdgcn_s_barrier();
         RRR_SCHED_BARRIER();
 
@@ -741,13 +801,13 @@ void rrr_exact_8wave_scaled_kernel(const layout_globals g) {
         __builtin_amdgcn_s_barrier();
         MXFP8_RRR_PHASE_SB();
         asm volatile("s_waitcnt lgkmcnt(0)");
-        __builtin_amdgcn_s_setprio(1);
+        R56A_SETPRIO_HI();
 #if RRR_B_REG_ROW_LOAD_TRANSPOSE && RRR_B_REG_ROW_LOAD_ALIAS
         rrr_mma_scaled_phase<phase>(cB, a, b1_keep, a0_scale_packs, b1_scale_packs);
 #else
         rrr_mma_scaled_phase<phase>(cB, a, b1, a0_scale_packs, b1_scale_packs);
 #endif
-        __builtin_amdgcn_s_setprio(0);
+        R56A_SETPRIO_LO();
         __builtin_amdgcn_s_barrier();
         // R52 Dev H: soft scheduler barrier at the cB->cC quartet boundary
         // (the same boundary R49 Dev B's noinline used). Default OFF.
@@ -762,13 +822,13 @@ void rrr_exact_8wave_scaled_kernel(const layout_globals g) {
         __builtin_amdgcn_s_barrier();
         MXFP8_RRR_PHASE_SB();
         asm volatile("s_waitcnt lgkmcnt(0)");
-        __builtin_amdgcn_s_setprio(1);
+        R56A_SETPRIO_HI();
 #if RRR_B_REG_ROW_LOAD_TRANSPOSE && RRR_B_REG_ROW_LOAD_ALIAS
         rrr_mma_scaled_phase<phase>(cC, a, b0_keep, a1_scale_packs, b0_scale_packs);
 #else
         rrr_mma_scaled_phase<phase>(cC, a, b0, a1_scale_packs, b0_scale_packs);
 #endif
-        __builtin_amdgcn_s_setprio(0);
+        R56A_SETPRIO_LO();
         __builtin_amdgcn_s_barrier();
         RRR_SCHED_BARRIER();
 
@@ -777,14 +837,15 @@ void rrr_exact_8wave_scaled_kernel(const layout_globals g) {
         __builtin_amdgcn_s_barrier();
         MXFP8_RRR_PHASE_SB();
         asm volatile("s_waitcnt lgkmcnt(0)");
-        __builtin_amdgcn_s_setprio(1);
+        R56A_SETPRIO_HI();
 #if RRR_B_REG_ROW_LOAD_TRANSPOSE && RRR_B_REG_ROW_LOAD_ALIAS
         rrr_mma_scaled_phase<phase>(cD, a, b1_keep, a1_scale_packs, b1_scale_packs);
 #else
         rrr_mma_scaled_phase<phase>(cD, a, b1, a1_scale_packs, b1_scale_packs);
 #endif
-        __builtin_amdgcn_s_setprio(0);
+        R56A_SETPRIO_LO();
         __builtin_amdgcn_s_barrier();
+        R56A_DKI_EXIT();
 #endif // MXFP8_RRR_PHASE_SPLIT
     };
 
