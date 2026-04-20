@@ -1264,8 +1264,85 @@ void crr_exact_8wave_scaled_kernel(const layout_globals g)
         asm volatile("s_waitcnt vmcnt(0)");
         __builtin_amdgcn_s_barrier();
     }
+#elif MXFP8_CRR_SB_PIPELINE == 4
+    // R57 Dev D: FP8-style interleaved pipeline.
+    // Extends SB_PIPELINE=3 by interleaving global→LDS loads for the next
+    // iter BETWEEN the cC and cD MMA pairs (rather than issuing all 4 in a
+    // burst between cB and cC). This gives the B-side loads more time in
+    // flight before the next-iter LDS reads need them, while keeping MMA
+    // chains intact (0 VGPR spill).
+    //
+    // The key structural change vs SB_PIPELINE=3:
+    //   - SB3: barrier → all 4 global_load → cC → cD → vmcnt(0)
+    //   - SB4: barrier → global_load_b x2 → cC → global_load_a x2 → cD → vmcnt(0)
+    //
+    // No additional sched_barrier(0) fences beyond CRR_MMA_BEGIN/END —
+    // LLVM naturally respects the source-level interleaving because each
+    // global_load writes to LDS (memory side-effect). Adding explicit
+    // sched_barrier(0) between loads and MMAs was tested (v3) and found
+    // to HURT performance by preventing natural LLVM overlap.
+    // Targets WAIT-DOMINANT bottleneck (R56B: SQ_WAIT_ANY +145%).
+    TK_PRAGMA_UNROLL(CRR_MAIN_UNROLL)
+    for (int k = 0; k < k_iters - 1; k++) {
+        if ((k & 1) == 0) {
+            load_raw_scales(k >> 1);
+        } else {
+            #pragma unroll
+            for (int g = 0; g < crr_a_pack_count; g++) {
+                a0_scale_packs[g] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(a0_scale_packs[g]) >> 16);
+                a1_scale_packs[g] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(a1_scale_packs[g]) >> 16);
+            }
+            #pragma unroll
+            for (int g = 0; g < crr_b_pack_count; g++) {
+                b0_scale_packs[g] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(b0_scale_packs[g]) >> 16);
+                b1_scale_packs[g] = std::bit_cast<fp8e8m0_4>(std::bit_cast<uint32_t>(b1_scale_packs[g]) >> 16);
+            }
+        }
+        // ---- Phase 1: LDS → register reads ----
+        load_b(b0, Bs[0][0], wn);
+        load_b(b1, Bs[0][1], wn);
+        load_a(a, As[0][0], wm);
+        asm volatile("s_waitcnt lgkmcnt(0)");
+
+        // ---- Phase 2: cA MMA (a=As[0][0], b=b0) ----
+        CRR_MMA_BEGIN();
+        crr_mma_scaled_from_packs_fixed_phase(cA, a, b0, a0_scale_packs, b0_scale_packs);
+        CRR_MMA_END();
+
+        // ---- Phase 3: cB MMA (a=As[0][0], b=b1) ----
+        CRR_MMA_BEGIN();
+        crr_mma_scaled_from_packs_fixed_phase(cB, a, b1, a0_scale_packs, b1_scale_packs);
+        CRR_MMA_END();
+
+        // ---- Phase 4: Last LDS read + drain ----
+        load_a(a, As[0][1], wm);
+        asm volatile("s_waitcnt lgkmcnt(0)");
+        __builtin_amdgcn_s_barrier();
+
+        // ---- Phase 5: Issue B-side VMEM (next-iter) ----
+        global_load_b(Bs[0][0], bc * 2, k + 1);
+        global_load_b(Bs[0][1], bc * 2 + 1, k + 1);
+
+        // ---- Phase 6: cC MMA (a=As[0][1], b=b0) — B VMEM in flight ----
+        CRR_MMA_BEGIN();
+        crr_mma_scaled_from_packs_fixed_phase(cC, a, b0, a1_scale_packs, b0_scale_packs);
+        CRR_MMA_END();
+
+        // ---- Phase 7: Issue A-side VMEM (next-iter) ----
+        global_load_a(As[0][0], br * 2, k + 1);
+        global_load_a(As[0][1], br * 2 + 1, k + 1);
+
+        // ---- Phase 8: cD MMA (a=As[0][1], b=b1) — all VMEM in flight ----
+        CRR_MMA_BEGIN();
+        crr_mma_scaled_from_packs_fixed_phase(cD, a, b1, a1_scale_packs, b1_scale_packs);
+        CRR_MMA_END();
+
+        // ---- Phase 9: Drain VMEM, sync waves ----
+        asm volatile("s_waitcnt vmcnt(0)");
+        __builtin_amdgcn_s_barrier();
+    }
 #else
-#error "MXFP8_CRR_SB_PIPELINE must be 0, 1, 2, or 3"
+#error "MXFP8_CRR_SB_PIPELINE must be 0, 1, 2, 3, or 4"
 #endif
     // Final iter: data from last prefetch of k=k_iters-1 is in [0].
     {
