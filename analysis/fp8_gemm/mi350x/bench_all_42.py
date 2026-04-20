@@ -110,6 +110,10 @@ DEFAULT_VARIANTS = [
     ("tbv16",     _BASE + " -DTAIL_BARRIER_VMCNT=16"),
     ("unr2_gm6",  _BASE + " -DUNROLL_K=2 -DGROUP_SIZE_M=6"),
     ("gb_unr2",   _BASE + " -DGLOBAL_B=1 -DUNROLL_K=2"),
+    # R66 axis-A Opt-1: interleave 16 buffer_load_dwordx4 ... lds prefetches
+    # into the kpair_64mfma_step34 asm block (true 4:1:1 MFMA:ds_read:bufload
+    # pattern, mirrors aiter scheduling). Replaces post-block emit_pf_tail<0>.
+    ("step34pf",  _BASE + " -DSTEP34_PF_INTERLEAVE=1"),
 ]
 
 

@@ -860,6 +860,227 @@ __device__ __forceinline__ void kpair_64mfma_step12(
 //   %72..73=sa0/sa1, %74..75=sbl0/sbl1, %76..77=sbr0/sbr1,
 //   %78..79=a0_lds_p0/p1, %80..81=bl_lds_p0/p1
 
+#ifndef STEP34_PF_INTERLEAVE
+#define STEP34_PF_INTERLEAVE 0
+#endif
+
+#if STEP34_PF_INTERLEAVE
+// ── R66 axis-A Opt-1: kpair_64mfma_step34_pf_interleaved ──
+// Same as kpair_64mfma_step34 (4:1 MFMA:ds_read in single asm block) PLUS
+// 16 buffer_load_dwordx4 ... lds prefetches interleaved between MFMA groups.
+// Layout per 4-MFMA group: [mfma, ds_read|nothing, mfma, s_mov_b32 m0,
+//   mfma, buffer_load_dwordx4 ... lds, mfma]. ds_read present in 8 of 16 groups
+// (groups consuming nxt_a0/nxt_bl). Buffer_load present in ALL 16 groups.
+// All in a SINGLE asm volatile to avoid the AGPR-allocator hazard from R62.
+//
+// Operand additions vs base helper (82 → 122):
+//   %82..85  = "s" srd_a0/a1/bl/br        (sgpr-quad each)
+//   %86..89  = "s" soff_a0/a1/bl/br
+//   %90..105 = "s" lds_addrs[a0,a1,bl,br][0..3]   (16 sgpr)
+//   %106..121 = "v" voffs[a0,a1,bl,br][0..3]      (16 vgpr)
+// Clobbers m0 (each prefetch writes m0 = lds_addr).
+__device__ __forceinline__ void kpair_64mfma_step34_pf_interleaved(
+    fp4_floatx4_t acc_bl[16], fp4_floatx4_t acc_br[16],
+    const fp4_intx8_t A1[4],
+    const fp4_intx8_t Bl[4], const fp4_intx8_t Br[4],
+    const fp8e8m0_4 a1_raw[2], const fp8e8m0_4 bl_raw[2], const fp8e8m0_4 br_raw[2],
+    float4 nxt_a0_d[8], float4 nxt_bl_d[8],
+    uint32_t a0_p0, uint32_t a0_p1,
+    uint32_t bl_p0, uint32_t bl_p1,
+    const tile_pf_params &pf_a0, const tile_pf_params &pf_a1,
+    const tile_pf_params &pf_bl, const tile_pf_params &pf_br)
+{
+    // A1 tile splits (shared between Step3 and Step4)
+    fp4_intx4_t a1_0l=fp4_lo4(A1[0]), a1_1l=fp4_lo4(A1[1]), a1_2l=fp4_lo4(A1[2]), a1_3l=fp4_lo4(A1[3]);
+    fp4_intx4_t a1_0h=fp4_hi4(A1[0]), a1_1h=fp4_hi4(A1[1]), a1_2h=fp4_hi4(A1[2]), a1_3h=fp4_hi4(A1[3]);
+    fp4_intx4_t bl_0l=fp4_lo4(Bl[0]), bl_1l=fp4_lo4(Bl[1]), bl_2l=fp4_lo4(Bl[2]), bl_3l=fp4_lo4(Bl[3]);
+    fp4_intx4_t bl_0h=fp4_hi4(Bl[0]), bl_1h=fp4_hi4(Bl[1]), bl_2h=fp4_hi4(Bl[2]), bl_3h=fp4_hi4(Bl[3]);
+    fp4_intx4_t br_0l=fp4_lo4(Br[0]), br_1l=fp4_lo4(Br[1]), br_2l=fp4_lo4(Br[2]), br_3l=fp4_lo4(Br[3]);
+    fp4_intx4_t br_0h=fp4_hi4(Br[0]), br_1h=fp4_hi4(Br[1]), br_2h=fp4_hi4(Br[2]), br_3h=fp4_hi4(Br[3]);
+    unsigned sa0  = std::bit_cast<unsigned>(a1_raw[0]);
+    unsigned sa1  = std::bit_cast<unsigned>(a1_raw[1]);
+    unsigned sbl0 = std::bit_cast<unsigned>(bl_raw[0]);
+    unsigned sbl1 = std::bit_cast<unsigned>(bl_raw[1]);
+    unsigned sbr0 = std::bit_cast<unsigned>(br_raw[0]);
+    unsigned sbr1 = std::bit_cast<unsigned>(br_raw[1]);
+
+    asm volatile("s_waitcnt vmcnt(" MXFP4_STR(STEP3_BARRIER_VMCNT) ")\ns_barrier\n" ::: "memory");
+    asm volatile(
+        // ═══ STEP 3: A1×Bl (32 MFMAs) + 8 ds_reads + 8 prefetches ═══
+        // Group 0 (acc_bl[0..3], sa0, lo): mfma, ds_read, mfma, m0+pf, mfma, mfma
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %48, %56, %0,  %72, %74 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %32, %78 offset:0\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %48, %57, %1,  %72, %74 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "s_mov_b32 m0, %90\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %48, %58, %2,  %72, %75 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "buffer_load_dwordx4 %106, %82, %86 offen lds\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %48, %59, %3,  %72, %75 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        // Group 1 (acc_bl[0..3], sa0, hi): mfma, ds_read, mfma, m0+pf, mfma, mfma
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %52, %60, %0,  %72, %74 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %33, %78 offset:2048\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %52, %61, %1,  %72, %74 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "s_mov_b32 m0, %91\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %52, %62, %2,  %72, %75 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "buffer_load_dwordx4 %107, %82, %86 offen lds\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %52, %63, %3,  %72, %75 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        // Group 2 (acc_bl[4..7], sa0, lo)
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %49, %56, %4,  %72, %74 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %34, %78 offset:4096\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %49, %57, %5,  %72, %74 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "s_mov_b32 m0, %92\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %49, %58, %6,  %72, %75 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "buffer_load_dwordx4 %108, %82, %86 offen lds\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %49, %59, %7,  %72, %75 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        // Group 3 (acc_bl[4..7], sa0, hi)
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %53, %60, %4,  %72, %74 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %35, %78 offset:6144\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %53, %61, %5,  %72, %74 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "s_mov_b32 m0, %93\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %53, %62, %6,  %72, %75 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "buffer_load_dwordx4 %109, %82, %86 offen lds\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %53, %63, %7,  %72, %75 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        // Group 4 (acc_bl[8..11], sa1, lo) — switch to a1_lds (%79)
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %50, %56, %8,  %73, %74 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %36, %79 offset:0\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %50, %57, %9,  %73, %74 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "s_mov_b32 m0, %94\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %50, %58, %10, %73, %75 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "buffer_load_dwordx4 %110, %83, %87 offen lds\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %50, %59, %11, %73, %75 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        // Group 5
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %54, %60, %8,  %73, %74 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %37, %79 offset:2048\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %54, %61, %9,  %73, %74 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "s_mov_b32 m0, %95\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %54, %62, %10, %73, %75 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "buffer_load_dwordx4 %111, %83, %87 offen lds\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %54, %63, %11, %73, %75 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        // Group 6
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %51, %56, %12, %73, %74 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %38, %79 offset:4096\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %51, %57, %13, %73, %74 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "s_mov_b32 m0, %96\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %51, %58, %14, %73, %75 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "buffer_load_dwordx4 %112, %83, %87 offen lds\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %51, %59, %15, %73, %75 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        // Group 7
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %55, %60, %12, %73, %74 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %39, %79 offset:6144\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %55, %61, %13, %73, %74 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "s_mov_b32 m0, %97\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %55, %62, %14, %73, %75 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "buffer_load_dwordx4 %113, %83, %87 offen lds\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %55, %63, %15, %73, %75 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        // ═══ STEP 4: A1×Br (32 MFMAs) + 8 ds_reads (nxt_bl) + 8 prefetches ═══
+        // Group 8 (acc_br[0..3], sa0, lo) — bl_lds (%80)
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %16, %48, %64, %16, %72, %76 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %40, %80 offset:0\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %17, %48, %65, %17, %72, %76 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "s_mov_b32 m0, %98\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %18, %48, %66, %18, %72, %77 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "buffer_load_dwordx4 %114, %84, %88 offen lds\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %19, %48, %67, %19, %72, %77 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        // Group 9
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %16, %52, %68, %16, %72, %76 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %41, %80 offset:2048\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %17, %52, %69, %17, %72, %76 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "s_mov_b32 m0, %99\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %18, %52, %70, %18, %72, %77 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "buffer_load_dwordx4 %115, %84, %88 offen lds\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %19, %52, %71, %19, %72, %77 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        // Group 10
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %20, %49, %64, %20, %72, %76 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %42, %80 offset:4096\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %21, %49, %65, %21, %72, %76 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "s_mov_b32 m0, %100\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %22, %49, %66, %22, %72, %77 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "buffer_load_dwordx4 %116, %84, %88 offen lds\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %23, %49, %67, %23, %72, %77 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        // Group 11
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %20, %53, %68, %20, %72, %76 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %43, %80 offset:6144\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %21, %53, %69, %21, %72, %76 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "s_mov_b32 m0, %101\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %22, %53, %70, %22, %72, %77 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "buffer_load_dwordx4 %117, %84, %88 offen lds\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %23, %53, %71, %23, %72, %77 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        // Group 12 (acc_br[8..11], sa1, lo) — switch to bl_p1 (%81)
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %24, %50, %64, %24, %73, %76 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %44, %81 offset:0\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %25, %50, %65, %25, %73, %76 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "s_mov_b32 m0, %102\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %26, %50, %66, %26, %73, %77 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "buffer_load_dwordx4 %118, %85, %89 offen lds\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %27, %50, %67, %27, %73, %77 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        // Group 13
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %24, %54, %68, %24, %73, %76 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %45, %81 offset:2048\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %25, %54, %69, %25, %73, %76 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "s_mov_b32 m0, %103\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %26, %54, %70, %26, %73, %77 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "buffer_load_dwordx4 %119, %85, %89 offen lds\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %27, %54, %71, %27, %73, %77 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        // Group 14
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %28, %51, %64, %28, %73, %76 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %46, %81 offset:4096\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %29, %51, %65, %29, %73, %76 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "s_mov_b32 m0, %104\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %30, %51, %66, %30, %73, %77 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "buffer_load_dwordx4 %120, %85, %89 offen lds\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %31, %51, %67, %31, %73, %77 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        // Group 15
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %28, %55, %68, %28, %73, %76 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %47, %81 offset:6144\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %29, %55, %69, %29, %73, %76 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "s_mov_b32 m0, %105\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %30, %55, %70, %30, %73, %77 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "buffer_load_dwordx4 %121, %85, %89 offen lds\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %31, %55, %71, %31, %73, %77 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        : "+a"(acc_bl[0]),  "+a"(acc_bl[1]),  "+a"(acc_bl[2]),  "+a"(acc_bl[3]),
+          "+a"(acc_bl[4]),  "+a"(acc_bl[5]),  "+a"(acc_bl[6]),  "+a"(acc_bl[7]),
+          "+a"(acc_bl[8]),  "+a"(acc_bl[9]),  "+a"(acc_bl[10]), "+a"(acc_bl[11]),
+          "+a"(acc_bl[12]), "+a"(acc_bl[13]), "+a"(acc_bl[14]), "+a"(acc_bl[15]),
+          "+a"(acc_br[0]),  "+a"(acc_br[1]),  "+a"(acc_br[2]),  "+a"(acc_br[3]),
+          "+a"(acc_br[4]),  "+a"(acc_br[5]),  "+a"(acc_br[6]),  "+a"(acc_br[7]),
+          "+a"(acc_br[8]),  "+a"(acc_br[9]),  "+a"(acc_br[10]), "+a"(acc_br[11]),
+          "+a"(acc_br[12]), "+a"(acc_br[13]), "+a"(acc_br[14]), "+a"(acc_br[15]),
+          "=&v"(nxt_a0_d[0]), "=&v"(nxt_a0_d[1]), "=&v"(nxt_a0_d[2]), "=&v"(nxt_a0_d[3]),
+          "=&v"(nxt_a0_d[4]), "=&v"(nxt_a0_d[5]), "=&v"(nxt_a0_d[6]), "=&v"(nxt_a0_d[7]),
+          "=&v"(nxt_bl_d[0]), "=&v"(nxt_bl_d[1]), "=&v"(nxt_bl_d[2]), "=&v"(nxt_bl_d[3]),
+          "=&v"(nxt_bl_d[4]), "=&v"(nxt_bl_d[5]), "=&v"(nxt_bl_d[6]), "=&v"(nxt_bl_d[7])
+        : "v"(a1_0l), "v"(a1_1l), "v"(a1_2l), "v"(a1_3l),
+          "v"(a1_0h), "v"(a1_1h), "v"(a1_2h), "v"(a1_3h),
+          "v"(bl_0l), "v"(bl_1l), "v"(bl_2l), "v"(bl_3l),
+          "v"(bl_0h), "v"(bl_1h), "v"(bl_2h), "v"(bl_3h),
+          "v"(br_0l), "v"(br_1l), "v"(br_2l), "v"(br_3l),
+          "v"(br_0h), "v"(br_1h), "v"(br_2h), "v"(br_3h),
+          "v"(sa0), "v"(sa1), "v"(sbl0), "v"(sbl1), "v"(sbr0), "v"(sbr1),
+          "v"(a0_p0), "v"(a0_p1), "v"(bl_p0), "v"(bl_p1),
+          // %82..85: srds (sgpr-quad each)
+          "s"(pf_a0.srd), "s"(pf_a1.srd), "s"(pf_bl.srd), "s"(pf_br.srd),
+          // %86..89: soffs
+          "s"(pf_a0.soff), "s"(pf_a1.soff), "s"(pf_bl.soff), "s"(pf_br.soff),
+          // %90..93: lds_addrs for a0 (sgpr)
+          "s"(pf_a0.lds_addrs[0]), "s"(pf_a0.lds_addrs[1]), "s"(pf_a0.lds_addrs[2]), "s"(pf_a0.lds_addrs[3]),
+          // %94..97: lds_addrs for a1
+          "s"(pf_a1.lds_addrs[0]), "s"(pf_a1.lds_addrs[1]), "s"(pf_a1.lds_addrs[2]), "s"(pf_a1.lds_addrs[3]),
+          // %98..101: lds_addrs for bl
+          "s"(pf_bl.lds_addrs[0]), "s"(pf_bl.lds_addrs[1]), "s"(pf_bl.lds_addrs[2]), "s"(pf_bl.lds_addrs[3]),
+          // %102..105: lds_addrs for br
+          "s"(pf_br.lds_addrs[0]), "s"(pf_br.lds_addrs[1]), "s"(pf_br.lds_addrs[2]), "s"(pf_br.lds_addrs[3]),
+          // %106..109: voffs for a0 (vgpr)
+          "v"(pf_a0.voffs[0]), "v"(pf_a0.voffs[1]), "v"(pf_a0.voffs[2]), "v"(pf_a0.voffs[3]),
+          // %110..113: voffs for a1
+          "v"(pf_a1.voffs[0]), "v"(pf_a1.voffs[1]), "v"(pf_a1.voffs[2]), "v"(pf_a1.voffs[3]),
+          // %114..117: voffs for bl
+          "v"(pf_bl.voffs[0]), "v"(pf_bl.voffs[1]), "v"(pf_bl.voffs[2]), "v"(pf_bl.voffs[3]),
+          // %118..121: voffs for br
+          "v"(pf_br.voffs[0]), "v"(pf_br.voffs[1]), "v"(pf_br.voffs[2]), "v"(pf_br.voffs[3])
+        : "memory", "m0"
+    );
+}
+#endif // STEP34_PF_INTERLEAVE
+
 __device__ __forceinline__ void kpair_64mfma_step34(
     fp4_floatx4_t acc_bl[16], fp4_floatx4_t acc_br[16],
     const fp4_intx8_t A1[4],
@@ -2425,11 +2646,19 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         // Fused Step34: barrier + 64 MFMAs + 16 ds_reads in one asm block
         float4 nxt_a0_d[8];
         float4 nxt_bl_d[8];
+#if STEP34_PF_INTERLEAVE
+        // R66 axis-A: prefetches inlined into the asm block, no post-tail needed.
+        kpair_64mfma_step34_pf_interleaved(acc_A1Bl, acc_A1Br, tA1, tBl, tBr,
+            a1_raw, bl_raw, br_raw, nxt_a0_d, nxt_bl_d,
+            sel_a0_p0, sel_a0_p1, sel_bl_p0, sel_bl_p1,
+            pf_a0_p, pf_a1_p, pf_bl_p, pf_br_p);
+#else
         kpair_64mfma_step34(acc_A1Bl, acc_A1Br, tA1, tBl, tBr,
             a1_raw, bl_raw, br_raw, nxt_a0_d, nxt_bl_d,
             sel_a0_p0, sel_a0_p1, sel_bl_p0, sel_bl_p1);
         emit_pf_tail<0>(pf_a0_p, pf_a1_p);
         emit_pf_tail<0>(pf_bl_p, pf_br_p);
+#endif
 #elif R37_FIX_B
         // R37 Fix B (default): use fused step3+step4 (correctness fix) while
         // that the FUSED_STEP34=1 path otherwise bypasses.
@@ -2633,12 +2862,20 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         // Fused Step34: barrier + 64 MFMAs + 16 ds_reads in one asm block
         float4 nxt_a0_d[8];
         // (nxt_bl_d already declared above)
+#if STEP34_PF_INTERLEAVE
+        // R66 axis-A: prefetches inlined into the asm block, no post-tail needed.
+        kpair_64mfma_step34_pf_interleaved(acc_A1Bl, acc_A1Br, tA1, tBl, tBr,
+            a1_raw, bl_raw, br_raw, nxt_a0_d, nxt_bl_d,
+            sel_a0_p0, sel_a0_p1, sel_bl_p0, sel_bl_p1,
+            pf_a0_p, pf_a1_p, pf_bl_p, pf_br_p);
+#else
         kpair_64mfma_step34(acc_A1Bl, acc_A1Br, tA1, tBl, tBr,
             a1_raw, bl_raw, br_raw, nxt_a0_d, nxt_bl_d,
             sel_a0_p0, sel_a0_p1, sel_bl_p0, sel_bl_p1);
         // All prefetches emitted after the fused block
         emit_pf_tail<0>(pf_a0_p, pf_a1_p);
         emit_pf_tail<0>(pf_bl_p, pf_br_p);
+#endif
 #elif R37_FIX_B
         // R37 Fix B (default, no-TAIL_SPLIT): use fused step3+step4 (correctness
         // fix). The no-TAIL_SPLIT path has no R25-C tail-pf-off branching, so we
