@@ -2298,7 +2298,6 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
             sel_a0_p0, sel_a0_p1);
 
         // Step 4: A1*Br (32 pure MFMAs)
-        // nxt_Bl loads should be complete by end of Step4 (~1024 cycles total)
         kpair_32mfma_with_pf<0>(acc_A1Br, tA1, tBr, a1_raw, br_raw, dummy_pf, dummy_pf);
 
         // Prefetch A tiles to LDS for next+1 iteration
