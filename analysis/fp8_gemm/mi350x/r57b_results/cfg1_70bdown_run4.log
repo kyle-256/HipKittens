@@ -1,0 +1,18 @@
+=== MXFP8 GEMM Layout Benchmark (preshuffle-quant): M=4096, N=8192, K=28672 ===
+Warmup=100, iters=200, correctness=on
+SNR threshold=48.0 dB, determinism_runs=3
+Layouts=crr
+
+--- CRR Layout: C = A^T @ B ---
+[R55B-DEBUG-3] dispatch_pq_v2 entry: L=2 g.m=0 g.n=0 g.k=0 a.cols=4096 c.rows=4096 c.cols=8192
+  Avg time: 0.7265 ms, TFLOPS: 2648.47
+  [CRR] Correctness (rtol=0.1000, atol=3.0):
+    Max  abs error: 0.4513, Mean abs error: 0.0040
+    Max  rel error: 0.4513, Mean rel error: 0.0022
+    SNR: 49.56 dB (threshold 48.0 dB)
+    Pass rate: 33554432/33554432 (100.00%)
+    Result: PASS
+  [CRR] Determinism (3 runs): FAIL
+    Max abs diff across runs: 0.535156
+
+Results saved to mxfp8_layout_results_4096x8192x28672_pq.json
