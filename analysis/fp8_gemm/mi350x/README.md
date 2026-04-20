@@ -4,14 +4,22 @@ MXFP4 GEMM kernel for gfx950 (MI350X / MI355X) using ThunderKittens C++ with inl
 
 ## Current Status (2026-04-20)
 
-**HipKittens kernel vs aiter: 0/42 WIN, average 89.5% of aiter performance.**
+**HipKittens kernel vs aiter: 16/42 WIN potential (per-shape tuned), ~95% mean.**
+- 12/42 WIN with default baseline (FUSED_STEP34=1, TAIL_SPLIT=1, GM=4)
+- +2 WIN with GROUP_SIZE_M=6 (32768×14336×2048, 32768×28672×2048)
+- +2 WIN with GLOBAL_B=1 (fixes K=28672 CRASH shapes)
+- Max: 144.3% (4096×128256×32768)
 
-| Gap range | Shape count | Examples |
+| Status | Count | Examples |
 |---|---|---|
-| 0-2% | 4 | 32768x4096x2048 (99.9%), 4096x6144x32768 (99.7%) |
-| 2-10% | 10 | 16384x6144x2048 (93.6%), 32768x14336x2048 (97.1%) |
-| 10-18% | 7+ | 4096x4096x16384 (82.5%), 4096x14336x16384 (81.8%) |
-| CRASH | ≥1 | K=32768×28672 memory aperture violation |
+| WIN (≥100%) | 16 | 16384x4096x2048 (111%), 4096x128256x32768 (144%) |
+| Close (95-100%) | 5 | 4096x4096x16384 (99.3%), 16384x4096x6144 (99%) |
+| Medium (85-95%) | 15 | 16384x28672x2048 (97%), 6144x4096x8192 (92%) |
+| Far (<85%) | 6 | 4096x32768x128256 (76%), 14336x4096x32768 (75%) |
+
+### Compile flags
+- `GLOBAL_B=1` — B tiles via buffer_load from global (fixes K=28672 CRASH, slower on most shapes)
+- `GROUP_SIZE_M=N` — grid swizzle for L2 reuse (6 best for large-M shapes)
 
 ## Architecture
 
