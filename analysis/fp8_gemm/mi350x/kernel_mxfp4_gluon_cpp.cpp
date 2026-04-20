@@ -2151,6 +2151,9 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     // ═══════════ Prologue ═══════════
     load_tiles(0, 0);
     if (k_byte_iters > 1) load_tiles(1, 1);
+#if BPRESHUFFLE
+    // BPS: no LDS load for B tiles — loaded via buffer_load in prologue
+#endif
 
     fp8e8m0_4 pf_a0[a_packs], pf_a1[a_packs], pf_bl[b_packs], pf_br[b_packs];
     {
@@ -2160,23 +2163,27 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         load_pq_scale_x2_async(br_srd, lane_soff_x2, 0, pf_br[0], pf_br[1]);
     }
 
-    // Pre-load A0+Bl for iteration 0 (2-tile software pipeline)
+    // Wait for ALL tile loads (A + B prologue) and scales
     asm volatile("s_waitcnt vmcnt(0)");
     __builtin_amdgcn_s_barrier();
+
+    // Load A0 + Bl from LDS
     A_row_reg a0_rt;
     fp4_load_st_to_rt(a0_rt, kittens::subtile_inplace<RBM, BK>(A0_db[0], {wm, 0}));
     fp4_intx8_t tA0[4], tBl[4];
 #if BPRESHUFFLE
-    // BPS prologue: use BASELINE A0 path + buffer_load Bl path
-    // Strictly serialize: first complete A0, then load Bl
+    // Load Bl directly from preshuffled global via buffer_load (NOT LDS)
     {
-        asm volatile("s_waitcnt lgkmcnt(0)");  // ensure A0 ds_reads from fp4_load_st_to_rt done
+        // First extract A0 from LDS (done before any buffer_load to avoid VGPR conflict)
+        asm volatile("s_waitcnt lgkmcnt(0)");
         #pragma unroll
         for (int i = 0; i < 4; i++) tA0[i] = fp4_extract_tile(a0_rt, i);
-        // Now A0 is fully extracted. Load Bl from pre-shuffled global.
+        // Force A0 data to be consumed (prevent compiler from reusing a0_rt VGPRs)
+        asm volatile("" :: "v"(tA0[0]), "v"(tA0[1]), "v"(tA0[2]), "v"(tA0[3]));
+        // Now load Bl from preshuffled global
         float4 bl_d0[8];
         load_b_preshuffle_8(bl_d0, srd_b, bl_voffs, 0);
-        asm volatile("s_waitcnt vmcnt(0)");  // wait for Bl buffer_loads
+        asm volatile("s_waitcnt vmcnt(0)");
         extract_tile(bl_d0, tBl);
     }
 #else
