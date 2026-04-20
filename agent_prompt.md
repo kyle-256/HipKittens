@@ -51,22 +51,29 @@ R69 (no commit, three parallel agents):
 
 **R70 priority: Axis-A Opt-2 (GLOBAL_A) implementation.** Both gates pass: knob axis exhausted + VGPR fits + concrete touchpoints scoped. No remaining decision blockers.
 
-R70 implementation plan (per `project_mxfp4_R69_axis_a_opt2_scoped.md`):
-1. Macro `GLOBAL_A` near `kernel_mxfp4_gluon_cpp.cpp:99-101` (default 0).
-2. New helpers `load_a_global_8` + `compute_a_global_load_voffs` near `:287` (B3b raw-row mapping, ~80 LOC).
-3. Driver gates at `:1574-1779` and `:1813-2073` to bypass A LDS path under `#if GLOBAL_A`.
-4. NEW variant `kpair_64mfma_step34_pf_interleaved_globalA` paralleling `:1004-1203` (~250 LOC, single asm volatile block).
-5. Bench `step34pf_globalA = -DSTEP34_PF_INTERLEAVE=1 -DGLOBAL_A=1` (one variant only, NO knob cross-product in PoC).
-6. Preflight: build with `GLOBAL_A=0`, diff `.s` against current main → must be byte-identical.
-7. Bench K=128256 first in isolation (R66 cadence).
-8. Use 10-run @ 80% cohort-race protocol (FINITE_GATE 0.97).
-9. Commit only on ≥+1 NEW WIN AND no regression on the 19 R66 winners.
+R70 first attempt (single-agent monolithic, no commit — see `project_mxfp4_R70_globalA_session_findings.md`):
+- Macro + bench-variant scaffolding compiled clean (default WIN = 109.9% baseline preserved). Reverted (inert without helpers).
+- BLOCKED at Step 2: `compute_a_global_load_voffs` (B3b raw-row mapping) — must produce 8 per-lane voffs that yield the bytes a `ds_read_b128` would have produced from swizzled-LDS-loaded `A_row_reg`. No existing function performs this mapping; must be authored fresh.
+- Authoring this in one shot without a bisect harness has the **same failure profile as R67 SPLIT** (5632 row-clustered NaN cells, root cause unidentified). NO-GO trigger #2 explicitly forbids this path.
+- F1 is **also closed** as NO-OP (`project_mxfp4_R71_F1_no_op.md`): claim of "49 in-loop XOR ops" was a counting error from C-store epilogue; current `compute_lds_base_addrs<>` already pre-computes everything.
+
+R70 RETRY plan (multi-agent, per session findings recommendation):
+- **Opt-A (B3b bisect harness)**: standalone ~150 LOC .cpp that loads one A half-tile via existing LDS path → reference `fp4_intx8_t[4]` per lane, then issues per-lane `buffer_load_dwordx4` (no `lds`) using candidate `compute_a_global_load_voffs` and bytewise-compares all 256 threads. Bisect by lane-group / (row, k-phase) / (warp_m, warp_n) until correct. Output: verified mapping function + pass log. ~3-4h. Worktree: `agent-a8d66e1e`.
+- **Opt-B (diff scoping)**: read-only — produce EXACT line-by-line diff between `kpair_64mfma_step34_pf_interleaved` (L1004-1203) and proposed `_globalA` variant: which 8 ds_read constraints get replaced by buffer_load_dwordx4 (no lds), operand-pool delta (122→?), AGPR-block discipline check, srd/soff reuse plan. Output: precise patch outline. ~1-2h. Worktree: `agent-ad42c716`.
+- **Opt-C (integration)**: sequential AFTER A+B — apply mapping (from A) to patch outline (from B), preflight `GLOBAL_A=0` byte-identical check, K=128256 isolated bench, full sweep, commit-gate. ~3-4h.
+- Total ~7-10h split across 3 agents.
+
+**R70 RETRY commit gates (unchanged):**
+- Preflight: `GLOBAL_A=0` `.s` byte-identical to current main.
+- Bench K=128256 first in isolation (R66 cadence).
+- 10-run @ 80% cohort-race protocol (FINITE_GATE 0.97).
+- Commit only on ≥+1 NEW WIN AND no regression on the 19 R66 winners.
 
 R71+ pre-scoped (R69 staged-gate pattern, R71 read-only scoping landed in R70 window):
 
 - **R71 OPTION A — GLOBAL_A knob cross-product** (`project_mxfp4_R71_globalA_xprod_scoped.md`): replay R67/R68 cross-product over GLOBAL_A base. Top-3 single: `globalA_we1` / `_gm6` / `_tbv16` (we1 promoted because GLOBAL_A pushes VGPR=253). Top-2 doubles: `globalA_gm6_tbv16`, `globalA_we1_gm6`. RULE OUT a-priori: `globalA + gb` (operand pool overflow), `globalA + unr16` (VGPR spill), `globalA + AGPR_REGS_HINT_*` (AGPR hazard). GO trigger: ≥1 NEW WIN at R70. Projected: +1-4 NEW WINs (27-30/42).
 - **R71 OPTION B — Hard-loser ISA-diff portable findings** (`project_mxfp4_R71_hardloser_isa_diff.md`): aiter loop body is 231 lines vs HK 726 lines (3.1× longer); aiter spreads bufloads 1-per-8-mfma, HK frontloads. Three actionable items:
-  - **F1: LDS-addr swizzle hoist** — eliminate 49 in-loop XOR ops/iter (~80-120 LOC, +1-3pp, **orthogonal to GLOBAL_A**, low risk; under R70 only B-side needs hoisting).
+  - ~~**F1: LDS-addr swizzle hoist**~~ **CLOSED — NO-OP** (`project_mxfp4_R71_F1_no_op.md`). Premise falsified: built `.s` for K=32768 + K=128256 + multiple variants → 0 in-loop XOR-swizzle ops in K-loop body. `compute_lds_base_addrs<>` (L1699-1708) already pre-computes; per-iter is just 8 v_cndmask + 4 s_cselect + 4 s_add (~<2% of cycles). The R71 ISA-diff memo's "49 ops/iter" was a counting error from C-store epilogue. DO NOT relaunch.
   - **F2: step12 PF interleave** — DEEP-SCOPED (`project_mxfp4_R72_F2_step12_pf_globalA_scoped.md`). **R68 ALREADY LANDED DORMANT INFRA** (commit d0778ba6): NON-SPLIT helper exists at L644-840 (197 LOC, 0 spills, 114 ops, VGPR 240), macro guard L640-642, driver gates wired. R72 F2 = MODIFY dormant code (drops 8 A-side lds_addrs → 108 ops; VGPR ~330 forces we1). LOC ~310 total. R67 SPLIT NaN H3 (A-side LDS race) structurally removed by GLOBAL_A; H5 (B-side) bisect-gated. `#error STEP12_PF_INTERLEAVE && !GLOBAL_A` macro guard. GO trigger: R70 lands ≥1 WIN + hard losers still <95%.
   - **F3: Per-shape 128×512 tile template** — DEEP-SCOPED (`project_mxfp4_R72_F3_per_shape_tile_scoped.md`). LOC refined to ~1340 (NOT 800-1500). Helps only 5 strip shapes (`4096×{32768×128256, 32768×28672, 32768×14336, 28672×32768, 128256×32768}`). 14336×4096×32768 hard loser stays 256×256 → F3 doesn't help; needs F1+GLOBAL_A. VGPR=480 fits, **LDS=160KB at gfx950 cap (TIGHT)**, mitigation = single-buffered B risks -5-10pp regression. GO trigger: R70 LANDED + 4096×32768×128256 still < 95% + 4096×28672×32768 still < 95%.
 - **step12pf SPLIT closed by correctness** (R67). Don't reopen without isolated bisect harness (or pair with GLOBAL_A → F2).
@@ -105,6 +112,10 @@ When the next round's pivot is hypothetically known but a cheap axis remains unt
   - Opt-C: compile-only gate of the expensive axis (gives "does it fit the register budget?").
 - Cost: ~3 agents × ~1.5h = 4.5h wallclock; payoff: next round can launch with no remaining decision blockers.
 - Used in R69; proceed with R70 GLOBAL_A implementation directly.
+
+## R70 lesson — bisect harness BEFORE integration for novel mappings
+R70 first attempt confirmed R67 SPLIT lesson: any structural change that requires NEW per-lane address-mapping code (not mirroring an existing function) carries unbounded NaN-risk if integrated directly. The B3b raw-row mapping for `compute_a_global_load_voffs` has no precedent in the codebase — it must produce 8 per-lane voffs that match what `ds_read_b128` would have produced from swizzled-LDS-loaded A. Building this as an isolated K=64 single-iter bytewise-comparison harness BEFORE touching the integrated kernel is non-negotiable for R70 RETRY (and any future similar work). New rule:
+> **If a planned change requires NEW per-lane address-mapping code that has no twin in the existing kernel, build the bisect harness first. Always.**
 
 ## Standing user commitments
 - Full GitHub push permission (no asking)
