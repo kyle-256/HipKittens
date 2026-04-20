@@ -32,78 +32,9 @@ using namespace kittens;
 #ifndef STEP3_EMBED_BARRIER
 #define STEP3_EMBED_BARRIER 1
 #endif
-// R49 Opt A (2026-04-19): aiter ISA disasm-driven pattern port.
-// Per R49A_aiter_256x256.s (disasm of f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256.co):
-// aiter uses `s_waitcnt vmcnt(15) lgkmcnt(0)` at the K-loop iter top while
-// HipKittens currently uses `s_waitcnt vmcnt(8) lgkmcnt(0)` (STEP3_BARRIER_VMCNT=8).
-// The +7 in-flight-VMEM tolerance lets aiter's 8 buffer_load_to_lds + 7 in-flight
-// ds_reads overlap further with MFMA work without serializing at the iter
-// boundary. Variant ladder:
-//   R49A_AITER_PATTERN_VMCNT_RELAX = 0 (default)  : keep STEP3_BARRIER_VMCNT=8
-//   R49A_AITER_PATTERN_VMCNT_RELAX = 1           : override STEP3_BARRIER_VMCNT
-//                                                  AND TAIL_BARRIER_VMCNT to 15
-//                                                  (matches aiter exactly)
-//   R49A_AITER_PATTERN_VMCNT_RELAX = 2           : override to 12 (intermediate)
-//   R49A_AITER_PATTERN_VMCNT_RELAX = 3           : override to 10
-// When OFF (=0), build is byte-compatible with R44 baseline. When non-zero,
-// applies BEFORE the STEP3_BARRIER_VMCNT and TAIL_BARRIER_VMCNT defaults so
-// any user override of those still wins via -D.
-// Cohort target: 6 cluster-B wcf-flake shapes; baseline check on 4096x4096x8192.
-#ifndef R49A_AITER_PATTERN_VMCNT_RELAX
-#define R49A_AITER_PATTERN_VMCNT_RELAX 0
-#endif
-
-// ==========================================================================
-// R50 Opt A — Aiter MFMA<->ds_read 1:4 spread interleaving inside
-// kpair_64mfma_step34 (vs HK's R44 "front-loaded ds_reads in Row 0" pattern).
-//
-// When R50A_AITER_INTERLEAVE=1, the asm volatile body of kpair_64mfma_step34
-// is rewritten so that the 8 ds_reads per Step (Step3 / Step4) are spread
-// evenly across all 4 rows (1 ds_read per ~4 MFMAs) instead of being
-// concentrated in Row 0. SAME MFMA count (32+32), SAME ds_read count (8+8),
-// SAME register operands. Only ISSUE ORDER changes inside the asm volatile.
-//
-// Default OFF: R44 baseline byte-equivalent.
-// ==========================================================================
-#ifndef R50A_AITER_INTERLEAVE
-#define R50A_AITER_INTERLEAVE 0
-#endif
-
-// R49A override: when ON, FORCE-OVERRIDE STEP3_BARRIER_VMCNT and
-// TAIL_BARRIER_VMCNT regardless of any prior -D from variant flags. Many R40B
-// variants pass `-DSTEP3_BARRIER_VMCNT=12` from bench_all_42.py; we need to
-// stomp those when R49A is enabled because the whole point is to test the
-// aiter-mirrored value. Without #undef, the parent's -D wins and R49A is a
-// no-op. This is intentional: R49A is a deliberate experiment that must
-// override variant tuning.
-#if R49A_AITER_PATTERN_VMCNT_RELAX == 1
-#  undef STEP3_BARRIER_VMCNT
-#  define STEP3_BARRIER_VMCNT 15
-#  undef TAIL_BARRIER_VMCNT
-#  define TAIL_BARRIER_VMCNT 15
-#elif R49A_AITER_PATTERN_VMCNT_RELAX == 2
-#  undef STEP3_BARRIER_VMCNT
-#  define STEP3_BARRIER_VMCNT 13
-#  undef TAIL_BARRIER_VMCNT
-#  define TAIL_BARRIER_VMCNT 13
-#elif R49A_AITER_PATTERN_VMCNT_RELAX == 3
-#  undef STEP3_BARRIER_VMCNT
-#  define STEP3_BARRIER_VMCNT 10
-#  undef TAIL_BARRIER_VMCNT
-#  define TAIL_BARRIER_VMCNT 10
-#endif
 
 #ifndef STEP3_BARRIER_VMCNT
 #define STEP3_BARRIER_VMCNT 8
-#endif
-#ifndef SWAP_STEP34_MAIN
-#define SWAP_STEP34_MAIN 0
-#endif
-#ifndef SWAP_STEP12_MAIN
-#define SWAP_STEP12_MAIN 0
-#endif
-#if SWAP_STEP12_MAIN && !SWAP_STEP34_MAIN
-#error "SWAP_STEP12_MAIN requires SWAP_STEP34_MAIN"
 #endif
 #ifndef SPREAD_LDS
 #define SPREAD_LDS 0
@@ -111,32 +42,6 @@ using namespace kittens;
 #ifndef NONVOLATILE_SCALE_X2_POC
 #define NONVOLATILE_SCALE_X2_POC 1
 #endif
-// R34-A Finding C: scale-load granularity reduction — replace 2× buffer_load_dwordx2
-// per K-iter with 4× single buffer_load_dword (same call sites, different asm).
-// When SCALE_LOAD_X1=1, load_pq_scale_x2_async issues two single-dword loads (offset
-// 0 and offset +4) instead of one dwordx2. This matches aiter's pattern that decouples
-// scale-arrival latency from the iter-boundary stall by feeding the LSU smaller, more
-// frequent loads. Default 0 → bit-for-bit identical to current 41/42 incumbent.
-#ifndef SCALE_LOAD_X1
-#define SCALE_LOAD_X1 0
-#endif
-#ifndef STEP4_EXTERNAL_BR_PREFETCH
-#define STEP4_EXTERNAL_BR_PREFETCH 0
-#endif
-#ifndef MAIN_PERMLANE_BF16_STORE_POC
-#define MAIN_PERMLANE_BF16_STORE_POC 0
-#endif
-#if MAIN_PERMLANE_BF16_STORE_POC && !SWAP_STEP34_MAIN
-#error "MAIN_PERMLANE_BF16_STORE_POC requires SWAP_STEP34_MAIN"
-#endif
-#if MAIN_PERMLANE_BF16_STORE_POC && !SWAP_STEP12_MAIN
-#error "MAIN_PERMLANE_BF16_STORE_POC requires SWAP_STEP12_MAIN"
-#endif
-
-#ifndef STEP12_BR_LGKMCNT
-#define STEP12_BR_LGKMCNT 0
-#endif
-
 #ifndef TAIL_BARRIER_VMCNT
 #define TAIL_BARRIER_VMCNT STEP3_BARRIER_VMCNT
 #endif
@@ -144,526 +49,17 @@ using namespace kittens;
 #ifndef FUSED_STEP34
 #define FUSED_STEP34 0
 #endif
-
-// R43 Opt A.fix1 (2026-04-19): R43A_GATE_PF_TAIL_KBOUND
-// Default OFF. When enabled together with FUSED_STEP34=1 + TAIL_SPLIT=1, gates
-// the unconditional `emit_pf_tail<0>(pf_a0_p, pf_a1_p)` and
-// `emit_pf_tail<0>(pf_bl_p, pf_br_p)` calls that follow the fused step34 asm
-// block (kernel line ~3222). Skips the prefetch on the LAST steady-state iter
-// (bt == k_byte_iters - 2) where pf_bt clamps to k_byte_iters-1 and the
-// in-flight LDS write races the TAIL_SPLIT tail handler's reads. Closes the
-// HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION on the K=28672 CRASH shapes
-// without exposing the 17%-bf16-overflow correctness bug that stripping
-// FUSED_STEP34 or TAIL_SPLIT alone would re-introduce. See R43_OPT_A_VERDICT.md.
-// No effect when FUSED_STEP34=0; no behavior change on non-CRASH variants when
-// the macro is unset.
-#ifndef R43A_GATE_PF_TAIL_KBOUND
-#define R43A_GATE_PF_TAIL_KBOUND 0
-#endif
-
 // R37 Fix B (2026-04-19): the non-fused step3+step4 path emits 4 separate
 // `asm volatile` blocks; the compiler is free to interleave clobbering moves
 // between them which corrupts the upper-left 128x128 quadrant of every 256x256
 // output tile (acc_A0Bl). Fix: on the default (non-FUSED_STEP34) path, fuse
 // step3+step4 into a single asm block via kpair_64mfma_step34 — preserving the
-// R25-C tail-pf-off, BARRIER_TO_WAITCNT_ALL, and K_EXACT branching that the
-// original FUSED_STEP34=1 path bypassed. Defaults ON; set R37_FIX_B=0 to revert
-// to the legacy buggy code path (for comparison only).
+// R25-C tail-pf-off and K_EXACT branching that the original FUSED_STEP34=1 path
+// bypassed. Defaults ON; set R37_FIX_B=0 to revert to the legacy buggy code
+// path (for comparison only).
 #ifndef R37_FIX_B
 #define R37_FIX_B 1
 #endif
-
-// R38 Opt B (2026-04-19): tail-iter prefetch hardening.
-// Background: 9/42 R37 BEST_VARIANTS shapes CRASH with HSA_STATUS_ERROR_MEMORY
-// _APERTURE_VIOLATION after a few hundred kernel invocations. All 9 use a
-// `_pfoff*` variant that drives `R25C_TAIL_PF_OFF_ITERS > 0` together with the
-// fused step34 backport. The single-rep correctness check passes (finite ≈
-// 0.999) — the fault is intermittent and only appears under stress.
-//
-// Mechanism: in the R37 fix-B path, `make_pf_params(...)` is called
-// UNCONDITIONALLY at the top of every K-loop iteration even when
-// `_r25c_tail_no_pf` is true. Building the `tile_pf_params` struct (~32 bytes
-// of `voffs`/`lds_addrs` per tile, x4 tiles = 128 bytes/iter) inflates VGPR
-// pressure for the rest of the iter. With `-mllvm -amdgpu-disable-clustered-
-// low-occupancy-reschedule` (in 5/9 CRASH variants) the spill scheduler
-// produces a frame index that, after the (bt+2 vs k_byte_iters) clamping
-// branch is folded by the unrolled loop, ends up referencing scratch slots
-// that were sized for the non-tail path. Those scratch loads/stores fault
-// once the GPU's scratch-bound speculation is exercised by repeat launches.
-//
-// Fix B1 (chosen): hoist `make_pf_params` INSIDE the `if (!_r25c_tail_no_pf)`
-// branch on the R37 path so the struct construction (and its per-iter
-// register footprint) is skipped on tail iters. Also wrap the PFs in an
-// `asm volatile("" ::: "memory")` pair so the compiler cannot speculate the
-// load-lds intrinsics across the tail-skip branch.
-//
-// Default OFF; the R38B builder sets R38B_TAIL_FIX=1 explicitly. This change
-// only touches the R37 fix-B branch (kernel line ~2863), not the FUSED_STEP34
-// branch nor the legacy path.
-#ifndef R38B_TAIL_FIX
-#define R38B_TAIL_FIX 0
-#endif
-
-// R38 Opt C (2026-04-19): Fix B3 — route tail-iter prefetches through the
-// L2-only path (`emit_full_pf_l2only<>`), instead of either skipping (R37
-// default = crash) or always-emitting LDS-bound prefetches (R38B = perf
-// regression). The L2-only path issues the SAME `buffer_load_dwordx4` GMEM
-// fetches (so the compiler-tracked vmcnt remains consistent with the iter's
-// scheduler footprint) but discards the result into a scratch VGPR (no LDS
-// write, no double-buffer slot collision). This should:
-//   - eliminate CRASH (the wait-count metadata stays in sync, no in-flight
-//     buffer-load-to-LDS racing the next iter's s_barrier);
-//   - preserve R37's WINs (no extra LDS write traffic, the tail iter's MFMAs
-//     still consume the SAME stale data they did under R25-C/R37, plus the
-//     new L2 fetches warm the cache for the prologue/epilogue Bl direct-load).
-// The scope of the change is the same `R37_FIX_B && !FUSED_STEP34` branch
-// that R38B targets. R38C must NOT be enabled together with R38B.
-// Default OFF; the R38C builder sets R38C_TAIL_L2ONLY=1 explicitly.
-#ifndef R38C_TAIL_L2ONLY
-#define R38C_TAIL_L2ONLY 0
-#endif
-#if R38C_TAIL_L2ONLY && R38B_TAIL_FIX
-#error "R38C_TAIL_L2ONLY and R38B_TAIL_FIX are mutually exclusive"
-#endif
-
-// R38 Opt F (2026-04-19): explicit tail-iter LDS-write drain. Per R38C verdict,
-// the structural fix for the 6 WIN→WRONG_OUTPUT and 6 CRASH→WRONG_OUTPUT demotions
-// is in the R37_FIX_B fused-step34 path's tail iters: the next iter's MFMA reads
-// from an LDS double-buffer slot whose write from the prior iter's
-// buffer_load_to_lds prefetch hasn't fully drained (the in-flight load lands
-// AFTER the next iter's s_barrier already released the slot for reuse). Without
-// fixing this, R37_FIX_B + R25-C produces stale-LDS reads → WRONG_OUTPUT.
-//
-// R38F inserts an explicit `s_waitcnt vmcnt(N) [+ s_barrier]` at the END of
-// each tail iter (after both step12 and step34/prefetch emission), guaranteeing
-// all outstanding GMEM→LDS loads land before the next iter's s_barrier releases
-// the LDS slot. Three variants:
-//   F1 (R38F_VARIANT=1): `s_waitcnt vmcnt(0)` only — drain GMEM, no WG sync.
-//   F2 (R38F_VARIANT=2): `s_waitcnt vmcnt(0)` + `s_barrier` — drain + sync.
-//   F3 (R38F_VARIANT=3): `s_waitcnt 0` (vmcnt+lgkmcnt+expcnt) — most conservative.
-//   F4 (R38F_VARIANT=4): `s_waitcnt vmcnt(0) lgkmcnt(0)` — drain GMEM + LDS.
-// Default OFF (R38F_TAIL_DRAIN=0); the R38F builder sets it explicitly.
-// Drain fires ONLY on the same tail iters R25-C identifies (when
-// _r25c_tail_no_pf is true), AND only on the R37_FIX_B path. No effect on
-// FUSED_STEP34 or on legacy paths. INDEPENDENT of R38B/R38C — those should
-// remain default OFF when testing R38F.
-#ifndef R38F_TAIL_DRAIN
-#define R38F_TAIL_DRAIN 0
-#endif
-#ifndef R38F_VARIANT
-#define R38F_VARIANT 2  // default to F2 (drain + barrier) when ON
-#endif
-// R38F may be combined with R38B (always-emit) — in fact it must be, to close
-// the underlying CRASH first; R38F then fixes the stale-LDS WRONG_OUTPUT that
-// R38B reveals. Keep mutex only with R38C (L2-only path takes a different
-// emit_full_pf_l2only target).
-#if R38F_TAIL_DRAIN && R38C_TAIL_L2ONLY
-#error "R38F_TAIL_DRAIN and R38C_TAIL_L2ONLY are mutually exclusive (different prefetch targets)"
-#endif
-
-// R39 Opt A (2026-04-19): TAIL_SCALE_CLAMP. Per R38_OPT_F_VERDICT root-cause
-// analysis: in R37_FIX_B + R25-C, the data-tile prefetch is suppressed on the
-// last R25C_TAIL_PF_OFF_ITERS iters (`if (!_r25c_tail_no_pf) emit_pf_tail<0>`),
-// while `load_pq_scale_x2_async(... bt+1 ...)` keeps advancing the scale index.
-// On those tail iters the next-iter MFMA reads STALE data (the last-prefetched
-// tile, which is iter `k_byte_iters - 1 - R25C_TAIL_PF_OFF_ITERS`) but a FRESH
-// scale (pointing at iter `bt+1` past the last fetched data tile). Scale-vs-data
-// mismatch under uniform scale=-4 produces BF16-overflow garbage on ~17% of
-// cells (matches the project memory `MXFP4 17%-deterministic-wrong cells`).
-//
-// R39A clamps the `nxt_scale` index to match the data-tile clamp pattern: when
-// `_r25c_tail_no_pf` is true, do not advance the scale; reuse the current iter's
-// scale slot (idx = bt). When R25-C is inactive (default tail_off=0), the
-// natural `bt+1` index is preserved (no behavior change on R37 WIN shapes).
-//
-// Macro is gated `R37_FIX_B && !FUSED_STEP34` (same scope as R38B/C/F). Default
-// OFF; the R39A builder sets `R39A_TAIL_SCALE_CLAMP=1` explicitly.
-//
-// Mutex: independent of R38B/C/F (operates on scale-load index, not data-pf
-// emission). May be combined with any of them if needed for incremental tests.
-#ifndef R39A_TAIL_SCALE_CLAMP
-#define R39A_TAIL_SCALE_CLAMP 0
-#endif
-
-// R40 Opt A (2026-04-19): per-iter PF FENCE for the R37_FIX_B path.
-//
-// Hypothesis: the compiler reorders the per-iter `buffer_load_to_lds` issue
-// (driven by `pf_*_p` struct construction at the TOP of the iter +
-// `emit_pf_tail` after step34) ACROSS the `kpair_64mfma_step12` asm boundary.
-// R37 added a fence AFTER step34, but did NOT add one BEFORE step12 — and the
-// pf_*_p struct construction sits free in scheduler-land at the top of the
-// iter, before step12. Result: a buffer_load_to_lds may land in an LDS slot
-// the in-flight MFMA is reading. Manifests as the cluster-A "borderline"
-// 24-50 dB SNR / 0.5-1.5% wrong cells on ~7 shapes.
-//
-// R40A surgical change in the `R37_FIX_B && !FUSED_STEP34` branch:
-//   1) Insert `asm volatile("" ::: "memory")` IMMEDIATELY BEFORE every call to
-//      `kpair_64mfma_step12` in the R37_FIX_B branch (TAIL_SPLIT and
-//      no-TAIL_SPLIT main loops).
-//   2) MOVE the `make_pf_params` block from the TOP of the iter to AFTER
-//      `kpair_64mfma_step34` returns. Construction is then folded into the
-//      same pre-emit_pf_tail span the R38B_TAIL_FIX branch already uses.
-//
-// Default OFF. The R40A builder sets `-DR40A_PF_FENCE=1` explicitly. Has no
-// effect on the R37_FIX_B == 0 legacy path nor on FUSED_STEP34 == 1.
-//
-// Notes:
-//  - When R40A_PF_FENCE && !R38B_TAIL_FIX: skip the per-iter top-of-loop
-//    `make_pf_params` (defer to inside the R37_FIX_B branch, mirroring R38B's
-//    deferred-construction pattern). When R38B_TAIL_FIX is ON, R38B already
-//    defers the construction, so R40A only adds the pre-step12 fence.
-//  - This change is INDEPENDENT of R39A/R38C/R38F. It can be combined with
-//    R38B (R38B already builds the params after step34 inside the always-emit
-//    branch); R40A then only adds the pre-step12 fence on top.
-#ifndef R40A_PF_FENCE
-#define R40A_PF_FENCE 0
-#endif
-
-// R44 Opt A (2026-04-19): per Opt C R44_OPT_C_FAULT_PC.md diagnosis,
-// the TAIL_SPLIT + FUSED_STEP34 K-loop back-edge has no s_waitcnt vmcnt(0)
-// drain. The 16 in-flight buffer_load_to_lds prefetches issued at the
-// end of the FUSED branch (line ~3313) can race the TAIL_SPLIT epilogue's
-// ds_reads on the SAME LDS double-buffer slots → HSA_STATUS_ERROR_MEMORY_
-// APERTURE_VIOLATION (code 0x29) at K=28672. Insert a single
-// `asm volatile("s_waitcnt vmcnt(0)\n" ::: "memory")` at the END of the
-// for (int bt = 0; bt + 1 < k_byte_iters; ++bt) loop body to drain
-// in-flight VMEM before fall-through. Default OFF.
-#ifndef R44A_BACKEDGE_VMCNT_DRAIN
-#define R44A_BACKEDGE_VMCNT_DRAIN 0
-#endif
-
-// R45 Opt B (2026-04-19): per R44 Opt A's mechanistic finding, the
-// FUSED_STEP34 + TAIL_SPLIT path needs a SEPARATING `s_waitcnt vmcnt(0)`
-// fence BETWEEN `kpair_64mfma_step34` and the unconditional `emit_pf_tail<0>`
-// calls inside the FUSED branch. R44A's back-edge drain (placed at the END
-// of the K-loop body) does NOT close the FUSED branch CRASH on
-// (4096, 32768, 28672) — empirically still 5/5 CRASH (R44_OPT_A_VERDICT.md).
-// The mechanism: the 16 `buffer_load_dwordx4 ... lds` (PCs 0x1A884–0x1A9A0,
-// see R44_OPT_C_FAULT_PC.md) issued by `emit_pf_tail<0>` may be scheduled
-// to overlap with the late `ds_read_b128` issues that `kpair_64mfma_step34`
-// emits for the next-iter A0/Bl tiles, both targeting the SAME LDS double-
-// buffer slots → HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION (code 0x29).
-// Inserting `asm volatile("s_waitcnt vmcnt(0)\n" ::: "memory")` immediately
-// AFTER `kpair_64mfma_step34` and BEFORE `emit_pf_tail<0>` drains all
-// in-flight VMEM (including the LDS-direct prefetches from prior iters)
-// before issuing the new tail prefetches. Default OFF; per-shape gated.
-#ifndef R45B_FUSED_SEPARATING_FENCE
-#define R45B_FUSED_SEPARATING_FENCE 0
-#endif
-
-// R45 Opt B variant 2: fence AFTER emit_pf_tail<0> calls in FUSED branch.
-// Drains the just-issued tail prefetches before the loop back-edge so the
-// next iter's step12 ds_reads see drained LDS state. Different placement
-// from R44A_BACKEDGE_VMCNT_DRAIN (which is at the END of the K-loop body
-// after R45B's own scope). Default OFF.
-#ifndef R45B_FUSED_POST_EMIT_FENCE
-#define R45B_FUSED_POST_EMIT_FENCE 0
-#endif
-
-// R45 Opt B variant 3: STRONG separating fence (vmcnt(0) + lgkmcnt(0) +
-// s_waitcnt expcnt(0) + s_barrier) between step34 and emit_pf_tail. Forces
-// all wave-shared LDS state to be coherent before issuing new prefetches.
-// Belt-and-braces test for whether the issue is purely VMEM ordering or
-// involves LDS export/load races. Default OFF.
-#ifndef R45B_FUSED_STRONG_FENCE
-#define R45B_FUSED_STRONG_FENCE 0
-#endif
-
-// R46 Opt B (2026-04-19): 3-buffer LDS rotation to bypass FUSED+TS K=28672
-// CRASH that R45 Opt B's 5 fence positions could not close (R45_OPT_B_VERDICT.md).
-// Mechanism: race lives INSIDE the FUSED `kpair_64mfma_step34` asm block
-// (not at its boundary), where iter-N+1's emit_pf_tail<0> writes target the
-// SAME LDS double-buffer slot that iter-N's step34 reads via ds_read_b128.
-// External fences cannot reorder the FUSED block. 3-buffer rotation
-// structurally separates the slots: at iter bt, READ from slot
-// `(bt+1) % 3`, WRITE prefetch into slot `(bt+2) % 3`, leaving slot
-// `bt % 3` as currently-consumed (by step12). No aliasing by construction.
-// Only A0 and Bl get triple-buffered (the tiles step34 reads next-iter
-// from); A1 and Br stay double-buffered (consumed only by current iter,
-// already race-free). LDS budget: 3*16K (A0) + 2*16K (A1) + 3*16K (Bl)
-// + 2*16K (Br) = 144 KB <= 160 KB hardware GROUP segment on gfx950.
-// Default OFF; only enabled per-shape for the K=28672 sister CRASH.
-#ifndef R46B_LDS_TRIPLE_BUFFER
-#define R46B_LDS_TRIPLE_BUFFER 0
-#endif
-
-// R47 Opt A (2026-04-19): per-slot vmcnt fence for the R46B 3-buffer
-// rotation. R46B structurally bypasses the FUSED+TS K=28672 HSA aperture
-// CRASH but produces wcf=0.33 wrong output: the slot-(bt+1)%3 read by
-// step34 may hold stale LDS because the producer (iter bt-1's
-// emit_pf_tail<0>) has not drained vmcnt for the now-distant write.
-// The back-edge `s_waitcnt lgkmcnt(0)` only gates LDS-direct (lgkmcnt),
-// not VMEM-via-buffer_load_to_lds (vmcnt).
-//
-// Variants (compile-time R47A_TRIPLE_BUF_VMCNT_TOP value):
-//   1 = `s_waitcnt vmcnt(0)` at TOP of K-loop iter (most conservative)
-//   2 = `s_waitcnt vmcnt(8)` at TOP of K-loop iter (allow 8 in-flight
-//       loads to OTHER two slots; PF_MPT=4 per A0/Bl tile × 2 tiles = 8)
-//   3 = `s_waitcnt vmcnt(0)` JUST BEFORE step34 in the FUSED+TS branch
-//
-// Default OFF; only meaningful when R46B_LDS_TRIPLE_BUFFER=1.
-#ifndef R47A_TRIPLE_BUF_VMCNT_TOP
-#define R47A_TRIPLE_BUF_VMCNT_TOP 0
-#endif
-
-// R48 Opt A (2026-04-19): Physically split `kpair_64mfma_step34` into TWO
-// separate `asm volatile` blocks (Step3 first, Step4 second) so the compiler
-// can interleave loads/stores between the two halves and reschedule operand
-// register allocation across the boundary. Combined with R46B 3-buffer
-// rotation, this aims to fix the FUSED+TS K=28672 correctness bug
-// (`(4096,32768,28672)`) — the only remaining CRASH after R44/R46/R47.
-//
-// Mechanism (per project_mxfp4_R47A_external_fence_axis_closed.md): R45B
-// proved 5 fence positions × 7 cells DEAD on FUSED+TS K=28672 (race lives
-// INSIDE the fused asm block). R47A proved 3 vmcnt-fence positions ALL
-// re-trigger HSA aperture violation under R46B 3-buffer rotation (external
-// fences cannot fix in-block race AND adding fences breaks R46B's bypass).
-// External-fence axis CLOSED. The remaining axis is to physically split
-// the fused asm so the compiler regains a scheduling boundary; combined
-// with R46B for slot separation, this restores the conditions under which
-// R44A's back-edge fence (proven on non-FUSED) can drain VMEM correctly
-// for the 3-buffer-rotated slots.
-//
-// Default OFF; harmless when 0 (selects the existing single fused asm).
-#ifndef R48A_SPLIT_STEP34
-#define R48A_SPLIT_STEP34 0
-#endif
-
-// ─────────────────────────────────────────────────────────────────────────────
-// R47 Opt C (2026-04-19): MFMA cohort-race attack via wave priority + NOP
-// pacing + MFMA group splitting. Targets the 6 cluster-B wcf-flake shapes
-// where R44_INTEGRATION's 5-run consensus reports n_OK in 2..4/5 with
-// wcf_max ~ 0.02-0.045. R42 Opt A confirmed (median Jaccard ~ 0.06) that
-// the bad cells are non-deterministic — hypothesis: MFMA accumulator cohort
-// race driven by inter-wave scheduling jitter. aiter sets wave priority
-// during MFMA-heavy regions; we test the same family of mitigations.
-//
-// All three knobs default OFF (bit-identical to baseline).
-//
-//   R47C_WAVE_PRIO  (default 0):
-//     1 = emit `s_setprio 3` (max priority) just before the K-loop, restore
-//         `s_setprio 1` after K-loop exit. Reduces inter-wave de-schedule
-//         during the MFMA-heavy K-iter, which may stabilise MFMA accumulator
-//         cohort issue order.
-//
-//   R47C_MFMA_NOP_N  (default 0, valid 0..4):
-//     N>0 = inject `s_nop N-1` between every 16-MFMA block inside
-//         kpair_64mfma_step34 (3 sites: after step3 row1 (16 MFMAs),
-//         after step3 (32 MFMAs), after step4 row1 (48 MFMAs)). Spreads
-//         MFMA issue cadence to reduce VGPR-bank conflict on accumulator
-//         reads.
-//
-//   R47C_MFMA_SPLIT  (default 0):
-//     1 = insert `s_waitcnt vmcnt(0) lgkmcnt(0)` between step3 and step4
-//         inside kpair_64mfma_step34 (after MFMA #32). Forces the
-//         scheduler to drain all in-flight memory traffic at the
-//         step-boundary; tests whether the second half of step34's
-//         MFMA cohort completes deterministically once VMEM is quiesced.
-// ─────────────────────────────────────────────────────────────────────────────
-#ifndef R47C_WAVE_PRIO
-#define R47C_WAVE_PRIO 0
-#endif
-#ifndef R47C_MFMA_NOP_N
-#define R47C_MFMA_NOP_N 0
-#endif
-#ifndef R47C_MFMA_SPLIT
-#define R47C_MFMA_SPLIT 0
-#endif
-
-// Stringification helpers for R47C inline-asm fragments.
-#define R47C_STR_(x) #x
-#define R47C_STR(x) R47C_STR_(x)
-
-// MFMA NOP fragment: emitted inside the kpair_64mfma_step34 asm block at
-// 16-MFMA boundaries. Empty string when R47C_MFMA_NOP_N == 0.
-#if R47C_MFMA_NOP_N > 0
-  #define R47C_NOP_FRAG "s_nop " R47C_STR(R47C_MFMA_NOP_N) "\n"
-#else
-  #define R47C_NOP_FRAG ""
-#endif
-
-// MFMA SPLIT fragment: emitted between step3 and step4 inside step34.
-#if R47C_MFMA_SPLIT == 1
-  #define R47C_SPLIT_FRAG "s_waitcnt vmcnt(0) lgkmcnt(0)\n"
-#else
-  #define R47C_SPLIT_FRAG ""
-#endif
-
-// Wave-priority hooks (used in K-loop pre/post).
-#if R47C_WAVE_PRIO == 1
-  #define R47C_PRIO_HIGH() do { asm volatile("s_setprio 3" ::: "memory"); } while (0)
-  #define R47C_PRIO_LOW()  do { asm volatile("s_setprio 1" ::: "memory"); } while (0)
-#else
-  #define R47C_PRIO_HIGH() ((void)0)
-  #define R47C_PRIO_LOW()  ((void)0)
-#endif
-
-// ─────────────────────────────────────────────────────────────────────────────
-// R49 Opt C (2026-04-19): Producer-side per-slot vmcnt EMBEDDED inside the
-// emit_pf_tail asm volatile block.
-//
-// Per project_mxfp4_R47A_external_fence_axis_closed.md (R47A: 3 vmcnt-fence
-// positions external to producer DEAD on FUSED+TS K=28672) and
-// project_mxfp4_R48A_split_step34_dead.md (R48A: physical asm-block split at
-// the consumer DEAD — compiler RA/scheduler runs before asm-volatile boundary
-// insertion at this MIR layer), the ONE remaining external-fence axis is to
-// embed the fence INSIDE the producer's own asm volatile block so the compiler
-// cannot reorder the fence across the producer/consumer boundary.
-//
-// Strategy: After emit_pf_tail finishes emitting all of its emit_one_pf calls
-// (which by default use the llvm_amdgcn_raw_buffer_load_lds intrinsic), append
-// an additional `asm volatile("s_waitcnt vmcnt(N)" ::: "memory")` as the LAST
-// statement of the templated function body. Because the fence sits inside the
-// templated function body — not at the C++ call site — it is part of the
-// producer's emission and cannot be hoisted above any of the loads by the
-// compiler scheduler.
-//
-// Distinct from R47A: R47A placed the fence in C++ space at the call site —
-// the compiler can reorder around the call. R49C places the fence in the
-// producer body so it always emits AFTER all prefetch loads of the same
-// emit_pf_tail invocation.
-//
-// Distinct from R45B: R45B placed external fences in the K-loop body — same
-// compiler reordering issue.
-//
-// Macro:
-//   R49C_EMBEDDED_VMCNT (default 0): when 0, behavior is byte-compatible with
-//     R44 baseline (no fence emitted). When 1, append the embedded fence.
-//   R49C_EMBEDDED_VMCNT_N (default 0): vmcnt depth (0=fully drain VMEM, 8 or
-//     16 = leave N in flight; PF_MPT=4 per tile × 2 tiles = 8 in-flight loads
-//     per emit_pf_tail call by default, so N=8 retains all of this call's
-//     loads while draining anything older).
-//
-// ─────────────────────────────────────────────────────────────────────────────
-#ifndef R49C_EMBEDDED_VMCNT
-#define R49C_EMBEDDED_VMCNT 0
-#endif
-#ifndef R49C_EMBEDDED_VMCNT_N
-#define R49C_EMBEDDED_VMCNT_N 0
-#endif
-
-#define R49C_STR_(x) #x
-#define R49C_STR(x) R49C_STR_(x)
-
-#if R49C_EMBEDDED_VMCNT == 1
-  // Trailing fence emitted as the LAST statement of emit_pf_tail. The
-  // "memory" clobber tells the compiler this asm has memory side effects so
-  // it cannot be hoisted above the preceding intrinsic prefetch loads.
-  #define R49C_PF_TAIL_FENCE() do { \
-      asm volatile("s_waitcnt vmcnt(" R49C_STR(R49C_EMBEDDED_VMCNT_N) ")" \
-                   ::: "memory"); \
-  } while (0)
-#else
-  #define R49C_PF_TAIL_FENCE() ((void)0)
-#endif
-
-// ─────────────────────────────────────────────────────────────────────────────
-// R48 Opt B (2026-04-19): MFMA chain-reorder + Phase-1 fine-grain s_setprio +
-// ds_read drain — attack residual MFMA cohort race on cluster-B wcf-flake
-// shapes that R47C wave-priority alone could not stabilise (R47 round-dead;
-// 5-run promote killed by 10-run protocol — see project_mxfp4_R47_round_dead).
-//
-// Mechanism: each step3 MFMA accumulator (acc_bl[0..15] split into 4 row
-// chains of 4 elements) is read TWICE in close succession (Phase 0 then
-// Phase 1) before moving to the next chain. The current emission order
-//   Row0 P0 P0 P0 P0 / Row0 P1 P1 P1 P1 / Row1 ... / Row2 ... / Row3 ...
-// schedules the SAME accumulator for back-to-back read-modify-write within
-// 4 MFMAs. Cohort-issue order between waves is non-deterministic at this
-// granularity (median Jaccard ~ 0.06 cluster-B). Spreading Phase 1 issue
-// across all 4 row chains lengthens the dependency window for each
-// accumulator from 4 MFMAs to 16 MFMAs — much longer issue gap → cohort
-// completion order becomes deterministic by construction.
-//
-// Three independent knobs (default OFF — bit-identical to R47 baseline):
-//
-//   R48B_MFMA_REORDER (default 0):
-//     1 = re-issue the 32 step3 MFMAs as
-//           Row0 P0(4) Row1 P0(4) Row2 P0(4) Row3 P0(4)  (16 MFMAs)
-//           Row0 P1(4) Row1 P1(4) Row2 P1(4) Row3 P1(4)  (16 MFMAs)
-//         instead of the current Row0(P0+P1) Row1(P0+P1) Row2(P0+P1)
-//         Row3(P0+P1). Same 32 instructions, same 8 ds_reads, only the
-//         issue ORDER changes. The 8 ds_reads (4 of nxt_a0[0..3], 4 of
-//         nxt_a0[4..7]) are kept inline at the same MFMA-relative cadence
-//         to preserve the original LDS issue spread. Step4 layout
-//         unchanged. Symmetric Step4 reorder is gated on R48B_MFMA_REORDER
-//         too (same mechanism; otherwise we'd half-fix the race).
-//
-//   R48B_PRIO_PHASE1 (default 0):
-//     1 = wrap each Phase-1 MFMA quartet (the SECOND pass over
-//         acc_bl[0..3], acc_bl[4..7], etc.) with `s_setprio 3` before
-//         and `s_setprio 1` after. Inside the asm block, this ensures
-//         the MFMA cohort responsible for the read-modify-write hazard
-//         executes at max wave priority (vs R47C_WAVE_PRIO which sets
-//         priority for the entire K-loop). Tests whether the race is
-//         specifically the Phase-1 quartet's issue cadence.
-//
-//   R48B_DSREAD_DRAIN (default 0):
-//     1 = emit `s_nop 7` between Step3 and Step4 inside the FUSED
-//         step34 asm block (replacing the current empty
-//         `R47C_SPLIT_FRAG` slot). Forces the LDS subsystem to
-//         drain the in-flight `ds_read_b128` for nxt_a0[0..7] before
-//         Step4 starts issuing its own ds_reads for nxt_bl. Cheaper
-//         than R47C_MFMA_SPLIT (no waitcnt, just instruction-pacing
-//         delay) and targets the AGPR-write-back window directly.
-// ─────────────────────────────────────────────────────────────────────────────
-#ifndef R48B_MFMA_REORDER
-#define R48B_MFMA_REORDER 0
-#endif
-#ifndef R48B_PRIO_PHASE1
-#define R48B_PRIO_PHASE1 0
-#endif
-#ifndef R48B_DSREAD_DRAIN
-#define R48B_DSREAD_DRAIN 0
-#endif
-
-#if R48B_PRIO_PHASE1 == 1
-  #define R48B_PRIO_HI_FRAG  "s_setprio 3\n"
-  #define R48B_PRIO_LO_FRAG  "s_setprio 1\n"
-#else
-  #define R48B_PRIO_HI_FRAG  ""
-  #define R48B_PRIO_LO_FRAG  ""
-#endif
-
-#if R48B_DSREAD_DRAIN == 1
-  #define R48B_DRAIN_FRAG    "s_nop 7\n"
-#else
-  #define R48B_DRAIN_FRAG    ""
-#endif
-
-// R38 Opt A (2026-04-19): replace the `__builtin_amdgcn_raw_buffer_load_lds`
-// intrinsic in emit_one_pf with an `asm volatile("buffer_load_dwordx4 ... lds")`
-// block carrying a "memory" clobber. The intrinsic, being a regular call, is
-// schedulable by LLVM (and especially by `-mllvm -amdgpu-sched-strategy=
-// max-memory-clause`) across iteration boundaries. Inline asm with "memory"
-// clobber is a hard ordering barrier — the compiler cannot reorder loads/stores
-// across it. Targets the 19 WRONG_OUTPUT shapes from R37 whose BEST_VARIANTS
-// flag stack still contains some scheduler-aggressive flag.
-//
-// IMPORTANT: when ON, the cache_hint argument is dropped (the inline asm uses
-// the default cache mode — sc0=sc1=nt=0). All R37 BEST_VARIANTS use cache_all
-// (=0), so this is a no-op for the R37 set. Default OFF; the R38A builder sets
-// R38A_INLINE_BUFLOAD_LDS=1 explicitly.
-#ifndef R38A_INLINE_BUFLOAD_LDS
-#define R38A_INLINE_BUFLOAD_LDS 0
-#endif
-
-// R47 Opt B (2026-04-19): port aiter's per-load `s_mov_b32 m0, sX`-immediately-
-// before-`buffer_load_dwordx4 ... lds` discipline to the PROLOGUE tile loader
-// (`emit_tile_pf` at line ~1154), which currently uses the LLVM intrinsic
-// emission path (no M0 fresh-set guarantee). R46 Opt C falsified the "M0 is
-// stylistic" interpretation: PF_N=2 with M0-only completes (99.9% finite),
-// PF_N=2 with consumer-fence-only HSA_FAULTs. The fence is NOT a substitute
-// for M0 hygiene.
-//
-// When R47B_M0_FRESH_SET_PRODUCTION=1, `emit_tile_pf` switches from the
-// `llvm_amdgcn_raw_buffer_load_lds` intrinsic to inline asm with explicit
-// `s_mov_b32 m0, %0` immediately before each `buffer_load_dwordx4 ... lds`.
-// This stacks on top of R38A_INLINE_BUFLOAD_LDS=1 (which only patches the
-// per-iter `emit_one_pf` site). Default OFF.
-#ifndef R47B_M0_FRESH_SET_PRODUCTION
-#define R47B_M0_FRESH_SET_PRODUCTION 0
-#endif
-
 // R25-C: K-loop tail epilogue specialization. When set to N>0, the last N
 // iterations of the steady-state main loop use PF_N=0 (no global prefetch) for
 // the Step3/Step4 KPAIR calls. Rationale: clamped pf_bt re-fetches the same
@@ -682,78 +78,6 @@ using namespace kittens;
 #define R25C_TAIL_PF_OFF_ITERS 0
 #endif
 
-// R41 Opt A (2026-04-19): Cluster C deep-K tail-pf-off SWEEP + extract_tile fence.
-// Targets the 5 catastrophic K=32768 shapes (~97% wrong cells, ~10% finite under R40B).
-// Hypothesis: R25C_TAIL_PF_OFF_ITERS=120 with K_DIM=32768 (k_byte_iters=128) means PF
-// runs only on first 8 iters, then kernel rides on extract_tile-staged registers for
-// >100 iters. Combined with FUSED_STEP34=1's fewer iter-boundary fences, the
-// tile-register liveness across deep K is the dominant corruption vector.
-// R40D's data (no-prefetch IMPROVES 4 of 5 cluster-C shapes) supports this.
-//
-// R41A_DEEP_K_FIX (master gate, default 0): when 0, behavior is bit-identical to R40B.
-// R41A_PFOFF_OVERRIDE (int, default 0): when nonzero AND R41A_DEEP_K_FIX AND
-//   K_DIM >= 16384, OVERRIDES the variant-supplied R25C_TAIL_PF_OFF_ITERS at
-//   compile time (via #undef + #define).
-// R41A_EXTRACT_TILE_FENCE (bool, default 0): when 1 AND R41A_DEEP_K_FIX AND
-//   FUSED_STEP34 AND K_DIM >= 16384, inserts s_waitcnt vmcnt(0) immediately
-//   BEFORE every extract_tile(nxt_a0_d, tA0) and extract_tile(nxt_bl_d, tBl)
-//   call in the K-loop body (3 sites: lines ~2851, ~3364, ~3598).
-#ifndef R41A_DEEP_K_FIX
-#define R41A_DEEP_K_FIX 0
-#endif
-#ifndef R41A_PFOFF_OVERRIDE
-#define R41A_PFOFF_OVERRIDE 0
-#endif
-#ifndef R41A_EXTRACT_TILE_FENCE
-#define R41A_EXTRACT_TILE_FENCE 0
-#endif
-
-// R42 Opt C (2026-04-19): broaden the R41A extract_tile vmcnt fence beyond
-// deep-K only. R41A's gating was (FUSED_STEP34 && K_DIM >= 16384). The same
-// load->extract race may exist at smaller K with a smaller window. Two opt-in
-// broadenings:
-//   R42C_FENCE_NO_K_GUARD (default 0): when 1 AND R41A_DEEP_K_FIX AND
-//     R41A_EXTRACT_TILE_FENCE AND FUSED_STEP34, drop the K_DIM>=16384 guard
-//     so the fence applies for any K. (C1)
-//   R42C_FENCE_ANY_PATH (default 0): when 1 AND R41A_DEEP_K_FIX AND
-//     R41A_EXTRACT_TILE_FENCE, drop BOTH the FUSED_STEP34 and K_DIM guards.
-//     Fence emitted at every extract_tile site. (C2)
-// Default behavior is BIT-IDENTICAL to R41A (both default OFF).
-//
-// ORIGINAL (R41A) gate, for reviewer reference (non-default change verifier):
-//   #if R41A_DEEP_K_FIX && R41A_EXTRACT_TILE_FENCE && FUSED_STEP34 && (K_DIM >= 16384)
-//     #define R41A_FENCE_BEFORE_EXTRACT() asm volatile("s_waitcnt vmcnt(0)" ::: "memory")
-//   #else
-//     #define R41A_FENCE_BEFORE_EXTRACT() ((void)0)
-//   #endif
-#ifndef R42C_FENCE_NO_K_GUARD
-#define R42C_FENCE_NO_K_GUARD 0
-#endif
-#ifndef R42C_FENCE_ANY_PATH
-#define R42C_FENCE_ANY_PATH 0
-#endif
-
-#if R41A_DEEP_K_FIX && (R41A_PFOFF_OVERRIDE != 0) && (K_DIM >= 16384)
-  #undef R25C_TAIL_PF_OFF_ITERS
-  #define R25C_TAIL_PF_OFF_ITERS R41A_PFOFF_OVERRIDE
-#endif
-
-#if R41A_DEEP_K_FIX && R41A_EXTRACT_TILE_FENCE && R42C_FENCE_ANY_PATH
-  // C2: any K, any path (fused or not)
-  #define R41A_FENCE_BEFORE_EXTRACT() \
-      asm volatile("s_waitcnt vmcnt(0)" ::: "memory")
-#elif R41A_DEEP_K_FIX && R41A_EXTRACT_TILE_FENCE && FUSED_STEP34 && R42C_FENCE_NO_K_GUARD
-  // C1: any K, but only on FUSED_STEP34 path
-  #define R41A_FENCE_BEFORE_EXTRACT() \
-      asm volatile("s_waitcnt vmcnt(0)" ::: "memory")
-#elif R41A_DEEP_K_FIX && R41A_EXTRACT_TILE_FENCE && FUSED_STEP34 && (K_DIM >= 16384)
-  // R41A original: deep-K only on FUSED_STEP34 path
-  #define R41A_FENCE_BEFORE_EXTRACT() \
-      asm volatile("s_waitcnt vmcnt(0)" ::: "memory")
-#else
-  #define R41A_FENCE_BEFORE_EXTRACT() ((void)0)
-#endif
-
 #ifndef R25C_K_LIMIT
 #define R25C_K_LIMIT 32768
 #endif
@@ -768,437 +92,9 @@ using namespace kittens;
 #define R25C_ACTIVE ((R25C_TAIL_PF_OFF_ITERS > 0) && (K_DIM <= R25C_K_LIMIT) \
                      && (R25C_K_EXACT == 0 || K_DIM == R25C_K_EXACT))
 
-#ifndef DIRECT_BL
-#define DIRECT_BL 0
-#endif
-#if DIRECT_BL && FUSED_STEP34
-#error "DIRECT_BL is incompatible with FUSED_STEP34"
-#endif
-
-// EARLY_BL_PF: when DIRECT_BL=1, issue the next-iter Bl buffer_load_dwordx4 BEFORE
-// Step12 instead of inside Step4. This gives ~128 MFMAs (~512 cycles) of latency
-// hiding for the ~400-cycle buffer_load, vs the original ~32 cycles in Step4 alone.
-// Step4 then runs as pure MFMAs + Br prefetch (Bl already in VGPR).
-#ifndef EARLY_BL_PF
-#define EARLY_BL_PF 0
-#endif
-#if EARLY_BL_PF && !DIRECT_BL
-#error "EARLY_BL_PF requires DIRECT_BL=1"
-#endif
-
-// EARLY_SCALE_PF: hoist next-iter scale buffer_load_dwordx2 to before _raw copy
-// using shadow regs nxt_pf_* with writeback at iter end.
-//
-// ⚠ BROKEN — DO NOT ENABLE. The compiler aliases pf_* and nxt_pf_* to the same
-// VGPRs (since `pf_* = nxt_pf_*` writeback looks like a no-op assignment), so the
-// outstanding VMEM clobbers pf_* before _raw reads it → race condition (different
-// NaN pattern vs baseline; torch.equal == False on 1024×1024×4096 corr test).
-//
-// Tried fixes that don't work: (a) volatile asm + 8 extra VGPRs → exceeds 256-VGPR
-// cap, no occupancy gain; (b) restructure pf_* as [2] array → invasive AND
-// no perf benefit since baseline ASM already issues scale loads at iter top
-// (NONVOLATILE_SCALE_X2_POC=1 lets the compiler schedule them ~512 cyc before use).
-//
-// Round 5 dead-end (2026-04-17). Bench (broken variant, for completeness):
-//   14336x4096x32768   baseline 4742.6 → early_scale 4702.3  (-0.85%)
-//   16384x4096x28672   baseline 5005.9 → early_scale 4982.3  (-0.47%)
-//   4096x32768x128256  baseline 5105.9 → early_scale 5123.9  (+0.35%)
-// All deltas within run-to-run noise. See test_early_scale_pf.py for repro.
-#ifndef EARLY_SCALE_PF
-#define EARLY_SCALE_PF 0
-#endif
-#if EARLY_SCALE_PF
-#error "EARLY_SCALE_PF is BROKEN (compiler aliases shadow regs → race)."
-#endif
-
-#ifndef NT_STORE
-#define NT_STORE 0
-#endif
-
-#ifndef PACKED_STORE
-#define PACKED_STORE 0
-#endif
-
-// PERSISTENT_XCD: launch a fixed-size grid (PERSISTENT_GRID workgroups), each WG
-// pulling tile_id atomically from a global counter. Maintains XCD-aware ordering
-// by constructing raw_bid = tile_id (so the existing % NUM_XCDS swizzle still works).
-#ifndef PERSISTENT_XCD
-#define PERSISTENT_XCD 0
-#endif
-
-// STATIC_XCD_REMAP (Round 7, Optimizer B): atomic-free static bid->(m,n) remap
-// that constrains each XCD to a narrow N-strip of width (bpc / NUM_XCDS).
-// Within the XCD: GROUP_M m-tiles × n_per_xcd n-tiles tiled walk for L2 B-tile reuse.
-// Requires bpc % NUM_XCDS == 0 — falls back to default mapping otherwise.
-#ifndef STATIC_XCD_REMAP
-#define STATIC_XCD_REMAP 0
-#endif
-#ifndef PERSISTENT_GRID
-// Default: 8 XCDs * 38 CUs * 2 WGs/CU = 608.  MI355X has 304 CUs total.
-#define PERSISTENT_GRID 608
-#endif
-#ifndef PERSISTENT_BATCH
-// Tiles claimed per atomicAdd (1 = one-at-a-time, 4 = grab 4 sequential tiles).
-#define PERSISTENT_BATCH 1
-#endif
-
-// OPTC flags (default-off, source-level scheduling/codegen hints)
-#ifndef WAVE_PRIO_HIGH
-#define WAVE_PRIO_HIGH 0
-#endif
-#ifndef WAVE_PRIO_LOW_TAIL
-#define WAVE_PRIO_LOW_TAIL 0
-#endif
-#ifndef SCHED_GROUP_BARRIERS
-#define SCHED_GROUP_BARRIERS 0
-#endif
-#ifndef EXPLICIT_S_NOP
-#define EXPLICIT_S_NOP 0
-#endif
-
-// ───── R22A: LDS sub-arbitration probes ─────
-// LDS_RD_STAGGER_NOP=N inserts `s_nop N-1` after each ds_read_b128 in the 3
-// hot-path KPAIR functions (kpair_32mfma_with_lds_and_pf,
-// kpair_32mfma_with_lds_rowspread_pf, kpair_32mfma_with_lds_and_pf_swapped_sel).
-// Default 0 means empty string, so default-built kernel is bit-for-bit identical.
-//
-// Hypothesis (R21-recon): TCP_TA_DATA_STALL = 167-294 % of GRBM with 0 % LDS bank
-// conflict means port-side sub-arbitration (multiple ds_read_b128 per cycle
-// exceeding LDS port bandwidth). Spreading them by 1-2 cycles via s_nop should
-// give the LDS arbiter time to drain. NOP cost is hidden by MFMA pipeline (16
-// cycles per MFMA), so as long as MFMA throughput remains saturated this is
-// expected to be free.
-#ifndef LDS_RD_STAGGER_NOP
-#define LDS_RD_STAGGER_NOP 0
-#endif
-#if LDS_RD_STAGGER_NOP == 1
-  #define LDS_NOP_STR "s_nop 0\n"
-#elif LDS_RD_STAGGER_NOP == 2
-  #define LDS_NOP_STR "s_nop 1\n"
-#elif LDS_RD_STAGGER_NOP == 3
-  #define LDS_NOP_STR "s_nop 2\n"
-#else
-  #define LDS_NOP_STR ""
-#endif
-
-// ───── R21B: macro hook helpers (no-op when defaults are 0) ─────
-// These expand to nothing in baseline so a default-built kernel is bit-for-bit
-// identical. Site-call macros are dropped at the 4 K-iter end points + tail +
-// pre-store-C for opt-in scheduling-hint experiments.
-#if EXPLICIT_S_NOP > 0
-  #if EXPLICIT_S_NOP >= 3
-    #define MXFP4_R21B_S_NOP_HOOK \
-      do { asm volatile("s_nop 0"); asm volatile("s_nop 0"); asm volatile("s_nop 0"); } while (0)
-  #elif EXPLICIT_S_NOP == 2
-    #define MXFP4_R21B_S_NOP_HOOK \
-      do { asm volatile("s_nop 0"); asm volatile("s_nop 0"); } while (0)
-  #else
-    #define MXFP4_R21B_S_NOP_HOOK do { asm volatile("s_nop 0"); } while (0)
-  #endif
-#else
-  #define MXFP4_R21B_S_NOP_HOOK do {} while (0)
-#endif
-
-// ───── R22C: finer-mask sched_group_barrier control ─────
-// R21B used mask=0xff (ALL), which over-constrained the post-RA scheduler and
-// regressed -1.6 to -3.5%. R22C adds finer per-class masks and tunable group
-// size + per-site enable bitmask. SCHED_GROUP_BARRIERS=1 still works as the
-// R21B "wide mask=0xff" path; setting R22C_SCHED_MASK!=0 overrides the mask.
-//   R22C_SCHED_MASK : AMDGCN inst-class mask (0x004=MFMA, 0x040=DS_R, 0x080=DS_W,
-//                     0x008=VMEM, 0x044=MFMA+DS_R, 0x0c0=DS_R+DS_W, etc.).
-//                     Set non-zero to opt in to R22C.
-//   R22C_SCHED_SIZE : group size (2nd arg to sched_group_barrier). R21B used 1.
-//   R22C_HOOK_MASK  : bitmask of hook sites
-//                     bit0..bit2 = the 3 K-iter end sites (lines ~2380/2605/2808)
-//                     bit3       = pre-Store-C site (line ~2823)
-//                     Defaults to 0xf = all 4 sites (matches R21B coverage).
-#ifndef R22C_SCHED_MASK
-#define R22C_SCHED_MASK 0
-#endif
-#ifndef R22C_SCHED_SIZE
-#define R22C_SCHED_SIZE 1
-#endif
-#ifndef R22C_HOOK_MASK
-#define R22C_HOOK_MASK 0xf
-#endif
-
-#if R22C_SCHED_MASK
-  // R22C overrides: caller picked an explicit mask. Implies SCHED_GROUP_BARRIERS.
-  #define MXFP4_R21B_SCHED_GROUP_HOOK \
-    do { __builtin_amdgcn_sched_group_barrier(R22C_SCHED_MASK, R22C_SCHED_SIZE, 0); } while (0)
-#elif SCHED_GROUP_BARRIERS
-  // R21B legacy path: mask=0xff matches all instruction classes; size=1 group.
-  #define MXFP4_R21B_SCHED_GROUP_HOOK \
-    do { __builtin_amdgcn_sched_group_barrier(0xff, 1, 0); } while (0)
-#else
-  #define MXFP4_R21B_SCHED_GROUP_HOOK do {} while (0)
-#endif
-
-#if WAVE_PRIO_LOW_TAIL
-  #define MXFP4_R21B_PRIO_LOW_HOOK \
-    do { asm volatile("s_setprio 0" ::: "memory"); } while (0)
-#else
-  #define MXFP4_R21B_PRIO_LOW_HOOK do {} while (0)
-#endif
-
-// R22C indexed iter-end hooks: each call site uses an _IDX form so individual
-// sites can be disabled via R22C_HOOK_MASK. The R21B convenience macro is
-// retained as a no-op-by-default base. EXPLICIT_S_NOP is independent of the
-// sched_group hook and is always emitted (gated by its own macro) regardless
-// of R22C_HOOK_MASK so existing R21B s_nop combos still work.
-#define MXFP4_R21B_ITER_END_HOOK \
-  do { MXFP4_R21B_S_NOP_HOOK; MXFP4_R21B_SCHED_GROUP_HOOK; } while (0)
-
-#if (R22C_HOOK_MASK) & 0x1
-  #define MXFP4_R22C_ITER_END_HOOK_0 \
-    do { MXFP4_R21B_S_NOP_HOOK; MXFP4_R21B_SCHED_GROUP_HOOK; } while (0)
-#else
-  #define MXFP4_R22C_ITER_END_HOOK_0 do { MXFP4_R21B_S_NOP_HOOK; } while (0)
-#endif
-#if (R22C_HOOK_MASK) & 0x2
-  #define MXFP4_R22C_ITER_END_HOOK_1 \
-    do { MXFP4_R21B_S_NOP_HOOK; MXFP4_R21B_SCHED_GROUP_HOOK; } while (0)
-#else
-  #define MXFP4_R22C_ITER_END_HOOK_1 do { MXFP4_R21B_S_NOP_HOOK; } while (0)
-#endif
-#if (R22C_HOOK_MASK) & 0x4
-  #define MXFP4_R22C_ITER_END_HOOK_2 \
-    do { MXFP4_R21B_S_NOP_HOOK; MXFP4_R21B_SCHED_GROUP_HOOK; } while (0)
-#else
-  #define MXFP4_R22C_ITER_END_HOOK_2 do { MXFP4_R21B_S_NOP_HOOK; } while (0)
-#endif
-#if (R22C_HOOK_MASK) & 0x8
-  #define MXFP4_R22C_PRESTORE_HOOK MXFP4_R21B_SCHED_GROUP_HOOK
-#else
-  #define MXFP4_R22C_PRESTORE_HOOK do {} while (0)
-#endif
-
-// ───── R22B: B-tile / A-tile cache-hint streaming (frees L2 BW for the partner) ─────
-// Hypothesis (R21-recon PMC): TCP_DATA_STALL = 290%+ on DLA2/DLA7 with HBM at only
-// 17–20% of peak — TCP/L2 throughput is the limit, not bandwidth. B-tile is
-// broadcast across all M-tile rows of the same (BlockX,BlockY); on large-N shapes
-// (DLA2 N=32768, DLA7 N=32768) B-tile traffic evicts A-tile L2 lines. Marking
-// B-tile loads as `cache_stream` (GLC=1) bypasses L2 for B → frees L2 for A.
-//
-// Values:
-//   B_LOAD_NONTEMPORAL=1 → B-tile uses `coherency::non_temporal`  (slc + glc bypass)
-//   B_LOAD_NONTEMPORAL=2 → B-tile uses `coherency::cache_stream`  (glc only)
-//   A_LOAD_NONTEMPORAL=1/2 → same for A-tile (likely worse on high-A-reuse shapes)
-#ifndef B_LOAD_NONTEMPORAL
-#define B_LOAD_NONTEMPORAL 0
-#endif
-#ifndef A_LOAD_NONTEMPORAL
-#define A_LOAD_NONTEMPORAL 0
-#endif
-
-#if B_LOAD_NONTEMPORAL == 0
-  #define MXFP4_R22B_B_HINT (kittens::coherency::cache_all)
-#elif B_LOAD_NONTEMPORAL == 1
-  #define MXFP4_R22B_B_HINT (kittens::coherency::non_temporal)
-#elif B_LOAD_NONTEMPORAL == 2
-  #define MXFP4_R22B_B_HINT (kittens::coherency::cache_stream)
-#else
-  #error "B_LOAD_NONTEMPORAL must be 0, 1, or 2"
-#endif
-
-#if A_LOAD_NONTEMPORAL == 0
-  #define MXFP4_R22B_A_HINT (kittens::coherency::cache_all)
-#elif A_LOAD_NONTEMPORAL == 1
-  #define MXFP4_R22B_A_HINT (kittens::coherency::non_temporal)
-#elif A_LOAD_NONTEMPORAL == 2
-  #define MXFP4_R22B_A_HINT (kittens::coherency::cache_stream)
-#else
-  #error "A_LOAD_NONTEMPORAL must be 0, 1, or 2"
-#endif
-
 #define MXFP4_STR_IMPL(x) #x
 #define MXFP4_STR(x) MXFP4_STR_IMPL(x)
 
-// ───── R18A-P3: replace inner-loop s_barrier with cheaper s_waitcnt lgkmcnt(0) ─────
-// The inner-loop `s_waitcnt vmcnt(N) s_barrier` synchronizes the producer chain
-// (buffer_load_to_lds → LDS) with the consumer (Step3 ds_read). The s_barrier
-// also provides cross-wave LDS visibility. If wave-private LDS partitions allow
-// safe drop of cross-wave sync (each wave only reads what it wrote), we can drop
-// the barrier and only wait for in-wave LDS+VMEM completion via lgkmcnt+vmcnt.
-//
-// SAFETY: drop only via SNR check at M=N=K=4096. If output diverges, the cross-
-// wave barrier IS load-bearing — discard variant.
-#ifndef BARRIER_TO_WAITCNT_STEP3
-#define BARRIER_TO_WAITCNT_STEP3 0
-#endif
-#ifndef BARRIER_TO_WAITCNT_STEP12
-#define BARRIER_TO_WAITCNT_STEP12 0
-#endif
-#ifndef BARRIER_TO_WAITCNT_ALL
-#define BARRIER_TO_WAITCNT_ALL 0
-#endif
-
-// ───── R20C: K-loop sync coarsening ─────
-// Hypothesis (from R17A DLA1 profile): for very-large-K shapes, the per-iter
-// inner-loop sync (vmcnt+lgkmcnt[+s_barrier]) dominates the K-loop epilogue
-// overhead (2004 iters × per-iter sync ≈ 0.6-1.2 ms wasted on DLA1).
-//
-// K_LOOP_SYNC_EVERY_2: call the embedded-barrier (or waitcnt-only)
-// kpair_32mfma_with_lds_and_pf_swapped_sel on EVEN-bt iters, and call the
-// no-barrier variant on ODD-bt iters. Existing 2-buffer LDS rotation:
-// iter N writes A*_db[N&1], iter N reads A*_db[1-(N&1)] (i.e. what was
-// written in iter N-1). Skipping the barrier on ODD bt means iter N+1 may
-// start its ds_read of A*_db[N&1] before iter N's buffer_load_to_lds for
-// that slot has finished — UNLESS the natural lgkmcnt+vmcnt of step12+step3
-// + the s_waitcnt lgkmcnt(0) at line 2235/2283 + the inherent SIMD
-// scheduling of MFMAs covers the gap.
-//
-// SAFETY: this is a CORRECTNESS-RISKY rewrite. Validate via SNR (both
-// uniform and random-scale aperture probe per R18A's lesson).
-#ifndef K_LOOP_SYNC_EVERY_2
-#define K_LOOP_SYNC_EVERY_2 0
-#endif
-#ifndef K_LOOP_SYNC_EVERY_4
-#define K_LOOP_SYNC_EVERY_4 0
-#endif
-
-#if BARRIER_TO_WAITCNT_ALL
-#undef BARRIER_TO_WAITCNT_STEP3
-#define BARRIER_TO_WAITCNT_STEP3 1
-#undef BARRIER_TO_WAITCNT_STEP12
-#define BARRIER_TO_WAITCNT_STEP12 1
-#endif
-
-#if BARRIER_TO_WAITCNT_STEP3
-// Drop s_barrier from STEP3 producer→consumer sync — wait only for VMEM + LDS.
-#define MXFP4_STEP3_BARRIER_INST "s_waitcnt vmcnt(" MXFP4_STR(STEP3_BARRIER_VMCNT) ") lgkmcnt(0)\n"
-#else
-#define MXFP4_STEP3_BARRIER_INST "s_waitcnt vmcnt(" MXFP4_STR(STEP3_BARRIER_VMCNT) ")\ns_barrier\n"
-#endif
-
-#if BARRIER_TO_WAITCNT_STEP12
-// Drop s_barrier from TAIL_BARRIER (last-iter sync before tail Step3/4).
-#define MXFP4_TAIL_BARRIER_INST "s_waitcnt vmcnt(" MXFP4_STR(TAIL_BARRIER_VMCNT) ") lgkmcnt(0)\n"
-#else
-#define MXFP4_TAIL_BARRIER_INST "s_waitcnt vmcnt(" MXFP4_STR(TAIL_BARRIER_VMCNT) ")\ns_barrier\n"
-#endif
-
-// ───── R19B: per-site (and vmcnt-relax) finer-grained barrier control ─────
-// Allow individual sites to be flipped to waitcnt-only without affecting other sites.
-// Each per-site macro defaults to the corresponding aggregate macro (STEP3 or STEP12)
-// so existing R18A behavior is preserved bit-exactly.
-//
-// STEP3 sites (live with default STEP3_EMBED_BARRIER=1):
-//   _S2 = template kpair_32mfma_with_lds_and_pf            (line ~1259)
-//   _S3 = template kpair_32mfma_with_lds_rowspread_pf      (line ~1452)
-//   _S4 = template kpair_32mfma_with_lds_and_pf_swapped_sel (line ~1677)
-// STEP3 sites (dead with default STEP3_EMBED_BARRIER=1):
-//   _S1 = kpair_64mfma_step34 entry (FUSED_STEP34=1 only,  line ~1022)
-//   _S5 = TAIL_SPLIT inner            (!STEP3_EMBED_BARRIER, line ~2127)
-//   _S6 = TAIL_SPLIT outer            (!STEP3_EMBED_BARRIER, line ~2314)
-//   _S7 = no-TAIL_SPLIT outer         (!STEP3_EMBED_BARRIER, line ~2505)
-// TAIL/STEP12 sites:
-//   STEP12_S1 = TAIL_SPLIT==1 path (line ~2213, live for all 4 parents)
-//   STEP12_S2 = TAIL_SPLIT==0 path (line ~2400, dead with TAIL_SPLIT=1)
-
-#ifndef BARRIER_TO_WAITCNT_STEP3_S1
-#define BARRIER_TO_WAITCNT_STEP3_S1 (BARRIER_TO_WAITCNT_STEP3)
-#endif
-
-// R37 Fix B (and FUSED_STEP34): the fused kpair_64mfma_step34 reads from LDS
-// double-buffer slots that the previous iteration's buffer_load_to_lds writes.
-// Cross-warp synchronization REQUIRES an actual s_barrier — converting the S1
-// barrier to a waitcnt-only causes ~10-30% non-finite output (R36 _f34 builds
-// with BARRIER_TO_WAITCNT_ALL=1 produced finite_frac ≈ 0.87 for that reason).
-// Force S1 back to s_barrier whenever the fused path is active, regardless of
-// BARRIER_TO_WAITCNT_ALL / BARRIER_TO_WAITCNT_STEP3 / explicit S1 override.
-#if (R37_FIX_B || FUSED_STEP34) && BARRIER_TO_WAITCNT_STEP3_S1
-#undef BARRIER_TO_WAITCNT_STEP3_S1
-#define BARRIER_TO_WAITCNT_STEP3_S1 0
-#endif
-#ifndef BARRIER_TO_WAITCNT_STEP3_S2
-#define BARRIER_TO_WAITCNT_STEP3_S2 (BARRIER_TO_WAITCNT_STEP3)
-#endif
-#ifndef BARRIER_TO_WAITCNT_STEP3_S3
-#define BARRIER_TO_WAITCNT_STEP3_S3 (BARRIER_TO_WAITCNT_STEP3)
-#endif
-#ifndef BARRIER_TO_WAITCNT_STEP3_S4
-#define BARRIER_TO_WAITCNT_STEP3_S4 (BARRIER_TO_WAITCNT_STEP3)
-#endif
-#ifndef BARRIER_TO_WAITCNT_STEP3_S5
-#define BARRIER_TO_WAITCNT_STEP3_S5 (BARRIER_TO_WAITCNT_STEP3)
-#endif
-#ifndef BARRIER_TO_WAITCNT_STEP3_S6
-#define BARRIER_TO_WAITCNT_STEP3_S6 (BARRIER_TO_WAITCNT_STEP3)
-#endif
-#ifndef BARRIER_TO_WAITCNT_STEP3_S7
-#define BARRIER_TO_WAITCNT_STEP3_S7 (BARRIER_TO_WAITCNT_STEP3)
-#endif
-#ifndef BARRIER_TO_WAITCNT_STEP12_S1
-#define BARRIER_TO_WAITCNT_STEP12_S1 (BARRIER_TO_WAITCNT_STEP12)
-#endif
-#ifndef BARRIER_TO_WAITCNT_STEP12_S2
-#define BARRIER_TO_WAITCNT_STEP12_S2 (BARRIER_TO_WAITCNT_STEP12)
-#endif
-
-// vmcnt override: when nonzero, replaces STEP3_BARRIER_VMCNT in the per-site STEP3
-// strings (and TAIL_BARRIER_VMCNT in the STEP12 strings). 0 (default) = use existing.
-// NB: applies regardless of barrier-vs-waitcnt mode — relaxed/tight vmcnt can be
-// independently swept.
-#ifndef BARRIER_TO_WAITCNT_RELAXED_VMCNT
-#define BARRIER_TO_WAITCNT_RELAXED_VMCNT 0
-#endif
-
-#if BARRIER_TO_WAITCNT_RELAXED_VMCNT > 0
-#define MXFP4_R19B_VMCNT_STR MXFP4_STR(BARRIER_TO_WAITCNT_RELAXED_VMCNT)
-#define MXFP4_R19B_TAIL_VMCNT_STR MXFP4_STR(BARRIER_TO_WAITCNT_RELAXED_VMCNT)
-#else
-#define MXFP4_R19B_VMCNT_STR MXFP4_STR(STEP3_BARRIER_VMCNT)
-#define MXFP4_R19B_TAIL_VMCNT_STR MXFP4_STR(TAIL_BARRIER_VMCNT)
-#endif
-
-// Per-site barrier strings. Each picks waitcnt-only OR vmcnt+s_barrier per its own gate.
-#if BARRIER_TO_WAITCNT_STEP3_S1
-#define MXFP4_STEP3_BARRIER_INST_S1 "s_waitcnt vmcnt(" MXFP4_R19B_VMCNT_STR ") lgkmcnt(0)\n"
-#else
-#define MXFP4_STEP3_BARRIER_INST_S1 "s_waitcnt vmcnt(" MXFP4_R19B_VMCNT_STR ")\ns_barrier\n"
-#endif
-#if BARRIER_TO_WAITCNT_STEP3_S2
-#define MXFP4_STEP3_BARRIER_INST_S2 "s_waitcnt vmcnt(" MXFP4_R19B_VMCNT_STR ") lgkmcnt(0)\n"
-#else
-#define MXFP4_STEP3_BARRIER_INST_S2 "s_waitcnt vmcnt(" MXFP4_R19B_VMCNT_STR ")\ns_barrier\n"
-#endif
-#if BARRIER_TO_WAITCNT_STEP3_S3
-#define MXFP4_STEP3_BARRIER_INST_S3 "s_waitcnt vmcnt(" MXFP4_R19B_VMCNT_STR ") lgkmcnt(0)\n"
-#else
-#define MXFP4_STEP3_BARRIER_INST_S3 "s_waitcnt vmcnt(" MXFP4_R19B_VMCNT_STR ")\ns_barrier\n"
-#endif
-#if BARRIER_TO_WAITCNT_STEP3_S4
-#define MXFP4_STEP3_BARRIER_INST_S4 "s_waitcnt vmcnt(" MXFP4_R19B_VMCNT_STR ") lgkmcnt(0)\n"
-#else
-#define MXFP4_STEP3_BARRIER_INST_S4 "s_waitcnt vmcnt(" MXFP4_R19B_VMCNT_STR ")\ns_barrier\n"
-#endif
-#if BARRIER_TO_WAITCNT_STEP3_S5
-#define MXFP4_STEP3_BARRIER_INST_S5 "s_waitcnt vmcnt(" MXFP4_R19B_VMCNT_STR ") lgkmcnt(0)\n"
-#else
-#define MXFP4_STEP3_BARRIER_INST_S5 "s_waitcnt vmcnt(" MXFP4_R19B_VMCNT_STR ")\ns_barrier\n"
-#endif
-#if BARRIER_TO_WAITCNT_STEP3_S6
-#define MXFP4_STEP3_BARRIER_INST_S6 "s_waitcnt vmcnt(" MXFP4_R19B_VMCNT_STR ") lgkmcnt(0)\n"
-#else
-#define MXFP4_STEP3_BARRIER_INST_S6 "s_waitcnt vmcnt(" MXFP4_R19B_VMCNT_STR ")\ns_barrier\n"
-#endif
-#if BARRIER_TO_WAITCNT_STEP3_S7
-#define MXFP4_STEP3_BARRIER_INST_S7 "s_waitcnt vmcnt(" MXFP4_R19B_VMCNT_STR ") lgkmcnt(0)\n"
-#else
-#define MXFP4_STEP3_BARRIER_INST_S7 "s_waitcnt vmcnt(" MXFP4_R19B_VMCNT_STR ")\ns_barrier\n"
-#endif
-
-#if BARRIER_TO_WAITCNT_STEP12_S1
-#define MXFP4_TAIL_BARRIER_INST_S1 "s_waitcnt vmcnt(" MXFP4_R19B_TAIL_VMCNT_STR ") lgkmcnt(0)\n"
-#else
-#define MXFP4_TAIL_BARRIER_INST_S1 "s_waitcnt vmcnt(" MXFP4_R19B_TAIL_VMCNT_STR ")\ns_barrier\n"
-#endif
-#if BARRIER_TO_WAITCNT_STEP12_S2
-#define MXFP4_TAIL_BARRIER_INST_S2 "s_waitcnt vmcnt(" MXFP4_R19B_TAIL_VMCNT_STR ") lgkmcnt(0)\n"
-#else
-#define MXFP4_TAIL_BARRIER_INST_S2 "s_waitcnt vmcnt(" MXFP4_R19B_TAIL_VMCNT_STR ")\ns_barrier\n"
-#endif
 
 constexpr int BLK = 256;
 constexpr int BK  = 128;
@@ -1226,9 +122,6 @@ struct gluon_globals {
     _gl_fp4 a, b;
     _gl_scale a_scale, b_scale;
     _gl_bf16 c;
-#if DIRECT_BL
-    _gl_fp4 b_ps;  // Preshuffled B for half-direct-Bl loading
-#endif
     float scale = 1.0f;
 };
 
@@ -1245,26 +138,16 @@ __device__ __forceinline__ unsigned int pack_bf16x2(float x, float y) {
     return out;
 }
 
-// Store bf16 with optional non-temporal hint (NT_STORE=1 bypasses L2 for writes)
+// Store bf16 value
 static __device__ __forceinline__ void store_bf16_val(bf16* addr, float val) {
     bf16 v = base_types::convertor<bf16, float>::convert(val);
-#if NT_STORE
-    unsigned short u;
-    __builtin_memcpy(&u, &v, 2);
-    __builtin_nontemporal_store(u, reinterpret_cast<unsigned short*>(addr));
-#else
     *addr = v;
-#endif
 }
 
 // Packed dword store: two bf16 values packed via v_cvt_pk_bf16_f32
 static __device__ __forceinline__ void store_bf16x2_packed(bf16* addr, float v0, float v1) {
     unsigned int packed = pack_bf16x2(v0, v1);
-#if NT_STORE
-    __builtin_nontemporal_store(packed, reinterpret_cast<unsigned int*>(addr));
-#else
     *reinterpret_cast<unsigned int*>(addr) = packed;
-#endif
 }
 
 __device__ __forceinline__ fp4_intx4_t fp4_lo4(const fp4_intx8_t& x) {
@@ -1362,43 +245,9 @@ __device__ __forceinline__ fp8e8m0_4 load_pq_scale_srd(
 
 // Load two consecutive scale dwords via buffer_load_dwordx2 (merged preshuffle format).
 // Non-volatile asm allows compiler scheduling flexibility while preserving dwordx2.
-//
-// R34-A: when SCALE_LOAD_X1=1, replace dwordx2 with 2× single dword loads (lo at
-// soffset, hi at soffset+4). Aiter's pattern uses dword-granularity scale loads
-// that interleave better with the MFMA chain than 8-byte dwordx2 loads pinching
-// the LSU at the iter boundary. Per-iter byte budget is identical (8 bytes/SRD)
-// but issue count doubles (2 issues/SRD vs 1).
 __device__ __forceinline__ void load_pq_scale_x2_async(
     i32x4 srsrc, uint32_t voffset, uint32_t soffset,
     fp8e8m0_4 &out_lo, fp8e8m0_4 &out_hi) {
-#if SCALE_LOAD_X1
-    uint32_t lo, hi;
-#if NONVOLATILE_SCALE_X2_POC
-    asm(
-        "buffer_load_dword %0, %1, %2, %3 offen"
-        : "=v"(lo)
-        : "v"(voffset), "s"(srsrc), "s"(soffset)
-    );
-    asm(
-        "buffer_load_dword %0, %1, %2, %3 offen offset:4"
-        : "=v"(hi)
-        : "v"(voffset), "s"(srsrc), "s"(soffset)
-    );
-#else
-    asm volatile(
-        "buffer_load_dword %0, %1, %2, %3 offen"
-        : "=v"(lo)
-        : "v"(voffset), "s"(srsrc), "s"(soffset)
-    );
-    asm volatile(
-        "buffer_load_dword %0, %1, %2, %3 offen offset:4"
-        : "=v"(hi)
-        : "v"(voffset), "s"(srsrc), "s"(soffset)
-    );
-#endif
-    out_lo = std::bit_cast<fp8e8m0_4>(lo);
-    out_hi = std::bit_cast<fp8e8m0_4>(hi);
-#else
     uint64_t pair;
 #if NONVOLATILE_SCALE_X2_POC
     asm(
@@ -1415,60 +264,10 @@ __device__ __forceinline__ void load_pq_scale_x2_async(
 #endif
     out_lo = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(pair));
     out_hi = std::bit_cast<fp8e8m0_4>(static_cast<uint32_t>(pair >> 32));
-#endif
 }
-
-// ── Half-direct Bl loading from preshuffled global memory ──
-#if DIRECT_BL
-// Preshuffled B layout: [N0, K0, KLane=4, NLane=16, KPack_bytes=16]
-// N0_stride = K0 * 4 * 16 * 16 = K0 * 1024 = 16 * K_BYTES
-// K0_stride = 4 * 16 * 16 = 1024
-// Per-lane voff: k_lane * 256 + n_lane * 16 = (lid/16)*256 + (lid%16)*16
-// soff per (n0, k0): n0 * N0_stride + k0 * K0_stride
-constexpr uint32_t BL_N0_STRIDE = 16 * K_BYTES;
-constexpr uint32_t BL_K0_STRIDE = 1024;
-
-// Issue 8 buffer_load_dwordx4 for one Bl tile from preshuffled memory.
-// Loads 4 subtiles (N0 groups) × 2 K-phases, NO waitcnt (caller manages).
-// R22B: B_LOAD_NONTEMPORAL drives cache hint for direct-Bl path.
-__device__ __forceinline__ void load_bl_direct_async(
-    float4 dst[8],
-    i32x4 srd, uint32_t voff, uint32_t soff_base)
-{
-    constexpr int B_HINT = static_cast<int>(MXFP4_R22B_B_HINT);
-    #pragma unroll
-    for (int i = 0; i < 4; i++) {
-        uint32_t si = soff_base + i * BL_N0_STRIDE;
-        dst[i]   = std::bit_cast<float4>(
-            llvm_amdgcn_raw_buffer_load_b128(srd, voff, si, B_HINT));
-        dst[i+4] = std::bit_cast<float4>(
-            llvm_amdgcn_raw_buffer_load_b128(srd, voff, si + BL_K0_STRIDE, B_HINT));
-    }
-}
-
-#endif
-
-// ── Tile prefetch ──
-
-// R48 Opt C (2026-04-19): PF_MPT override knob.
-// PF_MPT is the number of buffer_load_dwordx4 instructions emitted per warp
-// per tile. Geometrically `PF_MPT = (HB * BK * sizeof(fp8e4m3)) / (16 *
-// _NUM_THREADS) = 4` is the count required to fully cover one HB×BK tile
-// at 16 B/lane × 256 threads. This override exists ONLY for falsification
-// testing of the "deepen prefetch pipeline under R46B" hypothesis. Setting
-// `R48C_PF_MPT_OVERRIDE > 4` issues redundant loads beyond tile coverage:
-// the upper indices read past the valid `so_a/so_b[PF_MPT]` arrays (UB)
-// and write past the LDS tile bounds (UB). Default 0 = use natural value.
-#ifndef R48C_PF_MPT_OVERRIDE
-#define R48C_PF_MPT_OVERRIDE 0
-#endif
-#if R48C_PF_MPT_OVERRIDE > 0
-static constexpr int PF_MPT = R48C_PF_MPT_OVERRIDE;
-#else
 static constexpr int PF_MPT = (HB * BK * sizeof(fp8e4m3)) / (16 * _NUM_THREADS);
-#endif
 
-// R22B: cache_hint defaults to cache_all (0); pass MXFP4_R22B_B_HINT for B-tile sites.
+// Tile prefetch: issues PF_MPT buffer_load_dwordx4 ... lds per warp.
 __device__ __forceinline__ void emit_tile_pf(
     auto &dst, const auto &src, const auto &idx,
     const uint32_t *so, i32x4 srd, const void *base, uint32_t lb,
@@ -1491,27 +290,11 @@ __device__ __forceinline__ void emit_tile_pf(
         const uint32_t sid = lin / ST::underlying_subtile_bytes;
         uint32_t lds_b = lds_tile_base + lin + sid * ST::subtile_padding;
         asm volatile("" : "+s"(lds_b));
-#if R47B_M0_FRESH_SET_PRODUCTION
-        // R47B: emit per-load `s_mov_b32 m0, sLDS` immediately before
-        // `buffer_load_dwordx4 ... lds`, matching aiter's discipline (R46C
-        // proved this is load-bearing on gfx950, not stylistic).
-        // cache_hint dropped (inline asm uses default cache mode).
-        uint32_t voff_local = so[i];
-        int32x4_t srd_local = std::bit_cast<int32x4_t>(srd);
-        asm volatile(
-            "s_mov_b32 m0, %0\n"
-            "buffer_load_dwordx4 %1, %2, %3 offen lds\n"
-            :
-            : "s"(lds_b), "v"(voff_local), "s"(srd_local), "s"(soff)
-            : "memory"
-        );
-#else
         llvm_amdgcn_raw_buffer_load_lds(
             std::bit_cast<int32x4_t>(srd),
             (as3_uint32_ptr)(uintptr_t)lds_b,
             16, so[i], soff, 0,
             cache_hint);
-#endif
     }
 }
 
@@ -1574,48 +357,12 @@ __device__ __forceinline__ tile_pf_params make_pf_params(
 }
 
 __device__ __forceinline__ void emit_one_pf(const tile_pf_params& p, int idx) {
-#if R38A_INLINE_BUFLOAD_LDS
-    // R38 Opt A: inline asm form. Sets m0 to the LDS address then issues
-    // `buffer_load_dwordx4 voff, srd, soff offen lds`. The "memory" clobber
-    // prevents the compiler from reordering this load across other LDS/buffer
-    // operations. m0 is clobbered. cache_hint is dropped (default cache mode).
-    uint32_t lds_addr = p.lds_addrs[idx];
-    uint32_t voff = p.voffs[idx];
-    asm volatile(
-        "s_mov_b32 m0, %0\n"
-        "buffer_load_dwordx4 %1, %2, %3 offen lds\n"
-        :
-        : "s"(lds_addr), "v"(voff), "s"(p.srd), "s"(p.soff)
-        : "memory"
-    );
-#else
     llvm_amdgcn_raw_buffer_load_lds(
         std::bit_cast<int32x4_t>(p.srd),
         (as3_uint32_ptr)(uintptr_t)p.lds_addrs[idx],
         16, p.voffs[idx], p.soff, 0,
         p.cache_hint);
-#endif
 }
-
-// ── R24C: Outer-K pull-forward L2 prefetch ──
-// Issues a buffer_load_dwordx4 inline asm with no LDS write and discards
-// the result, leaving data in L2 (and L1) for subsequent LDS-bound prefetches.
-// The compiler cannot DCE inline asm volatile.
-//
-// `voff_extra` allows offsetting the per-tile voff by one outer-K stride so
-// the load targets K+OUTER_K_PF_DEPTH instead of K+1. We compute the stride
-// in bytes: K-step in GMEM equals `BK * sizeof(fp8e4m3) / 2 = 64` bytes per
-// 16-thread group; a full tile prefetch step is `K_BYTES_PER_K0_STRIDE`.
-// To stay simple we use the existing pf_a0_p (which already targets bt+2)
-// and reissue with soff += K_OUTER_STRIDE_BYTES.
-#ifndef OUTER_K_PF_DEPTH
-#define OUTER_K_PF_DEPTH 1
-#endif
-
-#ifndef OUTER_K_PF_MODE
-// 0 = no extra; 1 = L2-only via buffer_load discarded; 2 = (reserved future LDS triple-buffer)
-#define OUTER_K_PF_MODE 0
-#endif
 
 // ── R24B: L2-only prefetch (always-available helper) ──
 // Issue a buffer_load_dwordx4 into a scratch VGPR (discarded), targeting the
@@ -1637,19 +384,6 @@ __device__ __forceinline__ void emit_full_pf_l2only(const tile_pf_params& p) {
     #pragma unroll
     for (int i = 0; i < N; ++i) emit_one_pf_l2only(p, i);
 }
-
-// ── R24B: L2 prefetch macros (default 0 = inactive) ──
-// L2_PF_A / L2_PF_B = 1 → 1 buffer_load_dwordx4 per thread per K-iter (cheap probe)
-// L2_PF_A / L2_PF_B = 2 → PF_MPT/2 loads per K-iter (mid intensity)
-// L2_PF_A / L2_PF_B = 3 → full PF_MPT loads per K-iter (full tile cover)
-// Targets pf_bt+1 = bt+3 (one extra outer-K iter beyond the existing LDS prefetch).
-#ifndef L2_PF_A
-#define L2_PF_A 0
-#endif
-#ifndef L2_PF_B
-#define L2_PF_B 0
-#endif
-
 template<int LEVEL>
 __device__ __forceinline__ void emit_l2_pf_block(const tile_pf_params& p) {
     if constexpr (LEVEL == 1) {
@@ -1668,11 +402,7 @@ __device__ __forceinline__ void emit_l2_pf_block(const tile_pf_params& p) {
 #define STEP3_PF_N 8
 #endif
 #ifndef STEP4_PF_N
-#if STEP4_EXTERNAL_BR_PREFETCH
-#define STEP4_PF_N 4
-#else
 #define STEP4_PF_N 8
-#endif
 #endif
 
 static_assert(STEP3_PF_N >= 0 && STEP3_PF_N <= 2 * PF_MPT);
@@ -1686,15 +416,12 @@ __device__ __forceinline__ void emit_pf_tail(const tile_pf_params& pf0, const ti
         for (int pi = PF_N; pi < PF_MPT; ++pi) emit_one_pf(pf0, pi);
         #pragma unroll
         for (int pi = 0; pi < PF_MPT; ++pi) emit_one_pf(pf1, pi);
-        // R49 Opt C: producer-side embedded vmcnt fence. Placed inside the
         // templated function body so the fence cannot be hoisted above the
         // preceding loads by the compiler scheduler. Default OFF
         // (R44 baseline byte-compatible).
-        R49C_PF_TAIL_FENCE();
     } else if constexpr (PF_N < 2 * PF_MPT) {
         #pragma unroll
         for (int pi = PF_N - PF_MPT; pi < PF_MPT; ++pi) emit_one_pf(pf1, pi);
-        R49C_PF_TAIL_FENCE();
     }
     // PF_N == 2*PF_MPT path: zero loads emitted; do NOT emit a fence (no-op
     // function, fence would just stall for nothing).
@@ -1907,109 +634,6 @@ __device__ __forceinline__ void kpair_32mfma_pure(
         : KPAIR_ACC_CLOBBER : KPAIR_INPUTS);
 }
 
-#if DIRECT_BL
-// ── 32 KPAIR MFMAs + 8 interleaved buffer_load_dwordx4 for Bl (single asm block) ──
-// Loads next Bl tile from preshuffled global memory while executing 32 MFMAs.
-// The 8 buffer loads are interleaved 1:1 with the first 8 MFMAs (Row 0),
-// so the 32 VGPRs (8×float4) are created within the asm scope.
-// SGPR-optimized: computes N0 and K0 soffsets inside asm via s_add_u32 —
-// only 2 SGPR inputs (soff_base, n0_stride). K0=1 offset (0x400) is literal.
-//
-// Operand map:
-//   Outputs: %0..%15 = acc (AGPR), %16..%23 = d0..d7 (VGPR float4),
-//            %24..%26 = s1/s2/s3 temps (SGPR)
-//   Inputs:  %27..%46 = KPAIR_INPUTS (20 VGPRs: a_lo/hi, b_lo/hi, sa, sb),
-//            %47 = bl_voff (VGPR), %48 = bl_srd (SGPR i32x4),
-//            %49 = soff_base (SGPR), %50 = n0_stride (SGPR)
-__device__ __forceinline__ void kpair_32mfma_with_vmem_bl(
-    fp4_floatx4_t acc[16],
-    const fp4_intx8_t A[4], const fp4_intx8_t B[4],
-    const fp8e8m0_4 a_raw[2], const fp8e8m0_4 b_raw[2],
-    float4 &d0, float4 &d1, float4 &d2, float4 &d3,
-    float4 &d4, float4 &d5, float4 &d6, float4 &d7,
-    uint32_t bl_voff, i32x4 bl_srd,
-    uint32_t soff_base, uint32_t n0_stride)
-{
-    KPAIR_SETUP();
-    uint32_t s1_tmp, s2_tmp, s3_tmp;
-    asm volatile(
-        // Compute N0 soffsets for K0=0: s1=base+stride, s2=base+2*stride, s3=base+3*stride
-        "s_add_u32 %24, %49, %50\n"         // s1 = soff_base + n0_stride
-        "s_add_u32 %25, %24, %50\n"         // s2 = s1 + n0_stride
-        "s_add_u32 %26, %25, %50\n"         // s3 = s2 + n0_stride
-        // Row 0 Phase 0 — 4 K0=0 buffer_load_dwordx4 interleaved with first 4 MFMAs
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %27, %35, %0,  %43, %45 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "buffer_load_dwordx4 %16, %47, %48, %49 offen\n"             // d0: N0=0,K0=0
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %27, %36, %1,  %43, %45 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "buffer_load_dwordx4 %17, %47, %48, %24 offen\n"             // d1: N0=1,K0=0
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %27, %37, %2,  %43, %46 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "buffer_load_dwordx4 %18, %47, %48, %25 offen\n"             // d2: N0=2,K0=0
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %27, %38, %3,  %43, %46 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "buffer_load_dwordx4 %19, %47, %48, %26 offen\n"             // d3: N0=3,K0=0
-        // Row 0 Phase 1 — 4 K0=1 buffer_load_dwordx4 with s_add_u32 for soffsets
-        // Reuse s1 (=%24) for K0=1 soffsets: s1 = soff_base + BL_K0_STRIDE
-        "s_add_u32 %24, %49, 0x400\n"                                // s1 = soff_base + 1024 (N0=0,K0=1)
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %31, %39, %0,  %43, %45 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "buffer_load_dwordx4 %20, %47, %48, %24 offen\n"             // d4: N0=0,K0=1
-        "s_add_u32 %24, %24, %50\n"                                  // s1 += n0_stride (N0=1,K0=1)
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %31, %40, %1,  %43, %45 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "buffer_load_dwordx4 %21, %47, %48, %24 offen\n"             // d5: N0=1,K0=1
-        "s_add_u32 %24, %24, %50\n"                                  // s1 += n0_stride (N0=2,K0=1)
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %31, %41, %2,  %43, %46 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "buffer_load_dwordx4 %22, %47, %48, %24 offen\n"             // d6: N0=2,K0=1
-        "s_add_u32 %24, %24, %50\n"                                  // s1 += n0_stride (N0=3,K0=1)
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %31, %42, %3,  %43, %46 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "buffer_load_dwordx4 %23, %47, %48, %24 offen\n"             // d7: N0=3,K0=1
-        // Rows 1-3: pure MFMAs (24 total)
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %28, %35, %4,  %43, %45 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %28, %36, %5,  %43, %45 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %28, %37, %6,  %43, %46 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %28, %38, %7,  %43, %46 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %32, %39, %4,  %43, %45 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %32, %40, %5,  %43, %45 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %32, %41, %6,  %43, %46 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %32, %42, %7,  %43, %46 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %29, %35, %8,  %44, %45 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %29, %36, %9,  %44, %45 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %29, %37, %10, %44, %46 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %29, %38, %11, %44, %46 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %33, %39, %8,  %44, %45 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %33, %40, %9,  %44, %45 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %33, %41, %10, %44, %46 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %33, %42, %11, %44, %46 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %30, %35, %12, %44, %45 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %30, %36, %13, %44, %45 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %30, %37, %14, %44, %46 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %30, %38, %15, %44, %46 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %34, %39, %12, %44, %45 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %34, %40, %13, %44, %45 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %34, %41, %14, %44, %46 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %34, %42, %15, %44, %46 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        : KPAIR_ACC_CLOBBER,
-          "=&v"(d0), "=&v"(d1), "=&v"(d2), "=&v"(d3),
-          "=&v"(d4), "=&v"(d5), "=&v"(d6), "=&v"(d7),
-          "=&s"(s1_tmp), "=&s"(s2_tmp), "=&s"(s3_tmp)
-        : KPAIR_INPUTS,
-          "v"(bl_voff), "s"(bl_srd),
-          "s"(soff_base), "s"(n0_stride)
-        : "scc"
-    );
-}
-
-__device__ __forceinline__ void kpair_32mfma_with_vmem_bl_wrap(
-    fp4_floatx4_t acc[16],
-    const fp4_intx8_t A[4], const fp4_intx8_t B[4],
-    const fp8e8m0_4 a_raw[2], const fp8e8m0_4 b_raw[2],
-    float4 &d0, float4 &d1, float4 &d2, float4 &d3,
-    float4 &d4, float4 &d5, float4 &d6, float4 &d7,
-    uint32_t bl_voff, i32x4 bl_srd, uint32_t soff_base)
-{
-    kpair_32mfma_with_vmem_bl(acc, A, B, a_raw, b_raw,
-        d0, d1, d2, d3, d4, d5, d6, d7,
-        bl_voff, bl_srd, soff_base, BL_N0_STRIDE);
-}
-#endif // DIRECT_BL
-
 // ── Merged Steps 1+2: 64 MFMAs + 16 ds_reads (Br + A1) in one asm block ──
 // Eliminates compiler transition between Steps 1 and 2.
 // Outputs: %0..15=acc_bl, %16..31=acc_br, %32..39=br_d, %40..47=a1_d
@@ -2079,8 +703,7 @@ __device__ __forceinline__ void kpair_64mfma_step12(
         "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %55, %61, %13, %65, %66 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %55, %62, %14, %65, %67 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %55, %63, %15, %65, %67 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        // Wait for Br ds_reads (tunable: lgkmcnt(STEP12_BR_LGKMCNT))
-        "s_waitcnt lgkmcnt(" MXFP4_STR(STEP12_BR_LGKMCNT) ")\n"
+        "s_waitcnt lgkmcnt(0)\n"
         // ═══ STEP 2: A0×Br (32 MFMAs) + 8 ds_reads for A1 ═══
         "v_mfma_scale_f32_16x16x128_f8f6f4 %16, %48, %32, %16, %64, %68 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "ds_read_b128 %40, %72 offset:0\n"
@@ -2182,382 +805,8 @@ __device__ __forceinline__ void kpair_64mfma_step34(
 
     // Barrier emitted separately (with memory clobber) so the MFMAs block stays lightweight
     // R19B: site _S1 (kpair_64mfma_step34, dead with default FUSED_STEP34=0)
-    asm volatile(MXFP4_STEP3_BARRIER_INST_S1 ::: "memory");
-
-#if R50A_AITER_INTERLEAVE
-    // ═══ R50 Opt A: AITER 1:4 SPREAD INTERLEAVE ═══
-    // Same 64 MFMAs + 16 ds_reads as R44 baseline; ds_reads spread evenly
-    // across all 4 rows (1 per ~4 MFMAs) instead of front-loaded in Row 0.
-    // Same operand list/clobbers as R44 baseline.
+    asm volatile("s_waitcnt vmcnt(" MXFP4_STR(STEP3_BARRIER_VMCNT) ")\ns_barrier\n" ::: "memory");
     asm volatile(
-        // ── STEP 3: A1×Bl (32 MFMAs + 8 ds_reads spread 2/2/1/1/1/1/0/0) ──
-        // Row 0 P0: 4 MFMAs + 2 ds_reads (was 4)
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %48, %56, %0,  %72, %74 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %32, %78 offset:0\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %48, %57, %1,  %72, %74 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %33, %78 offset:2048\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %48, %58, %2,  %72, %75 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %48, %59, %3,  %72, %75 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        // Row 0 P1: 4 MFMAs + 2 ds_reads (was 4)
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %52, %60, %0,  %72, %74 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %36, %79 offset:0\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %52, %61, %1,  %72, %74 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %37, %79 offset:2048\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %52, %62, %2,  %72, %75 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %52, %63, %3,  %72, %75 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        // Row 1 P0: 4 MFMAs + 1 ds_read (was 0)
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %49, %56, %4,  %72, %74 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %49, %57, %5,  %72, %74 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %34, %78 offset:4096\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %49, %58, %6,  %72, %75 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %49, %59, %7,  %72, %75 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        // Row 1 P1: 4 MFMAs + 1 ds_read (was 0)
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %53, %60, %4,  %72, %74 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %53, %61, %5,  %72, %74 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %38, %79 offset:4096\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %53, %62, %6,  %72, %75 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %53, %63, %7,  %72, %75 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        // Row 2 P0: 4 MFMAs + 1 ds_read (was 0)
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %50, %56, %8,  %73, %74 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %50, %57, %9,  %73, %74 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %35, %78 offset:6144\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %50, %58, %10, %73, %75 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %50, %59, %11, %73, %75 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        // Row 2 P1: 4 MFMAs + 1 ds_read (was 0)
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %54, %60, %8,  %73, %74 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %54, %61, %9,  %73, %74 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %39, %79 offset:6144\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %54, %62, %10, %73, %75 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %54, %63, %11, %73, %75 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        // Row 3 P0+P1: 8 PURE MFMAs
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %51, %56, %12, %73, %74 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %51, %57, %13, %73, %74 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %51, %58, %14, %73, %75 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %51, %59, %15, %73, %75 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %55, %60, %12, %73, %74 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %55, %61, %13, %73, %74 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %55, %62, %14, %73, %75 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %55, %63, %15, %73, %75 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        // ── STEP 4: A1×Br (32 MFMAs + 8 ds_reads spread 2/2/1/1/1/1/0/0) ──
-        // Row 0 P0: 4 MFMAs + 2 ds_reads
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %16, %48, %64, %16, %72, %76 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %40, %80 offset:0\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %17, %48, %65, %17, %72, %76 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %41, %80 offset:2048\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %18, %48, %66, %18, %72, %77 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %19, %48, %67, %19, %72, %77 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        // Row 0 P1: 4 MFMAs + 2 ds_reads
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %16, %52, %68, %16, %72, %76 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %44, %81 offset:0\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %17, %52, %69, %17, %72, %76 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %45, %81 offset:2048\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %18, %52, %70, %18, %72, %77 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %19, %52, %71, %19, %72, %77 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        // Row 1 P0: 4 MFMAs + 1 ds_read
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %20, %49, %64, %20, %72, %76 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %21, %49, %65, %21, %72, %76 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %42, %80 offset:4096\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %22, %49, %66, %22, %72, %77 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %23, %49, %67, %23, %72, %77 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        // Row 1 P1: 4 MFMAs + 1 ds_read
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %20, %53, %68, %20, %72, %76 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %21, %53, %69, %21, %72, %76 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %46, %81 offset:4096\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %22, %53, %70, %22, %72, %77 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %23, %53, %71, %23, %72, %77 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        // Row 2 P0: 4 MFMAs + 1 ds_read
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %24, %50, %64, %24, %73, %76 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %25, %50, %65, %25, %73, %76 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %43, %80 offset:6144\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %26, %50, %66, %26, %73, %77 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %27, %50, %67, %27, %73, %77 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        // Row 2 P1: 4 MFMAs + 1 ds_read
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %24, %54, %68, %24, %73, %76 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %25, %54, %69, %25, %73, %76 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %47, %81 offset:6144\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %26, %54, %70, %26, %73, %77 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %27, %54, %71, %27, %73, %77 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        // Row 3 P0+P1: 8 PURE MFMAs
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %28, %51, %64, %28, %73, %76 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %29, %51, %65, %29, %73, %76 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %30, %51, %66, %30, %73, %77 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %31, %51, %67, %31, %73, %77 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %28, %55, %68, %28, %73, %76 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %29, %55, %69, %29, %73, %76 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %30, %55, %70, %30, %73, %77 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %31, %55, %71, %31, %73, %77 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        : "+a"(acc_bl[0]),  "+a"(acc_bl[1]),  "+a"(acc_bl[2]),  "+a"(acc_bl[3]),
-          "+a"(acc_bl[4]),  "+a"(acc_bl[5]),  "+a"(acc_bl[6]),  "+a"(acc_bl[7]),
-          "+a"(acc_bl[8]),  "+a"(acc_bl[9]),  "+a"(acc_bl[10]), "+a"(acc_bl[11]),
-          "+a"(acc_bl[12]), "+a"(acc_bl[13]), "+a"(acc_bl[14]), "+a"(acc_bl[15]),
-          "+a"(acc_br[0]),  "+a"(acc_br[1]),  "+a"(acc_br[2]),  "+a"(acc_br[3]),
-          "+a"(acc_br[4]),  "+a"(acc_br[5]),  "+a"(acc_br[6]),  "+a"(acc_br[7]),
-          "+a"(acc_br[8]),  "+a"(acc_br[9]),  "+a"(acc_br[10]), "+a"(acc_br[11]),
-          "+a"(acc_br[12]), "+a"(acc_br[13]), "+a"(acc_br[14]), "+a"(acc_br[15]),
-          "=&v"(nxt_a0_d[0]), "=&v"(nxt_a0_d[1]), "=&v"(nxt_a0_d[2]), "=&v"(nxt_a0_d[3]),
-          "=&v"(nxt_a0_d[4]), "=&v"(nxt_a0_d[5]), "=&v"(nxt_a0_d[6]), "=&v"(nxt_a0_d[7]),
-          "=&v"(nxt_bl_d[0]), "=&v"(nxt_bl_d[1]), "=&v"(nxt_bl_d[2]), "=&v"(nxt_bl_d[3]),
-          "=&v"(nxt_bl_d[4]), "=&v"(nxt_bl_d[5]), "=&v"(nxt_bl_d[6]), "=&v"(nxt_bl_d[7])
-        : "v"(a1_0l), "v"(a1_1l), "v"(a1_2l), "v"(a1_3l),
-          "v"(a1_0h), "v"(a1_1h), "v"(a1_2h), "v"(a1_3h),
-          "v"(bl_0l), "v"(bl_1l), "v"(bl_2l), "v"(bl_3l),
-          "v"(bl_0h), "v"(bl_1h), "v"(bl_2h), "v"(bl_3h),
-          "v"(br_0l), "v"(br_1l), "v"(br_2l), "v"(br_3l),
-          "v"(br_0h), "v"(br_1h), "v"(br_2h), "v"(br_3h),
-          "v"(sa0), "v"(sa1), "v"(sbl0), "v"(sbl1), "v"(sbr0), "v"(sbr1),
-          "v"(a0_p0), "v"(a0_p1), "v"(bl_p0), "v"(bl_p1)
-    );
-    return;  // R50A path emits the entire kpair_64mfma_step34 body — skip baseline
-#endif // R50A_AITER_INTERLEAVE
-
-#if R48A_SPLIT_STEP34
-    // ═══ R48 Opt A: PHYSICALLY SPLIT step3 + step4 into two asm volatile blocks ═══
-    // Block A: Step3 — 32 MFMAs writing acc_bl + 8 ds_reads writing nxt_a0_d
-    //   New operand map (per-block): %0..%15=acc_bl, %16..%23=nxt_a0_d,
-    //                                %24..%27=a1_*l, %28..%31=a1_*h,
-    //                                %32..%35=bl_*l, %36..%39=bl_*h,
-    //                                %40=sa0, %41=sa1, %42=sbl0, %43=sbl1,
-    //                                %44=a0_p0, %45=a0_p1.
-    asm volatile(
-        // Row 0 Phase 0: 4 MFMAs + 4 ds_reads
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %24, %32, %0,  %40, %42 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %16, %44 offset:0\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %24, %33, %1,  %40, %42 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %17, %44 offset:2048\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %24, %34, %2,  %40, %43 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %18, %44 offset:4096\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %24, %35, %3,  %40, %43 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %19, %44 offset:6144\n"
-        // Row 0 Phase 1: 4 MFMAs + 4 ds_reads
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %28, %36, %0,  %40, %42 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %20, %45 offset:0\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %28, %37, %1,  %40, %42 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %21, %45 offset:2048\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %28, %38, %2,  %40, %43 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %22, %45 offset:4096\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %28, %39, %3,  %40, %43 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %23, %45 offset:6144\n"
-        // Row 1: 8 pure Step3 MFMAs (odd, sa0)
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %25, %32, %4,  %40, %42 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %25, %33, %5,  %40, %42 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %25, %34, %6,  %40, %43 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %25, %35, %7,  %40, %43 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %29, %36, %4,  %40, %42 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %29, %37, %5,  %40, %42 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %29, %38, %6,  %40, %43 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %29, %39, %7,  %40, %43 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        // Row 2: 8 pure Step3 MFMAs (even, sa1)
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %26, %32, %8,  %41, %42 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %26, %33, %9,  %41, %42 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %26, %34, %10, %41, %43 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %26, %35, %11, %41, %43 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %30, %36, %8,  %41, %42 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %30, %37, %9,  %41, %42 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %30, %38, %10, %41, %43 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %30, %39, %11, %41, %43 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        // Row 3: 8 pure Step3 MFMAs (odd, sa1)
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %27, %32, %12, %41, %42 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %27, %33, %13, %41, %42 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %27, %34, %14, %41, %43 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %27, %35, %15, %41, %43 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %31, %36, %12, %41, %42 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %31, %37, %13, %41, %42 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %31, %38, %14, %41, %43 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %31, %39, %15, %41, %43 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        : "+a"(acc_bl[0]),  "+a"(acc_bl[1]),  "+a"(acc_bl[2]),  "+a"(acc_bl[3]),
-          "+a"(acc_bl[4]),  "+a"(acc_bl[5]),  "+a"(acc_bl[6]),  "+a"(acc_bl[7]),
-          "+a"(acc_bl[8]),  "+a"(acc_bl[9]),  "+a"(acc_bl[10]), "+a"(acc_bl[11]),
-          "+a"(acc_bl[12]), "+a"(acc_bl[13]), "+a"(acc_bl[14]), "+a"(acc_bl[15]),
-          "=&v"(nxt_a0_d[0]), "=&v"(nxt_a0_d[1]), "=&v"(nxt_a0_d[2]), "=&v"(nxt_a0_d[3]),
-          "=&v"(nxt_a0_d[4]), "=&v"(nxt_a0_d[5]), "=&v"(nxt_a0_d[6]), "=&v"(nxt_a0_d[7])
-        : "v"(a1_0l), "v"(a1_1l), "v"(a1_2l), "v"(a1_3l),
-          "v"(a1_0h), "v"(a1_1h), "v"(a1_2h), "v"(a1_3h),
-          "v"(bl_0l), "v"(bl_1l), "v"(bl_2l), "v"(bl_3l),
-          "v"(bl_0h), "v"(bl_1h), "v"(bl_2h), "v"(bl_3h),
-          "v"(sa0), "v"(sa1), "v"(sbl0), "v"(sbl1),
-          "v"(a0_p0), "v"(a0_p1)
-    );
-    // Block B: Step4 — 32 MFMAs writing acc_br + 8 ds_reads writing nxt_bl_d
-    //   New operand map (per-block): %0..%15=acc_br, %16..%23=nxt_bl_d,
-    //                                %24..%27=a1_*l, %28..%31=a1_*h,
-    //                                %32..%35=br_*l, %36..%39=br_*h,
-    //                                %40=sa0, %41=sa1, %42=sbr0, %43=sbr1,
-    //                                %44=bl_p0, %45=bl_p1.
-    asm volatile(
-        // Row 0 Phase 0: 4 MFMAs + 4 ds_reads
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %24, %32, %0,  %40, %42 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %16, %44 offset:0\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %24, %33, %1,  %40, %42 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %17, %44 offset:2048\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %24, %34, %2,  %40, %43 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %18, %44 offset:4096\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %24, %35, %3,  %40, %43 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %19, %44 offset:6144\n"
-        // Row 0 Phase 1: 4 MFMAs + 4 ds_reads
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %28, %36, %0,  %40, %42 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %20, %45 offset:0\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %28, %37, %1,  %40, %42 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %21, %45 offset:2048\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %28, %38, %2,  %40, %43 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %22, %45 offset:4096\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %28, %39, %3,  %40, %43 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %23, %45 offset:6144\n"
-        // Row 1: 8 pure Step4 MFMAs (odd, sa0)
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %25, %32, %4,  %40, %42 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %25, %33, %5,  %40, %42 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %25, %34, %6,  %40, %43 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %25, %35, %7,  %40, %43 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %29, %36, %4,  %40, %42 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %29, %37, %5,  %40, %42 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %29, %38, %6,  %40, %43 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %29, %39, %7,  %40, %43 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        // Row 2: 8 pure Step4 MFMAs (even, sa1)
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %26, %32, %8,  %41, %42 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %26, %33, %9,  %41, %42 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %26, %34, %10, %41, %43 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %26, %35, %11, %41, %43 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %30, %36, %8,  %41, %42 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %30, %37, %9,  %41, %42 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %30, %38, %10, %41, %43 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %30, %39, %11, %41, %43 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        // Row 3: 8 pure Step4 MFMAs (odd, sa1)
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %27, %32, %12, %41, %42 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %27, %33, %13, %41, %42 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %27, %34, %14, %41, %43 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %27, %35, %15, %41, %43 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %31, %36, %12, %41, %42 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %31, %37, %13, %41, %42 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %31, %38, %14, %41, %43 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %31, %39, %15, %41, %43 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        : "+a"(acc_br[0]),  "+a"(acc_br[1]),  "+a"(acc_br[2]),  "+a"(acc_br[3]),
-          "+a"(acc_br[4]),  "+a"(acc_br[5]),  "+a"(acc_br[6]),  "+a"(acc_br[7]),
-          "+a"(acc_br[8]),  "+a"(acc_br[9]),  "+a"(acc_br[10]), "+a"(acc_br[11]),
-          "+a"(acc_br[12]), "+a"(acc_br[13]), "+a"(acc_br[14]), "+a"(acc_br[15]),
-          "=&v"(nxt_bl_d[0]), "=&v"(nxt_bl_d[1]), "=&v"(nxt_bl_d[2]), "=&v"(nxt_bl_d[3]),
-          "=&v"(nxt_bl_d[4]), "=&v"(nxt_bl_d[5]), "=&v"(nxt_bl_d[6]), "=&v"(nxt_bl_d[7])
-        : "v"(a1_0l), "v"(a1_1l), "v"(a1_2l), "v"(a1_3l),
-          "v"(a1_0h), "v"(a1_1h), "v"(a1_2h), "v"(a1_3h),
-          "v"(br_0l), "v"(br_1l), "v"(br_2l), "v"(br_3l),
-          "v"(br_0h), "v"(br_1h), "v"(br_2h), "v"(br_3h),
-          "v"(sa0), "v"(sa1), "v"(sbr0), "v"(sbr1),
-          "v"(bl_p0), "v"(bl_p1)
-    );
-#else
-    asm volatile(
-#if R48B_MFMA_REORDER
-        // ═══ R48B REORDER: STEP 3 — interleave row Phase-0 across all 4 chains
-        // before any Phase-1, then interleave Phase-1. Same 32 MFMAs + 8 ds_reads,
-        // only the issue order changes. Per-acc dep window 4 → 16 MFMAs.
-        // Phase-0 block (16 MFMAs) — Row0 P0 (with ds_reads %32-35), Row1..3 P0.
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %48, %56, %0,  %72, %74 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %32, %78 offset:0\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %48, %57, %1,  %72, %74 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %33, %78 offset:2048\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %48, %58, %2,  %72, %75 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %34, %78 offset:4096\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %48, %59, %3,  %72, %75 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %35, %78 offset:6144\n"
-        // Row 1 P0 (sa0)
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %49, %56, %4,  %72, %74 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %49, %57, %5,  %72, %74 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %49, %58, %6,  %72, %75 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %49, %59, %7,  %72, %75 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        // Row 2 P0 (sa1)
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %50, %56, %8,  %73, %74 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %50, %57, %9,  %73, %74 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %50, %58, %10, %73, %75 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %50, %59, %11, %73, %75 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        // Row 3 P0 (sa1)
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %51, %56, %12, %73, %74 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %51, %57, %13, %73, %74 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %51, %58, %14, %73, %75 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %51, %59, %15, %73, %75 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        // R48B: Step3 P0/P1 boundary; allow opt-in PRIO_PHASE1 wrap + NOP pacing
-        R47C_NOP_FRAG
-        R48B_PRIO_HI_FRAG
-        // Phase-1 block (16 MFMAs) — Row0 P1 (with ds_reads %36-39), Row1..3 P1.
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %52, %60, %0,  %72, %74 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %36, %79 offset:0\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %52, %61, %1,  %72, %74 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %37, %79 offset:2048\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %52, %62, %2,  %72, %75 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %38, %79 offset:4096\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %52, %63, %3,  %72, %75 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %39, %79 offset:6144\n"
-        // Row 1 P1 (sa0)
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %53, %60, %4,  %72, %74 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %53, %61, %5,  %72, %74 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %53, %62, %6,  %72, %75 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %53, %63, %7,  %72, %75 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        // Row 2 P1 (sa1)
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %54, %60, %8,  %73, %74 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %54, %61, %9,  %73, %74 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %54, %62, %10, %73, %75 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %54, %63, %11, %73, %75 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        // Row 3 P1 (sa1)
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %55, %60, %12, %73, %74 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %55, %61, %13, %73, %74 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %55, %62, %14, %73, %75 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %55, %63, %15, %73, %75 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        R48B_PRIO_LO_FRAG
-        // R48B: 32-MFMA Step3 done — NOP/SPLIT/DRAIN before Step4
-        R47C_NOP_FRAG
-        R47C_SPLIT_FRAG
-        R48B_DRAIN_FRAG
-        // ═══ R48B REORDER: STEP 4 — same interleave on A1×Br ═══
-        // Phase-0 block (16 MFMAs) — Row0 P0 (with ds_reads %40-43), Row1..3 P0.
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %16, %48, %64, %16, %72, %76 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %40, %80 offset:0\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %17, %48, %65, %17, %72, %76 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %41, %80 offset:2048\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %18, %48, %66, %18, %72, %77 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %42, %80 offset:4096\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %19, %48, %67, %19, %72, %77 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %43, %80 offset:6144\n"
-        // Row 1 P0 (sa0)
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %20, %49, %64, %20, %72, %76 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %21, %49, %65, %21, %72, %76 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %22, %49, %66, %22, %72, %77 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %23, %49, %67, %23, %72, %77 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        // Row 2 P0 (sa1)
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %24, %50, %64, %24, %73, %76 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %25, %50, %65, %25, %73, %76 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %26, %50, %66, %26, %73, %77 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %27, %50, %67, %27, %73, %77 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        // Row 3 P0 (sa1)
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %28, %51, %64, %28, %73, %76 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %29, %51, %65, %29, %73, %76 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %30, %51, %66, %30, %73, %77 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %31, %51, %67, %31, %73, %77 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        // R48B: Step4 P0/P1 boundary; allow opt-in PRIO_PHASE1 wrap + NOP pacing
-        R47C_NOP_FRAG
-        R48B_PRIO_HI_FRAG
-        // Phase-1 block (16 MFMAs) — Row0 P1 (with ds_reads %44-47), Row1..3 P1.
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %16, %52, %68, %16, %72, %76 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %44, %81 offset:0\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %17, %52, %69, %17, %72, %76 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %45, %81 offset:2048\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %18, %52, %70, %18, %72, %77 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %46, %81 offset:4096\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %19, %52, %71, %19, %72, %77 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %47, %81 offset:6144\n"
-        // Row 1 P1 (sa0)
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %20, %53, %68, %20, %72, %76 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %21, %53, %69, %21, %72, %76 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %22, %53, %70, %22, %72, %77 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %23, %53, %71, %23, %72, %77 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        // Row 2 P1 (sa1)
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %24, %54, %68, %24, %73, %76 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %25, %54, %69, %25, %73, %76 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %26, %54, %70, %26, %73, %77 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %27, %54, %71, %27, %73, %77 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        // Row 3 P1 (sa1)
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %28, %55, %68, %28, %73, %76 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %29, %55, %69, %29, %73, %76 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %30, %55, %70, %30, %73, %77 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "v_mfma_scale_f32_16x16x128_f8f6f4 %31, %55, %71, %31, %73, %77 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        R48B_PRIO_LO_FRAG
-#else
         // ═══ STEP 3: A1×Bl (32 MFMAs) + 8 ds_reads for nxt_a0 ═══
         // Row 0 Phase 0: 4 MFMAs + 4 ds_reads
         "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %48, %56, %0,  %72, %74 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
@@ -2569,7 +818,6 @@ __device__ __forceinline__ void kpair_64mfma_step34(
         "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %48, %59, %3,  %72, %75 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "ds_read_b128 %35, %78 offset:6144\n"
         // Row 0 Phase 1: 4 MFMAs + 4 ds_reads
-        R48B_PRIO_HI_FRAG
         "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %52, %60, %0,  %72, %74 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "ds_read_b128 %36, %79 offset:0\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %52, %61, %1,  %72, %74 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
@@ -2578,47 +826,34 @@ __device__ __forceinline__ void kpair_64mfma_step34(
         "ds_read_b128 %38, %79 offset:4096\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %52, %63, %3,  %72, %75 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "ds_read_b128 %39, %79 offset:6144\n"
-        R48B_PRIO_LO_FRAG
         // Row 1: 8 pure Step3 MFMAs (odd, sa0)
         "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %49, %56, %4,  %72, %74 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %49, %57, %5,  %72, %74 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %49, %58, %6,  %72, %75 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %49, %59, %7,  %72, %75 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        R48B_PRIO_HI_FRAG
         "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %53, %60, %4,  %72, %74 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %53, %61, %5,  %72, %74 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %53, %62, %6,  %72, %75 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %53, %63, %7,  %72, %75 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        R48B_PRIO_LO_FRAG
-        // R47C: 16-MFMA boundary (Step3 first half done) — opt-in NOP pacing
-        R47C_NOP_FRAG
         // Row 2: 8 pure Step3 MFMAs (even, sa1)
         "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %50, %56, %8,  %73, %74 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %50, %57, %9,  %73, %74 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %50, %58, %10, %73, %75 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %50, %59, %11, %73, %75 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        R48B_PRIO_HI_FRAG
         "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %54, %60, %8,  %73, %74 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %54, %61, %9,  %73, %74 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %54, %62, %10, %73, %75 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %54, %63, %11, %73, %75 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        R48B_PRIO_LO_FRAG
         // Row 3: 8 pure Step3 MFMAs (odd, sa1)
         "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %51, %56, %12, %73, %74 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %51, %57, %13, %73, %74 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %51, %58, %14, %73, %75 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %51, %59, %15, %73, %75 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        R48B_PRIO_HI_FRAG
         "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %55, %60, %12, %73, %74 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %55, %61, %13, %73, %74 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %55, %62, %14, %73, %75 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %55, %63, %15, %73, %75 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        R48B_PRIO_LO_FRAG
-        // R47C: 32-MFMA boundary (Step3 done) — opt-in NOP pacing + opt-in
         // Step3/Step4 SPLIT (drain VMEM/LDS counters between MFMA halves).
-        R47C_NOP_FRAG
-        R47C_SPLIT_FRAG
-        R48B_DRAIN_FRAG
         // ═══ STEP 4: A1×Br (32 MFMAs) + 8 ds_reads for nxt_bl ═══
         // Row 0 Phase 0: 4 MFMAs + 4 ds_reads
         "v_mfma_scale_f32_16x16x128_f8f6f4 %16, %48, %64, %16, %72, %76 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
@@ -2630,7 +865,6 @@ __device__ __forceinline__ void kpair_64mfma_step34(
         "v_mfma_scale_f32_16x16x128_f8f6f4 %19, %48, %67, %19, %72, %77 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "ds_read_b128 %43, %80 offset:6144\n"
         // Row 0 Phase 1: 4 MFMAs + 4 ds_reads
-        R48B_PRIO_HI_FRAG
         "v_mfma_scale_f32_16x16x128_f8f6f4 %16, %52, %68, %16, %72, %76 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "ds_read_b128 %44, %81 offset:0\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %17, %52, %69, %17, %72, %76 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
@@ -2639,43 +873,33 @@ __device__ __forceinline__ void kpair_64mfma_step34(
         "ds_read_b128 %46, %81 offset:4096\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %19, %52, %71, %19, %72, %77 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "ds_read_b128 %47, %81 offset:6144\n"
-        R48B_PRIO_LO_FRAG
         // Row 1: 8 pure Step4 MFMAs (odd, sa0)
         "v_mfma_scale_f32_16x16x128_f8f6f4 %20, %49, %64, %20, %72, %76 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %21, %49, %65, %21, %72, %76 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %22, %49, %66, %22, %72, %77 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %23, %49, %67, %23, %72, %77 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        R48B_PRIO_HI_FRAG
         "v_mfma_scale_f32_16x16x128_f8f6f4 %20, %53, %68, %20, %72, %76 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %21, %53, %69, %21, %72, %76 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %22, %53, %70, %22, %72, %77 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %23, %53, %71, %23, %72, %77 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        R48B_PRIO_LO_FRAG
-        // R47C: 48-MFMA boundary (Step4 first half done) — opt-in NOP pacing
-        R47C_NOP_FRAG
         // Row 2: 8 pure Step4 MFMAs (even, sa1)
         "v_mfma_scale_f32_16x16x128_f8f6f4 %24, %50, %64, %24, %73, %76 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %25, %50, %65, %25, %73, %76 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %26, %50, %66, %26, %73, %77 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %27, %50, %67, %27, %73, %77 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        R48B_PRIO_HI_FRAG
         "v_mfma_scale_f32_16x16x128_f8f6f4 %24, %54, %68, %24, %73, %76 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %25, %54, %69, %25, %73, %76 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %26, %54, %70, %26, %73, %77 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %27, %54, %71, %27, %73, %77 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        R48B_PRIO_LO_FRAG
         // Row 3: 8 pure Step4 MFMAs (odd, sa1)
         "v_mfma_scale_f32_16x16x128_f8f6f4 %28, %51, %64, %28, %73, %76 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %29, %51, %65, %29, %73, %76 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %30, %51, %66, %30, %73, %77 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %31, %51, %67, %31, %73, %77 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        R48B_PRIO_HI_FRAG
         "v_mfma_scale_f32_16x16x128_f8f6f4 %28, %55, %68, %28, %73, %76 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %29, %55, %69, %29, %73, %76 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %30, %55, %70, %30, %73, %77 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %31, %55, %71, %31, %73, %77 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        R48B_PRIO_LO_FRAG
-#endif // R48B_MFMA_REORDER
         : "+a"(acc_bl[0]),  "+a"(acc_bl[1]),  "+a"(acc_bl[2]),  "+a"(acc_bl[3]),
           "+a"(acc_bl[4]),  "+a"(acc_bl[5]),  "+a"(acc_bl[6]),  "+a"(acc_bl[7]),
           "+a"(acc_bl[8]),  "+a"(acc_bl[9]),  "+a"(acc_bl[10]), "+a"(acc_bl[11]),
@@ -2697,7 +921,6 @@ __device__ __forceinline__ void kpair_64mfma_step34(
           "v"(sa0), "v"(sa1), "v"(sbl0), "v"(sbl1), "v"(sbr0), "v"(sbr1),
           "v"(a0_p0), "v"(a0_p1), "v"(bl_p0), "v"(bl_p1)
     );
-#endif // R48A_SPLIT_STEP34
 }
 
 // ── 32 KPAIR MFMAs + 16 ds_reads (2 tiles) + 8 pf (row blocks) ──
@@ -2820,25 +1043,25 @@ __device__ __forceinline__ void kpair_32mfma_with_lds_and_pf(
     // When EMIT_BARRIER: vmcnt+barrier at top, MFMAs overlap with any stall
     if constexpr (EMIT_BARRIER) {
         // R19B: site _S2 (kpair_32mfma_with_lds_and_pf, hot path)
-        asm volatile(MXFP4_STEP3_BARRIER_INST_S2 ::: "memory");
+        asm volatile("s_waitcnt vmcnt(" MXFP4_STR(STEP3_BARRIER_VMCNT) ")\ns_barrier\n" ::: "memory");
     }
     asm volatile(
         "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %24, %32, %0,  %40, %42 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %16, %44 offset:0\n" LDS_NOP_STR
+        "ds_read_b128 %16, %44 offset:0\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %24, %33, %1,  %40, %42 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %17, %44 offset:2048\n" LDS_NOP_STR
+        "ds_read_b128 %17, %44 offset:2048\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %24, %34, %2,  %40, %43 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %18, %44 offset:4096\n" LDS_NOP_STR
+        "ds_read_b128 %18, %44 offset:4096\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %24, %35, %3,  %40, %43 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %19, %44 offset:6144\n" LDS_NOP_STR
+        "ds_read_b128 %19, %44 offset:6144\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %28, %36, %0,  %40, %42 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %20, %45 offset:0\n" LDS_NOP_STR
+        "ds_read_b128 %20, %45 offset:0\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %28, %37, %1,  %40, %42 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %21, %45 offset:2048\n" LDS_NOP_STR
+        "ds_read_b128 %21, %45 offset:2048\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %28, %38, %2,  %40, %43 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %22, %45 offset:4096\n" LDS_NOP_STR
+        "ds_read_b128 %22, %45 offset:4096\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %28, %39, %3,  %40, %43 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %23, %45 offset:6144\n" LDS_NOP_STR
+        "ds_read_b128 %23, %45 offset:6144\n"
         : KPAIR_ACC_CLOBBER,
           "=&v"(d0), "=&v"(d1), "=&v"(d2), "=&v"(d3),
           "=&v"(d4), "=&v"(d5), "=&v"(d6), "=&v"(d7)
@@ -3014,7 +1237,7 @@ __device__ __forceinline__ void kpair_32mfma_with_lds_rowspread_pf(
     KPAIR_SETUP();
     if constexpr (EMIT_BARRIER) {
         // R19B: site _S3 (kpair_32mfma_with_lds_rowspread_pf, hot path)
-        asm volatile(MXFP4_STEP3_BARRIER_INST_S3 ::: "memory");
+        asm volatile("s_waitcnt vmcnt(" MXFP4_STR(STEP3_BARRIER_VMCNT) ")\ns_barrier\n" ::: "memory");
     }
     // Row 0: 8 MFMAs + 2 ds_reads (d0, d4)
     {
@@ -3022,8 +1245,8 @@ __device__ __forceinline__ void kpair_32mfma_with_lds_rowspread_pf(
         asm volatile(
             "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %18, %26, %0,  %34, %36 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
             "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %18, %27, %1,  %34, %36 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-            "ds_read_b128 %16, %38 offset:0\n" LDS_NOP_STR
-            "ds_read_b128 %17, %39 offset:0\n" LDS_NOP_STR
+            "ds_read_b128 %16, %38 offset:0\n"
+            "ds_read_b128 %17, %39 offset:0\n"
             "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %18, %28, %2,  %34, %37 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
             "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %18, %29, %3,  %34, %37 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
             "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %22, %30, %0,  %34, %36 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
@@ -3042,8 +1265,8 @@ __device__ __forceinline__ void kpair_32mfma_with_lds_rowspread_pf(
         asm volatile(
             "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %19, %26, %4,  %34, %36 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
             "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %19, %27, %5,  %34, %36 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-            "ds_read_b128 %16, %38 offset:2048\n" LDS_NOP_STR
-            "ds_read_b128 %17, %39 offset:2048\n" LDS_NOP_STR
+            "ds_read_b128 %16, %38 offset:2048\n"
+            "ds_read_b128 %17, %39 offset:2048\n"
             "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %19, %28, %6,  %34, %37 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
             "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %19, %29, %7,  %34, %37 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
             "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %23, %30, %4,  %34, %36 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
@@ -3062,8 +1285,8 @@ __device__ __forceinline__ void kpair_32mfma_with_lds_rowspread_pf(
         asm volatile(
             "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %20, %26, %8,  %35, %36 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
             "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %20, %27, %9,  %35, %36 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-            "ds_read_b128 %16, %38 offset:4096\n" LDS_NOP_STR
-            "ds_read_b128 %17, %39 offset:4096\n" LDS_NOP_STR
+            "ds_read_b128 %16, %38 offset:4096\n"
+            "ds_read_b128 %17, %39 offset:4096\n"
             "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %20, %28, %10, %35, %37 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
             "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %20, %29, %11, %35, %37 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
             "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %24, %30, %8,  %35, %36 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
@@ -3082,8 +1305,8 @@ __device__ __forceinline__ void kpair_32mfma_with_lds_rowspread_pf(
         asm volatile(
             "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %21, %26, %12, %35, %36 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
             "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %21, %27, %13, %35, %36 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-            "ds_read_b128 %16, %38 offset:6144\n" LDS_NOP_STR
-            "ds_read_b128 %17, %39 offset:6144\n" LDS_NOP_STR
+            "ds_read_b128 %16, %38 offset:6144\n"
+            "ds_read_b128 %17, %39 offset:6144\n"
             "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %21, %28, %14, %35, %37 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
             "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %21, %29, %15, %35, %37 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
             "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %25, %30, %12, %35, %36 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
@@ -3121,21 +1344,21 @@ __device__ __forceinline__ void kpair_64mfma_step12_swapped_sel(
     asm volatile(
         // STEP 1: A0*Bl (swapped) + 8 ds_reads for Br
         "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %56, %48, %0,  %66, %64 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %32, %70 offset:0\n" LDS_NOP_STR
+        "ds_read_b128 %32, %70 offset:0\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %57, %48, %1,  %66, %64 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %33, %70 offset:2048\n" LDS_NOP_STR
+        "ds_read_b128 %33, %70 offset:2048\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %58, %48, %2,  %67, %64 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %34, %70 offset:4096\n" LDS_NOP_STR
+        "ds_read_b128 %34, %70 offset:4096\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %59, %48, %3,  %67, %64 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %35, %70 offset:6144\n" LDS_NOP_STR
+        "ds_read_b128 %35, %70 offset:6144\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %60, %52, %0,  %66, %64 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %36, %71 offset:0\n" LDS_NOP_STR
+        "ds_read_b128 %36, %71 offset:0\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %61, %52, %1,  %66, %64 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %37, %71 offset:2048\n" LDS_NOP_STR
+        "ds_read_b128 %37, %71 offset:2048\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %62, %52, %2,  %67, %64 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %38, %71 offset:4096\n" LDS_NOP_STR
+        "ds_read_b128 %38, %71 offset:4096\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %63, %52, %3,  %67, %64 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %39, %71 offset:6144\n" LDS_NOP_STR
+        "ds_read_b128 %39, %71 offset:6144\n"
         // Rows 1-3: 24 pure Step 1 MFMAs
         "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %56, %49, %4,  %66, %64 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %57, %49, %5,  %66, %64 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
@@ -3161,25 +1384,24 @@ __device__ __forceinline__ void kpair_64mfma_step12_swapped_sel(
         "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %61, %55, %13, %66, %65 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %62, %55, %14, %67, %65 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %63, %55, %15, %67, %65 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        // Wait for Br ds_reads (tunable: lgkmcnt(STEP12_BR_LGKMCNT))
-        "s_waitcnt lgkmcnt(" MXFP4_STR(STEP12_BR_LGKMCNT) ")\n"
+        "s_waitcnt lgkmcnt(0)\n"
         // STEP 2: A0*Br (swapped) + 8 ds_reads for A1
         "v_mfma_scale_f32_16x16x128_f8f6f4 %16, %32, %48, %16, %68, %64 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %40, %72 offset:0\n" LDS_NOP_STR
+        "ds_read_b128 %40, %72 offset:0\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %17, %33, %48, %17, %68, %64 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %41, %72 offset:2048\n" LDS_NOP_STR
+        "ds_read_b128 %41, %72 offset:2048\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %18, %34, %48, %18, %69, %64 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %42, %72 offset:4096\n" LDS_NOP_STR
+        "ds_read_b128 %42, %72 offset:4096\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %19, %35, %48, %19, %69, %64 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %43, %72 offset:6144\n" LDS_NOP_STR
+        "ds_read_b128 %43, %72 offset:6144\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %16, %36, %52, %16, %68, %64 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %44, %73 offset:0\n" LDS_NOP_STR
+        "ds_read_b128 %44, %73 offset:0\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %17, %37, %52, %17, %68, %64 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %45, %73 offset:2048\n" LDS_NOP_STR
+        "ds_read_b128 %45, %73 offset:2048\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %18, %38, %52, %18, %69, %64 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %46, %73 offset:4096\n" LDS_NOP_STR
+        "ds_read_b128 %46, %73 offset:4096\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %19, %39, %52, %19, %69, %64 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %47, %73 offset:6144\n" LDS_NOP_STR
+        "ds_read_b128 %47, %73 offset:6144\n"
         // Rows 1-3: 24 pure Step 2 MFMAs
         "v_mfma_scale_f32_16x16x128_f8f6f4 %20, %32, %49, %20, %68, %64 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %21, %33, %49, %21, %68, %64 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
@@ -3240,25 +1462,25 @@ __device__ __forceinline__ void kpair_32mfma_with_lds_and_pf_swapped_sel(
     KPAIR_SETUP();
     if constexpr (EMIT_BARRIER) {
         // R19B: site _S4 (kpair_32mfma_with_lds_and_pf_swapped_sel, hot path)
-        asm volatile(MXFP4_STEP3_BARRIER_INST_S4 ::: "memory");
+        asm volatile("s_waitcnt vmcnt(" MXFP4_STR(STEP3_BARRIER_VMCNT) ")\ns_barrier\n" ::: "memory");
     }
     asm volatile(
         "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %32, %24, %0,  %42, %40 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %16, %44 offset:0\n" LDS_NOP_STR
+        "ds_read_b128 %16, %44 offset:0\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %33, %24, %1,  %42, %40 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %17, %44 offset:2048\n" LDS_NOP_STR
+        "ds_read_b128 %17, %44 offset:2048\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %34, %24, %2,  %43, %40 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %18, %44 offset:4096\n" LDS_NOP_STR
+        "ds_read_b128 %18, %44 offset:4096\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %35, %24, %3,  %43, %40 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %19, %44 offset:6144\n" LDS_NOP_STR
+        "ds_read_b128 %19, %44 offset:6144\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %36, %28, %0,  %42, %40 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %20, %45 offset:0\n" LDS_NOP_STR
+        "ds_read_b128 %20, %45 offset:0\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %37, %28, %1,  %42, %40 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %21, %45 offset:2048\n" LDS_NOP_STR
+        "ds_read_b128 %21, %45 offset:2048\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %38, %28, %2,  %43, %40 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %22, %45 offset:4096\n" LDS_NOP_STR
+        "ds_read_b128 %22, %45 offset:4096\n"
         "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %39, %28, %3,  %43, %40 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
-        "ds_read_b128 %23, %45 offset:6144\n" LDS_NOP_STR
+        "ds_read_b128 %23, %45 offset:6144\n"
         : KPAIR_ACC_CLOBBER,
           "=&v"(d0), "=&v"(d1), "=&v"(d2), "=&v"(d3),
           "=&v"(d4), "=&v"(d5), "=&v"(d6), "=&v"(d7)
@@ -3312,11 +1534,6 @@ __device__ __forceinline__ void kpair_32mfma_with_lds_and_pf_swapped_sel(
 // Main kernel
 // ══════════════════════════════════════════════════════════════
 
-#if PERSISTENT_XCD
-// Global tile counter for persistent-kernel mode. Reset to 0 from host before each launch.
-__device__ unsigned int g_persistent_tile_counter = 0;
-#endif
-
 #if defined(WAVES_PER_EU_1)
 __attribute__((amdgpu_waves_per_eu(1, 1)))
 #elif defined(WAVES_PER_EU_2)
@@ -3331,30 +1548,16 @@ __attribute__((amdgpu_num_agpr(256)))
 #endif
 __global__ __launch_bounds__(_NUM_THREADS, 1)
 void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
-#if WAVE_PRIO_HIGH
-    asm volatile("s_setprio 3" ::: "memory");
-#endif
     static_assert(K_BYTES % BK == 0 && N_DIM % BLK == 0 && M_DIM % BLK == 0);
 
     constexpr int bpc = N_DIM / BLK;
     constexpr int a_packs = RBM / 32;
     constexpr int b_packs = RBN / 32;
-
-#if R46B_LDS_TRIPLE_BUFFER
-    // R46 Opt B: A0/Bl triple-buffered (3 slots); A1/Br stay double-buffered.
-    // LDS layout: 3*16K + 2*16K + 3*16K + 2*16K = 144 KB <= 160 KB gfx950 limit.
-    constexpr int A0_SLOTS = 3;
-    constexpr int A1_SLOTS = 2;
-    constexpr int BL_SLOTS = 3;
-    constexpr int BR_SLOTS = 2;
-    __shared__ ST_tile A0_db[3], A1_db[2], Bl_db[3], Br_db[2];
-#else
     constexpr int A0_SLOTS = 2;
     constexpr int A1_SLOTS = 2;
     constexpr int BL_SLOTS = 2;
     constexpr int BR_SLOTS = 2;
     __shared__ ST_tile A0_db[2], A1_db[2], Bl_db[2], Br_db[2];
-#endif
 
     // XCD-aware dispatch + GROUP_SIZE_M swizzle for L2 B-tile reuse
     constexpr int NUM_XCDS = 8;
@@ -3362,43 +1565,15 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 #define GROUP_SIZE_M 4
 #endif
     constexpr int GROUP_M = GROUP_SIZE_M;
-#if PERSISTENT_XCD
-    // Persistent grid: total_blocks = real number of tiles in problem (M/BLK * N/BLK).
-    // gridDim.x = PERSISTENT_GRID (e.g. 608). Each WG loops, atomically claiming tile_id.
-    const int total_blocks = (M_DIM / BLK) * (N_DIM / BLK);
-#else
     const int total_blocks = gridDim.x;
-#endif
     const int bpr = total_blocks / bpc;
 
     const int pids_per_xcd = (total_blocks + NUM_XCDS - 1) / NUM_XCDS;
     int tall_xcds = total_blocks % NUM_XCDS;
     if (tall_xcds == 0) tall_xcds = NUM_XCDS;
-
-#if PERSISTENT_XCD
-    // ── Persistent loop entry ──
-    // Per-WG cache of the next tile (for batch>1 we reuse claims).
-    __shared__ unsigned int s_claim_base;
-    unsigned int local_offset = PERSISTENT_BATCH;  // forces first-iter claim
-
-    while (true) {
-        // ── Claim next tile_id via atomicAdd on the global counter ──
-        if (local_offset >= PERSISTENT_BATCH) {
-            if (threadIdx.x == 0) {
-                s_claim_base = atomicAdd(&g_persistent_tile_counter,
-                                         (unsigned int)PERSISTENT_BATCH);
-            }
-            __syncthreads();
-            local_offset = 0;
-        }
-        const int raw_bid = (int)(s_claim_base + local_offset);
-        local_offset += 1;
-        if (raw_bid >= total_blocks) break;
-#else
     {
         // Static dispatch: raw_bid = blockIdx.x
         const int raw_bid = (int)blockIdx.x;
-#endif
 
     // XCD pid remapping: Gluon-style "tall XCDs" for correct remainder handling
     const int xcd = raw_bid % NUM_XCDS;
@@ -3409,47 +1584,9 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     } else {
         bid = tall_xcds * pids_per_xcd + (xcd - tall_xcds) * (pids_per_xcd - 1) + local_pid;
     }
-#if PERSISTENT_XCD
-    if (bid >= total_blocks) continue;
-#else
     if (bid >= total_blocks) return;
-#endif
 
     int br, bc;
-#if STATIC_XCD_REMAP
-    // Round 7: atomic-free static remap.
-    // Each XCD owns a narrow N-strip of width n_per_xcd = bpc / NUM_XCDS.
-    // The original `bid` is a contiguous range in [xcd*pids_per_xcd, ..),
-    // length pids_per_xcd. We re-interpret it as a (M-stripe × n_per_xcd) walk:
-    //   inner_bid = bid - xcd * pids_per_xcd   (0..pids_per_xcd-1)
-    //   gid_m  = inner_bid / (GROUP_M * n_per_xcd)
-    //   in_gp  = inner_bid % (GROUP_M * n_per_xcd)
-    //   br     = gid_m*GROUP_M + (in_gp % gsm)
-    //   bc_loc = in_gp / gsm
-    //   bc     = xcd * n_per_xcd + bc_loc
-    // Falls back to default if bpc not divisible by NUM_XCDS or tile counts mismatch.
-    constexpr int n_per_xcd_const = (bpc) / NUM_XCDS;  // bpc is constexpr
-    if constexpr ((bpc) % NUM_XCDS == 0) {
-        const int xcd_pid_base = xcd * pids_per_xcd;
-        const int inner_bid = bid - xcd_pid_base;
-        const int g_m_size = GROUP_M * n_per_xcd_const;
-        const int gid_m = inner_bid / g_m_size;
-        const int in_gp = inner_bid - gid_m * g_m_size;
-        const int fpm = gid_m * GROUP_M;
-        const int gsm = (bpr - fpm < GROUP_M) ? (bpr - fpm) : GROUP_M;
-        br = fpm + (in_gp % gsm);
-        const int bc_loc = in_gp / gsm;
-        bc = xcd * n_per_xcd_const + bc_loc;
-    } else {
-        // Non-divisible fallback: default GROUP_M swizzle on full bid space
-        const int num_pig = GROUP_M * bpc;
-        const int gid = bid / num_pig;
-        const int fpm = gid * GROUP_M;
-        const int gsm = (bpr - fpm < GROUP_M) ? (bpr - fpm) : GROUP_M;
-        br = fpm + (bid % gsm);
-        bc = (bid % num_pig) / gsm;
-    }
-#else
     // GROUP_SIZE_M swizzle within XCD's block range
     const int num_pig = GROUP_M * bpc;
     const int gid = bid / num_pig;
@@ -3457,7 +1594,6 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     const int gsm = (bpr - fpm < GROUP_M) ? (bpr - fpm) : GROUP_M;
     br = fpm + (bid % gsm);
     bc = (bid % num_pig) / gsm;
-#endif
     const int wm = warpid() / WARPS_N, wn = warpid() % WARPS_N;
 
     uint32_t so_a[PF_MPT], so_b[PF_MPT];
@@ -3482,16 +1618,6 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 
     fp4_floatx4_t acc_A0Bl[16]={}, acc_A0Br[16]={}, acc_A1Bl[16]={}, acc_A1Br[16]={};
 
-#if DIRECT_BL
-    // Preshuffled B SRD and addressing for half-direct Bl loading
-    const uint32_t bl_voff_ps =
-        static_cast<uint32_t>(kittens::laneid() / 16) * 256 +
-        static_cast<uint32_t>(kittens::laneid() % 16) * 16;
-    const uint32_t bl_ps_n0_base = __builtin_amdgcn_readfirstlane(
-        static_cast<uint32_t>((bc * BLK + wn * RBN) / 16));
-    const uint32_t bl_ps_n0_soff = bl_ps_n0_base * BL_N0_STRIDE;
-#endif
-
     // Tile SRDs
     auto make_srd = [](const void* raw_ptr) {
         i32x4 s = std::bit_cast<i32x4>(make_buffer_resource(
@@ -3504,9 +1630,6 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         return s;
     };
     i32x4 srd_a = make_srd(g.a.raw_ptr), srd_b = make_srd(g.b.raw_ptr);
-#if DIRECT_BL
-    i32x4 srd_b_ps = make_srd(g.b_ps.raw_ptr);
-#endif
     const void *base_a = (const void*)g.a.raw_ptr, *base_b = (const void*)g.b.raw_ptr;
 
     constexpr int epw = 16 / sizeof(fp8e4m3) * WARP_THREADS;
@@ -3516,9 +1639,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
             reinterpret_cast<uintptr_t>(&t.data[0]) + wlo));
     };
     uint32_t lb_a0[A0_SLOTS], lb_a1[A1_SLOTS], lb_br[BR_SLOTS];
-#if !DIRECT_BL
     uint32_t lb_bl[BL_SLOTS];
-#endif
     for (int d = 0; d < A0_SLOTS; ++d) {
         lb_a0[d]=lb(A0_db[d]);
     }
@@ -3528,50 +1649,28 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     for (int d = 0; d < BR_SLOTS; ++d) {
         lb_br[d]=lb(Br_db[d]);
     }
-#if !DIRECT_BL
     for (int d = 0; d < BL_SLOTS; ++d) {
         lb_bl[d]=lb(Bl_db[d]);
     }
-#endif
 
-    constexpr int R22B_A_HINT_VAL = static_cast<int>(MXFP4_R22B_A_HINT);
-    constexpr int R22B_B_HINT_VAL = static_cast<int>(MXFP4_R22B_B_HINT);
     auto load_tiles = [&](int bt, int db) {
-        emit_tile_pf(A0_db[db], g.a, coord<ST_tile>(0,0,br*2,    bt), so_a, srd_a, base_a, lb_a0[db], R22B_A_HINT_VAL);
-        emit_tile_pf(A1_db[db], g.a, coord<ST_tile>(0,0,br*2+1,  bt), so_a, srd_a, base_a, lb_a1[db], R22B_A_HINT_VAL);
-#if !DIRECT_BL
-        emit_tile_pf(Bl_db[db], g.b, coord<ST_tile>(0,0,bc*2,    bt), so_b, srd_b, base_b, lb_bl[db], R22B_B_HINT_VAL);
-#endif
-        emit_tile_pf(Br_db[db], g.b, coord<ST_tile>(0,0,bc*2+1,  bt), so_b, srd_b, base_b, lb_br[db], R22B_B_HINT_VAL);
+        emit_tile_pf(A0_db[db], g.a, coord<ST_tile>(0,0,br*2,    bt), so_a, srd_a, base_a, lb_a0[db], static_cast<int>(kittens::coherency::cache_all));
+        emit_tile_pf(A1_db[db], g.a, coord<ST_tile>(0,0,br*2+1,  bt), so_a, srd_a, base_a, lb_a1[db], static_cast<int>(kittens::coherency::cache_all));
+        emit_tile_pf(Bl_db[db], g.b, coord<ST_tile>(0,0,bc*2,    bt), so_b, srd_b, base_b, lb_bl[db], static_cast<int>(kittens::coherency::cache_all));
+        emit_tile_pf(Br_db[db], g.b, coord<ST_tile>(0,0,bc*2+1,  bt), so_b, srd_b, base_b, lb_br[db], static_cast<int>(kittens::coherency::cache_all));
     };
 
     // Pre-compute LDS addresses as 16 static named variables (one per db-slot × phase).
     // Avoids runtime-indexed [2][2] arrays that compiler spills to LDS + ds_read_b64.
     // Selection via ternary (compiles to v_cndmask). No swap needed.
     uint32_t a0_0_p0, a0_0_p1, a0_1_p0, a0_1_p1;
-#if R46B_LDS_TRIPLE_BUFFER
-    uint32_t a0_2_p0, a0_2_p1;
-#endif
-#if !DIRECT_BL
     uint32_t bl_0_p0, bl_0_p1, bl_1_p0, bl_1_p1;
-#if R46B_LDS_TRIPLE_BUFFER
-    uint32_t bl_2_p0, bl_2_p1;
-#endif
-#endif
     uint32_t br_0_p0, br_0_p1, br_1_p0, br_1_p1;
     uint32_t a1_0_p0, a1_0_p1, a1_1_p0, a1_1_p1;
     compute_lds_base_addrs<A_row_reg>(kittens::subtile_inplace<RBM, BK>(A0_db[0], {wm, 0}), a0_0_p0, a0_0_p1);
     compute_lds_base_addrs<A_row_reg>(kittens::subtile_inplace<RBM, BK>(A0_db[1], {wm, 0}), a0_1_p0, a0_1_p1);
-#if R46B_LDS_TRIPLE_BUFFER
-    compute_lds_base_addrs<A_row_reg>(kittens::subtile_inplace<RBM, BK>(A0_db[2], {wm, 0}), a0_2_p0, a0_2_p1);
-#endif
-#if !DIRECT_BL
     compute_lds_base_addrs<B_row_reg>(kittens::subtile_inplace<RBN, BK>(Bl_db[0], {wn, 0}), bl_0_p0, bl_0_p1);
     compute_lds_base_addrs<B_row_reg>(kittens::subtile_inplace<RBN, BK>(Bl_db[1], {wn, 0}), bl_1_p0, bl_1_p1);
-#if R46B_LDS_TRIPLE_BUFFER
-    compute_lds_base_addrs<B_row_reg>(kittens::subtile_inplace<RBN, BK>(Bl_db[2], {wn, 0}), bl_2_p0, bl_2_p1);
-#endif
-#endif
     compute_lds_base_addrs<B_row_reg>(kittens::subtile_inplace<RBN, BK>(Br_db[0], {wn, 0}), br_0_p0, br_0_p1);
     compute_lds_base_addrs<B_row_reg>(kittens::subtile_inplace<RBN, BK>(Br_db[1], {wn, 0}), br_1_p0, br_1_p1);
     compute_lds_base_addrs<A_row_reg>(kittens::subtile_inplace<RBM, BK>(A1_db[0], {wm, 0}), a1_0_p0, a1_0_p1);
@@ -3605,18 +1704,6 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     __builtin_amdgcn_s_barrier();
     A_row_reg a0_rt;
     fp4_load_st_to_rt(a0_rt, kittens::subtile_inplace<RBM, BK>(A0_db[0], {wm, 0}));
-#if DIRECT_BL
-    // Load initial Bl directly from preshuffled global memory
-    float4 bl_init_vmem[8];
-    load_bl_direct_async(bl_init_vmem, srd_b_ps, bl_voff_ps,
-        bl_ps_n0_soff + 0 * 2 * BL_K0_STRIDE);  // bt=0
-    asm volatile("s_waitcnt vmcnt(0) lgkmcnt(0)");
-    fp4_intx8_t tA0[4], tBl[4];
-    #pragma unroll
-    for (int i = 0; i < 4; i++)
-        tA0[i] = fp4_extract_tile(a0_rt, i);
-    extract_tile(bl_init_vmem, tBl);
-#else
     B_row_reg bl_rt;
     fp4_load_st_to_rt(bl_rt, kittens::subtile_inplace<RBN, BK>(Bl_db[0], {wn, 0}));
     asm volatile("s_waitcnt lgkmcnt(0)");
@@ -3626,234 +1713,6 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         tA0[i] = fp4_extract_tile(a0_rt, i);
         tBl[i] = fp4_extract_tile(bl_rt, i);
     }
-#endif
-
-    // ═══════════ Main loop (2-tile pipeline) ═══════════
-#if SWAP_STEP34_MAIN
-    // Split steady-state iterations from the final tail to keep the hot loop free
-    // of last-iteration branches and reduce live-range pressure.
-#ifdef UNROLL_K
-  #if UNROLL_K == 0
-    #pragma unroll
-  #else
-    #pragma unroll UNROLL_K
-  #endif
-#elif (K_DIM / 256) <= 16
-    #pragma unroll
-#elif (K_DIM / 256) <= 32
-    #pragma unroll 16
-#else
-    #pragma unroll 8
-#endif
-    for (int bt = 0; bt + 1 < k_byte_iters; ++bt) {
-        const int cur = bt & 1;
-        const int nxt = 1 - cur;
-        const uint32_t sel_br_p0 = cur ? br_1_p0 : br_0_p0;
-        const uint32_t sel_br_p1 = cur ? br_1_p1 : br_0_p1;
-        const uint32_t sel_a1_p0 = cur ? a1_1_p0 : a1_0_p0;
-        const uint32_t sel_a1_p1 = cur ? a1_1_p1 : a1_0_p1;
-        const uint32_t sel_a0_p0 = nxt ? a0_1_p0 : a0_0_p0;
-        const uint32_t sel_a0_p1 = nxt ? a0_1_p1 : a0_0_p1;
-#if !DIRECT_BL
-#if !DIRECT_BL
-        const uint32_t sel_bl_p0 = nxt ? bl_1_p0 : bl_0_p0;
-        const uint32_t sel_bl_p1 = nxt ? bl_1_p1 : bl_0_p1;
-#endif
-#endif
-
-        const int pf_bt = (bt + 2 < k_byte_iters) ? (bt + 2) : (k_byte_iters - 1);
-        tile_pf_params pf_a0_p = make_pf_params(A0_db[cur], g.a, coord<ST_tile>(0,0,br*2,     pf_bt), so_a, srd_a, base_a, lb_a0[cur], R22B_A_HINT_VAL);
-        tile_pf_params pf_a1_p = make_pf_params(A1_db[cur], g.a, coord<ST_tile>(0,0,br*2+1,   pf_bt), so_a, srd_a, base_a, lb_a1[cur], R22B_A_HINT_VAL);
-#if !DIRECT_BL
-#if !DIRECT_BL
-        tile_pf_params pf_bl_p = make_pf_params(Bl_db[cur], g.b, coord<ST_tile>(0,0,bc*2,     pf_bt), so_b, srd_b, base_b, lb_bl[cur], R22B_B_HINT_VAL);
-#endif
-#endif
-        tile_pf_params pf_br_p = make_pf_params(Br_db[cur], g.b, coord<ST_tile>(0,0,bc*2+1,   pf_bt), so_b, srd_b, base_b, lb_br[cur], R22B_B_HINT_VAL);
-
-#if EARLY_SCALE_PF
-        // Hoist scale loads ABOVE the _raw copy: write to shadow regs nxt_pf_* so the
-        // outstanding VMEM does not collide with the current pf_* (still being copied
-        // to _raw). pf_* is updated from nxt_pf_* at end of iteration after vmcnt.
-        fp8e8m0_4 nxt_pf_a0[a_packs], nxt_pf_a1[a_packs], nxt_pf_bl[b_packs], nxt_pf_br[b_packs];
-        {
-            const uint32_t nxt_scale = static_cast<uint32_t>(bt + 1) << 9;
-            load_pq_scale_x2_async(a0_srd, lane_soff_x2, nxt_scale, nxt_pf_a0[0], nxt_pf_a0[1]);
-            load_pq_scale_x2_async(a1_srd, lane_soff_x2, nxt_scale, nxt_pf_a1[0], nxt_pf_a1[1]);
-            load_pq_scale_x2_async(bl_srd, lane_soff_x2, nxt_scale, nxt_pf_bl[0], nxt_pf_bl[1]);
-            load_pq_scale_x2_async(br_srd, lane_soff_x2, nxt_scale, nxt_pf_br[0], nxt_pf_br[1]);
-        }
-#endif
-
-        fp8e8m0_4 a0_raw[a_packs], a1_raw[a_packs], bl_raw[b_packs], br_raw[b_packs];
-        #pragma unroll
-        for (int p = 0; p < a_packs; ++p) { a0_raw[p] = pf_a0[p]; a1_raw[p] = pf_a1[p]; }
-        #pragma unroll
-        for (int p = 0; p < b_packs; ++p) { bl_raw[p] = pf_bl[p]; br_raw[p] = pf_br[p]; }
-
-#if !EARLY_SCALE_PF
-        {
-            const uint32_t nxt_scale = static_cast<uint32_t>(bt + 1) << 9;
-            load_pq_scale_x2_async(a0_srd, lane_soff_x2, nxt_scale, pf_a0[0], pf_a0[1]);
-            load_pq_scale_x2_async(a1_srd, lane_soff_x2, nxt_scale, pf_a1[0], pf_a1[1]);
-            load_pq_scale_x2_async(bl_srd, lane_soff_x2, nxt_scale, pf_bl[0], pf_bl[1]);
-            load_pq_scale_x2_async(br_srd, lane_soff_x2, nxt_scale, pf_br[0], pf_br[1]);
-        }
-#endif
-
-        float4 nxt_bl_d[8];
-#if DIRECT_BL && EARLY_BL_PF
-        // Issue Bl buffer_load BEFORE Step12 — ~128 MFMAs (~512 cyc) hiding window
-        load_bl_direct_async(nxt_bl_d, srd_b_ps, bl_voff_ps,
-            bl_ps_n0_soff + static_cast<uint32_t>(bt + 1) * 2 * BL_K0_STRIDE);
-#endif
-
-        float4 br_d[8], a1_d[8];
-#if SWAP_STEP12_MAIN
-        kpair_64mfma_step12_swapped_sel(acc_A0Bl, acc_A0Br, tA0, tBl,
-            a0_raw, bl_raw, br_raw, br_d, a1_d,
-            sel_br_p0, sel_br_p1, sel_a1_p0, sel_a1_p1);
-#else
-        kpair_64mfma_step12(acc_A0Bl, acc_A0Br, tA0, tBl,
-            a0_raw, bl_raw, br_raw, br_d, a1_d,
-            sel_br_p0, sel_br_p1, sel_a1_p0, sel_a1_p1);
-#endif
-
-        asm volatile("s_waitcnt lgkmcnt(0)");
-        fp4_intx8_t tBr[4], tA1[4];
-        extract_tile(br_d, tBr);
-        extract_tile(a1_d, tA1);
-
-#if !STEP3_EMBED_BARRIER
-        // R19B: site _S5 (TAIL_SPLIT inner !STEP3_EMBED_BARRIER, dead w/ default STEP3_EMBED_BARRIER=1)
-        asm volatile(MXFP4_STEP3_BARRIER_INST_S5 ::: "memory");
-#endif
-
-        float4 nxt_a0_d[8];
-#if K_LOOP_SYNC_EVERY_4
-        // R20C: barrier only every 4 iters (bt%4==0). Compiler unrolls and
-        // statically resolves the parity per unrolled copy.
-        if ((bt & 3) == 0) {
-            kpair_32mfma_with_lds_and_pf_swapped_sel<STEP3_PF_N, STEP3_EMBED_BARRIER>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
-                nxt_a0_d[0], nxt_a0_d[1], nxt_a0_d[2], nxt_a0_d[3],
-                nxt_a0_d[4], nxt_a0_d[5], nxt_a0_d[6], nxt_a0_d[7],
-                sel_a0_p0, sel_a0_p1, pf_a0_p, pf_a1_p);
-        } else {
-            kpair_32mfma_with_lds_and_pf_swapped_sel<STEP3_PF_N, false>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
-                nxt_a0_d[0], nxt_a0_d[1], nxt_a0_d[2], nxt_a0_d[3],
-                nxt_a0_d[4], nxt_a0_d[5], nxt_a0_d[6], nxt_a0_d[7],
-                sel_a0_p0, sel_a0_p1, pf_a0_p, pf_a1_p);
-        }
-#elif K_LOOP_SYNC_EVERY_2
-        // R20C: barrier only on EVEN bt iters (every 2 iters). Compiler unrolls
-        // and statically resolves the parity per unrolled copy.
-        if ((bt & 1) == 0) {
-            kpair_32mfma_with_lds_and_pf_swapped_sel<STEP3_PF_N, STEP3_EMBED_BARRIER>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
-                nxt_a0_d[0], nxt_a0_d[1], nxt_a0_d[2], nxt_a0_d[3],
-                nxt_a0_d[4], nxt_a0_d[5], nxt_a0_d[6], nxt_a0_d[7],
-                sel_a0_p0, sel_a0_p1, pf_a0_p, pf_a1_p);
-        } else {
-            kpair_32mfma_with_lds_and_pf_swapped_sel<STEP3_PF_N, false>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
-                nxt_a0_d[0], nxt_a0_d[1], nxt_a0_d[2], nxt_a0_d[3],
-                nxt_a0_d[4], nxt_a0_d[5], nxt_a0_d[6], nxt_a0_d[7],
-                sel_a0_p0, sel_a0_p1, pf_a0_p, pf_a1_p);
-        }
-#else
-        kpair_32mfma_with_lds_and_pf_swapped_sel<STEP3_PF_N, STEP3_EMBED_BARRIER>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
-            nxt_a0_d[0], nxt_a0_d[1], nxt_a0_d[2], nxt_a0_d[3],
-            nxt_a0_d[4], nxt_a0_d[5], nxt_a0_d[6], nxt_a0_d[7],
-            sel_a0_p0, sel_a0_p1, pf_a0_p, pf_a1_p);
-#endif
-        emit_pf_tail<STEP3_PF_N>(pf_a0_p, pf_a1_p);
-
-#if DIRECT_BL && EARLY_BL_PF
-        // Step4: pure MFMAs + Br prefetch only (Bl already in nxt_bl_d, no late vmem)
-        {
-            tile_pf_params dummy_pf = {};
-            kpair_32mfma_with_pf_swapped_sel<PF_MPT>(acc_A1Br, tA1, tBr, a1_raw, br_raw,
-                pf_br_p, dummy_pf);
-        }
-#elif DIRECT_BL
-        kpair_32mfma_with_vmem_bl_wrap(acc_A1Br, tA1, tBr, a1_raw, br_raw,
-            nxt_bl_d[0], nxt_bl_d[1], nxt_bl_d[2], nxt_bl_d[3],
-            nxt_bl_d[4], nxt_bl_d[5], nxt_bl_d[6], nxt_bl_d[7],
-            bl_voff_ps, srd_b_ps,
-            bl_ps_n0_soff + static_cast<uint32_t>(bt + 1) * 2 * BL_K0_STRIDE);
-        #pragma unroll
-        for (int pi = 0; pi < PF_MPT; ++pi) emit_one_pf(pf_br_p, pi);
-#else
-        kpair_32mfma_with_lds_and_pf_swapped_sel<STEP4_PF_N>(acc_A1Br, tA1, tBr, a1_raw, br_raw,
-            nxt_bl_d[0], nxt_bl_d[1], nxt_bl_d[2], nxt_bl_d[3],
-            nxt_bl_d[4], nxt_bl_d[5], nxt_bl_d[6], nxt_bl_d[7],
-            sel_bl_p0, sel_bl_p1, pf_bl_p, pf_br_p);
-#if STEP4_EXTERNAL_BR_PREFETCH
-        #pragma unroll
-        for (int pi = 0; pi < PF_MPT; ++pi) emit_one_pf(pf_br_p, pi);
-#else
-        emit_pf_tail<STEP4_PF_N>(pf_bl_p, pf_br_p);
-#endif
-#endif // DIRECT_BL
-
-#if DIRECT_BL
-        asm volatile("s_waitcnt vmcnt(0) lgkmcnt(0)");
-#else
-        asm volatile("s_waitcnt lgkmcnt(0)");
-#endif
-        R41A_FENCE_BEFORE_EXTRACT();
-        extract_tile(nxt_a0_d, tA0);
-        R41A_FENCE_BEFORE_EXTRACT();
-        extract_tile(nxt_bl_d, tBl);
-        // R21B/R22C: opt-in scheduling hooks (no-op at defaults). Site 0.
-        MXFP4_R22C_ITER_END_HOOK_0;
-
-#if EARLY_SCALE_PF
-        // Writeback shadow scales → pf_* (compiler inserts vmcnt as needed before next-iter use)
-        #pragma unroll
-        for (int p = 0; p < a_packs; ++p) { pf_a0[p] = nxt_pf_a0[p]; pf_a1[p] = nxt_pf_a1[p]; }
-        #pragma unroll
-        for (int p = 0; p < b_packs; ++p) { pf_bl[p] = nxt_pf_bl[p]; pf_br[p] = nxt_pf_br[p]; }
-#endif
-    }
-
-    {
-        const int bt = k_byte_iters - 1;
-        const int cur = bt & 1;
-        const uint32_t sel_br_p0 = cur ? br_1_p0 : br_0_p0;
-        const uint32_t sel_br_p1 = cur ? br_1_p1 : br_0_p1;
-        const uint32_t sel_a1_p0 = cur ? a1_1_p0 : a1_0_p0;
-        const uint32_t sel_a1_p1 = cur ? a1_1_p1 : a1_0_p1;
-
-        fp8e8m0_4 a0_raw[a_packs], a1_raw[a_packs], bl_raw[b_packs], br_raw[b_packs];
-        #pragma unroll
-        for (int p = 0; p < a_packs; ++p) { a0_raw[p] = pf_a0[p]; a1_raw[p] = pf_a1[p]; }
-        #pragma unroll
-        for (int p = 0; p < b_packs; ++p) { bl_raw[p] = pf_bl[p]; br_raw[p] = pf_br[p]; }
-
-        float4 br_d[8], a1_d[8];
-#if SWAP_STEP12_MAIN
-        kpair_64mfma_step12_swapped_sel(acc_A0Bl, acc_A0Br, tA0, tBl,
-            a0_raw, bl_raw, br_raw, br_d, a1_d,
-            sel_br_p0, sel_br_p1, sel_a1_p0, sel_a1_p1);
-#else
-        kpair_64mfma_step12(acc_A0Bl, acc_A0Br, tA0, tBl,
-            a0_raw, bl_raw, br_raw, br_d, a1_d,
-            sel_br_p0, sel_br_p1, sel_a1_p0, sel_a1_p1);
-#endif
-
-        asm volatile("s_waitcnt lgkmcnt(0)");
-        fp4_intx8_t tBr[4], tA1[4];
-        extract_tile(br_d, tBr);
-        extract_tile(a1_d, tA1);
-
-        // Tail: always emit barrier (no embedded barrier in pure-MFMA Step3/4)
-        // R19B: TAIL site _S1 (TAIL_SPLIT==1, live for parents using -DTAIL_SPLIT=1)
-        asm volatile(MXFP4_TAIL_BARRIER_INST_S1 ::: "memory");
-
-        tile_pf_params dummy_pf = {};
-        kpair_32mfma_with_pf_swapped_sel<0>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw, dummy_pf, dummy_pf);
-        kpair_32mfma_with_pf_swapped_sel<0>(acc_A1Br, tA1, tBr, a1_raw, br_raw, dummy_pf, dummy_pf);
-    }
-#else
 
 #ifndef TAIL_SPLIT
 #define TAIL_SPLIT 0
@@ -3863,12 +1722,9 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     // ── Non-SWAP path: tail-split to eliminate wasted prefetch/LDS on last iter ──
     // Steady-state loop: bt = 0 .. k_byte_iters-2
     // Tail: bt = k_byte_iters-1 (no prefetch, no next-iter scale/LDS loads)
-    // R47 Opt C: raise wave priority to max for the MFMA-heavy K-loop.
-    // Empty when R47C_WAVE_PRIO=0 (default). aiter does this at MFMA region
     // entry to reduce inter-wave de-schedule jitter. Placed BEFORE the
     // #pragma unroll so the pragma stays adjacent to the for-loop (clang
     // requires that adjacency).
-    R47C_PRIO_HIGH();
 #ifdef UNROLL_K
   #if UNROLL_K == 0
     #pragma unroll
@@ -3885,222 +1741,33 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     for (int bt = 0; bt + 1 < k_byte_iters; ++bt) {
         const int cur = bt & 1;
         const int nxt = 1 - cur;
-#if R46B_LDS_TRIPLE_BUFFER
-        // R46 Opt B: A0/Bl rotated through 3 slots.
-        // cur_a0bl = bt % 3   = slot read by step12 (current iter)
-        // nxt_a0bl = (bt+1)%3 = slot read by step34 ds_read (next iter)
-        // pf_a0bl  = (bt+2)%3 = slot written by emit_pf_tail (for iter bt+2)
-        // Modular arithmetic: avoid expensive division by precomputing the
-        // 3-cycle [0,1,2,0,1,2,...] from bt. Use precomputed lookup since
-        // bt is loop-induction; compiler will fold via #pragma unroll.
-        // Implementation: (bt mod 3) via subtraction tree; for K up to ~4096
-        // iters this is a couple of cmov.
-        const int cur_a0bl = bt - (bt / 3) * 3;
-        int _np1 = cur_a0bl + 1; if (_np1 >= 3) _np1 -= 3;
-        int _np2 = cur_a0bl + 2; if (_np2 >= 3) _np2 -= 3;
-        const int nxt_a0bl = _np1;
-        const int pf_a0bl  = _np2;
-#else
         const int cur_a0bl = cur;
         const int nxt_a0bl = nxt;
         const int pf_a0bl  = cur;
-#endif
-
-#if R46B_LDS_TRIPLE_BUFFER && (R47A_TRIPLE_BUF_VMCNT_TOP == 1)
-        // R47 Opt A V1: drain ALL in-flight buffer_load_to_lds writes
-        // before step34 reads slot-(bt+1)%3. Most conservative.
-        asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
-#elif R46B_LDS_TRIPLE_BUFFER && (R47A_TRIPLE_BUF_VMCNT_TOP == 2)
-        // R47 Opt A V2: allow up to 8 in-flight loads (PF_MPT*2 for the
-        // OTHER two slots' tail prefetches) — drains only the oldest write
-        // group (the one targeting the about-to-be-read slot).
-        asm volatile("s_waitcnt vmcnt(8)" ::: "memory");
-#endif
-
-#if R38F_TAIL_DRAIN && R37_FIX_B && !FUSED_STEP34
-        // R38F Fix B4: drain in-flight buffer_load_to_lds loads at the TOP of
-        // each iter that R25-C identified as a "tail" iter. Designed to be
-        // combined with R38B (always-emit) — R38B closes the CRASH; R38F then
-        // ensures the always-emitted prefetches drain before the next iter's
-        // ds_reads consume them, fixing the stale-LDS-read WRONG_OUTPUT.
-        // R25C_ACTIVE folds at compile-time when K-loop fully unrolls.
-#if R25C_ACTIVE
-        const bool _r38f_in_tail = (bt >= k_byte_iters - 1 - R25C_TAIL_PF_OFF_ITERS);
-        if (_r38f_in_tail) {
-#if R38F_VARIANT == 1
-            asm volatile("s_waitcnt vmcnt(0)\n" ::: "memory");
-#elif R38F_VARIANT == 2
-            asm volatile("s_waitcnt vmcnt(0)\ns_barrier\n" ::: "memory");
-#elif R38F_VARIANT == 3
-            asm volatile("s_waitcnt 0\n" ::: "memory");
-#elif R38F_VARIANT == 4
-            asm volatile("s_waitcnt vmcnt(0) lgkmcnt(0)\n" ::: "memory");
-#else
-#error "R38F_VARIANT must be 1, 2, 3, or 4"
-#endif
-        }
-#endif // R25C_ACTIVE
-#endif // R38F_TAIL_DRAIN
 
         const uint32_t sel_br_p0 = cur ? br_1_p0 : br_0_p0;
         const uint32_t sel_br_p1 = cur ? br_1_p1 : br_0_p1;
         const uint32_t sel_a1_p0 = cur ? a1_1_p0 : a1_0_p0;
         const uint32_t sel_a1_p1 = cur ? a1_1_p1 : a1_0_p1;
-#if R46B_LDS_TRIPLE_BUFFER
-        // R46 Opt B: 3-way slot select for A0/Bl (next-iter consumer reads).
-        const uint32_t sel_a0_p0 = (nxt_a0bl == 0) ? a0_0_p0 : ((nxt_a0bl == 1) ? a0_1_p0 : a0_2_p0);
-        const uint32_t sel_a0_p1 = (nxt_a0bl == 0) ? a0_0_p1 : ((nxt_a0bl == 1) ? a0_1_p1 : a0_2_p1);
-#if !DIRECT_BL
-        const uint32_t sel_bl_p0 = (nxt_a0bl == 0) ? bl_0_p0 : ((nxt_a0bl == 1) ? bl_1_p0 : bl_2_p0);
-        const uint32_t sel_bl_p1 = (nxt_a0bl == 0) ? bl_0_p1 : ((nxt_a0bl == 1) ? bl_1_p1 : bl_2_p1);
-#endif
-#else
         const uint32_t sel_a0_p0 = nxt ? a0_1_p0 : a0_0_p0;
         const uint32_t sel_a0_p1 = nxt ? a0_1_p1 : a0_0_p1;
-#if !DIRECT_BL
         const uint32_t sel_bl_p0 = nxt ? bl_1_p0 : bl_0_p0;
         const uint32_t sel_bl_p1 = nxt ? bl_1_p1 : bl_0_p1;
-#endif
-#endif
 
         const int pf_bt = (bt + 2 < k_byte_iters) ? (bt + 2) : (k_byte_iters - 1);
-#if R38B_TAIL_FIX && R37_FIX_B && !FUSED_STEP34
-        // R38B: defer make_pf_params construction to inside the no-tail
-        // gate (see R37_FIX_B branch below). This eliminates ~128 bytes/iter
-        // of struct construction (and the resulting VGPR/scratch pressure)
-        // on tail iters, fixing intermittent HSA aperture violations on the
-        // 9 R37 CRASH shapes.
-#elif R40A_PF_FENCE && R37_FIX_B && !FUSED_STEP34
-        // R40A: defer make_pf_params construction until AFTER kpair_64mfma_step34
-        // returns (see R37_FIX_B branch below). Combined with the explicit
-        // pre-step12 `asm volatile` fence, this prevents the compiler from
-        // hoisting the per-iter buffer_load_to_lds prefetches across the
-        // step12 asm boundary.
-#else
-        // R46B: A0/Bl prefetch destination uses pf_a0bl (slot (bt+2)%3).
         // A1/Br stay double-buffered (slot cur).
-        tile_pf_params pf_a0_p = make_pf_params(A0_db[pf_a0bl], g.a, coord<ST_tile>(0,0,br*2,     pf_bt), so_a, srd_a, base_a, lb_a0[pf_a0bl], R22B_A_HINT_VAL);
-        tile_pf_params pf_a1_p = make_pf_params(A1_db[cur],     g.a, coord<ST_tile>(0,0,br*2+1,   pf_bt), so_a, srd_a, base_a, lb_a1[cur],     R22B_A_HINT_VAL);
-#if !DIRECT_BL
-        tile_pf_params pf_bl_p = make_pf_params(Bl_db[pf_a0bl], g.b, coord<ST_tile>(0,0,bc*2,     pf_bt), so_b, srd_b, base_b, lb_bl[pf_a0bl], R22B_B_HINT_VAL);
-#endif
-        tile_pf_params pf_br_p = make_pf_params(Br_db[cur],     g.b, coord<ST_tile>(0,0,bc*2+1,   pf_bt), so_b, srd_b, base_b, lb_br[cur],     R22B_B_HINT_VAL);
-#endif // R38B_TAIL_FIX / R40A_PF_FENCE
-
-#if OUTER_K_PF_DEPTH > 1 && OUTER_K_PF_MODE == 1
-        // R24C: pull-forward L2-only prefetch for K+OUTER_K_PF_DEPTH (>=K+3 for depth=2).
-        // We rebuild pf params at pf_bt+(OUTER_K_PF_DEPTH-1) clamped to k_byte_iters-1
-        // and issue buffer_load_dwordx4 that lands in L2/L1 only (no LDS write).
-        // The LDS slot we encode does not matter — the load result is discarded.
-        {
-            const int pf2_bt = (pf_bt + (OUTER_K_PF_DEPTH - 1) < k_byte_iters)
-                              ? (pf_bt + (OUTER_K_PF_DEPTH - 1))
-                              : (k_byte_iters - 1);
-            tile_pf_params pf2_a0 = make_pf_params(A0_db[cur], g.a, coord<ST_tile>(0,0,br*2,     pf2_bt), so_a, srd_a, base_a, lb_a0[cur], R22B_A_HINT_VAL);
-            tile_pf_params pf2_a1 = make_pf_params(A1_db[cur], g.a, coord<ST_tile>(0,0,br*2+1,   pf2_bt), so_a, srd_a, base_a, lb_a1[cur], R22B_A_HINT_VAL);
-            tile_pf_params pf2_br = make_pf_params(Br_db[cur], g.b, coord<ST_tile>(0,0,bc*2+1,   pf2_bt), so_b, srd_b, base_b, lb_br[cur], R22B_B_HINT_VAL);
-            // Issue all PF_MPT loads per tile for A0/A1/Br. Skip Bl when DIRECT_BL.
-            emit_full_pf_l2only<PF_MPT>(pf2_a0);
-            emit_full_pf_l2only<PF_MPT>(pf2_a1);
-            emit_full_pf_l2only<PF_MPT>(pf2_br);
-#if !DIRECT_BL
-            tile_pf_params pf2_bl = make_pf_params(Bl_db[cur], g.b, coord<ST_tile>(0,0,bc*2,     pf2_bt), so_b, srd_b, base_b, lb_bl[cur], R22B_B_HINT_VAL);
-            emit_full_pf_l2only<PF_MPT>(pf2_bl);
-#endif
-        }
-#endif
-
-#if (L2_PF_A > 0) || (L2_PF_B > 0)
-        // R24B: L2-only prefetch one extra outer-K iter ahead of the LDS prefetch.
-        // pf_bt = bt+2 (LDS-going); pf3_bt = bt+3 (cache-warming only).
-        // Result is discarded by emit_one_pf_l2only (no LDS write, no live VGPR).
-        {
-            const int pf3_bt = (pf_bt + 1 < k_byte_iters) ? (pf_bt + 1) : (k_byte_iters - 1);
-#if (L2_PF_A > 0)
-            tile_pf_params pf3_a0 = make_pf_params(A0_db[cur], g.a, coord<ST_tile>(0,0,br*2,     pf3_bt), so_a, srd_a, base_a, lb_a0[cur], R22B_A_HINT_VAL);
-            tile_pf_params pf3_a1 = make_pf_params(A1_db[cur], g.a, coord<ST_tile>(0,0,br*2+1,   pf3_bt), so_a, srd_a, base_a, lb_a1[cur], R22B_A_HINT_VAL);
-            emit_l2_pf_block<L2_PF_A>(pf3_a0);
-            emit_l2_pf_block<L2_PF_A>(pf3_a1);
-#endif
-#if (L2_PF_B > 0)
-            tile_pf_params pf3_br = make_pf_params(Br_db[cur], g.b, coord<ST_tile>(0,0,bc*2+1,   pf3_bt), so_b, srd_b, base_b, lb_br[cur], R22B_B_HINT_VAL);
-            emit_l2_pf_block<L2_PF_B>(pf3_br);
-#if !DIRECT_BL
-            tile_pf_params pf3_bl = make_pf_params(Bl_db[cur], g.b, coord<ST_tile>(0,0,bc*2,     pf3_bt), so_b, srd_b, base_b, lb_bl[cur], R22B_B_HINT_VAL);
-            emit_l2_pf_block<L2_PF_B>(pf3_bl);
-#endif
-#endif
-        }
-#endif
-
-        // R39A: skip the scale-pf advance on R25-C tail iters where the data
-        // prefetch is suppressed. Without this, the next iter's MFMA reads STALE
-        // data (last fetched tile, frozen by R25-C) but a FRESH scale (advancing
-        // past the data), causing scale-vs-data mismatch and BF16-overflow garbage.
-        //
-        // Variants (compile-time):
-        //   R39A_VARIANT=0 (default): freeze scale loads entirely on tail iters
-        //                              (skip the load, keep previous pf_* values).
-        //   R39A_VARIANT=1:           clamp scale index to (k_byte_iters - 1 -
-        //                              R25C_TAIL_PF_OFF_ITERS) on tail iters
-        //                              (re-load same scale every tail iter).
-        //   R39A_VARIANT=2:           clamp to bt (one-back of natural bt+1).
-        //
-        // When R25-C is inactive (default tail_off=0) or R39A=0, the natural
-        // `bt+1` index is preserved (no behavior change on R37 WIN shapes).
-#ifndef R39A_VARIANT
-#define R39A_VARIANT 0
-#endif
-#if R39A_TAIL_SCALE_CLAMP && R37_FIX_B && !FUSED_STEP34 && R25C_ACTIVE
-        const bool _r39a_in_tail = (bt >= k_byte_iters - 1 - R25C_TAIL_PF_OFF_ITERS);
-#else
+        tile_pf_params pf_a0_p = make_pf_params(A0_db[pf_a0bl], g.a, coord<ST_tile>(0,0,br*2,     pf_bt), so_a, srd_a, base_a, lb_a0[pf_a0bl], static_cast<int>(kittens::coherency::cache_all));
+        tile_pf_params pf_a1_p = make_pf_params(A1_db[cur],     g.a, coord<ST_tile>(0,0,br*2+1,   pf_bt), so_a, srd_a, base_a, lb_a1[cur],     static_cast<int>(kittens::coherency::cache_all));
+        tile_pf_params pf_bl_p = make_pf_params(Bl_db[pf_a0bl], g.b, coord<ST_tile>(0,0,bc*2,     pf_bt), so_b, srd_b, base_b, lb_bl[pf_a0bl], static_cast<int>(kittens::coherency::cache_all));
+        tile_pf_params pf_br_p = make_pf_params(Br_db[cur],     g.b, coord<ST_tile>(0,0,bc*2+1,   pf_bt), so_b, srd_b, base_b, lb_br[cur],     static_cast<int>(kittens::coherency::cache_all));
         constexpr bool _r39a_in_tail = false;
-#endif
-#if R39A_VARIANT == 1
-        const uint32_t _r39a_scale_idx = _r39a_in_tail
-            ? static_cast<uint32_t>(k_byte_iters - 1 - R25C_TAIL_PF_OFF_ITERS)
-            : static_cast<uint32_t>(bt + 1);
-#elif R39A_VARIANT == 2
-        const uint32_t _r39a_scale_idx = _r39a_in_tail ? static_cast<uint32_t>(bt) : static_cast<uint32_t>(bt + 1);
-#else
         const uint32_t _r39a_scale_idx = static_cast<uint32_t>(bt + 1);
-#endif
-
-#if EARLY_SCALE_PF
-        fp8e8m0_4 nxt_pf_a0[a_packs], nxt_pf_a1[a_packs], nxt_pf_bl[b_packs], nxt_pf_br[b_packs];
-#if R39A_VARIANT == 0
-        if (!_r39a_in_tail) {
-            const uint32_t nxt_scale = static_cast<uint32_t>(bt + 1) << 9;
-            load_pq_scale_x2_async(a0_srd, lane_soff_x2, nxt_scale, nxt_pf_a0[0], nxt_pf_a0[1]);
-            load_pq_scale_x2_async(a1_srd, lane_soff_x2, nxt_scale, nxt_pf_a1[0], nxt_pf_a1[1]);
-            load_pq_scale_x2_async(bl_srd, lane_soff_x2, nxt_scale, nxt_pf_bl[0], nxt_pf_bl[1]);
-            load_pq_scale_x2_async(br_srd, lane_soff_x2, nxt_scale, nxt_pf_br[0], nxt_pf_br[1]);
-        } else {
-            // Carry forward existing pf_* (treated as nxt_pf_* shadow)
-            #pragma unroll
-            for (int p = 0; p < a_packs; ++p) { nxt_pf_a0[p] = pf_a0[p]; nxt_pf_a1[p] = pf_a1[p]; }
-            #pragma unroll
-            for (int p = 0; p < b_packs; ++p) { nxt_pf_bl[p] = pf_bl[p]; nxt_pf_br[p] = pf_br[p]; }
-        }
-#else
-        {
-            const uint32_t nxt_scale = _r39a_scale_idx << 9;
-            load_pq_scale_x2_async(a0_srd, lane_soff_x2, nxt_scale, nxt_pf_a0[0], nxt_pf_a0[1]);
-            load_pq_scale_x2_async(a1_srd, lane_soff_x2, nxt_scale, nxt_pf_a1[0], nxt_pf_a1[1]);
-            load_pq_scale_x2_async(bl_srd, lane_soff_x2, nxt_scale, nxt_pf_bl[0], nxt_pf_bl[1]);
-            load_pq_scale_x2_async(br_srd, lane_soff_x2, nxt_scale, nxt_pf_br[0], nxt_pf_br[1]);
-        }
-#endif // R39A_VARIANT == 0
-#endif
 
         fp8e8m0_4 a0_raw[a_packs], a1_raw[a_packs], bl_raw[b_packs], br_raw[b_packs];
         #pragma unroll
         for (int p = 0; p < a_packs; ++p) { a0_raw[p] = pf_a0[p]; a1_raw[p] = pf_a1[p]; }
         #pragma unroll
         for (int p = 0; p < b_packs; ++p) { bl_raw[p] = pf_bl[p]; br_raw[p] = pf_br[p]; }
-
-#if !EARLY_SCALE_PF
-#if R39A_VARIANT == 0
         if (!_r39a_in_tail) {
             const uint32_t nxt_scale = static_cast<uint32_t>(bt + 1) << 9;
             load_pq_scale_x2_async(a0_srd, lane_soff_x2, nxt_scale, pf_a0[0], pf_a0[1]);
@@ -4109,27 +1776,9 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
             load_pq_scale_x2_async(br_srd, lane_soff_x2, nxt_scale, pf_br[0], pf_br[1]);
         }
         // else: leave pf_* alone (frozen scale)
-#else
-        {
-            const uint32_t nxt_scale = _r39a_scale_idx << 9;
-            load_pq_scale_x2_async(a0_srd, lane_soff_x2, nxt_scale, pf_a0[0], pf_a0[1]);
-            load_pq_scale_x2_async(a1_srd, lane_soff_x2, nxt_scale, pf_a1[0], pf_a1[1]);
-            load_pq_scale_x2_async(bl_srd, lane_soff_x2, nxt_scale, pf_bl[0], pf_bl[1]);
-            load_pq_scale_x2_async(br_srd, lane_soff_x2, nxt_scale, pf_br[0], pf_br[1]);
-        }
-#endif // R39A_VARIANT == 0
-#endif
 
         // Steps 1+2 merged: A0*Bl (32 MFMAs) + ds_read Br + A0*Br (32 MFMAs) + ds_read A1
         float4 br_d[8], a1_d[8];
-#if R40A_PF_FENCE && R37_FIX_B && !FUSED_STEP34
-        // R40A: pre-step12 fence — prevent the compiler from hoisting any
-        // upcoming buffer_load_to_lds prefetches (constructed AFTER step34)
-        // across the step12 asm boundary. Combined with the deferred
-        // make_pf_params (see top-of-iter block) this guarantees the LDS
-        // prefetch issue cannot land in a slot mid-MFMA-read.
-        asm volatile("" ::: "memory");
-#endif
         kpair_64mfma_step12(acc_A0Bl, acc_A0Br, tA0, tBl,
             a0_raw, bl_raw, br_raw, br_d, a1_d,
             sel_br_p0, sel_br_p1, sel_a1_p0, sel_a1_p1);
@@ -4143,124 +1792,13 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         // Fused Step34: barrier + 64 MFMAs + 16 ds_reads in one asm block
         float4 nxt_a0_d[8];
         float4 nxt_bl_d[8];
-#if R46B_LDS_TRIPLE_BUFFER && (R47A_TRIPLE_BUF_VMCNT_TOP == 3)
-        // R47 Opt A V3: drain VMEM just BEFORE step34's ds_reads of the
-        // about-to-be-consumed slot-(bt+1)%3. Tighter placement than V1's
-        // top-of-iter (the latter may drain too early if scheduler reorders
-        // step12 ds_reads from registers below the fence).
-        asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
-#endif
         kpair_64mfma_step34(acc_A1Bl, acc_A1Br, tA1, tBl, tBr,
             a1_raw, bl_raw, br_raw, nxt_a0_d, nxt_bl_d,
             sel_a0_p0, sel_a0_p1, sel_bl_p0, sel_bl_p1);
-#if R45B_FUSED_SEPARATING_FENCE
-        // R45 Opt B: SEPARATING fence between step34 (above) and the
-        // unconditional emit_pf_tail<0> (below) inside the FUSED branch.
-        // Drain all in-flight VMEM/LDS-direct loads from prior iters' tail
-        // prefetches before issuing new ones — closes the LDS double-buffer
-        // race that R44A's back-edge drain cannot reach (back-edge fires
-        // AFTER emit_pf_tail). Volatile + memory clobber pin the fence
-        // textually between the MFMA block and the buffer_load_to_lds; the
-        // compiler cannot hoist or drop it. Per R44_OPT_A_VERDICT.md, this
-        // is the prescribed fix for (4096,32768,28672) FUSED CRASH 5/5.
-        asm volatile("s_waitcnt vmcnt(0)\n" ::: "memory");
-#endif
-#if R45B_FUSED_STRONG_FENCE
-        // R45 Opt B variant 3: STRONG separating fence — drains every counter
-        // and adds an s_barrier so all wave-shared LDS state is coherent
-        // before issuing the new tail prefetches. Tests whether the residual
-        // CRASH after the simple vmcnt(0) variant is an LDS-coherence issue
-        // rather than pure VMEM ordering.
-        asm volatile("s_waitcnt vmcnt(0) lgkmcnt(0) expcnt(0)\n s_barrier\n" ::: "memory");
-#endif
-#if R43A_GATE_PF_TAIL_KBOUND
-        // R43 Opt A.fix1 — at K=28672 (k_byte_iters=112), the FUSED_STEP34+TAIL_SPLIT
-        // conjunction triggers HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION at runtime.
-        // R42 Opt B Phase-2A localized the CRASH to FUSED_STEP34=1 AND TAIL_SPLIT=1
-        // (stripping either knob alone removes the CRASH but exposes a separate
-        // 17%-bf16-overflow correctness bug — see R42_OPT_B_VERDICT.md).
-        //
-        // Variants (compile-time R43A_GATE_PF_TAIL_KBOUND value):
-        //   1 = skip BOTH emit_pf_tail on bt == k_byte_iters-2 (kills A & B halves)
-        //   2 = skip only B-half on the clamped iter
-        //   3 = skip only A-half on the clamped iter
-        //   4 = REPLACE the data prefetches with L2-only (cache-warming, no LDS race)
-        //   5 = R38B-style: build pf_*_p HERE (after step34) instead of top-of-iter,
-        //       then emit_pf_tail. Mirrors R37_FIX_B+R38B_TAIL_FIX inside FUSED_STEP34.
-        //   6 = pre-emit-pf vmcnt fence: insert s_waitcnt vmcnt(0) BEFORE emit_pf_tail
-        //       to drain in-flight buffer_load_to_lds from prior iters before issuing
-        //       new ones (closes write-after-write race on shared LDS double-buffer).
-        const bool _r43a_skip = (bt >= k_byte_iters - 2);
-#if R43A_GATE_PF_TAIL_KBOUND == 1
-        if (!_r43a_skip) {
-            emit_pf_tail<0>(pf_a0_p, pf_a1_p);
-            emit_pf_tail<0>(pf_bl_p, pf_br_p);
-        }
-#elif R43A_GATE_PF_TAIL_KBOUND == 2
-        emit_pf_tail<0>(pf_a0_p, pf_a1_p);
-        if (!_r43a_skip) {
-            emit_pf_tail<0>(pf_bl_p, pf_br_p);
-        }
-#elif R43A_GATE_PF_TAIL_KBOUND == 3
-        if (!_r43a_skip) {
-            emit_pf_tail<0>(pf_a0_p, pf_a1_p);
-        }
-        emit_pf_tail<0>(pf_bl_p, pf_br_p);
-#elif R43A_GATE_PF_TAIL_KBOUND == 4
-        if (!_r43a_skip) {
-            emit_pf_tail<0>(pf_a0_p, pf_a1_p);
-            emit_pf_tail<0>(pf_bl_p, pf_br_p);
-        } else {
-            emit_full_pf_l2only<PF_MPT>(pf_a0_p);
-            emit_full_pf_l2only<PF_MPT>(pf_a1_p);
-            emit_full_pf_l2only<PF_MPT>(pf_bl_p);
-            emit_full_pf_l2only<PF_MPT>(pf_br_p);
-        }
-#elif R43A_GATE_PF_TAIL_KBOUND == 5
-        // R43 fix1 variant 5: defer make_pf_params construction to here (after step34)
-        // so the live-range of the pf_*_p structs spans only the emit_pf_tail emission,
-        // mirroring the R38B_TAIL_FIX pattern in the R37_FIX_B (non-FUSED) branch.
-        // The original (top-of-iter) pf_*_p go unused on the FUSED path with this
-        // variant — the compiler should DCE them. Suppress unused-warning only.
-        {
-            tile_pf_params pf_a0_p_late = make_pf_params(A0_db[cur], g.a, coord<ST_tile>(0,0,br*2,     pf_bt), so_a, srd_a, base_a, lb_a0[cur], R22B_A_HINT_VAL);
-            tile_pf_params pf_a1_p_late = make_pf_params(A1_db[cur], g.a, coord<ST_tile>(0,0,br*2+1,   pf_bt), so_a, srd_a, base_a, lb_a1[cur], R22B_A_HINT_VAL);
-#if !DIRECT_BL
-            tile_pf_params pf_bl_p_late = make_pf_params(Bl_db[cur], g.b, coord<ST_tile>(0,0,bc*2,     pf_bt), so_b, srd_b, base_b, lb_bl[cur], R22B_B_HINT_VAL);
-#endif
-            tile_pf_params pf_br_p_late = make_pf_params(Br_db[cur], g.b, coord<ST_tile>(0,0,bc*2+1,   pf_bt), so_b, srd_b, base_b, lb_br[cur], R22B_B_HINT_VAL);
-            emit_pf_tail<0>(pf_a0_p_late, pf_a1_p_late);
-            emit_pf_tail<0>(pf_bl_p_late, pf_br_p_late);
-        }
-        (void)pf_a0_p; (void)pf_a1_p;
-#if !DIRECT_BL
-        (void)pf_bl_p;
-#endif
-        (void)pf_br_p;
-#elif R43A_GATE_PF_TAIL_KBOUND == 6
-        // Variant 6: vmcnt(0) fence BEFORE the unconditional emit_pf_tail to ensure
-        // all prior buffer_load_to_lds have drained before issuing new ones.
-        asm volatile("s_waitcnt vmcnt(0)\n" ::: "memory");
         emit_pf_tail<0>(pf_a0_p, pf_a1_p);
         emit_pf_tail<0>(pf_bl_p, pf_br_p);
-#else
-#error "R43A_GATE_PF_TAIL_KBOUND must be 0, 1, 2, 3, 4, 5, or 6"
-#endif
-        (void)_r43a_skip;
-#else
-        emit_pf_tail<0>(pf_a0_p, pf_a1_p);
-        emit_pf_tail<0>(pf_bl_p, pf_br_p);
-#endif // R43A_GATE_PF_TAIL_KBOUND
-#if R45B_FUSED_POST_EMIT_FENCE
-        // R45 Opt B variant 2: drain the just-issued tail prefetches BEFORE
-        // the loop back-edge so the next iter's step12 ds_reads start from a
-        // coherent LDS state. Different placement from R44A drain (END of
-        // K-loop body, after R45B's scope).
-        asm volatile("s_waitcnt vmcnt(0)\n" ::: "memory");
-#endif
 #elif R37_FIX_B
         // R37 Fix B (default): use fused step3+step4 (correctness fix) while
-        // preserving R25-C tail-pf-off + STEP4_EXTERNAL_BR_PREFETCH branching
         // that the FUSED_STEP34=1 path otherwise bypasses.
         float4 nxt_a0_d[8];
         float4 nxt_bl_d[8];
@@ -4273,19 +1811,6 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         // the LDS double-buffer state because the next iter's s_barrier vmcnt count
         // is now wrong. Plain memory clobber asm volatile prevents the hoist.
         asm volatile("" ::: "memory");
-#if R40A_PF_FENCE && !R38B_TAIL_FIX
-        // R40A: build pf_*_p AFTER step34 (deferred from top-of-iter). With the
-        // pre-step12 fence above, the compiler cannot hoist the constructed
-        // emit_pf_tail loads back across step12. The construction itself is
-        // free of memory side effects; only the subsequent emit_pf_tail issues
-        // the buffer_load_to_lds intrinsics.
-        tile_pf_params pf_a0_p = make_pf_params(A0_db[cur], g.a, coord<ST_tile>(0,0,br*2,     pf_bt), so_a, srd_a, base_a, lb_a0[cur], R22B_A_HINT_VAL);
-        tile_pf_params pf_a1_p = make_pf_params(A1_db[cur], g.a, coord<ST_tile>(0,0,br*2+1,   pf_bt), so_a, srd_a, base_a, lb_a1[cur], R22B_A_HINT_VAL);
-#if !DIRECT_BL
-        tile_pf_params pf_bl_p = make_pf_params(Bl_db[cur], g.b, coord<ST_tile>(0,0,bc*2,     pf_bt), so_b, srd_b, base_b, lb_bl[cur], R22B_B_HINT_VAL);
-#endif
-        tile_pf_params pf_br_p = make_pf_params(Br_db[cur], g.b, coord<ST_tile>(0,0,bc*2+1,   pf_bt), so_b, srd_b, base_b, lb_br[cur], R22B_B_HINT_VAL);
-#endif // R40A_PF_FENCE && !R38B_TAIL_FIX
 
         // R25-C: in the last R25C_TAIL_PF_OFF_ITERS iters, drop global prefetch.
         // Branch folds to compile-time when K-loop fully unrolls (R25C_ACTIVE
@@ -4295,73 +1820,20 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 #else
         constexpr bool _r25c_tail_no_pf = false;
 #endif
-#if R38B_TAIL_FIX
-        // R38B: ALWAYS emit prefetches, even when R25C says "skip". Empirical
-        // finding: in the R37 fix-B path, the runtime `if (!_r25c_tail_no_pf)`
-        // branch around emit_pf_tail (combined with the per-iter struct
-        // construction of pf_*_p) leaves the compiler-generated vmcnt /
-        // s_barrier counts inconsistent across the tail iters, producing
-        // intermittent HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION on stress.
-        // Confirmed: setting R25C_TAIL_PF_OFF_ITERS=0 (always-emit) eliminates
-        // the crash; this macro provides the same effect WITHOUT having to
-        // strip the per-shape pfoff flag from every CRASH variant. The pf
-        // targets the clamped pf_bt = k_byte_iters - 1 on tail iters — same
-        // L2/LDS line we already loaded — so the perf cost is bounded
-        // (≤ R25C_TAIL_PF_OFF_ITERS / k_byte_iters extra wasted-bandwidth iters).
-        // Build the pf params HERE (deferred from loop top) so the construction
-        // cost is paid only inside the always-emit branch (no behavior change
-        // versus the original top-of-loop construction, just placement).
-        {
-            tile_pf_params pf_a0_p = make_pf_params(A0_db[cur], g.a, coord<ST_tile>(0,0,br*2,     pf_bt), so_a, srd_a, base_a, lb_a0[cur], R22B_A_HINT_VAL);
-            tile_pf_params pf_a1_p = make_pf_params(A1_db[cur], g.a, coord<ST_tile>(0,0,br*2+1,   pf_bt), so_a, srd_a, base_a, lb_a1[cur], R22B_A_HINT_VAL);
-#if !DIRECT_BL
-            tile_pf_params pf_bl_p = make_pf_params(Bl_db[cur], g.b, coord<ST_tile>(0,0,bc*2,     pf_bt), so_b, srd_b, base_b, lb_bl[cur], R22B_B_HINT_VAL);
-#endif
-            tile_pf_params pf_br_p = make_pf_params(Br_db[cur], g.b, coord<ST_tile>(0,0,bc*2+1,   pf_bt), so_b, srd_b, base_b, lb_br[cur], R22B_B_HINT_VAL);
-            emit_pf_tail<0>(pf_a0_p, pf_a1_p);
-            emit_pf_tail<0>(pf_bl_p, pf_br_p);
-        }
-        (void)_r25c_tail_no_pf;  // suppress unused-variable warning
-#else
         if (!_r25c_tail_no_pf) {
             // Issue full A0 + A1 prefetches (would have come from STEP3_PF_N).
             emit_pf_tail<0>(pf_a0_p, pf_a1_p);
             // Issue Bl + Br prefetches (would have come from STEP4_PF_N).
-            // STEP4_EXTERNAL_BR_PREFETCH=1 reorders Br to fire as a separate
             // emit_one_pf burst after Bl; semantically the SAME loads — so we
             // emit both pf groups here uniformly.
             emit_pf_tail<0>(pf_bl_p, pf_br_p);
         }
-#if R38C_TAIL_L2ONLY
-        // R38C Fix B3: when R25-C says "skip" the tail prefetches, instead of
-        // dropping them entirely (which leaves the compiler-tracked vmcnt out
-        // of sync with the in-flight buffer-load-to-LDS state and causes the
-        // next iter's s_barrier to fire while a load is still landing into a
-        // double-buffer slot about to be reallocated → CRASH), route the SAME
-        // GMEM addresses through `emit_full_pf_l2only<PF_MPT>`. That issues
-        // identical buffer_load_dwordx4 instructions but discards the result
-        // into a scratch VGPR (no `lds:1` modifier → no LDS write → no
-        // double-buffer slot collision). The data lands in L2/L1 and warms
-        // the cache for the prologue/epilogue Bl direct-load. Crucially the
-        // compiler-tracked vmcnt now stays consistent with the iter's
-        // scheduler footprint (the loads are emitted as inline-asm volatile
-        // with a "memory" clobber, so they cannot be reordered or DCE'd).
-        if (_r25c_tail_no_pf) {
-            emit_full_pf_l2only<PF_MPT>(pf_a0_p);
-            emit_full_pf_l2only<PF_MPT>(pf_a1_p);
-#if !DIRECT_BL
-            emit_full_pf_l2only<PF_MPT>(pf_bl_p);
-#endif
-            emit_full_pf_l2only<PF_MPT>(pf_br_p);
-        }
-#endif // R38C_TAIL_L2ONLY
-#endif // R38B_TAIL_FIX
         // R37: fence again post-prefetch so the next iter's barrier vmcnt is correct.
         asm volatile("" ::: "memory");
 #else // R37_FIX_B == 0 → legacy buggy non-fused step3+step4 path
 #if !STEP3_EMBED_BARRIER
         // R19B: site _S6 (TAIL_SPLIT outer !STEP3_EMBED_BARRIER, dead w/ default STEP3_EMBED_BARRIER=1)
-        asm volatile(MXFP4_STEP3_BARRIER_INST_S6 ::: "memory");
+        asm volatile("s_waitcnt vmcnt(" MXFP4_STR(STEP3_BARRIER_VMCNT) ")\ns_barrier\n" ::: "memory");
 #endif
 
         // Step 3: A1*Bl (32 MFMAs) + ds_read A0[nxt] + prefetch
@@ -4389,34 +1861,6 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
                 sel_a0_p0, sel_a0_p1, pf_a0_p, pf_a1_p);
             // emit_pf_tail<0> is a no-op
         } else {
-#if K_LOOP_SYNC_EVERY_4 || K_LOOP_SYNC_EVERY_2
-        // R20C: barrier coarsening — emit barrier only every 2 (or 4) iters.
-        // Compiler unrolls the K-loop and statically resolves the parity per copy.
-#if K_LOOP_SYNC_EVERY_4
-        const bool _r20c_emit_barrier = ((bt & 3) == 0);
-#else
-        const bool _r20c_emit_barrier = ((bt & 1) == 0);
-#endif
-        if (_r20c_emit_barrier) {
-#if SPREAD_LDS
-            kpair_32mfma_with_lds_rowspread_pf<STEP3_PF_N, STEP3_EMBED_BARRIER>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
-#else
-            kpair_32mfma_with_lds_and_pf<STEP3_PF_N, STEP3_EMBED_BARRIER>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
-#endif
-                nxt_a0_d[0], nxt_a0_d[1], nxt_a0_d[2], nxt_a0_d[3],
-                nxt_a0_d[4], nxt_a0_d[5], nxt_a0_d[6], nxt_a0_d[7],
-                sel_a0_p0, sel_a0_p1, pf_a0_p, pf_a1_p);
-        } else {
-#if SPREAD_LDS
-            kpair_32mfma_with_lds_rowspread_pf<STEP3_PF_N, false>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
-#else
-            kpair_32mfma_with_lds_and_pf<STEP3_PF_N, false>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
-#endif
-                nxt_a0_d[0], nxt_a0_d[1], nxt_a0_d[2], nxt_a0_d[3],
-                nxt_a0_d[4], nxt_a0_d[5], nxt_a0_d[6], nxt_a0_d[7],
-                sel_a0_p0, sel_a0_p1, pf_a0_p, pf_a1_p);
-        }
-#else
 #if SPREAD_LDS
         kpair_32mfma_with_lds_rowspread_pf<STEP3_PF_N, STEP3_EMBED_BARRIER>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
 #else
@@ -4425,20 +1869,8 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
             nxt_a0_d[0], nxt_a0_d[1], nxt_a0_d[2], nxt_a0_d[3],
             nxt_a0_d[4], nxt_a0_d[5], nxt_a0_d[6], nxt_a0_d[7],
             sel_a0_p0, sel_a0_p1, pf_a0_p, pf_a1_p);
-#endif // K_LOOP_SYNC_EVERY_*
         emit_pf_tail<STEP3_PF_N>(pf_a0_p, pf_a1_p);
         } // end !_r25c_tail_no_pf (Step3)
-
-        // Step 4: A1*Br (32 MFMAs) + load next Bl
-#if DIRECT_BL
-        kpair_32mfma_with_vmem_bl_wrap(acc_A1Br, tA1, tBr, a1_raw, br_raw,
-            nxt_bl_d[0], nxt_bl_d[1], nxt_bl_d[2], nxt_bl_d[3],
-            nxt_bl_d[4], nxt_bl_d[5], nxt_bl_d[6], nxt_bl_d[7],
-            bl_voff_ps, srd_b_ps,
-            bl_ps_n0_soff + static_cast<uint32_t>(bt + 1) * 2 * BL_K0_STRIDE);
-        #pragma unroll
-        for (int pi = 0; pi < PF_MPT; ++pi) emit_one_pf(pf_br_p, pi);
-#else
         if (_r25c_tail_no_pf) {
 #if SPREAD_LDS
             kpair_32mfma_with_lds_rowspread_pf<0>(acc_A1Br, tA1, tBr, a1_raw, br_raw,
@@ -4458,50 +1890,13 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
             nxt_bl_d[0], nxt_bl_d[1], nxt_bl_d[2], nxt_bl_d[3],
             nxt_bl_d[4], nxt_bl_d[5], nxt_bl_d[6], nxt_bl_d[7],
             sel_bl_p0, sel_bl_p1, pf_bl_p, pf_br_p);
-#if STEP4_EXTERNAL_BR_PREFETCH
-        #pragma unroll
-        for (int pi = 0; pi < PF_MPT; ++pi) emit_one_pf(pf_br_p, pi);
-#else
         emit_pf_tail<STEP4_PF_N>(pf_bl_p, pf_br_p);
-#endif
         } // end !_r25c_tail_no_pf (Step4)
-#endif // DIRECT_BL
 #endif // FUSED_STEP34 / R37_FIX_B / legacy
-
-#if DIRECT_BL
-        asm volatile("s_waitcnt vmcnt(0) lgkmcnt(0)");
-#else
         asm volatile("s_waitcnt lgkmcnt(0)");
-#endif
-        R41A_FENCE_BEFORE_EXTRACT();
         extract_tile(nxt_a0_d, tA0);
-        R41A_FENCE_BEFORE_EXTRACT();
         extract_tile(nxt_bl_d, tBl);
         // R21B/R22C: opt-in scheduling hooks (no-op at defaults). Site 1.
-        MXFP4_R22C_ITER_END_HOOK_1;
-
-#if EARLY_SCALE_PF
-        #pragma unroll
-        for (int p = 0; p < a_packs; ++p) { pf_a0[p] = nxt_pf_a0[p]; pf_a1[p] = nxt_pf_a1[p]; }
-        #pragma unroll
-        for (int p = 0; p < b_packs; ++p) { pf_bl[p] = nxt_pf_bl[p]; pf_br[p] = nxt_pf_br[p]; }
-#endif
-
-#if R44A_BACKEDGE_VMCNT_DRAIN
-        // R44 Opt A (per Opt C R44_OPT_C_FAULT_PC.md diagnosis):
-        // The TAIL_SPLIT + FUSED_STEP34 path's K-loop back-edge has no
-        // s_waitcnt vmcnt(0) drain. The 16 unconditional buffer_load_dwordx4
-        // ... lds prefetches issued at the end of the FUSED branch (line ~3313)
-        // can still be in flight when the loop falls through to the TAIL_SPLIT
-        // epilogue, which then ds_reads the SAME LDS double-buffer slots →
-        // HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION (code 0x29) at K=28672.
-        // This volatile asm at the very last C++ statement of the loop body
-        // is placed AFTER all step3/step4 + emit_pf_tail to drain in-flight
-        // VMEM before fall-through. memory clobber + volatile prevents
-        // compiler hoisting; combine with R37_FIX_B + R40A_PF_FENCE for max
-        // effectiveness.
-        asm volatile("s_waitcnt vmcnt(0)\n" ::: "memory");
-#endif
     }
 
     // ── Tail iteration: no prefetch, no next-iter scale/LDS loads ──
@@ -4532,16 +1927,13 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 
         // Tail: always emit barrier (no embedded barrier in pure-MFMA Step3/4)
         // R19B: TAIL site _S2 (TAIL_SPLIT==0, dead for parents using -DTAIL_SPLIT=1)
-        asm volatile(MXFP4_TAIL_BARRIER_INST_S2 ::: "memory");
+        asm volatile("s_waitcnt vmcnt(" MXFP4_STR(TAIL_BARRIER_VMCNT) ")\ns_barrier\n" ::: "memory");
 
         // Steps 3+4: pure MFMAs, no ds_reads, no prefetches
         tile_pf_params dummy_pf = {};
         kpair_32mfma_with_pf<0>(acc_A1Bl, tA1, tBl, a1_raw, bl_raw, dummy_pf, dummy_pf);
         kpair_32mfma_with_pf<0>(acc_A1Br, tA1, tBr, a1_raw, br_raw, dummy_pf, dummy_pf);
     }
-    // R47 Opt C: restore default wave priority after the K-loop + tail iter
-    // (epilogue stores have lower MFMA density). No-op when R47C_WAVE_PRIO=0.
-    R47C_PRIO_LOW();
 
 #else // TAIL_SPLIT == 0: original single-loop (better for large K)
 
@@ -4568,42 +1960,20 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         const uint32_t sel_a1_p1 = cur ? a1_1_p1 : a1_0_p1;
         const uint32_t sel_a0_p0 = nxt ? a0_1_p0 : a0_0_p0;
         const uint32_t sel_a0_p1 = nxt ? a0_1_p1 : a0_0_p1;
-#if !DIRECT_BL
         const uint32_t sel_bl_p0 = nxt ? bl_1_p0 : bl_0_p0;
         const uint32_t sel_bl_p1 = nxt ? bl_1_p1 : bl_0_p1;
-#endif
 
         const int pf_bt = (bt + 2 < k_byte_iters) ? (bt + 2) : (k_byte_iters - 1);
-#if R40A_PF_FENCE && R37_FIX_B && !FUSED_STEP34 && !DIRECT_BL
-        // R40A: defer make_pf_params construction until AFTER kpair_64mfma_step34
-        // returns (see R37_FIX_B branch below).
-#else
-        tile_pf_params pf_a0_p = make_pf_params(A0_db[cur], g.a, coord<ST_tile>(0,0,br*2,     pf_bt), so_a, srd_a, base_a, lb_a0[cur], R22B_A_HINT_VAL);
-        tile_pf_params pf_a1_p = make_pf_params(A1_db[cur], g.a, coord<ST_tile>(0,0,br*2+1,   pf_bt), so_a, srd_a, base_a, lb_a1[cur], R22B_A_HINT_VAL);
-#if !DIRECT_BL
-        tile_pf_params pf_bl_p = make_pf_params(Bl_db[cur], g.b, coord<ST_tile>(0,0,bc*2,     pf_bt), so_b, srd_b, base_b, lb_bl[cur], R22B_B_HINT_VAL);
-#endif
-        tile_pf_params pf_br_p = make_pf_params(Br_db[cur], g.b, coord<ST_tile>(0,0,bc*2+1,   pf_bt), so_b, srd_b, base_b, lb_br[cur], R22B_B_HINT_VAL);
-#endif // R40A_PF_FENCE
-
-#if EARLY_SCALE_PF
-        fp8e8m0_4 nxt_pf_a0[a_packs], nxt_pf_a1[a_packs], nxt_pf_bl[b_packs], nxt_pf_br[b_packs];
-        {
-            const uint32_t nxt_scale = static_cast<uint32_t>(bt + 1 < k_byte_iters ? bt + 1 : bt) << 9;
-            load_pq_scale_x2_async(a0_srd, lane_soff_x2, nxt_scale, nxt_pf_a0[0], nxt_pf_a0[1]);
-            load_pq_scale_x2_async(a1_srd, lane_soff_x2, nxt_scale, nxt_pf_a1[0], nxt_pf_a1[1]);
-            load_pq_scale_x2_async(bl_srd, lane_soff_x2, nxt_scale, nxt_pf_bl[0], nxt_pf_bl[1]);
-            load_pq_scale_x2_async(br_srd, lane_soff_x2, nxt_scale, nxt_pf_br[0], nxt_pf_br[1]);
-        }
-#endif
+        tile_pf_params pf_a0_p = make_pf_params(A0_db[cur], g.a, coord<ST_tile>(0,0,br*2,     pf_bt), so_a, srd_a, base_a, lb_a0[cur], static_cast<int>(kittens::coherency::cache_all));
+        tile_pf_params pf_a1_p = make_pf_params(A1_db[cur], g.a, coord<ST_tile>(0,0,br*2+1,   pf_bt), so_a, srd_a, base_a, lb_a1[cur], static_cast<int>(kittens::coherency::cache_all));
+        tile_pf_params pf_bl_p = make_pf_params(Bl_db[cur], g.b, coord<ST_tile>(0,0,bc*2,     pf_bt), so_b, srd_b, base_b, lb_bl[cur], static_cast<int>(kittens::coherency::cache_all));
+        tile_pf_params pf_br_p = make_pf_params(Br_db[cur], g.b, coord<ST_tile>(0,0,bc*2+1,   pf_bt), so_b, srd_b, base_b, lb_br[cur], static_cast<int>(kittens::coherency::cache_all));
 
         fp8e8m0_4 a0_raw[a_packs], a1_raw[a_packs], bl_raw[b_packs], br_raw[b_packs];
         #pragma unroll
         for (int p = 0; p < a_packs; ++p) { a0_raw[p] = pf_a0[p]; a1_raw[p] = pf_a1[p]; }
         #pragma unroll
         for (int p = 0; p < b_packs; ++p) { bl_raw[p] = pf_bl[p]; br_raw[p] = pf_br[p]; }
-
-#if !EARLY_SCALE_PF
         {
             const uint32_t nxt_scale = static_cast<uint32_t>(bt + 1 < k_byte_iters ? bt + 1 : bt) << 9;
             load_pq_scale_x2_async(a0_srd, lane_soff_x2, nxt_scale, pf_a0[0], pf_a0[1]);
@@ -4611,23 +1981,10 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
             load_pq_scale_x2_async(bl_srd, lane_soff_x2, nxt_scale, pf_bl[0], pf_bl[1]);
             load_pq_scale_x2_async(br_srd, lane_soff_x2, nxt_scale, pf_br[0], pf_br[1]);
         }
-#endif
 
         float4 nxt_bl_d[8];
-#if DIRECT_BL && EARLY_BL_PF
-        // Issue Bl buffer_load BEFORE Step12 — ~128 MFMAs (~512 cyc) hiding window
-        {
-            const uint32_t bl_nxt_bt = static_cast<uint32_t>((bt + 1 < k_byte_iters) ? (bt + 1) : bt);
-            load_bl_direct_async(nxt_bl_d, srd_b_ps, bl_voff_ps,
-                bl_ps_n0_soff + bl_nxt_bt * 2 * BL_K0_STRIDE);
-        }
-#endif
 
         float4 br_d[8], a1_d[8];
-#if R40A_PF_FENCE && R37_FIX_B && !FUSED_STEP34 && !DIRECT_BL
-        // R40A: pre-step12 fence — see top-of-iter comment block.
-        asm volatile("" ::: "memory");
-#endif
         kpair_64mfma_step12(acc_A0Bl, acc_A0Br, tA0, tBl,
             a0_raw, bl_raw, br_raw, br_d, a1_d,
             sel_br_p0, sel_br_p1, sel_a1_p0, sel_a1_p1);
@@ -4647,7 +2004,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         // All prefetches emitted after the fused block
         emit_pf_tail<0>(pf_a0_p, pf_a1_p);
         emit_pf_tail<0>(pf_bl_p, pf_br_p);
-#elif R37_FIX_B && !DIRECT_BL
+#elif R37_FIX_B
         // R37 Fix B (default, no-TAIL_SPLIT): use fused step3+step4 (correctness
         // fix). The no-TAIL_SPLIT path has no R25-C tail-pf-off branching, so we
         // unconditionally emit all prefetches after the fused block (matches the
@@ -4657,22 +2014,12 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         kpair_64mfma_step34(acc_A1Bl, acc_A1Br, tA1, tBl, tBr,
             a1_raw, bl_raw, br_raw, nxt_a0_d, nxt_bl_d,
             sel_a0_p0, sel_a0_p1, sel_bl_p0, sel_bl_p1);
-#if R40A_PF_FENCE
-        // R40A: build pf_*_p AFTER step34 (deferred from top-of-iter); see
-        // top-of-iter comment block. Plain memory clobber prevents the compiler
-        // from sinking the construction back across step12.
-        asm volatile("" ::: "memory");
-        tile_pf_params pf_a0_p = make_pf_params(A0_db[cur], g.a, coord<ST_tile>(0,0,br*2,     pf_bt), so_a, srd_a, base_a, lb_a0[cur], R22B_A_HINT_VAL);
-        tile_pf_params pf_a1_p = make_pf_params(A1_db[cur], g.a, coord<ST_tile>(0,0,br*2+1,   pf_bt), so_a, srd_a, base_a, lb_a1[cur], R22B_A_HINT_VAL);
-        tile_pf_params pf_bl_p = make_pf_params(Bl_db[cur], g.b, coord<ST_tile>(0,0,bc*2,     pf_bt), so_b, srd_b, base_b, lb_bl[cur], R22B_B_HINT_VAL);
-        tile_pf_params pf_br_p = make_pf_params(Br_db[cur], g.b, coord<ST_tile>(0,0,bc*2+1,   pf_bt), so_b, srd_b, base_b, lb_br[cur], R22B_B_HINT_VAL);
-#endif // R40A_PF_FENCE
         emit_pf_tail<0>(pf_a0_p, pf_a1_p);
         emit_pf_tail<0>(pf_bl_p, pf_br_p);
-#else // R37_FIX_B == 0 OR DIRECT_BL → legacy non-fused path
+#else // R37_FIX_B == 0 → legacy buggy non-fused step3+step4 path
 #if !STEP3_EMBED_BARRIER
         // R19B: site _S7 (no-TAIL_SPLIT outer !STEP3_EMBED_BARRIER, dead w/ default STEP3_EMBED_BARRIER=1)
-        asm volatile(MXFP4_STEP3_BARRIER_INST_S7 ::: "memory");
+        asm volatile("s_waitcnt vmcnt(" MXFP4_STR(STEP3_BARRIER_VMCNT) ")\ns_barrier\n" ::: "memory");
 #endif
 
         float4 nxt_a0_d[8];
@@ -4686,26 +2033,6 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
             nxt_a0_d[4], nxt_a0_d[5], nxt_a0_d[6], nxt_a0_d[7],
             sel_a0_p0, sel_a0_p1, pf_a0_p, pf_a1_p);
         emit_pf_tail<STEP3_PF_N>(pf_a0_p, pf_a1_p);
-
-#if DIRECT_BL && EARLY_BL_PF
-        // Step4: pure MFMAs + Br prefetch only (Bl already loaded into nxt_bl_d above)
-        {
-            tile_pf_params dummy_pf = {};
-            kpair_32mfma_with_pf<PF_MPT>(acc_A1Br, tA1, tBr, a1_raw, br_raw,
-                pf_br_p, dummy_pf);
-        }
-#elif DIRECT_BL
-        {
-            const uint32_t bl_nxt_bt = static_cast<uint32_t>((bt + 1 < k_byte_iters) ? (bt + 1) : bt);
-            kpair_32mfma_with_vmem_bl_wrap(acc_A1Br, tA1, tBr, a1_raw, br_raw,
-                nxt_bl_d[0], nxt_bl_d[1], nxt_bl_d[2], nxt_bl_d[3],
-                nxt_bl_d[4], nxt_bl_d[5], nxt_bl_d[6], nxt_bl_d[7],
-                bl_voff_ps, srd_b_ps,
-                bl_ps_n0_soff + bl_nxt_bt * 2 * BL_K0_STRIDE);
-        }
-        #pragma unroll
-        for (int pi = 0; pi < PF_MPT; ++pi) emit_one_pf(pf_br_p, pi);
-#else
 #if SPREAD_LDS
         kpair_32mfma_with_lds_rowspread_pf<STEP4_PF_N>(acc_A1Br, tA1, tBr, a1_raw, br_raw,
 #else
@@ -4714,43 +2041,19 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
             nxt_bl_d[0], nxt_bl_d[1], nxt_bl_d[2], nxt_bl_d[3],
             nxt_bl_d[4], nxt_bl_d[5], nxt_bl_d[6], nxt_bl_d[7],
             sel_bl_p0, sel_bl_p1, pf_bl_p, pf_br_p);
-#if STEP4_EXTERNAL_BR_PREFETCH
-        #pragma unroll
-        for (int pi = 0; pi < PF_MPT; ++pi) emit_one_pf(pf_br_p, pi);
-#else
         emit_pf_tail<STEP4_PF_N>(pf_bl_p, pf_br_p);
-#endif
-#endif // DIRECT_BL
 #endif // FUSED_STEP34 / R37_FIX_B / legacy
-
-#if DIRECT_BL
-        asm volatile("s_waitcnt vmcnt(0) lgkmcnt(0)");
-#else
         asm volatile("s_waitcnt lgkmcnt(0)");
-#endif
-        R41A_FENCE_BEFORE_EXTRACT();
         extract_tile(nxt_a0_d, tA0);
-        R41A_FENCE_BEFORE_EXTRACT();
         extract_tile(nxt_bl_d, tBl);
         // R21B/R22C: opt-in scheduling hooks (no-op at defaults). Site 2.
-        MXFP4_R22C_ITER_END_HOOK_2;
-
-#if EARLY_SCALE_PF
-        #pragma unroll
-        for (int p = 0; p < a_packs; ++p) { pf_a0[p] = nxt_pf_a0[p]; pf_a1[p] = nxt_pf_a1[p]; }
-        #pragma unroll
-        for (int p = 0; p < b_packs; ++p) { pf_bl[p] = nxt_pf_bl[p]; pf_br[p] = nxt_pf_br[p]; }
-#endif
     }
 
 #endif // TAIL_SPLIT
-#endif // SWAP_STEP34_MAIN
 
     // ═══════════ Store C -- streamlined direct store ═══════════
     // R21B: optionally drop wave priority before the store epilogue.
-    MXFP4_R21B_PRIO_LOW_HOOK;
     // R22C: optional sched_group_barrier just before Store-C (site bit3).
-    MXFP4_R22C_PRESTORE_HOOK;
     // Process base tiles directly from accumulators without materializing RT_C.
     auto store_block = [&](const fp4_floatx4_t acc[16], int mh, int nh) {
         const int lid = kittens::laneid();
@@ -4776,105 +2079,25 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
             }
         }
     };
-
-#if SWAP_STEP34_MAIN
-    auto store_block_inner = [&](const fp4_floatx4_t acc[16], int mh, int nh) {
-        const int lid = kittens::laneid();
-        const int tile_r = br * WARPS_M * 2 + WARPS_M * mh + wm;
-        const int tile_c = bc * WARPS_N * 2 + WARPS_N * nh + wn;
-        bf16 *dst_ptr = g.c.raw_ptr + static_cast<size_t>(tile_r * 64) * g.c.cols()
-                        + static_cast<size_t>(tile_c * 64);
-        const int row_stride = g.c.cols();
-        const int lane_group = lid / 16;
-        const int lane_pos = lid % 16;
-
-        #pragma unroll
-        for (int i = 0; i < 4; ++i) {
-            #pragma unroll
-            for (int j = 0; j < 4; ++j) {
-                fp4_floatx4_t s = acc[i * 4 + j] * g.scale;
-                const int row = i * 16 + lane_pos;
-                const int col = j * 16 + 4 * lane_group;
-#if PACKED_STORE
-                // Pack 4 bf16 into 2 dword stores (4x fewer store instructions)
-                store_bf16x2_packed(&dst_ptr[row * row_stride + col + 0], s[0], s[1]);
-                store_bf16x2_packed(&dst_ptr[row * row_stride + col + 2], s[2], s[3]);
-#else
-                store_bf16_val(&dst_ptr[row * row_stride + col + 0], s[0]);
-                store_bf16_val(&dst_ptr[row * row_stride + col + 1], s[1]);
-                store_bf16_val(&dst_ptr[row * row_stride + col + 2], s[2]);
-                store_bf16_val(&dst_ptr[row * row_stride + col + 3], s[3]);
-#endif // PACKED_STORE
-            }
-        }
-    };
-#if SWAP_STEP12_MAIN
-    store_block_inner(acc_A0Bl, 0, 0);
-    store_block_inner(acc_A0Br, 0, 1);
-    store_block_inner(acc_A1Bl, 1, 0);
-    store_block_inner(acc_A1Br, 1, 1);
-#else
-    store_block(acc_A0Bl, 0, 0);
-    store_block(acc_A0Br, 0, 1);
-    store_block_inner(acc_A1Bl, 1, 0);
-    store_block_inner(acc_A1Br, 1, 1);
-#endif
-#else
     store_block(acc_A0Bl, 0, 0);
     store_block(acc_A0Br, 0, 1);
     store_block(acc_A1Bl, 1, 0);
     store_block(acc_A1Br, 1, 1);
-#endif
-
-#if PERSISTENT_XCD
-    __syncthreads();   // Fix B: ensure all stores for the current tile are visible
-                       // and all threads have left the store loop before the next
-                       // atomicAdd claim on the global tile counter.
-    } // end while(true) persistent loop
-#else
     } // end static-dispatch block
-#endif
 }
 
 void dispatch_gluon_cpp(gluon_globals g) {
     int m = static_cast<int>(g.c.rows());
     int n = static_cast<int>(g.c.cols());
-#if PERSISTENT_XCD
-    // Fix A: robust counter reset (checked symbol lookup + synchronous memset).
-    unsigned int* counter_dev = nullptr;
-    hipError_t err = hipGetSymbolAddress((void**)&counter_dev,
-                                         HIP_SYMBOL(g_persistent_tile_counter));
-    if (err != hipSuccess || counter_dev == nullptr) {
-        fprintf(stderr, "PERSISTENT_XCD: hipGetSymbolAddress failed (%d) - aborting\n",
-                (int)err);
-        std::abort();
-    }
-    hipError_t merr = hipMemset(counter_dev, 0, sizeof(unsigned int));
-    if (merr != hipSuccess) {
-        fprintf(stderr, "PERSISTENT_XCD: hipMemset failed (%d)\n", (int)merr);
-        std::abort();
-    }
-    // Fix C: cap grid by problem size so we never over-launch on small problems.
-    const int total_tiles = (m / BLK) * (n / BLK);
-    const int grid_x = total_tiles < PERSISTENT_GRID ? total_tiles : PERSISTENT_GRID;
-    const dim3 grid(grid_x);
-#else
     const dim3 grid((m / BLK) * (n / BLK));
-#endif
     mxfp4_gluon_cpp_kernel<<<grid, dim3(_NUM_THREADS), 0>>>(g);
 }
 
 PYBIND11_MODULE(tk_mxfp4_gluon_cpp, m) {
     m.doc() = "MXFP4 Gluon-arch kernel (C++ reimplementation)";
-#if DIRECT_BL
-    py::bind_function<dispatch_gluon_cpp>(m, "gemm_rcr",
-        &gluon_globals::a, &gluon_globals::b,
-        &gluon_globals::a_scale, &gluon_globals::b_scale,
-        &gluon_globals::c, &gluon_globals::b_ps);
-#else
     py::bind_function<dispatch_gluon_cpp>(m, "gemm_rcr",
         &gluon_globals::a, &gluon_globals::b,
         &gluon_globals::a_scale, &gluon_globals::b_scale,
         &gluon_globals::c);
-#endif
 }
+
