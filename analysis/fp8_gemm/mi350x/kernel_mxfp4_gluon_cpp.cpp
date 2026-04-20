@@ -255,9 +255,20 @@ __device__ __forceinline__ void load_b_preshuffle_8(
     }
 }
 // Pre-compute 8 per-lane voffsets for one B half-tile.
-// n_block_start = first n-block index for this half-tile
+// n_block_start = first n-block index for this half-tile (each n-block = 16 rows)
 // K_bytes_full = K_DIM/2 (total K dimension in bytes)
-// voff[0..3] = tile-rows 0..3 at k_phase=0, voff[4..7] = same rows at k_phase=1
+//
+// MFMA 16x16x128 FP4 lane mapping (verified by POC):
+//   row = laneid % 16           (n-row within 16-row block)
+//   group = laneid / 16         (0..3)
+//   k_block_local = group / 2   (0 or 1: which 32-byte k_block within BK)
+//   k_phase = group % 2         (0 or 1: which 16-byte half within k_block)
+//
+// Preshuffle flat offset:
+//   n_block * 16 * K_bytes + k_block * 512 + k_phase * 256 + row * 16
+//
+// voff[0..3] = tile-rows 0..3 at k_phase=0 (k_block_local selects k_block)
+// voff[4..7] = tile-rows 0..3 at k_phase=1
 __device__ __forceinline__ void compute_b_preshuffle_voffs(
     uint32_t voff[8],
     int n_block_start,
@@ -267,13 +278,14 @@ __device__ __forceinline__ void compute_b_preshuffle_voffs(
     const int row = laneid % 16;
     const int group = laneid / 16;
     const int k_block_local = group / 2;
+    const int k_phase = group % 2;
 
     #pragma unroll
     for (int r = 0; r < 4; ++r) {
         const uint32_t n_base = (uint32_t)(n_block_start + r) * 16u * (uint32_t)K_bytes_full;
-        const uint32_t kb_base = (uint32_t)k_block_local * 512u + (uint32_t)row * 16u;
-        voff[r]     = n_base + kb_base;         // k_phase=0
-        voff[r + 4] = n_base + kb_base + 256u;  // k_phase=1
+        const uint32_t kb_base = (uint32_t)k_block_local * 512u + (uint32_t)k_phase * 256u + (uint32_t)row * 16u;
+        voff[r]     = n_base + kb_base;
+        voff[r + 4] = n_base + kb_base + 1024u;  // next 2 k_blocks (+2*512)
     }
 }
 
@@ -2180,7 +2192,9 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
     // ═══ BPRESHUFFLE K-loop: B tiles loaded via buffer_load_dwordx4 from global ═══
     // Pipeline: each iteration loads Br(cur) and nxt_Bl from pre-shuffled global,
     // A0 and A1 from LDS (same as baseline), prefetches only A tiles to LDS.
-    constexpr int BK_BYTES = BK / 2;  // 64 bytes per K-iteration
+    // Preshuffle flat-byte stride per K-iteration:
+    // BK=128 raw bytes = BK/32 k_blocks, each k_block = 512 flat bytes
+    constexpr int BK_PRESHUFFLE_STRIDE = (BK / 32) * 512;  // = 2048
 
 #ifdef UNROLL_K
   #if UNROLL_K == 0
@@ -2224,7 +2238,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 
         // Load Br from pre-shuffled global memory
         float4 br_d[8];
-        const uint32_t br_k_soff = (uint32_t)bt * BK_BYTES;
+        const uint32_t br_k_soff = (uint32_t)bt * BK_PRESHUFFLE_STRIDE;
         load_b_preshuffle_8(br_d, srd_b, br_voffs, br_k_soff);
 
         // Step 1: A0*Bl (32 pure MFMAs, Bl already in tBl)
@@ -2266,7 +2280,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 
         // Load next Bl from pre-shuffled global
         float4 nxt_bl_d[8];
-        const uint32_t nxt_bl_k_soff = (uint32_t)(bt + 1) * BK_BYTES;
+        const uint32_t nxt_bl_k_soff = (uint32_t)(bt + 1) * BK_PRESHUFFLE_STRIDE;
         load_b_preshuffle_8(nxt_bl_d, srd_b, bl_voffs, nxt_bl_k_soff);
 
         // Wait for nxt_A0 ds_reads and nxt_Bl loads
@@ -2291,7 +2305,7 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 
         // Load Br from pre-shuffled global
         float4 br_d[8];
-        const uint32_t br_k_soff = (uint32_t)bt * BK_BYTES;
+        const uint32_t br_k_soff = (uint32_t)bt * BK_PRESHUFFLE_STRIDE;
         load_b_preshuffle_8(br_d, srd_b, br_voffs, br_k_soff);
 
         // Step 1: A0*Bl
