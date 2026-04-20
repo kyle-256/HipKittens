@@ -1,0 +1,93 @@
+W20260420 02:01:29.730434 140332892642816 simple_timer.cpp:55] [rocprofv3] tool initialization ::     0.145776 sec
+W20260420 02:01:29.730652 140332892642816 simple_timer.cpp:55] [rocprofv3] 'python3 test_mxfp8_python.py 4096 28672 8192' ::     0.000000 sec
+=== MXFP8 GEMM Layout Benchmark (preshuffle-quant): M=4096, N=28672, K=8192 ===
+Warmup=100, iters=200, correctness=off
+Layouts=crr
+
+--- CRR Layout: C = A^T @ B ---
+W20260420 02:01:30.916545 140332892642816 tool.cpp:2420] HSA version 8.19.0 initialized (instance=0)
+[R55B-DEBUG-3] dispatch_pq_v2 entry: L=2 g.m=0 g.n=0 g.k=0 a.cols=4096 c.rows=4096 c.cols=28672
+  Avg time: 0.8605 ms, TFLOPS: 2236.01
+
+Results saved to mxfp8_layout_results_4096x28672x8192_pq.json
+W20260420 02:01:31.919375 140332892642816 simple_timer.cpp:55] [rocprofv3] 'python3 test_mxfp8_python.py 4096 28672 8192' ::     2.188723 sec
+E20260420 02:01:32.020130 140332892642816 output_stream.cpp:111] Opened result file: /shared_nfs/kyle/test/Hipkittens2/analysis/fp8_gemm/mi350x/r56b_pmc_results/70B_GateUp_mxfp8_crr_set1/pmc_1/pt-test-2-l7n7x-master-0/3038389_counter_collection.csv
+E20260420 02:01:32.101071 140332892642816 output_stream.cpp:111] Opened result file: /shared_nfs/kyle/test/Hipkittens2/analysis/fp8_gemm/mi350x/r56b_pmc_results/70B_GateUp_mxfp8_crr_set1/pmc_1/pt-test-2-l7n7x-master-0/3038389_agent_info.csv
+W20260420 02:01:32.105924 140332892642816 simple_timer.cpp:55] [rocprofv3] output generation ::     0.173426 sec
+W20260420 02:01:32.107369 140332892642816 simple_timer.cpp:55] [rocprofv3] tool finalization ::     0.174879 sec
+W20260420 02:01:32.845484 139825477131776 simple_timer.cpp:55] [rocprofv3] tool initialization ::     0.155087 sec
+W20260420 02:01:32.845688 139825477131776 simple_timer.cpp:55] [rocprofv3] 'python3 test_mxfp8_python.py 4096 28672 8192' ::     0.000000 sec
+=== MXFP8 GEMM Layout Benchmark (preshuffle-quant): M=4096, N=28672, K=8192 ===
+Warmup=100, iters=200, correctness=off
+Layouts=crr
+
+--- CRR Layout: C = A^T @ B ---
+W20260420 02:01:33.850918 139825477131776 tool.cpp:2420] HSA version 8.19.0 initialized (instance=0)
+[R55B-DEBUG-3] dispatch_pq_v2 entry: L=2 g.m=0 g.n=0 g.k=0 a.cols=4096 c.rows=4096 c.cols=28672
+  Avg time: 0.8513 ms, TFLOPS: 2260.18
+
+Results saved to mxfp8_layout_results_4096x28672x8192_pq.json
+W20260420 02:01:34.914085 139825477131776 simple_timer.cpp:55] [rocprofv3] 'python3 test_mxfp8_python.py 4096 28672 8192' ::     2.068397 sec
+E20260420 02:01:35.016225 139825477131776 output_stream.cpp:111] Opened result file: /shared_nfs/kyle/test/Hipkittens2/analysis/fp8_gemm/mi350x/r56b_pmc_results/70B_GateUp_mxfp8_crr_set1/pmc_2/pt-test-2-l7n7x-master-0/3038642_counter_collection.csv
+E20260420 02:01:35.088057 139825477131776 output_stream.cpp:111] Opened result file: /shared_nfs/kyle/test/Hipkittens2/analysis/fp8_gemm/mi350x/r56b_pmc_results/70B_GateUp_mxfp8_crr_set1/pmc_2/pt-test-2-l7n7x-master-0/3038642_agent_info.csv
+W20260420 02:01:35.091344 139825477131776 simple_timer.cpp:55] [rocprofv3] output generation ::     0.164302 sec
+W20260420 02:01:35.092775 139825477131776 simple_timer.cpp:55] [rocprofv3] tool finalization ::     0.165741 sec
+W20260420 02:01:35.832430 140691147800064 simple_timer.cpp:55] [rocprofv3] tool initialization ::     0.146867 sec
+W20260420 02:01:35.832653 140691147800064 simple_timer.cpp:55] [rocprofv3] 'python3 test_mxfp8_python.py 4096 28672 8192' ::     0.000000 sec
+=== MXFP8 GEMM Layout Benchmark (preshuffle-quant): M=4096, N=28672, K=8192 ===
+Warmup=100, iters=200, correctness=off
+Layouts=crr
+
+--- CRR Layout: C = A^T @ B ---
+W20260420 02:01:36.800845 140691147800064 tool.cpp:2420] HSA version 8.19.0 initialized (instance=0)
+[R55B-DEBUG-3] dispatch_pq_v2 entry: L=2 g.m=0 g.n=0 g.k=0 a.cols=4096 c.rows=4096 c.cols=28672
+  Avg time: 0.9122 ms, TFLOPS: 2109.27
+
+Results saved to mxfp8_layout_results_4096x28672x8192_pq.json
+W20260420 02:01:38.052101 140691147800064 simple_timer.cpp:55] [rocprofv3] 'python3 test_mxfp8_python.py 4096 28672 8192' ::     2.219449 sec
+E20260420 02:01:38.135537 140691147800064 output_stream.cpp:111] Opened result file: /shared_nfs/kyle/test/Hipkittens2/analysis/fp8_gemm/mi350x/r56b_pmc_results/70B_GateUp_mxfp8_crr_set1/pmc_3/pt-test-2-l7n7x-master-0/3038803_counter_collection.csv
+E20260420 02:01:38.207572 140691147800064 output_stream.cpp:111] Opened result file: /shared_nfs/kyle/test/Hipkittens2/analysis/fp8_gemm/mi350x/r56b_pmc_results/70B_GateUp_mxfp8_crr_set1/pmc_3/pt-test-2-l7n7x-master-0/3038803_agent_info.csv
+W20260420 02:01:38.212031 140691147800064 simple_timer.cpp:55] [rocprofv3] output generation ::     0.146702 sec
+W20260420 02:01:38.214369 140691147800064 simple_timer.cpp:55] [rocprofv3] tool finalization ::     0.149046 sec
+W20260420 02:01:38.867299 139755194547712 simple_timer.cpp:55] [rocprofv3] tool initialization ::     0.141331 sec
+W20260420 02:01:38.867497 139755194547712 simple_timer.cpp:55] [rocprofv3] 'python3 test_mxfp8_python.py 4096 28672 8192' ::     0.000000 sec
+=== MXFP8 GEMM Layout Benchmark (preshuffle-quant): M=4096, N=28672, K=8192 ===
+Warmup=100, iters=200, correctness=off
+Layouts=crr
+
+--- CRR Layout: C = A^T @ B ---
+W20260420 02:01:39.765705 139755194547712 tool.cpp:2420] HSA version 8.19.0 initialized (instance=0)
+[R55B-DEBUG-3] dispatch_pq_v2 entry: L=2 g.m=0 g.n=0 g.k=0 a.cols=4096 c.rows=4096 c.cols=28672
+  Avg time: 2.6444 ms, TFLOPS: 727.64
+
+Results saved to mxfp8_layout_results_4096x28672x8192_pq.json
+W20260420 02:01:41.178928 139755194547712 simple_timer.cpp:55] [rocprofv3] 'python3 test_mxfp8_python.py 4096 28672 8192' ::     2.311432 sec
+E20260420 02:01:41.266405 139755194547712 output_stream.cpp:111] Opened result file: /shared_nfs/kyle/test/Hipkittens2/analysis/fp8_gemm/mi350x/r56b_pmc_results/70B_GateUp_mxfp8_crr_set1/pmc_4/pt-test-2-l7n7x-master-0/3038948_counter_collection.csv
+E20260420 02:01:41.354229 139755194547712 output_stream.cpp:111] Opened result file: /shared_nfs/kyle/test/Hipkittens2/analysis/fp8_gemm/mi350x/r56b_pmc_results/70B_GateUp_mxfp8_crr_set1/pmc_4/pt-test-2-l7n7x-master-0/3038948_agent_info.csv
+W20260420 02:01:41.359370 139755194547712 simple_timer.cpp:55] [rocprofv3] output generation ::     0.167006 sec
+W20260420 02:01:41.360885 139755194547712 simple_timer.cpp:55] [rocprofv3] tool finalization ::     0.168529 sec
+W20260420 02:01:42.105708 139953376534016 simple_timer.cpp:55] [rocprofv3] tool initialization ::     0.152686 sec
+W20260420 02:01:42.105945 139953376534016 simple_timer.cpp:55] [rocprofv3] 'python3 test_mxfp8_python.py 4096 28672 8192' ::     0.000000 sec
+=== MXFP8 GEMM Layout Benchmark (preshuffle-quant): M=4096, N=28672, K=8192 ===
+Warmup=100, iters=200, correctness=off
+Layouts=crr
+
+--- CRR Layout: C = A^T @ B ---
+W20260420 02:01:43.049708 139953376534016 tool.cpp:2420] HSA version 8.19.0 initialized (instance=0)
+W20260420 02:01:43.333523 139953376534016 tool.cpp:1189] Unable to find all counters for agent 2 (gpu-0, gfx950) in [ALUStalledByLDS, FetchSize, L2CacheHit, LDSBankConflict, MemUnitBusy, MemUnitStalled, MfmaUtil, VALUBusy]. Found: [FetchSize, LDSBankConflict, MemUnitStalled, MfmaUtil, VALUBusy]. Missing: [ALUStalledByLDS, L2CacheHit, MemUnitBusy]
+W20260420 02:01:43.333636 139953376534016 tool.cpp:1189] Unable to find all counters for agent 3 (gpu-1, gfx950) in [ALUStalledByLDS, FetchSize, L2CacheHit, LDSBankConflict, MemUnitBusy, MemUnitStalled, MfmaUtil, VALUBusy]. Found: [FetchSize, LDSBankConflict, MemUnitStalled, MfmaUtil, VALUBusy]. Missing: [ALUStalledByLDS, L2CacheHit, MemUnitBusy]
+W20260420 02:01:43.335115 139953376534016 tool.cpp:1189] Unable to find all counters for agent 4 (gpu-2, gfx950) in [ALUStalledByLDS, FetchSize, L2CacheHit, LDSBankConflict, MemUnitBusy, MemUnitStalled, MfmaUtil, VALUBusy]. Found: [FetchSize, LDSBankConflict, MemUnitStalled, MfmaUtil, VALUBusy]. Missing: [ALUStalledByLDS, L2CacheHit, MemUnitBusy]
+W20260420 02:01:43.336646 139953376534016 tool.cpp:1189] Unable to find all counters for agent 5 (gpu-3, gfx950) in [ALUStalledByLDS, FetchSize, L2CacheHit, LDSBankConflict, MemUnitBusy, MemUnitStalled, MfmaUtil, VALUBusy]. Found: [FetchSize, LDSBankConflict, MemUnitStalled, MfmaUtil, VALUBusy]. Missing: [ALUStalledByLDS, L2CacheHit, MemUnitBusy]
+W20260420 02:01:43.337650 139953376534016 tool.cpp:1189] Unable to find all counters for agent 6 (gpu-4, gfx950) in [ALUStalledByLDS, FetchSize, L2CacheHit, LDSBankConflict, MemUnitBusy, MemUnitStalled, MfmaUtil, VALUBusy]. Found: [FetchSize, LDSBankConflict, MemUnitStalled, MfmaUtil, VALUBusy]. Missing: [ALUStalledByLDS, L2CacheHit, MemUnitBusy]
+W20260420 02:01:43.339954 139953376534016 tool.cpp:1189] Unable to find all counters for agent 7 (gpu-5, gfx950) in [ALUStalledByLDS, FetchSize, L2CacheHit, LDSBankConflict, MemUnitBusy, MemUnitStalled, MfmaUtil, VALUBusy]. Found: [FetchSize, LDSBankConflict, MemUnitStalled, MfmaUtil, VALUBusy]. Missing: [ALUStalledByLDS, L2CacheHit, MemUnitBusy]
+W20260420 02:01:43.339985 139953376534016 tool.cpp:1189] Unable to find all counters for agent 8 (gpu-6, gfx950) in [ALUStalledByLDS, FetchSize, L2CacheHit, LDSBankConflict, MemUnitBusy, MemUnitStalled, MfmaUtil, VALUBusy]. Found: [FetchSize, LDSBankConflict, MemUnitStalled, MfmaUtil, VALUBusy]. Missing: [ALUStalledByLDS, L2CacheHit, MemUnitBusy]
+W20260420 02:01:43.341279 139953376534016 tool.cpp:1189] Unable to find all counters for agent 9 (gpu-7, gfx950) in [ALUStalledByLDS, FetchSize, L2CacheHit, LDSBankConflict, MemUnitBusy, MemUnitStalled, MfmaUtil, VALUBusy]. Found: [FetchSize, LDSBankConflict, MemUnitStalled, MfmaUtil, VALUBusy]. Missing: [ALUStalledByLDS, L2CacheHit, MemUnitBusy]
+[R55B-DEBUG-3] dispatch_pq_v2 entry: L=2 g.m=0 g.n=0 g.k=0 a.cols=4096 c.rows=4096 c.cols=28672
+  Avg time: 0.8770 ms, TFLOPS: 2193.96
+
+Results saved to mxfp8_layout_results_4096x28672x8192_pq.json
+W20260420 02:01:44.176106 139953376534016 simple_timer.cpp:55] [rocprofv3] 'python3 test_mxfp8_python.py 4096 28672 8192' ::     2.070162 sec
+E20260420 02:01:44.287284 139953376534016 output_stream.cpp:111] Opened result file: /shared_nfs/kyle/test/Hipkittens2/analysis/fp8_gemm/mi350x/r56b_pmc_results/70B_GateUp_mxfp8_crr_set1/pmc_5/pt-test-2-l7n7x-master-0/3039130_counter_collection.csv
+E20260420 02:01:44.352048 139953376534016 output_stream.cpp:111] Opened result file: /shared_nfs/kyle/test/Hipkittens2/analysis/fp8_gemm/mi350x/r56b_pmc_results/70B_GateUp_mxfp8_crr_set1/pmc_5/pt-test-2-l7n7x-master-0/3039130_agent_info.csv
+W20260420 02:01:44.355928 139953376534016 simple_timer.cpp:55] [rocprofv3] output generation ::     0.166845 sec
+W20260420 02:01:44.357502 139953376534016 simple_timer.cpp:55] [rocprofv3] tool finalization ::     0.168424 sec

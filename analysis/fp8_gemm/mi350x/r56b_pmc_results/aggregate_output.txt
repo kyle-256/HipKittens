@@ -1,0 +1,145 @@
+
+====================================================================================================
+=== 70B_GateUp M=4096 N=28672 K=8192 (CRR) ===
+====================================================================================================
+Metric                                           FP8         MXFP8        MX-FP8        MX/FP8
+----------------------------------------------------------------------------------------------------
+duration_us                                    651.0         752.9         101.9         1.157
+achieved_TFLOPS                               2955.7        2555.7        -400.1       0.86464
+GRBM_GUI_ACTIVE                           10005841.5    14146894.0     4141052.5         1.414
+SQ_BUSY_CYCLES                            38847813.5    55644776.0    16796962.5         1.432
+SQ_INSTS_VALU                             75737088.0    79063040.0     3325952.0         1.044
+SQ_INSTS_MFMA                             29360128.0    29360128.0       0.00000       1.00000
+SQ_INSTS_LDS                              44040192.0    44040192.0       0.00000       1.00000
+SQ_INSTS_VMEM_RD                           7340032.0     8257536.0      917504.0         1.125
+SQ_INSTS_SALU                             27797504.0    37259264.0     9461760.0         1.340
+SQ_VALU_MFMA_BUSY_CYCLES                 939524096.0   939524096.0       0.00000       1.00000
+SQ_WAIT_INST_LDS_cyc4                     49180632.5    40440799.0    -8739833.5       0.82229
+SQ_WAIT_INST_ANY_cyc4                    283949900.5   256272031.0   -27677869.5       0.90253
+SQ_WAIT_ANY_cyc4                         165808244.0   407405310.5   241597066.5         2.457
+SQ_ACTIVE_INST_VALU                       75737088.0   108437504.0    32700416.0         1.432
+SQ_ACTIVE_INST_VMEM                        7340032.0     9627329.5     2287297.5         1.312
+SQ_ACTIVE_INST_LDS                        44040192.0    44040192.0       0.00000       1.00000
+TCC_HIT_sum                               47948057.5    54702273.5     6754216.0         1.141
+TCC_MISS_sum                              18130526.5    13216612.0    -4913914.5       0.72897
+TCC_hit_pct                                   72.562        80.541         7.978         1.110
+FetchSize_KB                               1013984.6      711246.2     -302738.4       0.70144
+VALUBusy_pct                                  22.886        23.649       0.76307         1.033
+MfmaUtil_pct                                  70.976        51.225       -19.751       0.72173
+MemUnitStalled_pct                           0.08252       0.04020      -0.04232       0.48715
+MemUnitBusy_pct                                    0             0             0             0
+LDSBankConflict_pct                          0.00000       0.00000       0.00000             0
+ALUStalledByLDS_pct                                0             0             0             0
+L2CacheHit_pct                                     0             0             0             0
+TA_ADDR_STALL_TC_per_grbm                      2.619         2.178      -0.44145       0.83145
+TA_DATA_STALL_TC_per_grbm                    0.64546       0.21375      -0.43171       0.33116
+TCP_TA_DATA_STALL_per_grbm                   0.65017       0.39072      -0.25946       0.60094
+TCP_PENDING_per_grbm                          18.020        18.858       0.83825         1.047
+TCP_RFIFO_per_grbm                           0.04815       0.00065      -0.04749       0.01355
+TCC_BUBBLE_per_grbm                          0.00000       0.00000       0.00000             0
+TCC_BUSY_per_grbm                             15.704        15.764       0.06018         1.004
+VMEM_FIFO_FULL_per_grbm                      0.87076       0.98593       0.11517         1.132
+LDS_FIFO_FULL_per_grbm                       0.00000       0.00000       0.00000             0
+LDS_BANK_CONFLICT_per_grbm                   0.00000       0.00000       0.00000             0
+  MXFP8 kernels: ['void crr_exact_8wave_scaled_kernel<true, 2>(layout_globals)']
+  FP8 kernels:   ['crr_exact_8wave_kernel(crr_exact_8wave_globals)']
+
+====================================================================================================
+=== 70B_QO M=4096 N=8192 K=8192 (CRR) ===
+====================================================================================================
+Metric                                           FP8         MXFP8        MX-FP8        MX/FP8
+----------------------------------------------------------------------------------------------------
+duration_us                                    187.4         194.7         7.270         1.039
+achieved_TFLOPS                               2933.1        2823.6        -109.5       0.96266
+GRBM_GUI_ACTIVE                            2941862.5     3341259.5      399397.0         1.136
+SQ_BUSY_CYCLES                            10686454.0    12362850.5     1676396.5         1.157
+SQ_INSTS_VALU                             21491712.0    22589440.0     1097728.0         1.051
+SQ_INSTS_MFMA                              8388608.0     8388608.0       0.00000       1.00000
+SQ_INSTS_LDS                              12582912.0    12582912.0       0.00000       1.00000
+SQ_INSTS_VMEM_RD                           2097152.0     2359296.0      262144.0         1.125
+SQ_INSTS_SALU                              8163328.0    10641408.0     2478080.0         1.304
+SQ_VALU_MFMA_BUSY_CYCLES                 268435456.0   268435456.0       0.00000       1.00000
+SQ_WAIT_INST_LDS_cyc4                     14786112.5    18917306.5     4131194.0         1.279
+SQ_WAIT_INST_ANY_cyc4                     81319099.5    81562628.0      243528.5         1.003
+SQ_WAIT_ANY_cyc4                          40649203.0    54003792.0    13354589.0         1.329
+SQ_ACTIVE_INST_VALU                       21491712.0    30982144.0     9490432.0         1.442
+SQ_ACTIVE_INST_VMEM                        2097152.0     2726741.5      629589.5         1.300
+SQ_ACTIVE_INST_LDS                        12582912.0    12582912.0       0.00000       1.00000
+TCC_HIT_sum                               15221694.0    15652713.0      431019.0         1.028
+TCC_MISS_sum                               3670531.0     3768960.0       98429.0         1.027
+TCC_hit_pct                                   80.571        80.594       0.02284         1.000
+FetchSize_KB                                196670.0      202837.4        6167.4         1.031
+VALUBusy_pct                                  22.256        28.169         5.913         1.266
+MfmaUtil_pct                                  69.495        61.015        -8.480       0.87798
+MemUnitStalled_pct                           0.11901       0.09847      -0.02054       0.82741
+MemUnitBusy_pct                                    0             0             0             0
+LDSBankConflict_pct                          0.00000       0.00000       0.00000             0
+ALUStalledByLDS_pct                                0             0             0             0
+L2CacheHit_pct                                     0             0             0             0
+TA_ADDR_STALL_TC_per_grbm                    0.05075       0.06386       0.01311         1.258
+TA_DATA_STALL_TC_per_grbm                      1.125       0.88171      -0.24310       0.78387
+TCP_TA_DATA_STALL_per_grbm                     1.127       0.92926      -0.19783       0.82447
+TCP_PENDING_per_grbm                          16.325        16.270      -0.05407       0.99669
+TCP_RFIFO_per_grbm                           0.41972       0.18461      -0.23511       0.43984
+TCC_BUBBLE_per_grbm                          0.00000       0.00000       0.00000             0
+TCC_BUSY_per_grbm                             14.458        14.328      -0.12956       0.99104
+VMEM_FIFO_FULL_per_grbm                      0.13296       0.13684       0.00388         1.029
+LDS_FIFO_FULL_per_grbm                       0.00000       0.00000       0.00000             0
+LDS_BANK_CONFLICT_per_grbm                   0.00000       0.00000       0.00000             0
+  MXFP8 kernels: ['void crr_exact_8wave_scaled_kernel<true, 2>(layout_globals)']
+  FP8 kernels:   ['crr_exact_8wave_kernel(crr_exact_8wave_globals)']
+
+====================================================================================================
+=== 70B_Down M=4096 N=8192 K=28672 (CRR) ===
+====================================================================================================
+Metric                                           FP8         MXFP8        MX-FP8        MX/FP8
+----------------------------------------------------------------------------------------------------
+duration_us                                    616.0         702.0        86.040         1.140
+achieved_TFLOPS                               3123.7        2740.8        -382.8       0.87744
+GRBM_GUI_ACTIVE                            9294499.0    12763861.0     3469362.0         1.373
+SQ_BUSY_CYCLES                            35354280.5    50169841.5    14815561.0         1.419
+SQ_INSTS_VALU                             71225344.0    74362880.0     3137536.0         1.044
+SQ_INSTS_MFMA                             29360128.0    29360128.0       0.00000       1.00000
+SQ_INSTS_LDS                              44040192.0    44040192.0       0.00000       1.00000
+SQ_INSTS_VMEM_RD                           7344128.0     8257536.0      913408.0         1.124
+SQ_INSTS_SALU                             29425664.0    36200448.0     6774784.0         1.230
+SQ_VALU_MFMA_BUSY_CYCLES                 939524096.0   939524096.0       0.00000       1.00000
+SQ_WAIT_INST_LDS_cyc4                     47975443.5    43098265.5    -4877178.0       0.89834
+SQ_WAIT_INST_ANY_cyc4                    260932340.5   238268488.5   -22663852.0       0.91314
+SQ_WAIT_ANY_cyc4                         144555710.0   345355865.5   200800155.5         2.389
+SQ_ACTIVE_INST_VALU                       71225344.0   103727104.0    32501760.0         1.456
+SQ_ACTIVE_INST_VMEM                        7340032.0     9632239.5     2292207.5         1.312
+SQ_ACTIVE_INST_LDS                        44040192.0    44040192.0       0.00000       1.00000
+TCC_HIT_sum                               49333179.5    50174834.0      841654.5         1.017
+TCC_MISS_sum                              11567636.0    12504753.0      937117.0         1.081
+TCC_hit_pct                                   81.006        80.050      -0.95606       0.98820
+FetchSize_KB                                688200.0      759303.4       71103.4         1.103
+VALUBusy_pct                                  23.055        24.776         1.721         1.075
+MfmaUtil_pct                                  76.028        56.103       -19.924       0.73793
+MemUnitStalled_pct                           0.03586       0.01460      -0.02126       0.40710
+MemUnitBusy_pct                                    0             0             0             0
+LDSBankConflict_pct                          0.00000       0.00000       0.00000             0
+ALUStalledByLDS_pct                                0             0             0             0
+L2CacheHit_pct                                     0             0             0             0
+TA_ADDR_STALL_TC_per_grbm                    0.91290         1.711       0.79818         1.874
+TA_DATA_STALL_TC_per_grbm                    0.29037       0.08596      -0.20440       0.29605
+TCP_TA_DATA_STALL_per_grbm                   0.29149       0.13394      -0.15755       0.45951
+TCP_PENDING_per_grbm                          15.995        18.191         2.196         1.137
+TCP_RFIFO_per_grbm                           0.05609       0.00346      -0.05262       0.06177
+TCC_BUBBLE_per_grbm                          0.00001       0.00000      -0.00001       0.00000
+TCC_BUSY_per_grbm                             15.298        15.631       0.33365         1.022
+VMEM_FIFO_FULL_per_grbm                      0.19735       0.36007       0.16272         1.825
+LDS_FIFO_FULL_per_grbm                       0.00000       0.00000       0.00000             0
+LDS_BANK_CONFLICT_per_grbm                   0.00000       0.00000       0.00000             0
+  MXFP8 kernels: ['void crr_exact_8wave_scaled_kernel<true, 2>(layout_globals)']
+  FP8 kernels:   ['crr_exact_8wave_kernel(crr_exact_8wave_globals)']
+
+====================================================================================================
+=== SUMMARY MXFP8/FP8 ratio per cell (CRR) ===
+====================================================================================================
+Cell                 K    FP8 TFLOPS     MX TFLOPS    MX/FP8  MfmaUtil FP8   MfmaUtil MX  TCChit FP8   TCChit MX
+70B_GateUp        8192        2955.7        2555.7     86.5%         70.98         51.23       72.56       80.54
+70B_QO            8192        2933.1        2823.6     96.3%         69.50         61.02       80.57       80.59
+70B_Down         28672        3123.7        2740.8     87.7%         76.03         56.10       81.01       80.05
+
+Wrote aggregated.json
