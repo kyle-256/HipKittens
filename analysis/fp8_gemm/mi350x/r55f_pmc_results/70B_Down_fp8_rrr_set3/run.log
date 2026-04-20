@@ -1,0 +1,125 @@
+W20260420 00:48:23.196918 140186658217472 simple_timer.cpp:55] [rocprofv3] tool initialization ::     0.145191 sec
+W20260420 00:48:23.197138 140186658217472 simple_timer.cpp:55] [rocprofv3] 'python3 test_python.py 4096 8192 28672' ::     0.000000 sec
+=== FP8 GEMM Layout Benchmark (native layouts, no preshuffle): M=4096, N=8192, K=28672 ===
+Warmup=100, iters=200, correctness=off
+Layouts=rrr
+
+--- RRR Layout: C = A @ B ---
+W20260420 00:48:24.117328 140186658217472 tool.cpp:2420] HSA version 8.19.0 initialized (instance=0)
+  Avg time: 0.7988 ms, TFLOPS: 2408.76
+
+============================================================
+Layout     Time (ms)    TFLOPS     % of RCR  
+------------------------------------------------------------
+RRR        0.7988       2408.76    0.00%
+============================================================
+
+95% target: NOT MET
+  RRR: 0.00% of RCR
+
+Results saved to fp8_layout_results_4096x8192x28672.json
+W20260420 00:48:24.838837 140186658217472 simple_timer.cpp:55] [rocprofv3] 'python3 test_python.py 4096 8192 28672' ::     1.641699 sec
+E20260420 00:48:24.909975 140186658217472 output_stream.cpp:111] Opened result file: /shared_nfs/kyle/test/Hipkittens2/analysis/fp8_gemm/mi350x/r55f_pmc_results/70B_Down_fp8_rrr_set3/pmc_1/pt-test-2-l7n7x-master-0/2953158_counter_collection.csv
+E20260420 00:48:24.969931 140186658217472 output_stream.cpp:111] Opened result file: /shared_nfs/kyle/test/Hipkittens2/analysis/fp8_gemm/mi350x/r55f_pmc_results/70B_Down_fp8_rrr_set3/pmc_1/pt-test-2-l7n7x-master-0/2953158_agent_info.csv
+W20260420 00:48:24.973303 140186658217472 simple_timer.cpp:55] [rocprofv3] output generation ::     0.133156 sec
+W20260420 00:48:24.973759 140186658217472 simple_timer.cpp:55] [rocprofv3] tool finalization ::     0.133619 sec
+W20260420 00:48:25.600636 140247395175936 simple_timer.cpp:55] [rocprofv3] tool initialization ::     0.143014 sec
+W20260420 00:48:25.600868 140247395175936 simple_timer.cpp:55] [rocprofv3] 'python3 test_python.py 4096 8192 28672' ::     0.000000 sec
+=== FP8 GEMM Layout Benchmark (native layouts, no preshuffle): M=4096, N=8192, K=28672 ===
+Warmup=100, iters=200, correctness=off
+Layouts=rrr
+
+--- RRR Layout: C = A @ B ---
+W20260420 00:48:26.513898 140247395175936 tool.cpp:2420] HSA version 8.19.0 initialized (instance=0)
+  Avg time: 0.7960 ms, TFLOPS: 2417.29
+
+============================================================
+Layout     Time (ms)    TFLOPS     % of RCR  
+------------------------------------------------------------
+RRR        0.7960       2417.29    0.00%
+============================================================
+
+95% target: NOT MET
+  RRR: 0.00% of RCR
+
+Results saved to fp8_layout_results_4096x8192x28672.json
+W20260420 00:48:27.216371 140247395175936 simple_timer.cpp:55] [rocprofv3] 'python3 test_python.py 4096 8192 28672' ::     1.615503 sec
+E20260420 00:48:27.294205 140247395175936 output_stream.cpp:111] Opened result file: /shared_nfs/kyle/test/Hipkittens2/analysis/fp8_gemm/mi350x/r55f_pmc_results/70B_Down_fp8_rrr_set3/pmc_2/pt-test-2-l7n7x-master-0/2953231_counter_collection.csv
+E20260420 00:48:27.346032 140247395175936 output_stream.cpp:111] Opened result file: /shared_nfs/kyle/test/Hipkittens2/analysis/fp8_gemm/mi350x/r55f_pmc_results/70B_Down_fp8_rrr_set3/pmc_2/pt-test-2-l7n7x-master-0/2953231_agent_info.csv
+W20260420 00:48:27.349377 140247395175936 simple_timer.cpp:55] [rocprofv3] output generation ::     0.131635 sec
+W20260420 00:48:27.349830 140247395175936 simple_timer.cpp:55] [rocprofv3] tool finalization ::     0.132095 sec
+W20260420 00:48:27.964911 140072323808768 simple_timer.cpp:55] [rocprofv3] tool initialization ::     0.141717 sec
+W20260420 00:48:27.965122 140072323808768 simple_timer.cpp:55] [rocprofv3] 'python3 test_python.py 4096 8192 28672' ::     0.000000 sec
+=== FP8 GEMM Layout Benchmark (native layouts, no preshuffle): M=4096, N=8192, K=28672 ===
+Warmup=100, iters=200, correctness=off
+Layouts=rrr
+
+--- RRR Layout: C = A @ B ---
+W20260420 00:48:28.905703 140072323808768 tool.cpp:2420] HSA version 8.19.0 initialized (instance=0)
+  Avg time: 0.7707 ms, TFLOPS: 2496.46
+
+============================================================
+Layout     Time (ms)    TFLOPS     % of RCR  
+------------------------------------------------------------
+RRR        0.7707       2496.46    0.00%
+============================================================
+
+95% target: NOT MET
+  RRR: 0.00% of RCR
+
+Results saved to fp8_layout_results_4096x8192x28672.json
+W20260420 00:48:29.563403 140072323808768 simple_timer.cpp:55] [rocprofv3] 'python3 test_python.py 4096 8192 28672' ::     1.598281 sec
+E20260420 00:48:29.642956 140072323808768 output_stream.cpp:111] Opened result file: /shared_nfs/kyle/test/Hipkittens2/analysis/fp8_gemm/mi350x/r55f_pmc_results/70B_Down_fp8_rrr_set3/pmc_3/pt-test-2-l7n7x-master-0/2953308_counter_collection.csv
+E20260420 00:48:29.688284 140072323808768 output_stream.cpp:111] Opened result file: /shared_nfs/kyle/test/Hipkittens2/analysis/fp8_gemm/mi350x/r55f_pmc_results/70B_Down_fp8_rrr_set3/pmc_3/pt-test-2-l7n7x-master-0/2953308_agent_info.csv
+W20260420 00:48:29.691573 140072323808768 simple_timer.cpp:55] [rocprofv3] output generation ::     0.126949 sec
+W20260420 00:48:29.692003 140072323808768 simple_timer.cpp:55] [rocprofv3] tool finalization ::     0.127385 sec
+W20260420 00:48:30.310078 140074789486080 simple_timer.cpp:55] [rocprofv3] tool initialization ::     0.141207 sec
+W20260420 00:48:30.310302 140074789486080 simple_timer.cpp:55] [rocprofv3] 'python3 test_python.py 4096 8192 28672' ::     0.000000 sec
+=== FP8 GEMM Layout Benchmark (native layouts, no preshuffle): M=4096, N=8192, K=28672 ===
+Warmup=100, iters=200, correctness=off
+Layouts=rrr
+
+--- RRR Layout: C = A @ B ---
+W20260420 00:48:31.223075 140074789486080 tool.cpp:2420] HSA version 8.19.0 initialized (instance=0)
+  Avg time: 0.8165 ms, TFLOPS: 2356.65
+
+============================================================
+Layout     Time (ms)    TFLOPS     % of RCR  
+------------------------------------------------------------
+RRR        0.8165       2356.65    0.00%
+============================================================
+
+95% target: NOT MET
+  RRR: 0.00% of RCR
+
+Results saved to fp8_layout_results_4096x8192x28672.json
+W20260420 00:48:31.894384 140074789486080 simple_timer.cpp:55] [rocprofv3] 'python3 test_python.py 4096 8192 28672' ::     1.584082 sec
+E20260420 00:48:31.960302 140074789486080 output_stream.cpp:111] Opened result file: /shared_nfs/kyle/test/Hipkittens2/analysis/fp8_gemm/mi350x/r55f_pmc_results/70B_Down_fp8_rrr_set3/pmc_4/pt-test-2-l7n7x-master-0/2953386_counter_collection.csv
+E20260420 00:48:32.007206 140074789486080 output_stream.cpp:111] Opened result file: /shared_nfs/kyle/test/Hipkittens2/analysis/fp8_gemm/mi350x/r55f_pmc_results/70B_Down_fp8_rrr_set3/pmc_4/pt-test-2-l7n7x-master-0/2953386_agent_info.csv
+W20260420 00:48:32.010176 140074789486080 simple_timer.cpp:55] [rocprofv3] output generation ::     0.114300 sec
+W20260420 00:48:32.010637 140074789486080 simple_timer.cpp:55] [rocprofv3] tool finalization ::     0.114769 sec
+W20260420 00:48:32.710262 140706395840000 simple_timer.cpp:55] [rocprofv3] tool initialization ::     0.143108 sec
+W20260420 00:48:32.710509 140706395840000 simple_timer.cpp:55] [rocprofv3] 'python3 test_python.py 4096 8192 28672' ::     0.000000 sec
+=== FP8 GEMM Layout Benchmark (native layouts, no preshuffle): M=4096, N=8192, K=28672 ===
+Warmup=100, iters=200, correctness=off
+Layouts=rrr
+
+--- RRR Layout: C = A @ B ---
+W20260420 00:48:33.642448 140706395840000 tool.cpp:2420] HSA version 8.19.0 initialized (instance=0)
+  Avg time: 0.7508 ms, TFLOPS: 2562.73
+
+============================================================
+Layout     Time (ms)    TFLOPS     % of RCR  
+------------------------------------------------------------
+RRR        0.7508       2562.73    0.00%
+============================================================
+
+95% target: NOT MET
+  RRR: 0.00% of RCR
+
+Results saved to fp8_layout_results_4096x8192x28672.json
+W20260420 00:48:34.374985 140706395840000 simple_timer.cpp:55] [rocprofv3] 'python3 test_python.py 4096 8192 28672' ::     1.664476 sec
+E20260420 00:48:34.453388 140706395840000 output_stream.cpp:111] Opened result file: /shared_nfs/kyle/test/Hipkittens2/analysis/fp8_gemm/mi350x/r55f_pmc_results/70B_Down_fp8_rrr_set3/pmc_5/pt-test-2-l7n7x-master-0/2953462_counter_collection.csv
+E20260420 00:48:34.557144 140706395840000 output_stream.cpp:111] Opened result file: /shared_nfs/kyle/test/Hipkittens2/analysis/fp8_gemm/mi350x/r55f_pmc_results/70B_Down_fp8_rrr_set3/pmc_5/pt-test-2-l7n7x-master-0/2953462_agent_info.csv
+W20260420 00:48:34.560411 140706395840000 simple_timer.cpp:55] [rocprofv3] output generation ::     0.184101 sec
+W20260420 00:48:34.560867 140706395840000 simple_timer.cpp:55] [rocprofv3] tool finalization ::     0.184565 sec
