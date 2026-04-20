@@ -1,8 +1,0 @@
-R32-A builds: 3 (parallel)
-Parent: ts_lgk2_v12_memc_btw_all on L6 (N=32768 K=128256)
-  V2_nt          PASS       compile=5.2s VGPR=212 spills=None scratch=0 occ=None
-  V3_kls2_nt     PASS       compile=5.2s VGPR=256 spills=None scratch=132 occ=None
-  V1_kls2        PASS       compile=5.3s VGPR=256 spills=None scratch=132 occ=None
-
-Wall clock: 5.3s
-Results: /shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/R32_OPT_A_BUILD_RESULTS.json

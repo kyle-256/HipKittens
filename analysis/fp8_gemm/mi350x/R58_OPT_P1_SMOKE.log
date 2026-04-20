@@ -1,5 +1,0 @@
-R58 Opt P-1 bench - mode=smoke, gpu=[2], shape=(16384,4096,2048), tile=128x256
-==========================================================================================
-  seed=  101 gpu=2 status=OK                     fin=1.0      wcf=0.0        snr_med=55.52    tflops=3171.4     (7.8s)
-------------------------------------------------------------------------------------------
-SUMMARY: {"mode": "smoke", "shape": [16384, 4096, 2048], "tile": [128, 256], "competitor_tflops": 2995.0, "n_runs": 1, "n_OK": 1, "n_OK_5": 1, "fin_min": 1.0, "fin_max": 1.0, "wcf_min": 0.0, "wcf_max": 0.0, "wcf_std": 0.0, "snr_min": 55.52, "snr_max": 55.52, "snr_med": 55.52, "tflops_first": 3171.4, "tflops_max": 3171.4, "pct_comp_first": 105.89, "passes_10run_gate": false}

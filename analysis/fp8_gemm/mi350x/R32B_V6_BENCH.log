@@ -1,3 +1,0 @@
-GPU core dump created: gpucore.1140741
-VGPU(0x55fb25ae7340) Queue(0x7f74697be000) is idle
-:0:rocdevice.cpp            :3580: 1211030337507 us:  Callback: Queue 0x7f3447400000 aborting with error : HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION: The agent attempted to access memory beyond the largest legal address. code: 0x29

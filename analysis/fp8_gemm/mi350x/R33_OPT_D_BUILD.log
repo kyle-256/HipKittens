@@ -1,8 +1,0 @@
-R33-D builds: 4 (parallel)
-  V0_legacy_fork           PASS       compile=7.3s VGPR=212 spills=None scratch=0 occ=None
-  V2_aitersrd_vm15         PASS       compile=7.8s VGPR=212 spills=None scratch=0 occ=None
-  V3_aitersrd_vm25         PASS       compile=7.9s VGPR=212 spills=None scratch=0 occ=None
-  V1_aitersrd              PASS       compile=8.0s VGPR=212 spills=None scratch=0 occ=None
-
-Wall clock: 8.0s
-Results: /shared_nfs/kyle/test/HipKittens/analysis/fp8_gemm/mi350x/R33_OPT_D_BUILD_RESULTS.json

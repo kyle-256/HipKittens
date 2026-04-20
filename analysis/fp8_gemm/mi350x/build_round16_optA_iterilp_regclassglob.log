@@ -1,9 +1,0 @@
-Total builds: 5  (workers=5)
-Compound: parent_macros + regclassglob + iterilp (last)
-  S3  _v20_memc_r16a_iterilp_regclassglob                          OK       (4.5s)
-  S1  _lgk2_dc_r16a_iterilp_regclassglob                           OK       (4.6s)
-  S5  _ts_lgk2_memc_r16a_iterilp_regclassglob                      OK       (4.6s)
-  S4  _u16_r16a_iterilp_regclassglob                               OK       (4.7s)
-  S2  _u32_r16a_iterilp_regclassglob                               OK       (5.1s)
-
-Elapsed: 5.1s   ok=5 cached=0 fail=0
