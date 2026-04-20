@@ -2284,7 +2284,13 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
         // Barrier for A tile double-buffer sync
         asm volatile("s_waitcnt vmcnt(0)\ns_barrier\n" ::: "memory");
 
+        // Issue nxt_Bl buffer_load EARLY — before Step3+4's 64 MFMAs to hide latency
+        float4 nxt_bl_d[8];
+        const uint32_t nxt_bl_k_soff = (uint32_t)(bt + 1) * BK_PRESHUFFLE_STRIDE;
+        load_b_preshuffle_8(nxt_bl_d, srd_b, bl_voffs, nxt_bl_k_soff);
+
         // Step 3: A1*Bl (32 MFMAs) + ds_read nxt_A0
+        // nxt_Bl buffer_loads are in-flight, overlapping with these MFMAs
         float4 nxt_a0_d[8];
         kpair_32mfma_with_lds(acc_A1Bl, tA1, tBl, a1_raw, bl_raw,
             nxt_a0_d[0], nxt_a0_d[1], nxt_a0_d[2], nxt_a0_d[3],
@@ -2292,20 +2298,15 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
             sel_a0_p0, sel_a0_p1);
 
         // Step 4: A1*Br (32 pure MFMAs)
+        // nxt_Bl loads should be complete by end of Step4 (~1024 cycles total)
         kpair_32mfma_with_pf<0>(acc_A1Br, tA1, tBr, a1_raw, br_raw, dummy_pf, dummy_pf);
 
-        // Prefetch A tiles to LDS for next+1 iteration (no B prefetch needed)
+        // Prefetch A tiles to LDS for next+1 iteration
         emit_pf_tail<0>(pf_a0_p, pf_a1_p);
         asm volatile("" ::: "memory");
 
-        // Load next Bl from pre-shuffled global
-        float4 nxt_bl_d[8];
-        const uint32_t nxt_bl_k_soff = (uint32_t)(bt + 1) * BK_PRESHUFFLE_STRIDE;
-        load_b_preshuffle_8(nxt_bl_d, srd_b, bl_voffs, nxt_bl_k_soff);
-
-        // Wait for nxt_A0 ds_reads and nxt_Bl loads
-        asm volatile("s_waitcnt vmcnt(0)");
-        asm volatile("s_waitcnt lgkmcnt(0)");
+        // Wait for nxt_A0 ds_reads and nxt_Bl buffer_loads
+        asm volatile("s_waitcnt vmcnt(0) lgkmcnt(0)");
         extract_tile(nxt_a0_d, tA0);
         extract_tile(nxt_bl_d, tBl);
     }
