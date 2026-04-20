@@ -1,0 +1,40 @@
+=== MXFP8 GEMM Layout Benchmark (reference scale layout): M=4096, N=28672, K=8192 ===
+Warmup=100, iters=200, correctness=off
+Layouts=crr
+
+--- CRR Layout: C = A^T @ B ---
+  Avg time: 2.3011 ms, TFLOPS: 836.18
+
+Results saved to mxfp8_layout_results_4096x28672x8192.json
+=== MXFP8 GEMM Layout Benchmark (reference scale layout): M=4096, N=28672, K=8192 ===
+Warmup=100, iters=200, correctness=off
+Layouts=crr
+
+--- CRR Layout: C = A^T @ B ---
+  Avg time: 2.2980 ms, TFLOPS: 837.30
+
+Results saved to mxfp8_layout_results_4096x28672x8192.json
+=== MXFP8 GEMM Layout Benchmark (reference scale layout): M=4096, N=28672, K=8192 ===
+Warmup=100, iters=200, correctness=off
+Layouts=crr
+
+--- CRR Layout: C = A^T @ B ---
+  Avg time: 2.2997 ms, TFLOPS: 836.68
+
+Results saved to mxfp8_layout_results_4096x28672x8192.json
+=== MXFP8 GEMM Layout Benchmark (reference scale layout): M=4096, N=28672, K=8192 ===
+Warmup=100, iters=200, correctness=off
+Layouts=crr
+
+--- CRR Layout: C = A^T @ B ---
+  Avg time: 2.2979 ms, TFLOPS: 837.34
+
+Results saved to mxfp8_layout_results_4096x28672x8192.json
+=== MXFP8 GEMM Layout Benchmark (reference scale layout): M=4096, N=28672, K=8192 ===
+Warmup=100, iters=200, correctness=off
+Layouts=crr
+
+--- CRR Layout: C = A^T @ B ---
+  Avg time: 2.2984 ms, TFLOPS: 837.17
+
+Results saved to mxfp8_layout_results_4096x28672x8192.json

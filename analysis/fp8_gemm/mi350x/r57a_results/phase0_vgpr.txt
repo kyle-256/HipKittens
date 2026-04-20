@@ -1,0 +1,6 @@
+Phase 0: CRR_STEADY_VMCNT VGPR check (CRR <true,2> kernel)
+vmcnt=4  VGPRs=227 Spill=0 Occupancy=2
+vmcnt=6  VGPRs=227 Spill=0 Occupancy=2
+vmcnt=8  VGPRs=227 Spill=0 Occupancy=2
+vmcnt=12 VGPRs=227 Spill=0 Occupancy=2
+All variants PASS -- no VGPR change, no spill.
