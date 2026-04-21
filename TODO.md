@@ -1,9 +1,9 @@
 # MXFP4 Optimization TODO
 
-**Last update:** 2026-04-20 (R70 first-attempt NO-COMMIT — B3b raw-row mapping flagged as monolithic-implementation blocker; F1 CLOSED as NO-OP; splitK ruled out; R70 RETRY = bisect-harness-first split)
-**Status:** **26/42 WIN, mean ~103.2%** of aiter. R69 confirms knob-axis ceiling reached. R70 first attempt confirmed Axis-A Opt-2 (GLOBAL_A) requires bisect harness for B3b raw-row mapping BEFORE integration (R67 SPLIT precedent). Next: R70 RETRY split into 3 agents (bisect harness + diff scoping + integration).
-**Bench harness:** `analysis/fp8_gemm/mi350x/bench_all_42.py` (HipKittens-only, **23 variants**, parallel-GPU)
-**Kernel commits:** 9b83a0e8 (R66 helper) + 3cc7f92a (R67 bench cross-product) + fc0e6ef1 (R68 orphan cleanup -703 LOC) + d0778ba6 (R68 step12pf NON-SPLIT iso harness, dominated) + 830ae4c9 (R68 triple cross-product). R69/R70 produced no new kernel commits — only TODO/agent_prompt updates (5d6affeb, 4d5a5136, d848e149).
+**Last update:** 2026-04-21 (R70 GLOBAL_A DEAD; F1 NO-OP; F3 128×512 VGPR-spill; 8-wave ping-pong < 4-wave; UNROLL_K=4 landed; exhaustive knob sweep done)
+**Status:** **26/42 WIN, mean ~103.2%** of aiter. 1 shape < 90% (14336×4096×32768 = 88.5%, knob ceiling). K=128256 actual = 92.5% isolated (89.2% in contended sweep = noise).
+**Bench harness:** `analysis/fp8_gemm/mi350x/bench_all_42.py` (HipKittens-only, **27 variants** incl unr4, parallel-GPU)
+**Kernel commits:** 9b83a0e8 (R66) + 3cc7f92a (R67) + fc0e6ef1 (R68 cleanup) + d0778ba6 (R68 step12pf) + 830ae4c9 (R68 triple) + d76ad328 (R70 unr4 bench variants).
 
 ---
 
