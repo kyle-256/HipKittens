@@ -135,6 +135,10 @@ DEFAULT_VARIANTS = [
     ("step34pf_unr4_tbv16", _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DUNROLL_K=4 -DTAIL_BARRIER_VMCNT=16"),
     ("step34pf_unr4_we1",   _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DUNROLL_K=4 -DWAVES_PER_EU_1"),
     ("step34pf_unr4_gm6",   _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DUNROLL_K=4 -DGROUP_SIZE_M=6"),
+    # STEP12_SPLIT_PF: split step12 into 2x 32-MFMA + 4 prefetches between halves.
+    # +1.7pp on K=128256, -1.5pp on K=32768. Autotune picks best per-shape.
+    ("step34pf_s12split",       _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DSTEP12_SPLIT_PF=1"),
+    ("step34pf_s12split_unr4",  _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DSTEP12_SPLIT_PF=1 -DUNROLL_K=4"),
 ]
 
 

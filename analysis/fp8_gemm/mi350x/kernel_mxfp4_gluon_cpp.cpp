@@ -641,6 +641,18 @@ __device__ __forceinline__ void kpair_32mfma_with_pf(
 #define STEP12_PF_INTERLEAVE 0
 #endif
 
+// ── STEP12_SPLIT_PF: split step12 into 2x kpair_32mfma_with_lds + 4 prefetches ──
+// Splits the monolithic 64-MFMA step12 asm block into:
+//   Step1: kpair_32mfma_with_lds(A0*Bl + ds_read Br)
+//   waitcnt lgkmcnt(0) + extract_tile(Br)
+//   4x emit_one_pf(A0_db + Bl_db) — SAFE: A0/Bl already in regs, no LDS race
+//   Step2: kpair_32mfma_with_lds(A0*Br + ds_read A1)
+// +1.7pp on K=128256, -1.5pp on K=32768. Autotune picks best per-shape.
+// Requires STEP34_PF_INTERLEAVE=1 (redundant A0/Bl loads in step34 are harmless).
+#ifndef STEP12_SPLIT_PF
+#define STEP12_SPLIT_PF 0
+#endif
+
 #if STEP12_PF_INTERLEAVE
 __device__ __forceinline__ void kpair_64mfma_step12_pf_interleaved(
     fp4_floatx4_t acc_bl[16], fp4_floatx4_t acc_br[16],
@@ -1999,6 +2011,28 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
             a0_raw, bl_raw, br_raw, br_d, a1_d,
             sel_br_p0, sel_br_p1, sel_a1_p0, sel_a1_p1,
             pf_a0_p, pf_a1_p, pf_bl_p, pf_br_p);
+#elif STEP12_SPLIT_PF
+        // STEP12_SPLIT_PF: split step12 into 2x kpair_32mfma_with_lds + 4 prefetches.
+        // Step1: A0*Bl (32 MFMAs) + ds_read Br
+        kpair_32mfma_with_lds(acc_A0Bl, tA0, tBl, a0_raw, bl_raw,
+            br_d[0], br_d[1], br_d[2], br_d[3],
+            br_d[4], br_d[5], br_d[6], br_d[7],
+            sel_br_p0, sel_br_p1);
+        // Wait for Br ds_reads, extract
+        asm volatile("s_waitcnt lgkmcnt(0)" ::: "memory");
+        fp4_intx8_t tBr_s12[4];
+        extract_tile(br_d, tBr_s12);
+        // 4 prefetches: A0_db + Bl_db (SAFE — A0/Bl already in regs, no LDS race)
+        emit_one_pf(pf_a0_p, 0);
+        emit_one_pf(pf_a0_p, 1);
+        emit_one_pf(pf_bl_p, 0);
+        emit_one_pf(pf_bl_p, 1);
+        asm volatile("" ::: "memory");
+        // Step2: A0*Br (32 MFMAs) + ds_read A1
+        kpair_32mfma_with_lds(acc_A0Br, tA0, tBr_s12, a0_raw, br_raw,
+            a1_d[0], a1_d[1], a1_d[2], a1_d[3],
+            a1_d[4], a1_d[5], a1_d[6], a1_d[7],
+            sel_a1_p0, sel_a1_p1);
 #else
         kpair_64mfma_step12(acc_A0Bl, acc_A0Br, tA0, tBl,
             a0_raw, bl_raw, br_raw, br_d, a1_d,
@@ -2007,7 +2041,12 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         fp4_intx8_t tBr[4], tA1[4];
+#if STEP12_SPLIT_PF
+        // Br already extracted above in the split path
+        tBr[0] = tBr_s12[0]; tBr[1] = tBr_s12[1]; tBr[2] = tBr_s12[2]; tBr[3] = tBr_s12[3];
+#else
         extract_tile(br_d, tBr);
+#endif
         extract_tile(a1_d, tA1);
 
 #if FUSED_STEP34
@@ -2021,6 +2060,8 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
             sel_a0_p0, sel_a0_p1, sel_bl_p0, sel_bl_p1);
 #elif STEP34_PF_INTERLEAVE
         // R66 axis-A: prefetches inlined into the asm block, no post-tail needed.
+        // When STEP12_SPLIT_PF=1, the 4 extra A0/Bl loads from step12 split are
+        // harmless duplicates — step34pf still emits all 16 prefetches.
         kpair_64mfma_step34_pf_interleaved(acc_A1Bl, acc_A1Br, tA1, tBl, tBr,
             a1_raw, bl_raw, br_raw, nxt_a0_d, nxt_bl_d,
             sel_a0_p0, sel_a0_p1, sel_bl_p0, sel_bl_p1,
@@ -2165,6 +2206,28 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
             a0_raw, bl_raw, br_raw, br_d, a1_d,
             sel_br_p0, sel_br_p1, sel_a1_p0, sel_a1_p1,
             pf_a0_p, pf_a1_p, pf_bl_p, pf_br_p);
+#elif STEP12_SPLIT_PF
+        // STEP12_SPLIT_PF: split step12 into 2x kpair_32mfma_with_lds + 4 prefetches.
+        // Step1: A0*Bl (32 MFMAs) + ds_read Br
+        kpair_32mfma_with_lds(acc_A0Bl, tA0, tBl, a0_raw, bl_raw,
+            br_d[0], br_d[1], br_d[2], br_d[3],
+            br_d[4], br_d[5], br_d[6], br_d[7],
+            sel_br_p0, sel_br_p1);
+        // Wait for Br ds_reads, extract
+        asm volatile("s_waitcnt lgkmcnt(0)" ::: "memory");
+        fp4_intx8_t tBr_s12[4];
+        extract_tile(br_d, tBr_s12);
+        // 4 prefetches: A0_db + Bl_db (SAFE — A0/Bl already in regs, no LDS race)
+        emit_one_pf(pf_a0_p, 0);
+        emit_one_pf(pf_a0_p, 1);
+        emit_one_pf(pf_bl_p, 0);
+        emit_one_pf(pf_bl_p, 1);
+        asm volatile("" ::: "memory");
+        // Step2: A0*Br (32 MFMAs) + ds_read A1
+        kpair_32mfma_with_lds(acc_A0Br, tA0, tBr_s12, a0_raw, br_raw,
+            a1_d[0], a1_d[1], a1_d[2], a1_d[3],
+            a1_d[4], a1_d[5], a1_d[6], a1_d[7],
+            sel_a1_p0, sel_a1_p1);
 #else
         kpair_64mfma_step12(acc_A0Bl, acc_A0Br, tA0, tBl,
             a0_raw, bl_raw, br_raw, br_d, a1_d,
@@ -2173,7 +2236,11 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         fp4_intx8_t tBr[4], tA1[4];
+#if STEP12_SPLIT_PF
+        tBr[0] = tBr_s12[0]; tBr[1] = tBr_s12[1]; tBr[2] = tBr_s12[2]; tBr[3] = tBr_s12[3];
+#else
         extract_tile(br_d, tBr);
+#endif
         extract_tile(a1_d, tA1);
 
 #if FUSED_STEP34
@@ -2187,6 +2254,8 @@ void mxfp4_gluon_cpp_kernel(const gluon_globals g) {
             sel_a0_p0, sel_a0_p1, sel_bl_p0, sel_bl_p1);
 #elif STEP34_PF_INTERLEAVE
         // R66 axis-A: prefetches inlined into the asm block, no post-tail needed.
+        // When STEP12_SPLIT_PF=1, the 4 extra A0/Bl loads from step12 split are
+        // harmless duplicates — step34pf still emits all 16 prefetches.
         kpair_64mfma_step34_pf_interleaved(acc_A1Bl, acc_A1Br, tA1, tBl, tBr,
             a1_raw, bl_raw, br_raw, nxt_a0_d, nxt_bl_d,
             sel_a0_p0, sel_a0_p1, sel_bl_p0, sel_bl_p1,
