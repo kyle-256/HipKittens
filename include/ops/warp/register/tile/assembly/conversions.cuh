@@ -28,7 +28,7 @@ namespace kittens {
 
 template<ducks::art::all T0, ducks::art::all T1>
 __device__ static inline void swap_layout_inplace(T0 &dst, const T1 &src) {
-    if constexpr (std::is_same_v<typename T0::shape, typename ducks::rt_shape::rt_16x32> && std::is_same_v<typename T1::shape, typename ducks::rt_shape::rt_16x16>) {
+    if constexpr ((std::is_same_v<typename T0::shape, typename ducks::rt_shape::rt_16x32> || std::is_same_v<typename T0::shape, typename ducks::rt_shape::rt_16x32_4>) && std::is_same_v<typename T1::shape, typename ducks::rt_shape::rt_16x16>) {
 
         if constexpr (std::is_same_v<typename T1::layout, typename ducks::rt_layout::col> && std::is_same_v<typename T1::layout, typename ducks::rt_layout::col>) {
             // src consists of 16x16 tiles while dst consists of 16x32 tiles.

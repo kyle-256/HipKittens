@@ -106,6 +106,7 @@ __device__ static inline rt<T, _rows, _cols, layout1, shape1>& swap_layout_inpla
     return dst;   
 }
 
+
 /* ----------  TRANSPOSE  ---------- */
 template<typename T2, int _rows, int _cols, ducks::rt_layout::all layout, ducks::rt_shape::all shape>
 __device__ static inline void transpose(rt<T2, _cols, _rows, typename ducks::rt_layout::transpose<layout>::type, typename ducks::rt_shape::transpose<shape>::type> &result, const rt<T2, _rows, _cols, layout, shape> &tile) {

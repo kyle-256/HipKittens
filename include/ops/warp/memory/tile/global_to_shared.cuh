@@ -33,7 +33,7 @@ __device__ inline void load(ST& dst, const GL& src, const COORD& idx)
     T* global_ptr = (T*)&src[unit_coord];
     i32x4 srsrc = make_srsrc(global_ptr, row_stride * ST::rows * sizeof(T));
 
-    const uintptr_t lds_base = reinterpret_cast<uintptr_t>(&dst.data[0]) + (warpid * bytes_per_warp);
+    const uintptr_t lds_tile_base = reinterpret_cast<uintptr_t>(&dst.data[0]);
 
     if constexpr (memcpy_per_tile > 0) {
 
@@ -55,7 +55,9 @@ __device__ inline void load(ST& dst, const GL& src, const COORD& idx)
             const int swizzled_global_col = (swizzled_shared_byte_offset % ST::underlying_subtile_row_bytes) / sizeof(T) + subtile_col * ST::underlying_subtile_cols;
             const uint32_t swizzled_global_byte_offset = (swizzled_global_row * row_stride + swizzled_global_col) * sizeof(T);
 
-            uintptr_t lds_addr = lds_base + (i * num_warps * bytes_per_warp);
+            const int warp_linear_offset = (warpid * bytes_per_warp) + (i * num_warps * bytes_per_warp);
+            const int lds_subtile_id = warp_linear_offset / ST::underlying_subtile_bytes;
+            uintptr_t lds_addr = lds_tile_base + warp_linear_offset + lds_subtile_id * ST::subtile_padding;
             as3_uint32_ptr lds_ptr = (as3_uint32_ptr)(lds_addr);
 
             llvm_amdgcn_raw_buffer_load_lds(
@@ -91,7 +93,9 @@ __device__ inline void load(ST& dst, const GL& src, const COORD& idx)
             const int swizzled_global_col = (swizzled_shared_byte_offset % ST::underlying_subtile_row_bytes) / sizeof(T) + subtile_col * ST::underlying_subtile_cols;
             const uint32_t swizzled_global_byte_offset = (swizzled_global_row * row_stride + swizzled_global_col) * sizeof(T);
 
-            uintptr_t lds_addr = lds_base + (memcpy_per_tile * num_warps * bytes_per_warp);
+            const int warp_linear_offset = (warpid * bytes_per_warp) + (memcpy_per_tile * num_warps * bytes_per_warp);
+            const int lds_subtile_id = warp_linear_offset / ST::underlying_subtile_bytes;
+            uintptr_t lds_addr = lds_tile_base + warp_linear_offset + lds_subtile_id * ST::subtile_padding;
             as3_uint32_ptr lds_ptr = (as3_uint32_ptr)(lds_addr);
 
             llvm_amdgcn_raw_buffer_load_lds(
@@ -198,13 +202,14 @@ __device__ inline void load(ST& dst, const GL& src, const COORD& idx, const uint
     T* global_ptr = (T*)&src[unit_coord];
     i32x4 srsrc = make_srsrc(global_ptr, row_stride * ST::rows * sizeof(T));
 
-    const T* lds_base = &dst.data[0] + (warpid * elements_per_warp);
+    const uintptr_t lds_tile_base2 = reinterpret_cast<uintptr_t>(&dst.data[0]);
 
     #pragma unroll
     for (int i = 0; i < memcpy_per_tile; i++) {
 
-        const T* lds_elem_ptr = lds_base + (i * num_warps * elements_per_warp);
-        uintptr_t lds_addr = reinterpret_cast<uintptr_t>(lds_elem_ptr);
+        const int warp_linear_offset = (warpid * bytes_per_warp) + (i * num_warps * bytes_per_warp);
+        const int lds_subtile_id = warp_linear_offset / ST::underlying_subtile_bytes;
+        uintptr_t lds_addr = lds_tile_base2 + warp_linear_offset + lds_subtile_id * ST::subtile_padding;
         as3_uint32_ptr lds_ptr = (as3_uint32_ptr)(lds_addr);
 
         llvm_amdgcn_raw_buffer_load_lds(
@@ -226,7 +231,9 @@ __device__ inline void load(ST& dst, const GL& src, const COORD& idx, const uint
 
         if (warpid < leftover_warps) {
 
-            uintptr_t lds_addr = lds_base + (memcpy_per_tile * num_warps * bytes_per_warp);
+            const int warp_linear_offset = (warpid * bytes_per_warp) + (memcpy_per_tile * num_warps * bytes_per_warp);
+            const int lds_subtile_id = warp_linear_offset / ST::underlying_subtile_bytes;
+            uintptr_t lds_addr = lds_tile_base2 + warp_linear_offset + lds_subtile_id * ST::subtile_padding;
             as3_uint32_ptr lds_ptr = (as3_uint32_ptr)(lds_addr);
 
             llvm_amdgcn_raw_buffer_load_lds(
@@ -287,28 +294,52 @@ __device__ __forceinline__ void load(ST& dst, const GL& src, const COORD& idx,
     // reinterpret_cast<uintptr_t>(&dst.data[0]) + wid * elem_per_warp * sizeof(T)
     // ));
 
-    // ---- SGPR cursor we bump each iteration (no new readfirstlane) ----
-    uint32_t lds_cur = lds_base;
-    asm volatile("" : "+s"(lds_cur)); 
+    const uint32_t lds_tile_base3 = to_sgpr_u32(static_cast<uint32_t>(
+        reinterpret_cast<uintptr_t>(&dst.data[0])));
+    const uint32_t warp_offset = lds_base - lds_tile_base3;
 
     #pragma unroll
     for (int i = 0; i < memcpy_per_tile; ++i) {
-        int32_t lds_byte = lds_cur;                 // still SGPR
-        asm volatile("" : "+s"(lds_byte));           // keep it SGPR at the use
+        const uint32_t linear_offset = warp_offset + i * bytes_per_memcpy;
+        const uint32_t subtile_id_lds = linear_offset / ST::underlying_subtile_bytes;
+        int32_t lds_byte = lds_tile_base3 + linear_offset + subtile_id_lds * ST::subtile_padding;
+        asm volatile("" : "+s"(lds_byte));
 
-        asm volatile("s_mov_b32 m0, %0" :: "s"(lds_byte));
         llvm_amdgcn_raw_buffer_load_lds(
             SRD, 
-            (as3_uint32_ptr)0, 
+            (as3_uint32_ptr)(uintptr_t)lds_byte, 
             16, 
             swizzled_offsets[i], 
             SOFF, 
             0,
             static_cast<int>(coherency::cache_all)
         );
+    }
 
-        // SGPR bump (compiler emits s_add_u32)
-        lds_cur += bytes_per_memcpy;
+    constexpr int total_tile_bytes = ST::rows * ST::cols * sizeof(T);
+    if constexpr (memcpy_per_tile * bytes_per_memcpy != total_tile_bytes) {
+        constexpr int bytes_per_warp = bytes_per_thread * kittens::WARP_THREADS;
+        constexpr int leftover_bytes = total_tile_bytes - memcpy_per_tile * bytes_per_memcpy;
+        constexpr int leftover_warps = leftover_bytes / bytes_per_warp;
+        constexpr int num_warps = N_THREADS / kittens::WARP_THREADS;
+        const int wid = kittens::warpid() % num_warps;
+
+        if (wid < leftover_warps) {
+            const uint32_t linear_offset = warp_offset + memcpy_per_tile * bytes_per_memcpy;
+            const uint32_t subtile_id_lds = linear_offset / ST::underlying_subtile_bytes;
+            int32_t lds_byte = lds_tile_base3 + linear_offset + subtile_id_lds * ST::subtile_padding;
+            asm volatile("" : "+s"(lds_byte));
+
+            llvm_amdgcn_raw_buffer_load_lds(
+                SRD,
+                (as3_uint32_ptr)(uintptr_t)lds_byte,
+                16,
+                swizzled_offsets[memcpy_per_tile],
+                SOFF,
+                0,
+                static_cast<int>(coherency::cache_all)
+            );
+        }
     }
 }
 template<ducks::st::all ST, ducks::gl::all GL, ducks::coord::tile COORD=coord<ST>>

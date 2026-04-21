@@ -288,6 +288,83 @@ __device__ static inline void mma_ABt(D &d,
  * @param[in] b The second input rt_bf<K, M, col_layout> matrix in column-major mode.
  * @param[in] c The input rt_fl<N, M, row_layout> accumulator matrix.
  */
+/**
+ * @brief Base matrix multiply-accumulate operation for AB layout (art<>).
+ * D = A * B + C where A is row_layout, B is col_layout, D/C are col_layout.
+ * Uses 32x32x16 bf16 MFMA when D shape is rt_32x32, else 16x16x32.
+ */
+template<typename AccumulatorShape, typename InputType, typename RegisterRangeA, typename RegisterRangeB, typename RegisterRangeC, typename RegisterRangeD>
+__device__ static inline void mma_AB_base() {
+    if constexpr (std::is_same_v<AccumulatorShape, ducks::rt_shape::rt_32x32>) {
+        macros::mfma_f32_32x32x16_bf16<RegisterRangeA::lo, RegisterRangeB::lo, RegisterRangeC::lo, RegisterRangeD::lo>();
+    } else {
+        macros::mfma_f32_16x16x32_bf16<RegisterRangeA::lo, RegisterRangeB::lo, RegisterRangeC::lo, RegisterRangeD::lo>();
+    }
+}
+
+/**
+ * @brief Matrix multiply-accumulate D = A * B + C for art<> tiles.
+ * A: row_layout, B: col_layout, D/C: col_layout.
+ */
+template<ducks::art::all D, ducks::art::all A, ducks::art::all B, ducks::art::all C>
+__device__ static inline void mma_AB(D &d,
+                                const A &a,
+                                const B &b,
+                                const C &c) {
+
+    static_assert(std::is_same_v<typename D::layout, ducks::rt_layout::col>, "D must be a col layout");
+    static_assert(std::is_same_v<typename A::layout, ducks::rt_layout::row>, "A must be a row layout");
+    static_assert(std::is_same_v<typename B::layout, ducks::rt_layout::col>, "B must be a col layout");
+    static_assert(std::is_same_v<typename C::layout, ducks::rt_layout::col>, "C must be a col layout");
+
+    static_assert(D::rows == A::rows && D::cols == B::cols); // Check D matches A, B
+    static_assert(A::cols == B::rows); // Check reduction dim is same
+    static_assert(D::rows == C::rows && D::cols == C::cols); // Check D matches C
+
+    static_assert(
+        (std::is_same_v<typename D::T, float> && std::is_same_v<typename A::T, bf16> &&
+            std::is_same_v<typename B::T, bf16>) ||
+        (std::is_same_v<typename D::T, half> && std::is_same_v<typename A::T, half> &&
+            std::is_same_v<typename B::T, half>)
+    );
+
+    // Indexing for AB: a is [height, A::width], b is [B::height, width], d/c are [height, width].
+    // a.tiles[N][K], b.tiles[K][M], d/c.tiles[N][M]. Linear index in row-major register_ranges.
+    auto perform_mma_at = []<int N, int M>() {
+        // First MMA operation with k=0
+        using range_type_A = ducks::art::get_nth_range_t<typename A::register_ranges, N * A::width>;
+        using range_type_B = ducks::art::get_nth_range_t<typename B::register_ranges, M>;
+        using range_type_C = ducks::art::get_nth_range_t<typename C::register_ranges, N * C::width + M>;
+        using range_type_D = ducks::art::get_nth_range_t<typename D::register_ranges, N * D::width + M>;
+        mma_AB_base<typename D::shape, typename A::T, range_type_A, range_type_B, range_type_C, range_type_D>();
+
+        // Subsequent MMA operations for k=1 to A::width-1
+        [&]<std::size_t... Ks>(std::index_sequence<Ks...>) {
+            ([&] {
+                constexpr int k = Ks + 1;
+                if constexpr (k < A::width) {
+                    using range_type_A = ducks::art::get_nth_range_t<typename A::register_ranges, k + N * A::width>;
+                    using range_type_B = ducks::art::get_nth_range_t<typename B::register_ranges, k * B::width + M>;
+                    using range_type_D = ducks::art::get_nth_range_t<typename D::register_ranges, N * D::width + M>;
+                    // accumulate into D each k>=1 iteration
+                    mma_AB_base<typename D::shape, typename A::T, range_type_A, range_type_B, range_type_D, range_type_D>();
+                }
+            }(), ...);
+        }(std::make_index_sequence<A::width>{});
+    };
+
+    // Compile-time nested loops over N and M
+    [&]<std::size_t... Ns>(std::index_sequence<Ns...>) {
+        ([&]<std::size_t N>() {
+            [&]<std::size_t... Ms>(std::index_sequence<Ms...>) {
+                ([&]<std::size_t M>() {
+                    perform_mma_at.template operator()<N, M>();
+                }.template operator()<Ms>(), ...);
+            }(std::make_index_sequence<D::width>{});
+        }.template operator()<Ns>(), ...);
+    }(std::make_index_sequence<D::height>{});
+}
+
 template<int N, int M, int K, ducks::art::all D, ducks::art::all A, ducks::art::all B, ducks::art::all C>
 __device__ static inline void mma_AtB(D &d,
                                 const A &a,

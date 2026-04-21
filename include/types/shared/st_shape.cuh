@@ -19,6 +19,7 @@ namespace st_shape {
 struct st_16x16 {
     static constexpr int rows = 16;
     static constexpr int cols = 16;
+    static constexpr int subtile_padding = 0;
 
     template<typename _T>
     static constexpr int bytes_per_thread() {
@@ -48,6 +49,7 @@ struct st_16x16 {
 struct st_16x16_swizzled {
     static constexpr int rows = 16;
     static constexpr int cols = 16;
+    static constexpr int subtile_padding = 0;
 
     template<typename _T>
     static constexpr int bytes_per_thread() {
@@ -83,6 +85,7 @@ struct st_16x16_swizzled {
 struct st_32x32 {
     static constexpr int rows = 32;
     static constexpr int cols = 32;
+    static constexpr int subtile_padding = 0;
 
     template<typename _T>
     static constexpr int bytes_per_thread() {
@@ -116,6 +119,7 @@ struct st_32x32 {
 struct st_16x32 {
     static constexpr int rows = 16;
     static constexpr int cols = 32;
+    static constexpr int subtile_padding = 0;
 
     template<typename _T>
     static constexpr int bytes_per_thread() {
@@ -145,9 +149,41 @@ struct st_16x32 {
     }
 };
 
+// R94G: pad-stride variant of st_32x32 used by the dQ kernel's attn_smem
+// (col_l rt_32x32_s -> row_l rt_32x16_4_s round-trip) to break the bank-conflict
+// stride pattern. Plain row-major within subtile + 4 extra bf16 cols/row.
+//   data[r*(cols+4) + c] holds element (r,c)
+//   subtile_padding = 4 * rows * sizeof(T) extends underlying_subtile_stride_bytes
+//     so consecutive subtiles in the parent st<> are properly spaced.
+// NOTE: uses PLAIN row-major (no XOR swizzle) — padding alone breaks bank stride.
+struct st_32x32_pad4 {
+    static constexpr int rows = 32;
+    static constexpr int cols = 32;
+    static constexpr int subtile_padding = 32 * 4 * 2;  // 256 bytes
+
+    template<typename _T>
+    static constexpr int bytes_per_thread() {
+        if constexpr (sizeof(_T) == 2 || sizeof(_T) == 4) {
+            return 16;
+        } else {
+            static_assert(false, "Unsupported type");
+        }
+    }
+
+    template<typename _T>
+    __device__ __forceinline__ static const uint32_t swizzle (int2 coord) {
+        const int r = coord.x, c = coord.y;
+        using T = _T;
+        // padded row-major: row stride = (cols + 4) bf16 = 36 bf16 = 72 bytes.
+        const uint32_t offset = sizeof(T) * (r * (cols + 4) + c);
+        return offset;
+    }
+};
+
 struct st_32x16 {
     static constexpr int rows = 32;
     static constexpr int cols = 16;
+    static constexpr int subtile_padding = 0;
 
     template<typename _T>
     static constexpr int bytes_per_thread() {
@@ -180,6 +216,7 @@ struct st_32x16 {
 struct st_8x32 {
     static constexpr int rows = 8;
     static constexpr int cols = 32;
+    static constexpr int subtile_padding = 0;
 
     template<typename _T>
     static constexpr int bytes_per_thread() {
@@ -208,6 +245,7 @@ struct st_8x32 {
 struct st_16x128 {
     static constexpr int rows = 16;
     static constexpr int cols = 128;
+    static constexpr int subtile_padding = 0;
 
     template<typename _T>
     static constexpr int bytes_per_thread() {
@@ -236,11 +274,12 @@ struct st_16x128 {
 };
 
 template<typename T>
-concept all = std::is_same_v<T, st_16x16> || 
-              std::is_same_v<T, st_16x16_swizzled> || 
-              std::is_same_v<T, st_32x32> || 
-              std::is_same_v<T, st_16x32> || 
-              std::is_same_v<T, st_32x16> || 
+concept all = std::is_same_v<T, st_16x16> ||
+              std::is_same_v<T, st_16x16_swizzled> ||
+              std::is_same_v<T, st_32x32> ||
+              std::is_same_v<T, st_32x32_pad4> ||
+              std::is_same_v<T, st_16x32> ||
+              std::is_same_v<T, st_32x16> ||
               std::is_same_v<T, st_8x32>  ||
               std::is_same_v<T, st_16x128>;
 

@@ -64,23 +64,47 @@ __device__ static inline void load(SV &dst, const GL &src, const COORD &idx) {
         constexpr int leftover_bytes = SV::length * sizeof(T) - num_memcpys * (N_THREADS*bytes_per_thread);
         constexpr int leftover_threads = leftover_bytes / bytes_per_thread;
         constexpr int leftover_warps = leftover_threads / kittens::WARP_THREADS;
-        
-        if (warpid < leftover_warps) {
-            const int warp_offset = warpid + num_memcpys * num_warps;
-            const int lane_byte_offset = warp_offset * bytes_per_warp + laneid * bytes_per_thread;
 
-            const T* lds_elem_ptr = lds_base + (num_memcpys * num_warps * elem_per_warp);
-            uintptr_t lds_addr = reinterpret_cast<uintptr_t>(lds_elem_ptr);
-            as3_uint32_ptr lds_ptr = (as3_uint32_ptr)(lds_addr);
+        if constexpr (leftover_warps > 0) {
+            if (warpid < leftover_warps) {
+                const int warp_offset = warpid + num_memcpys * num_warps;
+                const int lane_byte_offset = warp_offset * bytes_per_warp + laneid * bytes_per_thread;
 
-            llvm_amdgcn_raw_buffer_load_lds(
-                srsrc,
-                lds_ptr,
-                bytes_per_thread,
-                lane_byte_offset,
-                0,
-                0,
-                static_cast<int>(coherency::cache_all));
+                const T* lds_elem_ptr = lds_base + (num_memcpys * num_warps * elem_per_warp);
+                uintptr_t lds_addr = reinterpret_cast<uintptr_t>(lds_elem_ptr);
+                as3_uint32_ptr lds_ptr = (as3_uint32_ptr)(lds_addr);
+
+                llvm_amdgcn_raw_buffer_load_lds(
+                    srsrc,
+                    lds_ptr,
+                    bytes_per_thread,
+                    lane_byte_offset,
+                    0,
+                    0,
+                    static_cast<int>(coherency::cache_all));
+            }
+        } else {
+            // Fewer than a full warp's worth of bytes remain. Use warp 0 with
+            // the first `leftover_threads` lanes doing per-thread 4-B loads.
+            // (Fixes silent no-op for sv_fl<32> on 256-thread group loads —
+            // bug #2 in gqa_causal_backwards/TODO.md.)
+            if (warpid == 0 && laneid < leftover_threads) {
+                const int lane_byte_offset = num_memcpys * (N_THREADS*bytes_per_thread)
+                                             + laneid * bytes_per_thread;
+
+                const T* lds_elem_ptr = lds_base + (num_memcpys * num_warps * elem_per_warp);
+                uintptr_t lds_addr = reinterpret_cast<uintptr_t>(lds_elem_ptr);
+                as3_uint32_ptr lds_ptr = (as3_uint32_ptr)(lds_addr);
+
+                llvm_amdgcn_raw_buffer_load_lds(
+                    srsrc,
+                    lds_ptr,
+                    bytes_per_thread,
+                    lane_byte_offset,
+                    0,
+                    0,
+                    static_cast<int>(coherency::cache_all));
+            }
         }
     }
 }

@@ -101,7 +101,16 @@
             const int col_offset = ((laneid % 4) * 4) + 16*((laneid % 32)/16);
             const int lane_byte_offset = (row_offset * 32 + col_offset) * sizeof(U);
             const int swizzled_lane_byte_offset = lane_byte_offset ^ ((lane_byte_offset >> 9) << 5);
-    
+
+            const uint32_t addr = src_ptr + swizzled_lane_byte_offset;
+            return addr;
+        } else if constexpr (std::is_same_v<typename ST::shape, st_16x32_s> && std::is_same_v<typename RT::shape, rt_16x32_4_s>) {
+            // col_l load for mfma_f32_32x32x16_bf16 format (stride=4)
+            const int row_offset = (laneid % 16) / 4 + (laneid / 32) * 4;
+            const int col_offset = ((laneid % 4) * 4) + 16*((laneid % 32)/16);
+            const int lane_byte_offset = (row_offset * 32 + col_offset) * sizeof(U);
+            const int swizzled_lane_byte_offset = lane_byte_offset ^ ((lane_byte_offset >> 9) << 5);
+
             const uint32_t addr = src_ptr + swizzled_lane_byte_offset;
             return addr;
         } else {
@@ -179,12 +188,28 @@
         } else if constexpr (std::is_same_v<typename ST::shape, st_16x32_s> && std::is_same_v<typename RT::shape, rt_16x32_s>) {
             constexpr int tile_stride = 16 * 32 * sizeof(U);
             constexpr int row_stride = tile_stride * ST::underlying_subtiles_per_row;
-    
+
             using range_type = ducks::art::get_nth_range_t<typename RT::register_ranges, N * RT::width + M>;
             static_assert(range_type::lo + 3 == range_type::hi, "ds_read_b64_tr_b16 requires 4 consecutive registers");
-            
+
             constexpr int offset_0 = N * row_stride + M * tile_stride;
             constexpr int offset_1 = N * row_stride + M * tile_stride + 4 * 32 * sizeof(U);
+            macros::ds_read_b64_tr_b16<range_type::lo>(addr, offset_0);
+            macros::ds_read_b64_tr_b16<range_type::lo + 2>(addr, offset_1);
+        } else if constexpr (std::is_same_v<typename ST::shape, st_16x32_s> && std::is_same_v<typename RT::shape, rt_16x32_4_s>) {
+            // col_l load for mfma_f32_32x32x16_bf16 format (stride=4)
+            // Two reads per tile, each reading 4 rows from the 16-row shared tile
+            // k=0: reads rows 0-7, k=1: reads rows 8-15
+            constexpr int tile_stride = 16 * 32 * sizeof(U);
+            constexpr int row_stride = tile_stride * ST::underlying_subtiles_per_row;
+
+            using range_type = ducks::art::get_nth_range_t<typename RT::register_ranges, N * RT::width + M>;
+            static_assert(range_type::lo + 3 == range_type::hi, "ds_read_b64_tr_b16 requires 4 consecutive registers");
+
+            // k=0: base rows 0-7 (addr already points to row 0-3 for lanes 0-31, row 4-7 for lanes 32-63)
+            constexpr int offset_0 = N * row_stride + M * tile_stride;
+            // k=1: advance by 8 rows = 8 * 32 * sizeof(U) = 512 bytes
+            constexpr int offset_1 = N * row_stride + M * tile_stride + 8 * 32 * sizeof(U);
             macros::ds_read_b64_tr_b16<range_type::lo>(addr, offset_0);
             macros::ds_read_b64_tr_b16<range_type::lo + 2>(addr, offset_1);
         } else {
@@ -379,12 +404,42 @@
                     }(std::make_index_sequence<RT::width>{});
                 }.template operator()<Ns>(), ...);
             }(std::make_index_sequence<RT::height>{});
+        } else if constexpr (std::is_same_v<typename ST::shape, st_16x32_s> && std::is_same_v<typename RT::shape, rt_16x32_4_s>) {
+            // col_l full load for mfma_f32_32x32x16_bf16 format (stride=4)
+            const int tile_stride = 16 * 32 * sizeof(U);
+            const int row_stride = tile_stride * ST::underlying_subtiles_per_row;
+            const int row_offset = (laneid % 16) / 4 + (laneid / 32) * 4;
+            const int col_offset = ((laneid % 4) * 4) + 16*((laneid % 32)/16);
+            const int lane_byte_offset = (row_offset * 32 + col_offset) * sizeof(U);
+            const int swizzled_lane_byte_offset = lane_byte_offset ^ ((lane_byte_offset >> 9) << 5);
+
+            const uint32_t addr = src_ptr + swizzled_lane_byte_offset;
+
+            auto perform_load_at = [&]<int N, int M>() {
+                using range_type = ducks::art::get_nth_range_t<typename RT::register_ranges, N * RT::width + M>;
+                static_assert(range_type::lo + 3 == range_type::hi, "ds_read_b64_tr_b16 requires 4 consecutive registers");
+
+                const int offset_0 = N * row_stride + M * tile_stride;
+                const int offset_1 = N * row_stride + M * tile_stride + 8 * 32 * sizeof(U);
+                macros::ds_read_b64_tr_b16<range_type::lo>(addr, offset_0);
+                macros::ds_read_b64_tr_b16<range_type::lo + 2>(addr, offset_1);
+            };
+
+            [&]<std::size_t... Ns>(std::index_sequence<Ns...>) {
+                ([&]<std::size_t N>() {
+                    [&]<std::size_t... Ms>(std::index_sequence<Ms...>) {
+                        ([&]<std::size_t M>() {
+                            perform_load_at.template operator()<N, M>();
+                        }.template operator()<Ms>(), ...);
+                    }(std::make_index_sequence<RT::width>{});
+                }.template operator()<Ns>(), ...);
+            }(std::make_index_sequence<RT::height>{});
         } else {
             static_assert(false, "Unsupported shape");
         }
     }
  }
- 
+
  /**
   * @brief Store data into a shared tile from a register tile.
   *

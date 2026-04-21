@@ -182,18 +182,13 @@ __device__ __forceinline__ constexpr uint32_t max_mubuf_inst_offset()
 
 template<int GPR_START>
 __device__ __forceinline__ void ds_read_b32(const uint32_t smem_ptr, const int i_offset) {
-  // AGPRS
   if constexpr (GPR_START >= 256) {
-    asm volatile("ds_read_b32 a[%0], %1 offset:%2"
-      :
-      : "n"(GPR_START - 256), "v"(smem_ptr), "i"(i_offset)
-      : "memory");
-  // VGPRS
+    uint32_t tmp;
+    asm volatile("ds_read_b32 %0, %1 offset:%2" : "=v"(tmp) : "v"(smem_ptr), "i"(i_offset) : "memory");
+    asm volatile("s_waitcnt lgkmcnt(0)" ::: "memory");
+    v_accvgpr_write_b32<GPR_START>(tmp);
   } else {
-    asm volatile("ds_read_b32 v[%0], %1 offset:%2"
-      :
-      : "n"(GPR_START), "v"(smem_ptr), "i"(i_offset)
-      : "memory");
+    asm volatile("ds_read_b32 v[%0], %1 offset:%2" : : "n"(GPR_START), "v"(smem_ptr), "i"(i_offset) : "memory");
   }
 }
 
@@ -220,18 +215,14 @@ __device__ __forceinline__ T ds_read_b64(const uint32_t smem_ptr, const int i_of
 template<int GPR_START>
 __device__ __forceinline__ void ds_read_b64(const uint32_t smem_ptr, const int i_offset) {
   constexpr int GPR_END = GPR_START + 1;
-  // AGPRS
   if constexpr (GPR_START >= 256) {
-    asm volatile("ds_read_b64 a[%0:%1], %2 offset:%3"
-      :
-      : "n"(GPR_START - 256), "n"(GPR_END - 256), "v"(smem_ptr), "i"(i_offset)
-      : "memory");
-  // VGPRS
+    int2 tmp;
+    asm volatile("ds_read_b64 %0, %1 offset:%2" : "=v"(tmp) : "v"(smem_ptr), "i"(i_offset) : "memory");
+    asm volatile("s_waitcnt lgkmcnt(0)" ::: "memory");
+    v_accvgpr_write_b32<GPR_START  >(static_cast<uint32_t>(tmp.x));
+    v_accvgpr_write_b32<GPR_START+1>(static_cast<uint32_t>(tmp.y));
   } else {
-    asm volatile("ds_read_b64 v[%0:%1], %2 offset:%3"
-      :
-      : "n"(GPR_START), "n"(GPR_END), "v"(smem_ptr), "i"(i_offset)
-      : "memory");
+    asm volatile("ds_read_b64 v[%0:%1], %2 offset:%3" : : "n"(GPR_START), "n"(GPR_END), "v"(smem_ptr), "i"(i_offset) : "memory");
   }
 }
 
@@ -262,16 +253,29 @@ __device__ __forceinline__ T ds_read_b128(const uint32_t smem_ptr, const int i_o
   return result;
 }
 
+template<int AGPR_DST, int _dummy=0>
+__device__ __forceinline__ void v_accvgpr_write_b32(uint32_t val) {
+  asm volatile("v_accvgpr_write_b32 a[%0], %1"
+    :
+    : "n"(AGPR_DST - 256), "v"(val)
+    : "memory");
+}
+
 template<int GPR_START>
 __device__ __forceinline__ void ds_read_b128(const uint32_t smem_ptr, const int i_offset) {
   constexpr int GPR_END = GPR_START + 3;
-  // AGPRS
   if constexpr (GPR_START >= 256) {
-    asm volatile("ds_read_b128 a[%0:%1], %2 offset:%3"
-      :
-      : "n"(GPR_START - 256), "n"(GPR_END - 256), "v"(smem_ptr), "i"(i_offset)
+    // LDS reads can only target VGPRs. For AGPR: read to temp VGPRs, then accvgpr_write.
+    int4 tmp;
+    asm volatile("ds_read_b128 %0, %1 offset:%2"
+      : "=v"(tmp)
+      : "v"(smem_ptr), "i"(i_offset)
       : "memory");
-  // VGPRS
+    asm volatile("s_waitcnt lgkmcnt(0)" ::: "memory");
+    v_accvgpr_write_b32<GPR_START  >(static_cast<uint32_t>(tmp.x));
+    v_accvgpr_write_b32<GPR_START+1>(static_cast<uint32_t>(tmp.y));
+    v_accvgpr_write_b32<GPR_START+2>(static_cast<uint32_t>(tmp.z));
+    v_accvgpr_write_b32<GPR_START+3>(static_cast<uint32_t>(tmp.w));
   } else {
     asm volatile("ds_read_b128 v[%0:%1], %2 offset:%3"
       :
@@ -894,8 +898,9 @@ template<int DST_GPR, int SRC_GPR_0, int SRC_GPR_1>
 __device__ __forceinline__ void v_cvt_pk_bf16_f32() {
   if constexpr (DST_GPR < 256 && SRC_GPR_0 < 256 && SRC_GPR_1 < 256) {
     asm volatile("v_cvt_pk_bf16_f32 v[%0], v[%1], v[%2]"
-      : 
-      : "n"(DST_GPR), "n"(SRC_GPR_0), "n"(SRC_GPR_1));
+      :
+      : "n"(DST_GPR), "n"(SRC_GPR_0), "n"(SRC_GPR_1)
+      : "memory");
   } else {
     static_assert(false, "Invalid operand for instruction: v_cvt_pk_bf16_f32");
   }
@@ -905,8 +910,9 @@ template<int GPR0, int GPR1>
 __device__ __forceinline__ void v_permlane16_swap_b32_e32() {
   if constexpr (GPR0 < 256 && GPR1 < 256) {
     asm volatile("v_permlane16_swap_b32_e32 v[%0], v[%1]"
-      : 
-      : "n"(GPR0), "n"(GPR1));
+      :
+      : "n"(GPR0), "n"(GPR1)
+      : "memory");
   } else {
     static_assert(false, "Invalid operand for instruction: v_permlane16_swap_b32_e32");
   }
@@ -916,8 +922,18 @@ template<int GPR0, int GPR1>
 __device__ __forceinline__ void v_accvgpr_read_b32() {
   asm volatile("v_accvgpr_read_b32 v[%0], a[%1]"
     : 
-    : "n"(GPR0), "n"(GPR1 - 256));
+    : "n"(GPR0), "n"(GPR1 - 256)
+    : "memory");
 }
+
+template<int AGPR_DST, int VGPR_SRC>
+__device__ __forceinline__ void v_accvgpr_write_b32() {
+  asm volatile("v_accvgpr_write_b32 a[%0], v[%1]"
+    :
+    : "n"(AGPR_DST - 256), "n"(VGPR_SRC)
+    : "memory");
+}
+
 
 template<int GPR, typename T>
 __device__ __forceinline__ void v_mov_b32_up2p(const T value) {
@@ -1051,7 +1067,9 @@ struct zero {
         : 
         : "n"(GPR0));
     } else {
-      static_assert(false, "Invalid operand for instruction: zero");
+      asm volatile("v_accvgpr_write_b32 a[%0], 0"
+        :
+        : "n"(GPR0 - 256));
     }
   }
 };

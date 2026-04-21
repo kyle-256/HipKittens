@@ -72,6 +72,7 @@ using rt_16x128_s = ducks::rt_shape::rt_16x128;
 using st_16x16_s = ducks::st_shape::st_16x16;
 using st_16x16_swizzled_s = ducks::st_shape::st_16x16_swizzled;
 using st_32x32_s = ducks::st_shape::st_32x32;
+using st_32x32_pad4_s = ducks::st_shape::st_32x32_pad4;
 using st_16x32_s = ducks::st_shape::st_16x32;
 using st_32x16_s = ducks::st_shape::st_32x16;
 using st_8x32_s = ducks::st_shape::st_8x32;
