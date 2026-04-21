@@ -129,6 +129,12 @@ DEFAULT_VARIANTS = [
     ("step34pf_unr2_tbv16", _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DUNROLL_K=2 -DTAIL_BARRIER_VMCNT=16"),
     ("step34pf_gb_gm6",     _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DGLOBAL_B=1 -DGROUP_SIZE_M=6"),
     ("step34pf_we1_unr2",   _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DWAVES_PER_EU_1 -DUNROLL_K=2"),
+    # R70: UNROLL_K=4 reduces I-cache pressure on K-heavy shapes (K≥14336).
+    # Compiler default unrolls 8-51× for large K; unr4 keeps it moderate.
+    ("step34pf_unr4",       _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DUNROLL_K=4"),
+    ("step34pf_unr4_tbv16", _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DUNROLL_K=4 -DTAIL_BARRIER_VMCNT=16"),
+    ("step34pf_unr4_we1",   _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DUNROLL_K=4 -DWAVES_PER_EU_1"),
+    ("step34pf_unr4_gm6",   _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DUNROLL_K=4 -DGROUP_SIZE_M=6"),
 ]
 
 
