@@ -154,6 +154,8 @@ DEFAULT_VARIANTS = [
     ("step34pf_spread_unr4",    _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DSPREAD_DS_READ=1 -DUNROLL_K=4"),
     ("step34pf_spread_gm6",     _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DSPREAD_DS_READ=1 -DGROUP_SIZE_M=6"),
     ("step34pf_spread_we1",     _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DSPREAD_DS_READ=1 -DWAVES_PER_EU_1"),
+    ("step34pf_spread_unr6",    _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DSPREAD_DS_READ=1 -DUNROLL_K=6"),
+    ("step34pf_spread_unr6_we1",_BASE + " -DSTEP34_PF_INTERLEAVE=1 -DSPREAD_DS_READ=1 -DUNROLL_K=6 -DWAVES_PER_EU_1"),
     # Fused 128-MFMA: all 4 steps in one asm block, eliminates extract_tile overhead
     ("fused128",               _BASE + " -DFUSED_128=1"),
     ("fused128_gm6",           _BASE + " -DFUSED_128=1 -DGROUP_SIZE_M=6"),
