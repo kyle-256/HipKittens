@@ -142,6 +142,8 @@ DEFAULT_VARIANTS = [
     # R70+: triple-knob combos that unlock borderline shapes (16384x4096x14336 → WIN)
     ("step34pf_gm6_we1",        _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DGROUP_SIZE_M=6 -DWAVES_PER_EU_1"),
     ("step34pf_unr4_gm6_tbv16", _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DUNROLL_K=4 -DGROUP_SIZE_M=6 -DTAIL_BARRIER_VMCNT=16"),
+    ("step34pf_gm6_tbv16_we1", _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DGROUP_SIZE_M=6 -DTAIL_BARRIER_VMCNT=16 -DWAVES_PER_EU_1"),
+    ("step34pf_unr2_gm6_tbv16",_BASE + " -DSTEP34_PF_INTERLEAVE=1 -DUNROLL_K=2 -DGROUP_SIZE_M=6 -DTAIL_BARRIER_VMCNT=16"),
 ]
 
 
