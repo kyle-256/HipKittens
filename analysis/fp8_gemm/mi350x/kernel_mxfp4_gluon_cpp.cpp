@@ -483,6 +483,7 @@ __device__ __forceinline__ void emit_pf_tail(const tile_pf_params& pf0, const ti
 //   %32..35=b_lo, %36..39=b_hi, %40=sa0, %41=sa1, %42=sb0, %43=sb1,
 //   %44=lds_a0, %45=lds_a1.
 
+#if !defined(SPREAD_DS_READ) || !SPREAD_DS_READ
 __device__ __forceinline__ void kpair_32mfma_with_lds(
     fp4_floatx4_t acc[16],
     const fp4_intx8_t A[4], const fp4_intx8_t B[4],
@@ -549,6 +550,80 @@ __device__ __forceinline__ void kpair_32mfma_with_lds(
           "v"(lds_a0), "v"(lds_a1)
     );
 }
+#endif // !SPREAD_DS_READ
+
+// ── SPREAD variant: 8 ds_reads distributed 1:4 across 32 MFMAs ──
+// Same interface as kpair_32mfma_with_lds but with spread ds_read placement.
+// Includes s_waitcnt lgkmcnt(0) at the END of the asm block to prevent
+// the compiler from reading ds_read outputs before they complete.
+#if defined(SPREAD_DS_READ) && SPREAD_DS_READ
+__device__ __forceinline__ void kpair_32mfma_with_lds(
+    fp4_floatx4_t acc[16],
+    const fp4_intx8_t A[4], const fp4_intx8_t B[4],
+    const fp8e8m0_4 a_raw[2], const fp8e8m0_4 b_raw[2],
+    float4 &d0, float4 &d1, float4 &d2, float4 &d3,
+    float4 &d4, float4 &d5, float4 &d6, float4 &d7,
+    uint32_t lds_a0, uint32_t lds_a1)
+{
+    KPAIR_SETUP();
+    asm volatile(
+        // Row 0 Phase 0 (4 MFMAs) + ds_read 0
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %24, %32, %0,  %40, %42 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %24, %33, %1,  %40, %42 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %24, %34, %2,  %40, %43 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %16, %44 offset:0\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %24, %35, %3,  %40, %43 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        // Row 0 Phase 1 (4 MFMAs) + ds_read 1
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %0,  %28, %36, %0,  %40, %42 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %1,  %28, %37, %1,  %40, %42 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %2,  %28, %38, %2,  %40, %43 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %17, %44 offset:2048\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %3,  %28, %39, %3,  %40, %43 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        // Row 1 Phase 0 (4 MFMAs) + ds_read 2
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %25, %32, %4,  %40, %42 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %25, %33, %5,  %40, %42 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %25, %34, %6,  %40, %43 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %18, %44 offset:4096\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %25, %35, %7,  %40, %43 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        // Row 1 Phase 1 (4 MFMAs) + ds_read 3
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %4,  %29, %36, %4,  %40, %42 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %5,  %29, %37, %5,  %40, %42 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %6,  %29, %38, %6,  %40, %43 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %19, %44 offset:6144\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %7,  %29, %39, %7,  %40, %43 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        // Row 2 Phase 0 (4 MFMAs) + ds_read 4
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %26, %32, %8,  %41, %42 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %26, %33, %9,  %41, %42 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %26, %34, %10, %41, %43 op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %20, %45 offset:0\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %26, %35, %11, %41, %43 op_sel:[0,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        // Row 2 Phase 1 (4 MFMAs) + ds_read 5
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %8,  %30, %36, %8,  %41, %42 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %9,  %30, %37, %9,  %41, %42 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %10, %30, %38, %10, %41, %43 op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %21, %45 offset:2048\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %11, %30, %39, %11, %41, %43 op_sel:[0,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        // Row 3 Phase 0 (4 MFMAs) + ds_read 6
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %27, %32, %12, %41, %42 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %27, %33, %13, %41, %42 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %27, %34, %14, %41, %43 op_sel:[1,0,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %22, %45 offset:4096\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %27, %35, %15, %41, %43 op_sel:[1,1,0] op_sel_hi:[0,0,0] cbsz:4 blgp:4\n"
+        // Row 3 Phase 1 (4 MFMAs) + ds_read 7 + waitcnt
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %12, %31, %36, %12, %41, %42 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "ds_read_b128 %23, %45 offset:6144\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %13, %31, %37, %13, %41, %42 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %14, %31, %38, %14, %41, %43 op_sel:[1,0,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "v_mfma_scale_f32_16x16x128_f8f6f4 %15, %31, %39, %15, %41, %43 op_sel:[1,1,0] op_sel_hi:[1,1,0] cbsz:4 blgp:4\n"
+        "s_waitcnt lgkmcnt(0)\n"
+        : KPAIR_ACC_CLOBBER,
+          "=&v"(d0), "=&v"(d1), "=&v"(d2), "=&v"(d3),
+          "=&v"(d4), "=&v"(d5), "=&v"(d6), "=&v"(d7)
+        : KPAIR_INPUTS,
+          "v"(lds_a0), "v"(lds_a1)
+    );
+}
+#endif // SPREAD_DS_READ
 
 // ── 32 KPAIR MFMAs + 8 interleaved tile prefetch loads ──
 // Uses same operand layout as original kpair_32mfma (%0..15=acc, %16..19=a_lo,
