@@ -139,6 +139,7 @@ DEFAULT_VARIANTS = [
     # +1.7pp on K=128256, -1.5pp on K=32768. Autotune picks best per-shape.
     ("step34pf_s12split",       _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DSTEP12_SPLIT_PF=1"),
     ("step34pf_s12split_unr4",  _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DSTEP12_SPLIT_PF=1 -DUNROLL_K=4"),
+    ("step34pf_s12split_gm6_tbv16", _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DSTEP12_SPLIT_PF=1 -DGROUP_SIZE_M=6 -DTAIL_BARRIER_VMCNT=16"),
     # R70+: triple-knob combos that unlock borderline shapes (16384x4096x14336 → WIN)
     ("step34pf_gm6_we1",        _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DGROUP_SIZE_M=6 -DWAVES_PER_EU_1"),
     ("step34pf_unr4_gm6_tbv16", _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DUNROLL_K=4 -DGROUP_SIZE_M=6 -DTAIL_BARRIER_VMCNT=16"),
