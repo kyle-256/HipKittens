@@ -140,6 +140,10 @@ DEFAULT_VARIANTS = [
     ("step34pf_s12split",       _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DSTEP12_SPLIT_PF=1"),
     ("step34pf_s12split_unr4",  _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DSTEP12_SPLIT_PF=1 -DUNROLL_K=4"),
     ("step34pf_s12split_gm6_tbv16", _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DSTEP12_SPLIT_PF=1 -DGROUP_SIZE_M=6 -DTAIL_BARRIER_VMCNT=16"),
+    # R70+ aggressive sweep: best combos for hard losers (no NEW WINs but +0.8-2pp uplift)
+    ("step34pf_unr6",          _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DUNROLL_K=6"),
+    ("step34pf_unr3",          _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DUNROLL_K=3"),
+    ("step34pf_unr4_gm8_we1",  _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DUNROLL_K=4 -DGROUP_SIZE_M=8 -DWAVES_PER_EU_1"),
     # R70+: triple-knob combos that unlock borderline shapes (16384x4096x14336 → WIN)
     ("step34pf_gm6_we1",        _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DGROUP_SIZE_M=6 -DWAVES_PER_EU_1"),
     ("step34pf_unr4_gm6_tbv16", _BASE + " -DSTEP34_PF_INTERLEAVE=1 -DUNROLL_K=4 -DGROUP_SIZE_M=6 -DTAIL_BARRIER_VMCNT=16"),
