@@ -475,10 +475,33 @@ struct layout_globals {
     int bpr, bpc, ki;
     int fast_m, fast_n, fast_k;
     int group_m;
+    // Optional device-side scalar scales. When non-null, the kernel epilogue
+    // reads `*dscale_a * *dscale_b` from device memory instead of using the
+    // host-side `scale_a * scale_b` floats above. This lets the Python host
+    // wrapper skip the `.item()` stream sync that would otherwise be required
+    // to materialise the scales into host floats before kernel launch -- the
+    // sync was responsible for ~18us of dispatch latency on small dense FP8
+    // shapes (4096^3 etc) where it was bigger than the GEMM kernel itself
+    // is over default hipBLASLt. nullptr selects the host-scale path so
+    // existing call sites (gemm_{rcr,rrr,crr}) keep working unchanged.
+    const float* dscale_a;
+    const float* dscale_b;
     dim3 grid()  { return dim3(bpr * bpc); }
     dim3 block() { return dim3(_NUM_THREADS); }
     size_t dynamic_shared_memory() { return 0; }
 };
+
+// Resolve the combined per-tensor scale at kernel epilogue time. When the
+// host wrapper passed device-side scale tensors (dscale_{a,b} non-null) we
+// load them with a scalar global-memory read; otherwise we fall back to
+// the host-known floats baked into `g`. The branch is uniform across the
+// wave so the compiler keeps it scalar; the load itself is one b32 from
+// global memory and hits cache after the first wave issues it.
+__device__ __forceinline__ float resolve_combined_scale(const layout_globals &g) {
+    const float sa = g.dscale_a ? *g.dscale_a : g.scale_a;
+    const float sb = g.dscale_b ? *g.dscale_b : g.scale_b;
+    return sa * sb;
+}
 
 __device__ __forceinline__ int gemm_chiplet_swizzle_bid(int bid, int num_wgs) {
     if (num_wgs >= BLOCK_SWIZZLE_NUM_XCDS &&
@@ -951,7 +974,7 @@ void kernel(const layout_globals g) {
         __builtin_amdgcn_sched_barrier(0);
     }
 
-    const float sc = g.scale_a * g.scale_b;
+    const float sc = resolve_combined_scale(g);
     mul(c[0][0], c[0][0], sc);
     mul(c[0][1], c[0][1], sc);
     mul(c[1][0], c[1][0], sc);
@@ -1474,7 +1497,7 @@ void gemm_kernel(const layout_globals g) {
             __builtin_amdgcn_s_barrier();
         }    }
 
-    const float combined_scale = g.scale_a * g.scale_b;
+    const float combined_scale = resolve_combined_scale(g);
     mul(cA, cA, combined_scale);
     mul(cB, cB, combined_scale);
     mul(cC, cC, combined_scale);
@@ -1515,7 +1538,7 @@ __global__ void gemm_tail_kernel(const layout_globals g) {
         }
     }
 
-    const float scaled = acc * g.scale_a * g.scale_b;
+    const float scaled = acc * resolve_combined_scale(g);
     if (fast_covers_cell && needs_k_tail) {
         store_bf16_scalar(g.c, row, col, load_bf16_scalar(g.c, row, col) + scaled);
     } else {
@@ -1612,6 +1635,35 @@ static void gemm_wrapper(pybind11::object a, pybind11::object b, pybind11::objec
         to_float(scale_b_obj),
         {}, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         group_m,
+        nullptr, nullptr,
+    };
+    dispatch<L>(g);
+}
+
+// Variant of gemm_wrapper that takes the per-tensor FP8 scales as 0-d device
+// tensors (one element each) instead of host-side scalars / 0-d host tensors.
+// The Python-side host wrapper used to call `(a_scale_inv * b_scale_inv).item()`
+// on every dispatch which is a stream sync that costs ~18us on small dense
+// FP8 shapes (≈ 30% of the kernel itself) — this entry skips that sync by
+// passing the device pointers straight through to the kernel's epilogue, which
+// reads one b32 from global memory at scale-application time. The two scales
+// are both used in the epilogue only, so the cost of the load is fully hidden
+// behind the GEMM main loop.
+template<Layout L>
+static void gemm_wrapper_dscale(pybind11::object a, pybind11::object b, pybind11::object c,
+                                 pybind11::object scale_a_obj, pybind11::object scale_b_obj,
+                                 int group_m) {
+    auto sa_ptr = scale_a_obj.attr("data_ptr")().cast<uintptr_t>();
+    auto sb_ptr = scale_b_obj.attr("data_ptr")().cast<uintptr_t>();
+    layout_globals g{
+        py::from_object<_gl_fp8>::make(a),
+        py::from_object<_gl_fp8>::make(b),
+        py::from_object<_gl_bf16>::make(c),
+        0.f, 0.f,
+        {}, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        group_m,
+        reinterpret_cast<const float*>(sa_ptr),
+        reinterpret_cast<const float*>(sb_ptr),
     };
     dispatch<L>(g);
 }
@@ -1627,6 +1679,18 @@ PYBIND11_MODULE(tk_fp8_layouts, m) {
           pybind11::arg("scale_a"), pybind11::arg("scale_b"),
           pybind11::arg("group_m") = DEFAULT_GROUP_M);
     m.def("gemm_crr", &gemm_wrapper<Layout::CRR>,
+          pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("c"),
+          pybind11::arg("scale_a"), pybind11::arg("scale_b"),
+          pybind11::arg("group_m") = DEFAULT_GROUP_M);
+    m.def("gemm_rcr_dscale", &gemm_wrapper_dscale<Layout::RCR>,
+          pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("c"),
+          pybind11::arg("scale_a"), pybind11::arg("scale_b"),
+          pybind11::arg("group_m") = DEFAULT_GROUP_M);
+    m.def("gemm_rrr_dscale", &gemm_wrapper_dscale<Layout::RRR>,
+          pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("c"),
+          pybind11::arg("scale_a"), pybind11::arg("scale_b"),
+          pybind11::arg("group_m") = DEFAULT_GROUP_M);
+    m.def("gemm_crr_dscale", &gemm_wrapper_dscale<Layout::CRR>,
           pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("c"),
           pybind11::arg("scale_a"), pybind11::arg("scale_b"),
           pybind11::arg("group_m") = DEFAULT_GROUP_M);
