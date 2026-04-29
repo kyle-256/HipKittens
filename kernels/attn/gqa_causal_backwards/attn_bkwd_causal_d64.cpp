@@ -172,6 +172,21 @@ template<int D> struct attn_bwd_combined_globals {
 };
 
 
+// Inside this kernel the canonical fwd idiom
+//
+//     asm volatile("s_waitcnt ...");
+//     __builtin_amdgcn_sched_barrier(0);   // pin the wait + barrier to this point
+//     __builtin_amdgcn_s_barrier();
+//
+// is used at every wave-sync point in the prologue/inner-loop/epilogue.
+// `__builtin_amdgcn_sched_barrier(0)` (mask=0 -> "no instruction class may
+// be reordered across this barrier") prevents the LLVM post-RA scheduler
+// from sliding the surrounding mma/load instructions over the explicit
+// s_waitcnt -- without it, the carefully chosen lgkmcnt/vmcnt values risk
+// being defeated by upstream/downstream code-motion.  Mirrors the 89
+// occurrences in attn_fwd_causal_d64.cpp (vs only 1 in this file before).
+// Pure additive hint -- no numerics change, verified per-shape cos
+// unchanged.
 template<int D> __launch_bounds__(NUM_THREADS, 1)
 __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(const attn_bwd_combined_globals<D> g) {
 
@@ -404,6 +419,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         load<1, 0>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
         load<1, 1>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
         asm volatile("s_waitcnt lgkmcnt(0)");
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
 
         // 10. S_ij = Q_i K_j^T * scale
@@ -555,6 +571,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         load<4, 0>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid_dq}), K_j_col_addr);
         mma_AtB<0, 1, 0>(dK_j_T, Q_i_col, dP_ij_bf16_col);
         asm volatile("s_waitcnt lgkmcnt(8)");
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         mma_AtB<1, 0, 0>(dK_j_T, Q_i_col, dP_ij_bf16_col);
         // Load dP_ij_bf16_col_T from shared memory to registers
@@ -573,6 +590,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         load<7, 0>(dP_ij_bf16_col_T, attn_i_smem, dP_ij_bf16_col_T_addr);
         load<5, 1>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid_dq}), K_j_col_addr);
         asm volatile("s_waitcnt vmcnt(0) lgkmcnt(6)");
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         // 15. dQ_i += dS_ij @ K_j (32x16)=(32x256)x(256x16)
         // mma_AtB(dQ_i_T, K_j_col, dP_ij_bf16_col_T);
@@ -594,6 +612,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         load<0, 1>(Q_i, subtile_inplace<DOT_SLICE_QO, D>(Q_i_smem[tic][0], {0, 0}), Q_i_addr);
         mma_AtB<0, 0, 5>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
         asm volatile("s_waitcnt lgkmcnt(4)");
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         mma_AtB<0, 0, 6>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
         mma_AtB<0, 0, 7>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
@@ -771,6 +790,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         load<4, 0>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid_dq}), K_j_col_addr);
         mma_AtB<0, 1, 0>(dK_j_T, Q_i_col, dP_ij_bf16_col, dK_j_T);
         asm volatile("s_waitcnt lgkmcnt(8)");
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         mma_AtB<1, 0, 0>(dK_j_T, Q_i_col, dP_ij_bf16_col, dK_j_T);
         // Load dP_ij_bf16_col_T from shared memory to registers
@@ -791,6 +811,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         load<7, 0>(dP_ij_bf16_col_T, attn_i_smem, dP_ij_bf16_col_T_addr);
         load<5, 1>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid_dq}), K_j_col_addr);
         asm volatile("s_waitcnt vmcnt(4) lgkmcnt(6)");
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         // 15. dQ_i += dS_ij @ K_j (32x16)=(32x256)x(256x16)
         // mma_AtB(dQ_i_T, K_j_col, dP_ij_bf16_col_T);
@@ -811,6 +832,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         load<0, 1>(Q_i, subtile_inplace<DOT_SLICE_QO, D>(Q_i_smem[tic][0], {0, 0}), Q_i_addr);
         mma_AtB<0, 0, 5>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
         asm volatile("s_waitcnt lgkmcnt(4)");
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         mma_AtB<0, 0, 6>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
         mma_AtB<0, 0, 7>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
@@ -987,6 +1009,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         load<4, 0>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid_dq}), K_j_col_addr);
         mma_AtB<0, 1, 0>(dK_j_T, Q_i_col, dP_ij_bf16_col, dK_j_T);
         asm volatile("s_waitcnt lgkmcnt(8)");
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         mma_AtB<1, 0, 0>(dK_j_T, Q_i_col, dP_ij_bf16_col, dK_j_T);
         // Load dP_ij_bf16_col_T from shared memory to registers
@@ -1007,6 +1030,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         load<7, 0>(dP_ij_bf16_col_T, attn_i_smem, dP_ij_bf16_col_T_addr);
         load<5, 1>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid_dq}), K_j_col_addr);
         asm volatile("s_waitcnt vmcnt(4) lgkmcnt(6)");
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         // 15. dQ_i += dS_ij @ K_j (32x16)=(32x256)x(256x16)
         // mma_AtB(dQ_i_T, K_j_col, dP_ij_bf16_col_T);
@@ -1027,6 +1051,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         load<0, 1>(Q_i, subtile_inplace<DOT_SLICE_QO, D>(Q_i_smem[tic][0], {0, 0}), Q_i_addr);
         mma_AtB<0, 0, 5>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
         asm volatile("s_waitcnt lgkmcnt(4)");
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         mma_AtB<0, 0, 6>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
         mma_AtB<0, 0, 7>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
@@ -1202,6 +1227,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         load<4, 0>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid_dq}), K_j_col_addr);
         mma_AtB<0, 1, 0>(dK_j_T, Q_i_col, dP_ij_bf16_col, dK_j_T);
         asm volatile("s_waitcnt lgkmcnt(8)");
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         mma_AtB<1, 0, 0>(dK_j_T, Q_i_col, dP_ij_bf16_col, dK_j_T);
         // Load dP_ij_bf16_col_T from shared memory to registers
@@ -1222,6 +1248,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         load<7, 0>(dP_ij_bf16_col_T, attn_i_smem, dP_ij_bf16_col_T_addr);
         load<5, 1>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid_dq}), K_j_col_addr);
         asm volatile("s_waitcnt vmcnt(4) lgkmcnt(6)");
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         // 15. dQ_i += dS_ij @ K_j (32x16)=(32x256)x(256x16)
         // mma_AtB(dQ_i_T, K_j_col, dP_ij_bf16_col_T);
@@ -1241,6 +1268,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         load<0, 1>(Q_i, subtile_inplace<DOT_SLICE_QO, D>(Q_i_smem[toc][0], {0, 0}), Q_i_addr);
         mma_AtB<0, 0, 5>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
         asm volatile("s_waitcnt lgkmcnt(4)");
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         mma_AtB<0, 0, 6>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
         mma_AtB<0, 0, 7>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
@@ -1435,6 +1463,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         load<4, 0>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid_dq}), K_j_col_addr);
         mma_AtB<0, 1, 0>(dK_j_T, Q_i_col, dP_ij_bf16_col, dK_j_T);
         asm volatile("s_waitcnt lgkmcnt(8)");
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         mma_AtB<1, 0, 0>(dK_j_T, Q_i_col, dP_ij_bf16_col, dK_j_T);
         // Load dP_ij_bf16_col_T from shared memory to registers
@@ -1455,6 +1484,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         load<7, 0>(dP_ij_bf16_col_T, attn_i_smem, dP_ij_bf16_col_T_addr);
         load<5, 1>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid_dq}), K_j_col_addr);
         asm volatile("s_waitcnt vmcnt(4) lgkmcnt(6)");
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         // 15. dQ_i += dS_ij @ K_j (32x16)=(32x256)x(256x16)
         // mma_AtB(dQ_i_T, K_j_col, dP_ij_bf16_col_T);
@@ -1476,6 +1506,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         load<0, 1>(Q_i, subtile_inplace<DOT_SLICE_QO, D>(Q_i_smem[tic][0], {0, 0}), Q_i_addr);
         mma_AtB<0, 0, 5>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
         asm volatile("s_waitcnt lgkmcnt(4)");
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         mma_AtB<0, 0, 6>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
         mma_AtB<0, 0, 7>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
@@ -1655,6 +1686,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         load<4, 0>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid_dq}), K_j_col_addr);
         mma_AtB<0, 1, 0>(dK_j_T, Q_i_col, dP_ij_bf16_col, dK_j_T);
         asm volatile("s_waitcnt lgkmcnt(8)");
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         mma_AtB<1, 0, 0>(dK_j_T, Q_i_col, dP_ij_bf16_col, dK_j_T);
         // Load dP_ij_bf16_col_T from shared memory to registers
@@ -1675,6 +1707,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         load<7, 0>(dP_ij_bf16_col_T, attn_i_smem, dP_ij_bf16_col_T_addr);
         load<5, 1>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid_dq}), K_j_col_addr);
         asm volatile("s_waitcnt vmcnt(4) lgkmcnt(6)");
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         // 15. dQ_i += dS_ij @ K_j (32x16)=(32x256)x(256x16)
         // mma_AtB(dQ_i_T, K_j_col, dP_ij_bf16_col_T);
@@ -1695,6 +1728,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         load<0, 1>(Q_i, subtile_inplace<DOT_SLICE_QO, D>(Q_i_smem[tic][0], {0, 0}), Q_i_addr);
         mma_AtB<0, 0, 5>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
         asm volatile("s_waitcnt lgkmcnt(4)");
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         mma_AtB<0, 0, 6>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
         mma_AtB<0, 0, 7>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
@@ -1871,6 +1905,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         load<4, 0>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid_dq}), K_j_col_addr);
         mma_AtB<0, 1, 0>(dK_j_T, Q_i_col, dP_ij_bf16_col, dK_j_T);
         asm volatile("s_waitcnt lgkmcnt(8)");
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         mma_AtB<1, 0, 0>(dK_j_T, Q_i_col, dP_ij_bf16_col, dK_j_T);
         // Load dP_ij_bf16_col_T from shared memory to registers
@@ -1891,6 +1926,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         load<7, 0>(dP_ij_bf16_col_T, attn_i_smem, dP_ij_bf16_col_T_addr);
         load<5, 1>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid_dq}), K_j_col_addr);
         asm volatile("s_waitcnt vmcnt(4) lgkmcnt(6)");
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         // 15. dQ_i += dS_ij @ K_j (32x16)=(32x256)x(256x16)
         // mma_AtB(dQ_i_T, K_j_col, dP_ij_bf16_col_T);
@@ -1911,6 +1947,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         load<0, 1>(Q_i, subtile_inplace<DOT_SLICE_QO, D>(Q_i_smem[tic][0], {0, 0}), Q_i_addr);
         mma_AtB<0, 0, 5>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
         asm volatile("s_waitcnt lgkmcnt(4)");
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         mma_AtB<0, 0, 6>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
         mma_AtB<0, 0, 7>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
@@ -2086,6 +2123,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         load<4, 0>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid_dq}), K_j_col_addr);
         mma_AtB<0, 1, 0>(dK_j_T, Q_i_col, dP_ij_bf16_col, dK_j_T);
         asm volatile("s_waitcnt lgkmcnt(8)");
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         mma_AtB<1, 0, 0>(dK_j_T, Q_i_col, dP_ij_bf16_col, dK_j_T);
         // Load dP_ij_bf16_col_T from shared memory to registers
@@ -2106,6 +2144,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         load<7, 0>(dP_ij_bf16_col_T, attn_i_smem, dP_ij_bf16_col_T_addr);
         load<5, 1>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid_dq}), K_j_col_addr);
         asm volatile("s_waitcnt vmcnt(4) lgkmcnt(6)");
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         // 15. dQ_i += dS_ij @ K_j (32x16)=(32x256)x(256x16)
         // mma_AtB(dQ_i_T, K_j_col, dP_ij_bf16_col_T);
@@ -2125,6 +2164,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         load<0, 1>(Q_i, subtile_inplace<DOT_SLICE_QO, D>(Q_i_smem[toc][0], {0, 0}), Q_i_addr);
         mma_AtB<0, 0, 5>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
         asm volatile("s_waitcnt lgkmcnt(4)");
+        __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         mma_AtB<0, 0, 6>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
         mma_AtB<0, 0, 7>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
@@ -2314,6 +2354,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<4, 0>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid_dq}), K_j_col_addr);
       mma_AtB<0, 1, 0>(dK_j_T, Q_i_col, dP_ij_bf16_col, dK_j_T);
       asm volatile("s_waitcnt lgkmcnt(8)");
+      __builtin_amdgcn_sched_barrier(0);
       __builtin_amdgcn_s_barrier();
       mma_AtB<1, 0, 0>(dK_j_T, Q_i_col, dP_ij_bf16_col, dK_j_T);
       // Load dP_ij_bf16_col_T from shared memory to registers
@@ -2338,6 +2379,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<7, 0>(dP_ij_bf16_col_T, attn_i_smem, dP_ij_bf16_col_T_addr);
       load<5, 1>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid_dq}), K_j_col_addr);
       asm volatile("s_waitcnt lgkmcnt(6)");
+      __builtin_amdgcn_sched_barrier(0);
       __builtin_amdgcn_s_barrier();
       // 15. dQ_i += dS_ij @ K_j (32x16)=(32x256)x(256x16)
       // mma_AtB(dQ_i_T, K_j_col, dP_ij_bf16_col_T);
@@ -2357,6 +2399,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<0, 1>(Q_i, subtile_inplace<DOT_SLICE_QO, D>(Q_i_smem[tic][0], {0, 0}), Q_i_addr);
       mma_AtB<0, 0, 5>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
       asm volatile("s_waitcnt lgkmcnt(4)");
+      __builtin_amdgcn_sched_barrier(0);
       __builtin_amdgcn_s_barrier();
       mma_AtB<0, 0, 6>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
       mma_AtB<0, 0, 7>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
@@ -2534,6 +2577,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<4, 0>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid_dq}), K_j_col_addr);
       mma_AtB<0, 1, 0>(dK_j_T, Q_i_col, dP_ij_bf16_col, dK_j_T);
       asm volatile("s_waitcnt lgkmcnt(8)");
+      __builtin_amdgcn_sched_barrier(0);
       __builtin_amdgcn_s_barrier();
       mma_AtB<1, 0, 0>(dK_j_T, Q_i_col, dP_ij_bf16_col, dK_j_T);
       // Load dP_ij_bf16_col_T from shared memory to registers
@@ -2554,6 +2598,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<7, 0>(dP_ij_bf16_col_T, attn_i_smem, dP_ij_bf16_col_T_addr);
       load<5, 1>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid_dq}), K_j_col_addr);
       asm volatile("s_waitcnt lgkmcnt(6)");
+      __builtin_amdgcn_sched_barrier(0);
       __builtin_amdgcn_s_barrier();
       // 15. dQ_i += dS_ij @ K_j (32x16)=(32x256)x(256x16)
       // mma_AtB(dQ_i_T, K_j_col, dP_ij_bf16_col_T);
@@ -2573,6 +2618,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<0, 1>(Q_i, subtile_inplace<DOT_SLICE_QO, D>(Q_i_smem[tic][0], {0, 0}), Q_i_addr);
       mma_AtB<0, 0, 5>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
       asm volatile("s_waitcnt lgkmcnt(4)");
+      __builtin_amdgcn_sched_barrier(0);
       __builtin_amdgcn_s_barrier();
       mma_AtB<0, 0, 6>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
       mma_AtB<0, 0, 7>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
@@ -2749,6 +2795,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<4, 0>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid_dq}), K_j_col_addr);
       mma_AtB<0, 1, 0>(dK_j_T, Q_i_col, dP_ij_bf16_col, dK_j_T);
       asm volatile("s_waitcnt lgkmcnt(8)");
+      __builtin_amdgcn_sched_barrier(0);
       __builtin_amdgcn_s_barrier();
       mma_AtB<1, 0, 0>(dK_j_T, Q_i_col, dP_ij_bf16_col, dK_j_T);
       // Load dP_ij_bf16_col_T from shared memory to registers
@@ -2769,6 +2816,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<7, 0>(dP_ij_bf16_col_T, attn_i_smem, dP_ij_bf16_col_T_addr);
       load<5, 1>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid_dq}), K_j_col_addr);
       asm volatile("s_waitcnt lgkmcnt(6)");
+      __builtin_amdgcn_sched_barrier(0);
       __builtin_amdgcn_s_barrier();
       // 15. dQ_i += dS_ij @ K_j (32x16)=(32x256)x(256x16)
       // mma_AtB(dQ_i_T, K_j_col, dP_ij_bf16_col_T);
@@ -2789,6 +2837,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<0, 1>(Q_i, subtile_inplace<DOT_SLICE_QO, D>(Q_i_smem[tic][0], {0, 0}), Q_i_addr);
       mma_AtB<0, 0, 5>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
       asm volatile("s_waitcnt lgkmcnt(4)");
+      __builtin_amdgcn_sched_barrier(0);
       __builtin_amdgcn_s_barrier();
       mma_AtB<0, 0, 6>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
       mma_AtB<0, 0, 7>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
@@ -2962,6 +3011,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<4, 0>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid_dq}), K_j_col_addr);
       mma_AtB<0, 1, 0>(dK_j_T, Q_i_col, dP_ij_bf16_col, dK_j_T);
       asm volatile("s_waitcnt lgkmcnt(8)");
+      __builtin_amdgcn_sched_barrier(0);
       __builtin_amdgcn_s_barrier();
       mma_AtB<1, 0, 0>(dK_j_T, Q_i_col, dP_ij_bf16_col, dK_j_T);
       // Load dP_ij_bf16_col_T from shared memory to registers
@@ -2981,6 +3031,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<7, 0>(dP_ij_bf16_col_T, attn_i_smem, dP_ij_bf16_col_T_addr);
       load<5, 1>(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid_dq}), K_j_col_addr);
       asm volatile("s_waitcnt lgkmcnt(6)");
+      __builtin_amdgcn_sched_barrier(0);
       __builtin_amdgcn_s_barrier();
       // 15. dQ_i += dS_ij @ K_j (32x16)=(32x256)x(256x16)
       // mma_AtB(dQ_i_T, K_j_col, dP_ij_bf16_col_T);
@@ -2997,6 +3048,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       // ds_read_b128 a[116:119]
       mma_AtB<0, 0, 5>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
       asm volatile("s_waitcnt lgkmcnt(4)");
+      __builtin_amdgcn_sched_barrier(0);
       __builtin_amdgcn_s_barrier();
       mma_AtB<0, 0, 6>(dQ_i_T, K_j_col, dP_ij_bf16_col_T, dQ_i_T);
       // ds_read_b128 a[120:123]
