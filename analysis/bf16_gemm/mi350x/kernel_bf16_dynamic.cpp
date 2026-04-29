@@ -1458,36 +1458,44 @@ __global__ void grouped_ktail_kernel_lds(const grouped_layout_globals g) {
     // dispatch bug) — fall back to early-exit, scalar tail will fix things.
     if (K_rem_dyn != K_REM) return;
 
-    // Cooperative A K-strip load. Linear index → (r_in_blk, kk_offset).
-    // Each thread loads A_PER_THR ≤ 4 elements at K_REM=64. ``load_bf16_scalar``
-    // returns ``float``; cast back to ``bf16`` for LDS storage (no precision
-    // loss — value originated as bf16 in HBM).
-    #pragma unroll
-    for (int li = 0; li < A_PER_THR; ++li) {
-        const int linear = li * NTHR + tid;
-        if (linear < A_TOTAL) {
-            const int r_in_blk = linear / K_REM;
-            const int kk = linear - r_in_blk * K_REM;
-            const int r_global = row_block_base + r_in_blk;
-            const float a_val = (r_global < g.M_total)
-                ? load_bf16_scalar(g.a, r_global, k0 + kk)
-                : 0.0f;
-            A_lds[linear] = static_cast<bf16>(a_val);
+    // [round-9] Vec4 cooperative load (1 dwordx2 / thread instead of 4
+    // separate scalar bf16 loads). With NTHR=256 threads and A_TOTAL=1024
+    // bf16 = 256 vec4, each thread owns exactly one vec4. Address pattern:
+    //   tid=0  -> A_lds[0..3]   (row 0, k 0..3)
+    //   tid=1  -> A_lds[4..7]   (row 0, k 4..7)
+    //   tid=15 -> A_lds[60..63] (row 0, k 60..63)
+    //   tid=16 -> A_lds[64..67] (row 1, k 0..3)
+    //   ...
+    // 8-byte alignment: g.a's row stride is g.k bf16 elements; for K=2880
+    // (multiple of 4) every (r_global, k0 + 4*j) start is 8-byte aligned.
+    constexpr int VEC = 4;
+    constexpr int VECS_PER_ROW = K_REM / VEC;
+    static_assert(K_REM % VEC == 0, "K_REM must be vec4-aligned");
+    static_assert(NTHR == TBM * VECS_PER_ROW,
+        "Each thread must own exactly one vec4 of A.");
+    {
+        const int r_in_blk = tid / VECS_PER_ROW;
+        const int kk_v = tid - r_in_blk * VECS_PER_ROW;
+        const int kk_start = kk_v * VEC;
+        const int r_global = row_block_base + r_in_blk;
+        bf16x4 va{};
+        if (r_global < g.M_total) {
+            const bf16* ap = &g.a[coord<>(r_global, k0 + kk_start)];
+            va = *reinterpret_cast<const bf16x4*>(ap);
         }
+        *reinterpret_cast<bf16x4*>(&A_lds[r_in_blk * K_REM + kk_start]) = va;
     }
-    // Cooperative B K-strip load (group_idx fixed for the whole block).
-    #pragma unroll
-    for (int li = 0; li < B_PER_THR; ++li) {
-        const int linear = li * NTHR + tid;
-        if (linear < B_TOTAL) {
-            const int c_in_blk = linear / K_REM;
-            const int kk = linear - c_in_blk * K_REM;
-            const int c_global = col_block_base + c_in_blk;
-            const float b_val = (c_global < g.fast_n)
-                ? load_bf16_scalar_grp(g.b, group_idx, c_global, k0 + kk)
-                : 0.0f;
-            B_lds[linear] = static_cast<bf16>(b_val);
+    {
+        const int c_in_blk = tid / VECS_PER_ROW;
+        const int kk_v = tid - c_in_blk * VECS_PER_ROW;
+        const int kk_start = kk_v * VEC;
+        const int c_global = col_block_base + c_in_blk;
+        bf16x4 vb{};
+        if (c_global < g.fast_n) {
+            const bf16* bp = &g.b[coord<>{0, group_idx, c_global, k0 + kk_start}];
+            vb = *reinterpret_cast<const bf16x4*>(bp);
         }
+        *reinterpret_cast<bf16x4*>(&B_lds[c_in_blk * K_REM + kk_start]) = vb;
     }
     __syncthreads();
 
@@ -1597,41 +1605,43 @@ __global__ void grouped_ntail_kernel_lds(const grouped_layout_globals g) {
 
     float acc = 0.0f;
 
+    // [round-9] Vec4 cooperative load (1 dwordx2 / thread / chunk). With
+    // K_CHUNK=64 and TBM=16: 1024 bf16 / chunk / operand = 256 vec4 / chunk
+    // / operand. NTHR=256 -> exactly 1 vec4 per thread per chunk per operand.
+    constexpr int VEC = 4;
+    constexpr int VECS_PER_ROW = K_CHUNK / VEC;
+    static_assert(K_CHUNK % VEC == 0, "K_CHUNK must be vec4-aligned");
+    static_assert(NTHR == TBM * VECS_PER_ROW,
+        "Each thread must own exactly one vec4 of A per chunk.");
+    const int r_in_blk_a = tid / VECS_PER_ROW;
+    const int kk_v_a = tid - r_in_blk_a * VECS_PER_ROW;
+    const int kk_start_a = kk_v_a * VEC;
+    const int c_in_blk_b = r_in_blk_a;
+    const int kk_start_b = kk_start_a;
+
     // Loop K in K_CHUNK slices. The compile-time partial loop over K_CHUNK
     // unrolls fully (kk in [0, K_CHUNK)). The runtime outer loop iterates
     // ceil_div(g.k, K_CHUNK) times (e.g. K=2880, K_CHUNK=64 -> 45 chunks).
     for (int k_chunk_start = 0; k_chunk_start < g.k; k_chunk_start += K_CHUNK) {
-        // Cooperative A load: A_lds[r_in_blk * K_CHUNK + kk] = A[row_block_base
-        // + r_in_blk, k_chunk_start + kk].
-        #pragma unroll
-        for (int li = 0; li < A_PER_THR; ++li) {
-            const int linear = li * NTHR + tid;
-            if (linear < A_CHUNK) {
-                const int r_in_blk = linear / K_CHUNK;
-                const int kk = linear - r_in_blk * K_CHUNK;
-                const int r_global = row_block_base + r_in_blk;
-                const int k_global = k_chunk_start + kk;
-                const float a_val = (r_global < g.M_total && k_global < g.k)
-                    ? load_bf16_scalar(g.a, r_global, k_global)
-                    : 0.0f;
-                A_lds[linear] = static_cast<bf16>(a_val);
+        {
+            const int r_global = row_block_base + r_in_blk_a;
+            const int k_global = k_chunk_start + kk_start_a;
+            bf16x4 va{};
+            if (r_global < g.M_total && k_global + VEC <= g.k) {
+                const bf16* ap = &g.a[coord<>(r_global, k_global)];
+                va = *reinterpret_cast<const bf16x4*>(ap);
             }
+            *reinterpret_cast<bf16x4*>(&A_lds[r_in_blk_a * K_CHUNK + kk_start_a]) = va;
         }
-        // Cooperative B load (group_idx fixed for the block by the
-        // cross-group early-return above).
-        #pragma unroll
-        for (int li = 0; li < B_PER_THR; ++li) {
-            const int linear = li * NTHR + tid;
-            if (linear < B_CHUNK) {
-                const int c_in_blk = linear / K_CHUNK;
-                const int kk = linear - c_in_blk * K_CHUNK;
-                const int c_global = col_block_base + c_in_blk;
-                const int k_global = k_chunk_start + kk;
-                const float b_val = (c_global < g.n && k_global < g.k)
-                    ? load_bf16_scalar_grp(g.b, group_idx, c_global, k_global)
-                    : 0.0f;
-                B_lds[linear] = static_cast<bf16>(b_val);
+        {
+            const int c_global = col_block_base + c_in_blk_b;
+            const int k_global = k_chunk_start + kk_start_b;
+            bf16x4 vb{};
+            if (c_global < g.n && k_global + VEC <= g.k) {
+                const bf16* bp = &g.b[coord<>{0, group_idx, c_global, k_global}];
+                vb = *reinterpret_cast<const bf16x4*>(bp);
             }
+            *reinterpret_cast<bf16x4*>(&B_lds[c_in_blk_b * K_CHUNK + kk_start_b]) = vb;
         }
         __syncthreads();
 
