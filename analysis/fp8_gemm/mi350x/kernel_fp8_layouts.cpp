@@ -2986,6 +2986,213 @@ __global__ void grouped_ktail_kernel_mfma(const grouped_layout_globals g) {
 
 template __global__ void grouped_ktail_kernel_mfma<Layout::RCR, 64>(const grouped_layout_globals);
 
+// =============================================================================
+// Round-20 (FP8): 32x32x64 MFMA-based K-tail correction kernel for RCR.
+//
+// Round-18 used ``v_mfma_scale_f32_16x16x128_f8f6f4`` to fold a K=64 tail
+// into a single mfma op per (16M × 16N) cell tile. That mfma instruction
+// natively consumes K=128 fp8, so K_REM=64 forced **50 % effective MFMA
+// utilization** (lanes 0..31 fed real K=[k0, k0+64), lanes 32..63 fed
+// zero-padded K=[k0+64, k0+128)).
+//
+// gfx950 also exposes ``v_mfma_scale_f32_32x32x64_f8f6f4`` whose native K
+// is **64**, so K_REM=64 fits perfectly with **100 % MFMA utilization**.
+// The output cell tile expands from 16×16 = 256 cells to 32×32 = 1024
+// cells per block, so the K-tail grid shrinks 4× while the per-mfma
+// useful work doubles — net ~2× theoretical speedup on the K-tail
+// dominated gpt_oss FP8 grouped path.
+//
+// Layout (verified by /tmp/mfma_fp8_3232x64_test2 microtest, gfx950):
+//   * Input A: [32 rows, 64 K] fp8 row-major.
+//       lane t (0..63): row = t % 32, K-chunk = t / 32.
+//       lane t supplies a_pack = 32 fp8 covering A[t%32, k_chunk*32 + 0..31]
+//       (= one intx8_t = 8 ints = 32 bytes).
+//   * Input B: same shape as A, but logically B^T = [64 K, 32 cols].
+//       lane t supplies b_pack = 32 fp8 covering B[t%32 (= col), k_chunk*32 + 0..31].
+//   * Output D: [32 rows, 32 cols] fp32, 16 floats per lane.
+//       For lane t at d[i] (i = 0..15):
+//           col       = t % 32
+//           chunk     = t / 32  (0 or 1)
+//           row_group = i / 4
+//           row_in_grp= (i % 4) + chunk * 4
+//           row       = row_group * 8 + row_in_grp
+//       i.e. chunk=0 owns rows {0..3, 8..11, 16..19, 24..27} per col;
+//            chunk=1 owns rows {4..7, 12..15, 20..23, 28..31} per col.
+//
+// Host hint requirements:
+//   * ``g.m_per_group >= 32 && g.m_per_group % 32 == 0`` (TBM=32). Falls
+//     back to the 16x16 round-18 mfma kernel otherwise.
+//   * Per-block runtime cross-group check still re-derives ``group_idx``
+//     and falls back to a per-cell scalar fma fallback if a single
+//     32-row block straddles a group boundary (rare in MoE dispatch
+//     where group_lens are typically uniform M-aligned).
+// =============================================================================
+template<Layout L, int K_REM>
+__global__ void grouped_ktail_kernel_mfma32x32(const grouped_layout_globals g) {
+    static_assert(L == Layout::RCR,
+        "grouped_ktail_kernel_mfma32x32 (FP8): RCR only.");
+    static_assert(K_REM == 64,
+        "grouped_ktail_kernel_mfma32x32 (FP8): K_REM must be 64 (native mfma K).");
+    constexpr int TBM = 32;
+    constexpr int TBN = 32;
+    constexpr int MAX_G_PLUS_1 = 65;
+    __shared__ int s_offs[MAX_G_PLUS_1];
+
+    const int tid = threadIdx.x;            // single-wave block, 64 threads
+    if (tid <= g.G && tid < MAX_G_PLUS_1) {
+        s_offs[tid] = static_cast<int>(g.group_offs[tid]);
+    }
+    __syncthreads();
+
+    const int row_block_base = blockIdx.y * TBM;
+    const int col_block_base = blockIdx.x * TBN;
+    if (row_block_base >= g.M_total || col_block_base >= g.n) return;
+
+    int group_idx = 0;
+    #pragma unroll 1
+    for (int gi = 0; gi < g.G; ++gi) {
+        if (row_block_base < s_offs[gi + 1]) { group_idx = gi; break; }
+    }
+
+    const int K_rem_dyn = g.k - g.fast_k;
+    if (K_rem_dyn != K_REM) return;
+    const int k0 = g.fast_k;
+
+    // Cross-group fallback (block straddles a group boundary in M, or
+    // hits the M_total tail). 64 lanes × 16 passes = 1024 cells covered
+    // by the same per-row vec8 cvt_pk_f32_fp8 + 4-way parallel-acc loop
+    // as the 16x16 variant. Unreachable on uniform group_lens with M_g
+    // % 32 == 0 (the metric path).
+    const bool cross_boundary = (row_block_base + TBM > s_offs[group_idx + 1]);
+    if (cross_boundary) {
+        typedef __attribute__((__vector_size__(2 * sizeof(float)))) float fp32x2_v;
+        auto fp8x4_to_f32x4 = [](const fp8e4m3_4& u) -> float4 {
+            int packed;
+            __builtin_memcpy(&packed, &u, 4);
+            fp32x2_v lo = __builtin_amdgcn_cvt_pk_f32_fp8(packed, false);
+            fp32x2_v hi = __builtin_amdgcn_cvt_pk_f32_fp8(packed, true);
+            return make_float4(lo[0], lo[1], hi[0], hi[1]);
+        };
+        // 64 lanes cover the 1024 cells in 16 passes (16 cells/lane).
+        // Pass slot s ∈ 0..15 → cell offset within block:
+        //   rib = s / 2 * 2 + (tid / 32);  // 16 row stripes
+        //   cib = (s % 2) * 32 + (tid % 32);  // 32 cols / pass
+        // Hmm simpler: each lane does 16 passes, in pass s walks (rib, cib).
+        // Use the standard tiled traversal: each lane "owns" col=tid%32
+        // and walks 16 distinct rows per col.
+        const int col = col_block_base + (tid % 32);
+        if (col < g.n) {
+            #pragma unroll
+            for (int rr = 0; rr < TBM; ++rr) {
+                if ((rr % 2) != ((tid / 32))) continue;
+                // Already this means: chunk-0 lanes serve even rr (0, 2, ...)
+                // and chunk-1 lanes serve odd rr (1, 3, ...). Half work / lane.
+                // Actually we want 16 cells / lane evenly — but the metric
+                // path never reaches this branch, so a simple "every other
+                // row per chunk" division (16 rows / lane) is fine.
+                const int row = row_block_base + rr;
+                if (row >= g.M_total) break;
+                int row_group = 0;
+                #pragma unroll 1
+                for (int gi = 0; gi < g.G; ++gi) {
+                    if (row < s_offs[gi + 1]) { row_group = gi; break; }
+                }
+                float acc_s0 = 0.f, acc_s1 = 0.f, acc_s2 = 0.f, acc_s3 = 0.f;
+                const fp8e4m3* a_row = &g.a[coord<>(row, 0)];
+                const fp8e4m3* b_row = &g.b[coord<>{0, row_group, col, 0}];
+                int kk = k0;
+                if ((g.k % 8 == 0) && ((k0 & 7) == 0)) {
+                    const fp8e4m3_8* a_v8 = reinterpret_cast<const fp8e4m3_8*>(a_row);
+                    const fp8e4m3_8* b_v8 = reinterpret_cast<const fp8e4m3_8*>(b_row);
+                    const int j_start = k0 >> 3;
+                    const int j_end   = g.k >> 3;
+                    for (int j = j_start; j < j_end; ++j) {
+                        fp8e4m3_8 a8 = a_v8[j];
+                        fp8e4m3_8 b8 = b_v8[j];
+                        float4 a_lo = fp8x4_to_f32x4(a8.lo);
+                        float4 a_hi = fp8x4_to_f32x4(a8.hi);
+                        float4 b_lo = fp8x4_to_f32x4(b8.lo);
+                        float4 b_hi = fp8x4_to_f32x4(b8.hi);
+                        acc_s0 += a_lo.x * b_lo.x + a_hi.x * b_hi.x;
+                        acc_s1 += a_lo.y * b_lo.y + a_hi.y * b_hi.y;
+                        acc_s2 += a_lo.z * b_lo.z + a_hi.z * b_hi.z;
+                        acc_s3 += a_lo.w * b_lo.w + a_hi.w * b_hi.w;
+                    }
+                    kk = j_end << 3;
+                }
+                float acc_s = (acc_s0 + acc_s1) + (acc_s2 + acc_s3);
+                for (; kk < g.k; ++kk) {
+                    acc_s += load_fp8_scalar(g.a, row, kk) *
+                             load_fp8_scalar_grp(g.b, row_group, col, kk);
+                }
+                const float scaled_s = acc_s * resolve_combined_scale_grp(g);
+                store_bf16_scalar(g.c, row, col,
+                                  load_bf16_scalar(g.c, row, col) + scaled_s);
+            }
+        }
+        return;
+    }
+
+    // ----- Fast MFMA path ------------------------------------------------
+    // K=64 native mfma_32x32x64_f8f6f4 — 100 % utilization (vs round-18
+    // 50 % zero-padded mfma_16x16x128). 1 wave per block, 64 lanes feed
+    // the entire 32×64 A and 32×64 B tiles.
+    typedef __attribute__((__vector_size__(8 * sizeof(int)))) int intx8_t;
+    typedef __attribute__((__vector_size__(16 * sizeof(float)))) float floatx16_t;
+
+    const int row_in_blk = tid % 32;
+    const int chunk      = tid / 32;        // 0 or 1
+    const int k_off      = k0 + chunk * 32;
+
+    const int g_row = row_block_base + row_in_blk;
+    const int g_col = col_block_base + row_in_blk;
+
+    intx8_t a_pack;
+    intx8_t b_pack;
+    // K=2880 → k0=2816 → k_off ∈ {2816, 2848}; row stride = K = 2880 fp8.
+    // Both 32-byte aligned (2816 % 32 = 0, 2848 % 32 = 0, 2880 % 32 = 0)
+    // so one buffer load per pack = 2 × b128.
+    if (g_row < g.M_total) {
+        const fp8e4m3* a_ptr = &g.a[coord<>(g_row, k_off)];
+        a_pack = *reinterpret_cast<const intx8_t*>(a_ptr);
+    } else {
+        a_pack = intx8_t{};
+    }
+    if (g_col < g.n) {
+        const fp8e4m3* b_ptr = &g.b[coord<>{0, group_idx, g_col, k_off}];
+        b_pack = *reinterpret_cast<const intx8_t*>(b_ptr);
+    } else {
+        b_pack = intx8_t{};
+    }
+
+    // mfma_scale_f32_32x32x64_f8f6f4 — D[32,32] = A[32,64] @ B^T[64,32] + C
+    floatx16_t acc{};
+    acc = __builtin_amdgcn_mfma_scale_f32_32x32x64_f8f6f4(
+        a_pack, b_pack, acc, /*cbsz=*/0, /*abid=*/0, /*blgp=*/0,
+        /*scale_op_a=*/0, /*scale_op_b=*/0, /*scale_op_d=*/0);
+
+    // Output: lane t → cells C[r, t%32] for 16 r's.
+    //   chunk=0: rows 0..3, 8..11, 16..19, 24..27 in d[0..3], d[4..7], d[8..11], d[12..15]
+    //   chunk=1: rows 4..7, 12..15, 20..23, 28..31
+    // Unified: row_group = i/4; row_in_group = (i%4) + chunk*4; row = row_group*8 + row_in_group.
+    const float scale = resolve_combined_scale_grp(g);
+    const int out_col = col_block_base + row_in_blk;
+    if (out_col >= g.n) return;
+    #pragma unroll
+    for (int i = 0; i < 16; ++i) {
+        const int row_group     = i >> 2;
+        const int row_in_group  = (i & 3) + chunk * 4;
+        const int local_row     = row_group * 8 + row_in_group;
+        const int r             = row_block_base + local_row;
+        if (r >= g.M_total) continue;
+        const float existing = load_bf16_scalar(g.c, r, out_col);
+        const float new_val  = existing + acc[i] * scale;
+        store_bf16_scalar(g.c, r, out_col, new_val);
+    }
+}
+
+template __global__ void grouped_ktail_kernel_mfma32x32<Layout::RCR, 64>(const grouped_layout_globals);
+
 void dispatch_grouped_rcr(grouped_layout_globals g) {
     g.n = static_cast<int>(g.c.cols());
     g.M_total = static_cast<int>(g.c.rows());
@@ -3040,20 +3247,40 @@ void dispatch_grouped_rcr(grouped_layout_globals g) {
     // the existing scalar tail.
     if (g.fast_k != g.k || g.bpc == 0) {
         const int K_rem = g.k - g.fast_k;
+        // Round-20: prefer 32x32x64 mfma kernel (100 % util) when
+        // ``m_per_group`` is 32-aligned. Falls back to the round-18
+        // 16x16x128 mfma kernel (50 % util) for 16-aligned but not
+        // 32-aligned, and to the round-13 LDS scalar kernel /
+        // grouped_tail_kernel for unaligned ``m_per_group``.
+        constexpr int TBM_32x32 = 32;
+        const bool mfma32_safe = (g.m_per_group >= TBM_32x32) &&
+                                 ((g.m_per_group % TBM_32x32) == 0);
         const bool lds_k_tail_safe = (g.m_per_group >= TAIL_BLOCK_M) &&
                                      ((g.m_per_group % TAIL_BLOCK_M) == 0);
-        const bool lds_handles_all =
+        const bool mfma32_handles_all =
+            (g.bpc > 0) &&
+            (K_rem == 64) &&
+            mfma32_safe;
+        const bool mfma16_handles_all =
             (g.bpc > 0) &&
             (K_rem == 64) &&
             lds_k_tail_safe;
-        if (lds_handles_all) {
-            // Round-18: prefer the MFMA-based K-tail kernel for K_REM=64.
-            // Geometry / safety identical to the LDS-staged scalar variant
-            // (same per-block (16M × 16N) cell tile, same host hint
-            // ``m_per_group % 16 == 0``); blockDim shrinks to a single wave
-            // (64 threads) since each lane owns 4 output cells via mfma.
-            // Round-13 LDS kernel is kept compiled as a fallback safety
-            // net but unreachable on this dispatch path.
+        if (mfma32_handles_all) {
+            // Round-20: 32x32x64 mfma_scale_f32_f8f6f4 — K=64 native, no
+            // zero padding, 2× theoretical speedup over round-18.
+            // ``m_per_group`` is 32-aligned (gpt_oss M_per ∈ {2048, 4096}
+            // both satisfy this), so per-block ``row_block_base + 32 <=
+            // s_offs[group_idx + 1]`` is guaranteed and the kernel takes
+            // its fast MFMA path.
+            dim3 mfma_block(64);
+            dim3 mfma_grid(
+                kittens::ceil_div(g.n, TBM_32x32),
+                kittens::ceil_div(g.M_total, TBM_32x32)
+            );
+            grouped_ktail_kernel_mfma32x32<Layout::RCR, 64>
+                <<<mfma_grid, mfma_block, 0, g.stream>>>(g);
+        } else if (mfma16_handles_all) {
+            // Round-18: 16x16x128 mfma kernel (50 % util via zero-pad).
             dim3 mfma_block(64);
             dim3 mfma_grid(
                 kittens::ceil_div(g.n, TAIL_BLOCK_N),
