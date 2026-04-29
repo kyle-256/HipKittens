@@ -1560,6 +1560,344 @@ template __global__ void gemm_tail_kernel<Layout::RCR>(const layout_globals);
 template __global__ void gemm_tail_kernel<Layout::RRR>(const layout_globals);
 template __global__ void gemm_tail_kernel<Layout::CRR>(const layout_globals);
 
+// =============================================================================
+// Persistent grouped GEMM (CPU-sync-free) — RCR layout only for round 12.
+//
+// Mirror of the BF16 grouped persistent kernel
+// (analysis/bf16_gemm/mi350x/kernel_bf16_dynamic.cpp ``grouped_kernel<L,KI>``)
+// ported to the FP8 register / shared tile types. One launch with grid_x =
+// NUM_CUS programs covers ALL groups × ALL tiles. Each program:
+//
+//   1. Pulls G+1 int64 offsets from a device tensor and computes total tile
+//      count via O(G) scan (no host sync).
+//   2. Iterates ``gt = pid; gt < total; gt += NUM_CUS`` so the same block
+//      streams through many (group, tile) pairs without re-launch.
+//   3. Per iteration: O(G) scan to recover (group_idx, m_start_g, M_g),
+//      then runs the existing dense RCR GEMM tile body with coord shifts:
+//         * A   spatial += m_start_g / HB    (HB  = 128, ST_A row unit)
+//         * B   depth   = group_idx          (b is treated as [G, N, K])
+//         * C   row     += m_start_g / RBM   (RBM = 64,  RT::rows store unit)
+//
+// Inner body is the SINGLE-tile main loop + epilogs from the dense kernel
+// (the ``else`` branch of ``gemm_kernel<Layout::RCR, ...>`` lines 1129-1210
+// + scale epilog at 1500). Two-tile schedule (faster for ki>=28 with even
+// ki) is intentionally not used in this round to keep the persistent path
+// simple; can be added in a follow-up. RRR / CRR persistent variants ditto.
+//
+// Scale epilog: ``scale_a * scale_b`` applied per tile (matches dense).
+// =============================================================================
+
+struct grouped_layout_globals {
+    _gl_fp8 a;                   // [M_total, K]
+    _gl_fp8 b;                   // [G, N, K] (RCR)
+    _gl_bf16 c;                  // [M_total, N]
+    float scale_a, scale_b;
+    const float* dscale_a;
+    const float* dscale_b;
+    const int64_t* group_offs;   // [G+1] int64 prefix-sum on device
+    hipStream_t stream;
+    int G;                       // number of groups
+    int n;                       // N
+    int k;                       // K
+    int ki;                      // K / K_BLOCK
+    int bpc;                     // n / BLOCK_SIZE
+    int group_m;                 // tile-scheduling super-block factor
+    int M_total;                 // sum of group sizes (= a.shape[0])
+    dim3 block() { return dim3(_NUM_THREADS); }
+    size_t dynamic_shared_memory() { return 0; }
+};
+
+__device__ __forceinline__ float resolve_combined_scale_grp(
+    const grouped_layout_globals &g) {
+    const float sa = g.dscale_a ? *g.dscale_a : g.scale_a;
+    const float sb = g.dscale_b ? *g.dscale_b : g.scale_b;
+    return sa * sb;
+}
+
+// Persistent RCR kernel: grid_x = NUM_CUS. One block per CU; each block
+// iterates many (group, tile) pairs in a single launch.
+template<int KI_HINT = 0>
+__global__ __launch_bounds__(_NUM_THREADS, 1)
+void grouped_rcr_kernel(const grouped_layout_globals g) {
+    using ST_rcr = ST_v2;
+    __shared__ ST_rcr As[2][2];
+    __shared__ ST_rcr Bs[2][2];
+    // [grouped] LDS cache for device group_offs (int32 view) + per-group
+    // tile-cumsum. group_offs is read O(N_iter * G) times by the per-tile
+    // inner scan; caching to LDS once at kernel entry replaces ~640 cycles
+    // of HBM-cached ld/iter with ~320 cycles of LDS ld/iter, ~3-5% kernel
+    // speedup on shapes with low ki / many tiles. Cap MAX_G_PLUS_1 = 65 to
+    // cover G ≤ 64 (metric uses G ≤ 32). 8×65 = 520 bytes LDS, negligible.
+    constexpr int MAX_G_PLUS_1 = 65;
+    __shared__ int s_offs[MAX_G_PLUS_1];
+    __shared__ int s_cum_tiles[MAX_G_PLUS_1];
+    __shared__ int s_total_tiles;
+    A_row_reg a;
+    B_row_reg b0, b1;
+    rt_fl<RBM, RBN, col_l, rt_16x16_s> cA, cB, cC, cD;
+
+    // [grouped] Persistent: chiplet-swizzle pid against full NUM_CUS grid.
+    int pid = chiplet_transform_chunked(
+        blockIdx.x, NUM_CUS, BLOCK_SWIZZLE_NUM_XCDS, 64);
+
+    int wm = warpid() / WARPS_N;
+    int wn = warpid() % WARPS_N;
+    const int num_pid_n = g.bpc;
+    const int ki_dyn   = (KI_HINT > 0) ? KI_HINT : g.ki;
+
+    // [grouped] Cooperative init of the LDS group-metadata caches. Single
+    // thread does the O(G) scan once; then everyone uses s_offs / s_cum_tiles.
+    // Pad s_cum_tiles[g.G + 1 .. MAX_G_PLUS_1) with INT_MAX so a constant-
+    // depth (6-step) branch-free binary search reading any mid > g.G never
+    // updates lo (the cmp `gt >= INT_MAX` is always false for finite gt).
+    if (threadIdx.x == 0) {
+        int prev = static_cast<int>(g.group_offs[0]);
+        s_offs[0] = prev;
+        s_cum_tiles[0] = 0;
+        int t = 0;
+        #pragma unroll 1
+        for (int gi = 0; gi < g.G; ++gi) {
+            const int next = static_cast<int>(g.group_offs[gi + 1]);
+            s_offs[gi + 1] = next;
+            t += ((next - prev) / BLOCK_SIZE) * num_pid_n;
+            s_cum_tiles[gi + 1] = t;
+            prev = next;
+        }
+        s_total_tiles = t;
+        #pragma unroll 1
+        for (int gi = g.G + 1; gi < MAX_G_PLUS_1; ++gi) {
+            s_cum_tiles[gi] = 0x7FFFFFFF;
+        }
+    }
+    __syncthreads();
+    const int total_tiles = s_total_tiles;
+
+    // Prefill swizzled offsets ONCE (shared across all tiles & all groups —
+    // depends only on the GL strides which are constant within the launch).
+    constexpr int bpt = ST_rcr::underlying_subtile_bytes_per_thread;
+    constexpr int bpm = bpt * _NUM_THREADS;
+    constexpr int mpt = ST_rcr::rows * ST_rcr::cols * sizeof(fp8e4m3) / bpm;
+    uint32_t soA[mpt], soB[mpt];
+    G::prefill_swizzled_offsets(As[0][0], g.a, soA);
+    G::prefill_swizzled_offsets(Bs[0][0], g.b, soB);
+
+    // [grouped] Persistent outer loop.
+    for (int gt = pid; gt < total_tiles; gt += NUM_CUS) {
+        // [grouped] 6-step branch-free binary search over LDS-cached cumsum
+        // (covers G ∈ [1, 64] since 2^6 = 64 = MAX_G_PLUS_1-1). Sentinel
+        // INT_MAX past g.G keeps the `gt >= s_cum_tiles[mid]` cmp false so
+        // lo never advances past g.G. Compared to the linear O(G) scan,
+        // this collapses ~32 LDS lds + cmp into 6 sequential lookups: ~70
+        // cyc instead of ~320 cyc per outer iter (kernel-only saving ~3-5%
+        // on shapes with low ki / many tiles).
+        int lo = 0;
+        int hi = MAX_G_PLUS_1 - 1;
+        #pragma unroll
+        for (int level = 0; level < 6; ++level) {
+            const int mid = (lo + hi + 1) >> 1;
+            if (gt >= s_cum_tiles[mid]) lo = mid;
+            else hi = mid - 1;
+        }
+        const int group_idx = lo;
+        const int tile_start = s_cum_tiles[lo];
+        const int local_tile = gt - tile_start;
+        const int m_start_g = s_offs[group_idx];
+        const int M_g = s_offs[group_idx + 1] - m_start_g;
+        const int bpr_g = M_g / BLOCK_SIZE;
+
+        // Group-by-M / group-by-N swizzle (matches dense kernel mapping).
+        int br, bc;
+        if (g.bpc > bpr_g) {
+            const int WGN = g.group_m;
+            const int num_wgid_in_group = bpr_g * WGN;
+            int group_id = local_tile / num_wgid_in_group;
+            int first_pid_n = group_id * WGN;
+            int group_size_n = min(num_pid_n - first_pid_n, WGN);
+            if (group_size_n <= 0) continue;
+            bc = first_pid_n + ((local_tile % num_wgid_in_group) % group_size_n);
+            br = (local_tile % num_wgid_in_group) / group_size_n;
+        } else {
+            const int WGM = g.group_m;
+            const int num_wgid_in_group = WGM * num_pid_n;
+            int group_id = local_tile / num_wgid_in_group;
+            int first_pid_m = group_id * WGM;
+            int group_size_m = min(bpr_g - first_pid_m, WGM);
+            if (group_size_m <= 0) continue;
+            br = first_pid_m + ((local_tile % num_wgid_in_group) % group_size_m);
+            bc = (local_tile % num_wgid_in_group) / group_size_m;
+        }
+        if (br >= bpr_g || bc >= num_pid_n) continue;
+
+        // Coord shifts:
+        //   ST_A: st_fp8e4m3<HB=128, BK=128, ...> → row-coord unit = HB = 128.
+        //         m_subtile_A = m_start_g / HB.
+        //   C (RT store): rt_fl<RBM=64, RBN=32, ...> → row-coord unit = RBM=64.
+        //         m_subtile_C = m_start_g / RBM.
+        const int m_subtile_A = m_start_g / HB;
+        const int m_subtile_C = m_start_g / RBM;
+
+        auto a_co = [&](int s, int k) -> coord<ST_rcr> {
+            return {0, 0, m_subtile_A + s, k};
+        };
+        auto b_co = [&](int s, int k) -> coord<ST_rcr> {
+            return {0, group_idx, s, k};
+        };
+
+        auto load_a = [&](A_row_reg& dst, ST_rcr& tile, int wi) {
+            auto sub = subtile_inplace<RBM, BK>(tile, {wi, 0});
+            load(dst, sub);
+        };
+        auto load_b = [&](B_row_reg& dst, ST_rcr& tile, int wi) {
+            auto sub = subtile_inplace<RBN, BK>(tile, {wi, 0});
+            load(dst, sub);
+        };
+
+        auto b_tile = [&](int stage, int which) -> ST_rcr& {
+            return Bs[stage][which];
+        };
+
+        // Reset accumulators per tile.
+        zero(cA); zero(cB); zero(cC); zero(cD);
+
+        int tic = 0, toc = 1;
+        // Prologue: load tile-0 + tile-1 (mirrors gemm_kernel<RCR> 1040-1054).
+        rcr_8w_load_hoist<_NUM_THREADS>(b_tile(tic, 0), g.b, b_co(bc*2,   0), soB);
+        rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0],    g.a, a_co(br*2,   0), soA);
+        rcr_8w_load_hoist<_NUM_THREADS>(b_tile(tic, 1), g.b, b_co(bc*2+1, 0), soB);
+        rcr_8w_load_hoist<_NUM_THREADS>(As[tic][1],    g.a, a_co(br*2+1, 0), soA);
+
+        if (wm == 1) __builtin_amdgcn_s_barrier();
+        TK_WAIT_VMCNT(RCR_INIT0_VMCNT);
+        __builtin_amdgcn_s_barrier();
+
+        rcr_8w_load_hoist<_NUM_THREADS>(b_tile(toc, 0), g.b, b_co(bc*2,   1), soB);
+        rcr_8w_load_hoist<_NUM_THREADS>(As[toc][0],    g.a, a_co(br*2,   1), soA);
+        rcr_8w_load_hoist<_NUM_THREADS>(b_tile(toc, 1), g.b, b_co(bc*2+1, 1), soB);
+
+        TK_WAIT_VMCNT(RCR_INIT1_VMCNT);
+        __builtin_amdgcn_s_barrier();
+
+        // Single-tile main loop (mirrors dense gemm_kernel<RCR> else-branch
+        // lines 1129-1158).
+        TK_PRAGMA_UNROLL(RCR_MAIN_UNROLL)
+        for (int k = 0; k < ki_dyn - 2; k++, tic ^= 1, toc ^= 1) {
+            load_b(b0, b_tile(tic, 0), wn);
+            load_a(a, As[tic][0], wm);
+            rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], g.a, a_co(br*2+1, k+1), soA);
+            TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
+
+            load_b(b1, b_tile(tic, 1), wn);
+            rcr_8w_load_hoist<_NUM_THREADS>(b_tile(tic, 0), g.b, b_co(bc*2, k+2), soB);
+            __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cB, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_a(a, As[tic][1], wm);
+            rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0], g.a, a_co(br*2, k+2), soA);
+            __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cC, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
+
+            rcr_8w_load_hoist<_NUM_THREADS>(b_tile(tic, 1), g.b, b_co(bc*2+1, k+2), soB);
+            TK_WAIT_VMCNT(RCR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cD, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+        }
+
+        // Epilog 1: second-to-last K-tile (mirrors dense lines 1160-1187).
+        {
+            load_b(b0, b_tile(tic, 0), wn);
+            load_a(a, As[tic][0], wm);
+            rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], g.a, a_co(br*2+1, ki_dyn-1), soA);
+            __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
+
+            load_b(b1, b_tile(tic, 1), wn);
+            __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cB, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_a(a, As[tic][1], wm);
+            TK_WAIT_VMCNT(RCR_EPILOGUE_VMCNT); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cC, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_b(b0, b_tile(toc, 0), wn);
+            __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cD, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
+            tic ^= 1; toc ^= 1;
+        }
+
+        // Epilog 2: last K-tile (mirrors dense lines 1189-1210).
+        {
+            load_a(a, As[tic][0], wm);
+            asm volatile("s_waitcnt vmcnt(0)"); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_b(b1, b_tile(tic, 1), wn);
+            __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cB, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_a(a, As[tic][1], wm);
+            __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1);
+            rcr_mma(cC, a, b0);
+            rcr_mma(cD, a, b1);
+            __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+        }
+
+        // Apply scale + store with m_subtile_C row shift.
+        const float combined_scale = resolve_combined_scale_grp(g);
+        mul(cA, cA, combined_scale);
+        mul(cB, cB, combined_scale);
+        mul(cC, cC, combined_scale);
+        mul(cD, cD, combined_scale);
+
+        if (wm == 0) __builtin_amdgcn_s_barrier();
+        store(g.c, cA, {0, 0, m_subtile_C + br*WARPS_M*2+wm,
+                              bc*WARPS_N*2+wn});
+        store(g.c, cB, {0, 0, m_subtile_C + br*WARPS_M*2+wm,
+                              bc*WARPS_N*2+WARPS_N+wn});
+        store(g.c, cC, {0, 0, m_subtile_C + br*WARPS_M*2+WARPS_M+wm,
+                              bc*WARPS_N*2+wn});
+        store(g.c, cD, {0, 0, m_subtile_C + br*WARPS_M*2+WARPS_M+wm,
+                              bc*WARPS_N*2+WARPS_N+wn});
+
+        // [grouped] Drain in-flight ops before the next persistent iteration
+        // so the next tile's prologue starts from a clean state.
+        asm volatile("s_waitcnt vmcnt(0) lgkmcnt(0)");
+        __builtin_amdgcn_s_barrier();
+    }
+}
+
+template __global__ void grouped_rcr_kernel<0>(const grouped_layout_globals);
+
+void dispatch_grouped_rcr(grouped_layout_globals g) {
+    g.n = static_cast<int>(g.c.cols());
+    g.M_total = static_cast<int>(g.c.rows());
+    g.k = static_cast<int>(g.a.cols());
+    g.ki = g.k / K_BLOCK;
+    g.bpc = g.n / BLOCK_SIZE;
+    grouped_rcr_kernel<0><<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
+}
+
 template<Layout L>
 void dispatch(layout_globals g) {
     g.m = static_cast<int>(g.c.rows());
@@ -1668,6 +2006,51 @@ static void gemm_wrapper_dscale(pybind11::object a, pybind11::object b, pybind11
     dispatch<L>(g);
 }
 
+// Host-side wrappers for grouped RCR kernel (host-scalar + dscale variants).
+static void grouped_rcr_fn(pybind11::object a, pybind11::object b, pybind11::object c,
+                           pybind11::object scale_a_obj, pybind11::object scale_b_obj,
+                           pybind11::object group_offs_obj,
+                           int group_m) {
+    auto group_offs_ptr = group_offs_obj.attr("data_ptr")().cast<uintptr_t>();
+    int G = group_offs_obj.attr("numel")().cast<int>() - 1;
+    grouped_layout_globals g{
+        py::from_object<_gl_fp8>::make(a),
+        py::from_object<_gl_fp8>::make(b),
+        py::from_object<_gl_bf16>::make(c),
+        to_float(scale_a_obj),
+        to_float(scale_b_obj),
+        nullptr,
+        nullptr,
+        reinterpret_cast<const int64_t*>(group_offs_ptr),
+        {},
+        G, 0, 0, 0, 0, group_m, 0,
+    };
+    dispatch_grouped_rcr(g);
+}
+
+static void grouped_rcr_dscale_fn(
+    pybind11::object a, pybind11::object b, pybind11::object c,
+    pybind11::object scale_a_obj, pybind11::object scale_b_obj,
+    pybind11::object group_offs_obj,
+    int group_m) {
+    auto sa_ptr = scale_a_obj.attr("data_ptr")().cast<uintptr_t>();
+    auto sb_ptr = scale_b_obj.attr("data_ptr")().cast<uintptr_t>();
+    auto group_offs_ptr = group_offs_obj.attr("data_ptr")().cast<uintptr_t>();
+    int G = group_offs_obj.attr("numel")().cast<int>() - 1;
+    grouped_layout_globals g{
+        py::from_object<_gl_fp8>::make(a),
+        py::from_object<_gl_fp8>::make(b),
+        py::from_object<_gl_bf16>::make(c),
+        0.f, 0.f,
+        reinterpret_cast<const float*>(sa_ptr),
+        reinterpret_cast<const float*>(sb_ptr),
+        reinterpret_cast<const int64_t*>(group_offs_ptr),
+        {},
+        G, 0, 0, 0, 0, group_m, 0,
+    };
+    dispatch_grouped_rcr(g);
+}
+
 PYBIND11_MODULE(tk_fp8_layouts, m) {
     m.doc() = "FP8 per-tensor GEMM: C = A op B * scale_a * scale_b";
     m.def("gemm_rcr", &gemm_wrapper<Layout::RCR>,
@@ -1697,6 +2080,19 @@ PYBIND11_MODULE(tk_fp8_layouts, m) {
     m.def("supports_shape", [](int m, int n, int k) -> bool {
         return m > 0 && n > 0 && k > 0;
     });
+    // [grouped] Persistent + CPU-sync-free FP8 RCR launcher. ``group_offs`` is
+    // a [G+1] int64 device tensor (prefix-sum of per-group M); the kernel
+    // consumes it on the GPU side via O(G) linear scan, no host reads.
+    m.def("grouped_rcr", &grouped_rcr_fn,
+          pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("c"),
+          pybind11::arg("scale_a"), pybind11::arg("scale_b"),
+          pybind11::arg("group_offs"),
+          pybind11::arg("group_m") = DEFAULT_GROUP_M);
+    m.def("grouped_rcr_dscale", &grouped_rcr_dscale_fn,
+          pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("c"),
+          pybind11::arg("scale_a"), pybind11::arg("scale_b"),
+          pybind11::arg("group_offs"),
+          pybind11::arg("group_m") = DEFAULT_GROUP_M);
     m.attr("DEFAULT_GROUP_M") = DEFAULT_GROUP_M;
     m.attr("BLOCK_SIZE") = BLK;
     m.attr("K_BLOCK") = BK;

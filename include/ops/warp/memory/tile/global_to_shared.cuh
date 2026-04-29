@@ -302,8 +302,12 @@ __device__ __forceinline__ void load(ST& dst, const GL& src, const COORD& idx,
     for (int i = 0; i < memcpy_per_tile; ++i) {
         const uint32_t linear_offset = warp_offset + i * bytes_per_memcpy;
         const uint32_t subtile_id_lds = linear_offset / ST::underlying_subtile_bytes;
-        int32_t lds_byte = lds_tile_base3 + linear_offset + subtile_id_lds * ST::subtile_padding;
-        asm volatile("" : "+s"(lds_byte));
+        // Rebuild lds_byte through readfirstlane to coerce SGPR class without
+        // the inline-asm "+s" clobber that breaks under clang 22.0.0
+        // ("illegal VGPR to SGPR copy" backend error). readfirstlane produces
+        // an SGPR result identical to what the asm clobber requested.
+        const uint32_t lds_byte = __builtin_amdgcn_readfirstlane(
+            lds_tile_base3 + linear_offset + subtile_id_lds * ST::subtile_padding);
 
         llvm_amdgcn_raw_buffer_load_lds(
             SRD, 
