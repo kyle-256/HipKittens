@@ -2727,12 +2727,23 @@ __global__ void grouped_ktail_kernel_lds(const grouped_layout_globals g) {
     constexpr int K_VECS = K_REM / FMA_VEC;          // 8
     static_assert(K_REM % FMA_VEC == 0, "K_REM must be vec8-aligned for inner fma");
     float acc = 0.0f;
+    // Round-16: replace the 4 scalar fp8->fp32 conversions per
+    // ``convertor::convert(a8.lo)`` (which expands to 4 separate
+    // ``v_cvt_f32_fp8`` lane-shifted ops) with 2 ``v_cvt_pk_f32_fp8``
+    // packed conversions (each consumes a 32-bit reg of 4 fp8 and
+    // outputs a fp32x2 from a chosen pair of lanes). Halves the cvt
+    // count on each operand: 4 cvts -> 2 cvts per fp8e4m3_4.
+    typedef __attribute__((__vector_size__(2 * sizeof(float)))) float fp32x2_v;
+    auto fp8x4_to_f32x4 = [](const fp8e4m3_4& u) -> float4 {
+        int packed;
+        __builtin_memcpy(&packed, &u, 4);
+        fp32x2_v lo = __builtin_amdgcn_cvt_pk_f32_fp8(packed, false);
+        fp32x2_v hi = __builtin_amdgcn_cvt_pk_f32_fp8(packed, true);
+        return make_float4(lo[0], lo[1], hi[0], hi[1]);
+    };
+
     // Round-15: split into 4 parallel fp32 accumulators to break the
-    // 8-deep dependency chain in the per-thread fma loop. With 1
-    // accumulator the inner-loop ILP is bounded by fma latency (~4
-    // cycles on CDNA4 VALU); 4 parallel chains let the compiler /
-    // scheduler hide that latency by interleaving independent fmas
-    // from each chain. Final acc = sum of 4 partials.
+    // 8-deep dependency chain in the per-thread fma loop.
     float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
     #pragma unroll
     for (int kk_v = 0; kk_v < K_VECS; ++kk_v) {
@@ -2740,10 +2751,10 @@ __global__ void grouped_ktail_kernel_lds(const grouped_layout_globals g) {
             &A_lds[rib * K_REM + kk_v * FMA_VEC]);
         fp8e4m3_8 b8 = *reinterpret_cast<const fp8e4m3_8*>(
             &B_lds[cib * K_REM + kk_v * FMA_VEC]);
-        float4 a_lo = base_types::convertor<float4, fp8e4m3_4>::convert(a8.lo);
-        float4 a_hi = base_types::convertor<float4, fp8e4m3_4>::convert(a8.hi);
-        float4 b_lo = base_types::convertor<float4, fp8e4m3_4>::convert(b8.lo);
-        float4 b_hi = base_types::convertor<float4, fp8e4m3_4>::convert(b8.hi);
+        float4 a_lo = fp8x4_to_f32x4(a8.lo);
+        float4 a_hi = fp8x4_to_f32x4(a8.hi);
+        float4 b_lo = fp8x4_to_f32x4(b8.lo);
+        float4 b_hi = fp8x4_to_f32x4(b8.hi);
         acc0 += a_lo.x * b_lo.x + a_hi.x * b_hi.x;
         acc1 += a_lo.y * b_lo.y + a_hi.y * b_hi.y;
         acc2 += a_lo.z * b_lo.z + a_hi.z * b_hi.z;
