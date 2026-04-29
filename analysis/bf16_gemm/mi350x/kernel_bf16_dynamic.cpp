@@ -1258,6 +1258,16 @@ __global__ void grouped_tail_kernel(const grouped_layout_globals g) {
             lds_k_rem_match && block_in_group) {
             return;  // LDS K-tail kernel already wrote the corrected value.
         }
+        // [round-7] LDS-staged N-tail full-K reduction skip. The N-tail
+        // LDS kernel (grouped_ntail_kernel_lds) wrote ABSOLUTE values for
+        // col >= fast_n cells in blocks fully contained in one group,
+        // mirroring the dispatcher's launch gate (m_per_group passes
+        // alignment) plus the device-side cross-group check. Same gates
+        // here.
+        if (!main_covers_n && col >= g.fast_n && lds_k_tail_safe &&
+            block_in_group) {
+            return;  // LDS N-tail kernel already wrote the absolute value.
+        }
     }
 
     const int k0 = fast_covers_cell ? g.fast_k : 0;
@@ -1504,6 +1514,151 @@ __global__ void grouped_ktail_kernel_lds(const grouped_layout_globals g) {
 }
 
 template __global__ void grouped_ktail_kernel_lds<Layout::RCR, 64>(const grouped_layout_globals);
+
+// =============================================================================
+// LDS-staged N-tail full-K reduction kernel for the partial last col-tile
+// region [fast_n, n) (RCR only).
+//
+// Background: when the main grouped kernel uses bpc = fast_n / BLOCK_SIZE
+// (the safe pre-round-6 path; ceil_div coverage of N is gated to fast_k == k
+// because dual-misaligned shapes triggered a memory fault in KI=0 dynamic
+// main kernel — see comment in dispatch_grouped), the N-tail region
+// [fast_n, n) is computed by `grouped_tail_kernel`'s scalar fp32 vec4-loaded
+// path: per-(row, col) thread, K-loop over [0, k), 8-byte load A & B with
+// no LDS reuse. On gpt_oss N=2880/5760 K=2880 this hits ~5 TF (HBM-bound).
+//
+// This kernel handles the same cells with cooperative LDS staging:
+//   1. Block of (TBM=16, TBN=16) cells, 256 threads.
+//   2. Loop K in chunks of K_CHUNK=64. Per chunk:
+//        a. Coop-load A[block_rows, k_chunk] -> A_lds (16*64*2 = 2 KB,
+//           4 bf16 elements per thread).
+//        b. Coop-load B[group_idx, block_cols, k_chunk] -> B_lds (2 KB).
+//        c. __syncthreads().
+//        d. Per (rib, cib) thread: K_CHUNK fma over LDS data (row
+//           broadcast across cib lane-group, col broadcast across rib).
+//        e. __syncthreads() before next chunk overwrites LDS.
+//   3. Store full result to C[row, col] (main did NOT write here).
+//
+// Cross-group safety mirrors `grouped_ktail_kernel_lds` (round-6): per-block
+// `row_block_base + TBM <= s_offs[group_idx + 1]` check, fall back to scalar
+// tail for cross-group blocks (which pick group_idx per-row).
+//
+// LDS bank-conflict: A_lds laid out [row][k]. For fixed `rib`, threads with
+// different `cib` read A_lds[rib][kk] for the SAME kk -> broadcast (no
+// conflict). For fixed `cib`, threads with different `rib` read
+// B_lds[cib][kk] for the SAME kk -> broadcast.
+// =============================================================================
+template<Layout L, int K_CHUNK>
+__global__ void grouped_ntail_kernel_lds(const grouped_layout_globals g) {
+    static_assert(L == Layout::RCR,
+        "grouped_ntail_kernel_lds: RCR only — RRR/CRR fall back to scalar tail.");
+    constexpr int TBM = TAIL_BLOCK_M;        // 16
+    constexpr int TBN = TAIL_BLOCK_N;        // 16
+    constexpr int NTHR = TBM * TBN;           // 256
+    constexpr int A_CHUNK = TBM * K_CHUNK;    // 16 * 64 = 1024 elements
+    constexpr int B_CHUNK = TBN * K_CHUNK;    // 16 * 64 = 1024 elements
+    constexpr int A_PER_THR = (A_CHUNK + NTHR - 1) / NTHR;
+    constexpr int B_PER_THR = (B_CHUNK + NTHR - 1) / NTHR;
+
+    __shared__ bf16 A_lds[A_CHUNK];
+    __shared__ bf16 B_lds[B_CHUNK];
+    constexpr int MAX_G_PLUS_1 = 65;
+    __shared__ int s_offs[MAX_G_PLUS_1];
+
+    const int rib = threadIdx.y;
+    const int cib = threadIdx.x;
+    const int tid = rib * blockDim.x + cib;
+
+    if (tid < MAX_G_PLUS_1) {
+        s_offs[tid] = (tid <= g.G) ? static_cast<int>(g.group_offs[tid]) : 0;
+    }
+    __syncthreads();
+
+    const int row_block_base = blockIdx.y * TBM;
+    // grid.x indexes the n-tail region [fast_n, n); shift by fast_n.
+    const int col_block_base = g.fast_n + blockIdx.x * TBN;
+    if (row_block_base >= g.M_total || col_block_base >= g.n) return;
+
+    int group_idx = 0;
+    #pragma unroll 1
+    for (int gi = 0; gi < g.G; ++gi) {
+        if (row_block_base < s_offs[gi + 1]) { group_idx = gi; break; }
+    }
+
+    // [round-7] Cross-group safety mirror. Single-group_idx B-strip load
+    // would feed wrong rows for the upper part of a cross-boundary block;
+    // early-exit and let the scalar tail handle every cell with per-row
+    // group_idx (it has the same block_in_group skip we add in this round).
+    if (row_block_base + TBM > s_offs[group_idx + 1]) return;
+
+    const int row = row_block_base + rib;
+    const int col = col_block_base + cib;
+    const bool active_cell = (row < g.M_total) && (col < g.n);
+
+    float acc = 0.0f;
+
+    // Loop K in K_CHUNK slices. The compile-time partial loop over K_CHUNK
+    // unrolls fully (kk in [0, K_CHUNK)). The runtime outer loop iterates
+    // ceil_div(g.k, K_CHUNK) times (e.g. K=2880, K_CHUNK=64 -> 45 chunks).
+    for (int k_chunk_start = 0; k_chunk_start < g.k; k_chunk_start += K_CHUNK) {
+        // Cooperative A load: A_lds[r_in_blk * K_CHUNK + kk] = A[row_block_base
+        // + r_in_blk, k_chunk_start + kk].
+        #pragma unroll
+        for (int li = 0; li < A_PER_THR; ++li) {
+            const int linear = li * NTHR + tid;
+            if (linear < A_CHUNK) {
+                const int r_in_blk = linear / K_CHUNK;
+                const int kk = linear - r_in_blk * K_CHUNK;
+                const int r_global = row_block_base + r_in_blk;
+                const int k_global = k_chunk_start + kk;
+                const float a_val = (r_global < g.M_total && k_global < g.k)
+                    ? load_bf16_scalar(g.a, r_global, k_global)
+                    : 0.0f;
+                A_lds[linear] = static_cast<bf16>(a_val);
+            }
+        }
+        // Cooperative B load (group_idx fixed for the block by the
+        // cross-group early-return above).
+        #pragma unroll
+        for (int li = 0; li < B_PER_THR; ++li) {
+            const int linear = li * NTHR + tid;
+            if (linear < B_CHUNK) {
+                const int c_in_blk = linear / K_CHUNK;
+                const int kk = linear - c_in_blk * K_CHUNK;
+                const int c_global = col_block_base + c_in_blk;
+                const int k_global = k_chunk_start + kk;
+                const float b_val = (c_global < g.n && k_global < g.k)
+                    ? load_bf16_scalar_grp(g.b, group_idx, c_global, k_global)
+                    : 0.0f;
+                B_lds[linear] = static_cast<bf16>(b_val);
+            }
+        }
+        __syncthreads();
+
+        if (active_cell) {
+            // Bound the inner unroll by the actual K_remaining when k_chunk_start
+            // + K_CHUNK exceeds g.k (last partial chunk). The 0.0f-pad on load
+            // also makes excess kk safe, but skipping the multiply saves cycles.
+            const int k_left = g.k - k_chunk_start;
+            const int k_iters = (k_left < K_CHUNK) ? k_left : K_CHUNK;
+            #pragma unroll
+            for (int kk = 0; kk < K_CHUNK; ++kk) {
+                if (kk >= k_iters) break;
+                acc += float(A_lds[rib * K_CHUNK + kk])
+                     * float(B_lds[cib * K_CHUNK + kk]);
+            }
+        }
+        __syncthreads();  // before next chunk overwrites LDS
+    }
+
+    // Store ABSOLUTE value (main kernel did NOT write [fast_n, n) when
+    // bpc = fast_n / BLOCK_SIZE; this kernel is the sole contributor).
+    if (active_cell) {
+        store_bf16_scalar(g.c, row, col, acc);
+    }
+}
+
+template __global__ void grouped_ntail_kernel_lds<Layout::RCR, 64>(const grouped_layout_globals);
 
 // Persistent kernel: grid_x = NUM_CUS. One block per CU; each block iterates
 // many (group, tile) pairs in a single launch.
@@ -1953,6 +2108,22 @@ void dispatch_grouped(grouped_layout_globals g) {
                 );
                 grouped_ktail_kernel_lds<Layout::RCR, 64>
                     <<<lds_grid, lds_block, 0, g.stream>>>(g);
+            }
+            // [round-7] LDS-staged N-tail full-K reduction for cols
+            // [fast_n, n). Only when main_covers_n is FALSE (i.e., main
+            // kernel uses bpc = fast_n / BLOCK_SIZE and never wrote the
+            // partial last col-tile). Mirrored launch gate as LDS K-tail:
+            // m_per_group hint passes alignment, plus per-block runtime
+            // cross-group check inside the kernel.
+            if (!main_covers_n && g.fast_n < g.n && lds_k_tail_safe) {
+                const int n_tail = g.n - g.fast_n;
+                dim3 ntail_block(TAIL_BLOCK_N, TAIL_BLOCK_M);
+                dim3 ntail_grid(
+                    kittens::ceil_div(n_tail, TAIL_BLOCK_N),
+                    kittens::ceil_div(g.M_total, TAIL_BLOCK_M)
+                );
+                grouped_ntail_kernel_lds<Layout::RCR, 64>
+                    <<<ntail_grid, ntail_block, 0, g.stream>>>(g);
             }
         }
 
