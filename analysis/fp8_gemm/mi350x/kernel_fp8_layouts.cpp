@@ -1844,7 +1844,15 @@ __device__ __forceinline__ float resolve_combined_scale_grp(
 
 // Persistent RCR kernel: grid_x = NUM_CUS. One block per CU; each block
 // iterates many (group, tile) pairs in a single launch.
-template<int KI_HINT = 0>
+//
+// Round-12: ``N_MASKED_STORE`` selects the C-store path at compile time.
+// When ``false`` (N is BLOCK_SIZE-aligned, e.g. DSV3 N=4096/7168) the
+// masked variant is dead-code-eliminated and the main kernel emits the
+// same raw-store sequence as the round-11 path — keeping VGPR pressure
+// low (no spill from the masked branch's lane-level row/col reconstruction).
+// When ``true`` (N misaligned, e.g. gpt_oss N=2880/5760) we use
+// ``store_c_tile_n_masked`` to drop OOB cols on the partial last tile.
+template<int KI_HINT = 0, bool N_MASKED_STORE = false>
 __global__ __launch_bounds__(_NUM_THREADS, 1)
 void grouped_rcr_kernel(const grouped_layout_globals g) {
     using ST_rcr = ST_v2;
@@ -2099,14 +2107,30 @@ void grouped_rcr_kernel(const grouped_layout_globals g) {
         mul(cD, cD, combined_scale);
 
         if (wm == 0) __builtin_amdgcn_s_barrier();
-        store(g.c, cA, {0, 0, m_subtile_C + br*WARPS_M*2+wm,
-                              bc*WARPS_N*2+wn});
-        store(g.c, cB, {0, 0, m_subtile_C + br*WARPS_M*2+wm,
-                              bc*WARPS_N*2+WARPS_N+wn});
-        store(g.c, cC, {0, 0, m_subtile_C + br*WARPS_M*2+WARPS_M+wm,
-                              bc*WARPS_N*2+wn});
-        store(g.c, cD, {0, 0, m_subtile_C + br*WARPS_M*2+WARPS_M+wm,
-                              bc*WARPS_N*2+WARPS_N+wn});
+        // Round-12: mirror BF16 grouped's column-masked C store. With
+        // ``g.bpc = ceil_div(g.n, BLOCK_SIZE)`` (dispatch_grouped_rcr
+        // round-12 path) the last col-tile may straddle ``[fast_n, n)``;
+        // ``store_c_tile_n_masked`` drops OOB columns. ``rcr_8w_load_hoist``
+        // already uses the full-tensor SRD (line ~432) so OOB rows in B
+        // clamp to 0 — the masked C store then prevents those cells from
+        // being written. ``N_MASKED_STORE`` is a compile-time template
+        // parameter so the N-aligned dispatch path emits the raw store
+        // (no spill from the masked variant's row/col reconstruction).
+        const int r0 = m_subtile_C + br*WARPS_M*2+wm;
+        const int r1 = m_subtile_C + br*WARPS_M*2+WARPS_M+wm;
+        const int c0 = bc*WARPS_N*2+wn;
+        const int c1 = bc*WARPS_N*2+WARPS_N+wn;
+        if constexpr (N_MASKED_STORE) {
+            store_c_tile_n_masked(g.c, cA, r0, c0, g.n);
+            store_c_tile_n_masked(g.c, cB, r0, c1, g.n);
+            store_c_tile_n_masked(g.c, cC, r1, c0, g.n);
+            store_c_tile_n_masked(g.c, cD, r1, c1, g.n);
+        } else {
+            store(g.c, cA, {0, 0, r0, c0});
+            store(g.c, cB, {0, 0, r0, c1});
+            store(g.c, cC, {0, 0, r1, c0});
+            store(g.c, cD, {0, 0, r1, c1});
+        }
 
         // [grouped] Drain in-flight ops before the next persistent iteration
         // so the next tile's prologue starts from a clean state.
@@ -2115,7 +2139,8 @@ void grouped_rcr_kernel(const grouped_layout_globals g) {
     }
 }
 
-template __global__ void grouped_rcr_kernel<0>(const grouped_layout_globals);
+template __global__ void grouped_rcr_kernel<0, false>(const grouped_layout_globals);
+template __global__ void grouped_rcr_kernel<0, true >(const grouped_layout_globals);
 
 // =============================================================================
 // Persistent RRR grouped kernel — round-1 mirror of grouped_rcr_kernel.
@@ -2441,8 +2466,17 @@ __global__ void grouped_tail_kernel(const grouped_layout_globals g) {
     }
     __syncthreads();
 
+    // Round-12: ``main_covers_n`` mirrors the dispatch decision (see
+    // ``dispatch_grouped_rcr``). When ``g.bpc * BLOCK_SIZE > g.fast_n``,
+    // the main kernel ran with ``bpc = ceil_div(g.n, BLOCK_SIZE)`` and
+    // ``store_c_tile_n_masked`` already wrote cols [0, g.n) with the
+    // [0, fast_k) partial K reduction. Tail must NOT redo full-K
+    // reduction for those cells — only add the K-tail [fast_k, k)
+    // correction. Detected from ``g.bpc`` itself (mirror dense
+    // ``gemm_tail_kernel`` pattern).
+    const bool main_covers_n = (g.bpc * BLOCK_SIZE > g.fast_n);
     const bool needs_k_tail = g.fast_k < g.k;
-    const bool needs_n_tail = g.fast_n < g.n;
+    const bool needs_n_tail = !main_covers_n && (g.fast_n < g.n);
     if (!needs_k_tail && !needs_n_tail) return;
 
     const int row = blockIdx.y * blockDim.y + threadIdx.y;
@@ -2455,7 +2489,12 @@ __global__ void grouped_tail_kernel(const grouped_layout_globals g) {
         if (row < s_offs[gi + 1]) { group_idx = gi; break; }
     }
 
-    const bool interior_n       = col < g.fast_n;
+    // Round-12: ``interior_n`` widens to ``col < g.n`` whenever
+    // ``main_covers_n``. The fast_covers_cell branch then takes the
+    // K-tail correction path (RMW + acc) for ALL cols [0, g.n) — the
+    // legacy ``col < g.fast_n`` interior is preserved for layouts whose
+    // main kernel still uses ``bpc = fast_n / BLOCK_SIZE`` (RRR).
+    const bool interior_n       = main_covers_n ? true : (col < g.fast_n);
     const bool fast_covers_cell = interior_n && g.fast_n > 0 && g.fast_k > 0;
     if (fast_covers_cell && !needs_k_tail) return;
 
@@ -2527,15 +2566,32 @@ void dispatch_grouped_rcr(grouped_layout_globals g) {
     g.M_total = static_cast<int>(g.c.rows());
     g.k = static_cast<int>(g.a.cols());
 
-    // Aligned interior swept by the persistent main kernel; cells outside go
-    // through `grouped_tail_kernel`.
+    // Round-12: mirror BF16 grouped round-11 path. Main kernel uses
+    // ``bpc = ceil_div(g.n, BLOCK_SIZE)`` unconditionally on RCR; the
+    // full-tensor SRD inside ``rcr_8w_load_hoist`` clamps OOB row loads
+    // to 0 (no swizzle stride, see line ~432), and the column-masked
+    // ``store_c_tile_n_masked`` in the main kernel drops OOB cells from
+    // the write-back. This eliminates the ``grouped_tail_kernel`` full-K
+    // N-tail reduction (scalar fp32 vec8) for cols [fast_n, n) — the
+    // dominant wall-time on gpt_oss N=2880/5760, K=2880 grouped FP8.
+    // The tail kernel still runs for K-tail correction in [fast_k, k)
+    // for ALL cols [0, g.n) (including the partial last col-tile, since
+    // main now wrote partial K reduction there too).
     g.fast_n = (g.n / BLOCK_SIZE) * BLOCK_SIZE;
     g.fast_k = (g.k / K_BLOCK)    * K_BLOCK;
-    g.bpc    = g.fast_n / BLOCK_SIZE;
+    g.bpc    = kittens::ceil_div(g.n, BLOCK_SIZE);
     g.ki     = g.fast_k / K_BLOCK;
 
     if (g.bpc > 0 && g.ki > 0) {
-        grouped_rcr_kernel<0><<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
+        // Round-12: launch-uniform branch on N alignment selects the
+        // masked-vs-raw store variant at compile time. DSV3 N=4096/7168
+        // hits the raw-store instance (zero overhead, ratios stable);
+        // gpt_oss N=2880/5760 hits the masked-store instance.
+        if (g.bpc * BLOCK_SIZE == g.n) {
+            grouped_rcr_kernel<0, false><<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
+        } else {
+            grouped_rcr_kernel<0, true ><<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
+        }
     } else {
         // No aligned interior at all: main kernel cannot run; tail handles
         // every cell with a full-K reduction.
@@ -2545,7 +2601,11 @@ void dispatch_grouped_rcr(grouped_layout_globals g) {
         g.ki = 0;
     }
 
-    if (g.fast_n != g.n || g.fast_k != g.k) {
+    // Round-12: tail kernel only needed for K-tail correction now (and
+    // for the no-main fallback). Skip when fast_k == g.k (main covered
+    // every cell). The tail kernel detects ``main_covers_n`` via
+    // ``g.bpc * BLOCK_SIZE > g.fast_n`` (mirror dense gemm_tail_kernel).
+    if (g.fast_k != g.k || g.bpc == 0) {
         dim3 tail_block(TAIL_BLOCK_N, TAIL_BLOCK_M);
         dim3 tail_grid(
             kittens::ceil_div(g.n, TAIL_BLOCK_N),
