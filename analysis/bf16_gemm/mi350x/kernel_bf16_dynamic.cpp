@@ -1479,7 +1479,16 @@ __global__ void grouped_ktail_kernel_lds(const grouped_layout_globals g) {
             for (int gi = 0; gi < g.G; ++gi) {
                 if (row < s_offs[gi + 1]) { row_group = gi; break; }
             }
-            float acc_s = 0.0f;
+            // Round-18: cross_boundary fallback now uses the same
+            // ``__builtin_amdgcn_fdot2_f32_bf16`` packed dot + 2-way
+            // parallel acc as the fast LDS path (see round-15 of bf16
+            // K-tail). This branch only fires when a tail block
+            // straddles a group boundary (non-uniform group_lens at
+            // launch); the metric uses uniform group_lens so it does
+            // not exercise this branch — but a real bench with skewed
+            // group_lens benefits ~2x on the cross_boundary cells.
+            typedef __attribute__((__vector_size__(2 * sizeof(__bf16)))) __bf16 bf16x2_v;
+            float acc_s_lo = 0.0f, acc_s_hi = 0.0f;
             const bf16* a_row = &g.a[coord<>(row, 0)];
             const bf16* b_row = &g.b[coord<>{0, row_group, col, 0}];
             int kk = k0;
@@ -1491,13 +1500,18 @@ __global__ void grouped_ktail_kernel_lds(const grouped_layout_globals g) {
                 for (int j = j_start; j < j_end; ++j) {
                     bf16x4 a4 = a_v4[j];
                     bf16x4 b4 = b_v4[j];
-                    acc_s += float(a4.lo.x) * float(b4.lo.x)
-                           + float(a4.lo.y) * float(b4.lo.y)
-                           + float(a4.hi.x) * float(b4.hi.x)
-                           + float(a4.hi.y) * float(b4.hi.y);
+                    acc_s_lo = __builtin_amdgcn_fdot2_f32_bf16(
+                        *reinterpret_cast<const bf16x2_v*>(&a4.lo),
+                        *reinterpret_cast<const bf16x2_v*>(&b4.lo),
+                        acc_s_lo, false);
+                    acc_s_hi = __builtin_amdgcn_fdot2_f32_bf16(
+                        *reinterpret_cast<const bf16x2_v*>(&a4.hi),
+                        *reinterpret_cast<const bf16x2_v*>(&b4.hi),
+                        acc_s_hi, false);
                 }
                 kk = j_end << 2;
             }
+            float acc_s = acc_s_lo + acc_s_hi;
             for (; kk < g.k; ++kk) {
                 acc_s += load_bf16_scalar(g.a, row, kk) *
                          load_bf16_scalar_grp(g.b, row_group, col, kk);
