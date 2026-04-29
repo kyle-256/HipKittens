@@ -447,10 +447,10 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         // Dot slice 0
         if constexpr (causal) {
           // If the query position is less than the key position, set P_ij to -inf
-          if (q_pos < k_pos) {
+          if (__builtin_expect((q_pos < k_pos), 0)) {
             mov<neg_inf_v>(P_ij);
           // If the query position is equal to the key position, we need to apply a causal mask
-          } else if (q_pos == k_pos) {
+          } else if (__builtin_expect((q_pos == k_pos), 0)) {
             // Apply the causal mask to [0, 0] and set [0, 1:4] to -inf
             make_causal<0, 0, neg_inf_v>(P_ij, P_ij);
             mov<0, 1, neg_inf_v>(P_ij);
@@ -665,10 +665,10 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         // Dot slice 1
         if constexpr (causal) {
           // If the query position is less than the key position, set P_ij to -inf
-          if (q_pos < k_pos) {
+          if (__builtin_expect((q_pos < k_pos), 0)) {
             mov<neg_inf_v>(P_ij);
           // If the query position is equal to the key position, we need to apply a causal mask
-          } else if (q_pos == k_pos) {
+          } else if (__builtin_expect((q_pos == k_pos), 0)) {
             // Apply the causal mask to [0, 1] and set [0, 2:4] to -inf
             make_causal<0, 1, neg_inf_v>(P_ij, P_ij);
             mov<0, 2, neg_inf_v>(P_ij);
@@ -882,10 +882,10 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         // Dot slice 2
         if constexpr (causal) {
           // If the query position is less than the key position, set P_ij to -inf
-          if (q_pos < k_pos) {
+          if (__builtin_expect((q_pos < k_pos), 0)) {
             mov<neg_inf_v>(P_ij);
           // If the query position is equal to the key position, we need to apply a causal mask
-          } else if (q_pos == k_pos) {
+          } else if (__builtin_expect((q_pos == k_pos), 0)) {
             // Apply the causal mask to [0, 2] and set [0, 3:4] to -inf
             make_causal<0, 2, neg_inf_v>(P_ij, P_ij);
             mov<0, 3, neg_inf_v>(P_ij);
@@ -1098,10 +1098,10 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         // Dot slice 3
         if constexpr (causal) {
           // If the query position is less than the key position, set P_ij to -inf
-          if (q_pos < k_pos) {
+          if (__builtin_expect((q_pos < k_pos), 0)) {
             mov<neg_inf_v>(P_ij);
           // If the query position is equal to the key position, we need to apply a causal mask
-          } else if (q_pos == k_pos) {
+          } else if (__builtin_expect((q_pos == k_pos), 0)) {
             // Apply the causal mask to [0, 3]
             make_causal<0, 3, neg_inf_v>(P_ij, P_ij);
           }
@@ -1328,10 +1328,10 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         // Dot slice 0
         if constexpr (causal) {
           // If the query position is less than the key position, set P_ij to -inf
-          if (q_pos < k_pos) {
+          if (__builtin_expect((q_pos < k_pos), 0)) {
             mov<neg_inf_v>(P_ij);
           // If the query position is equal to the key position, we need to apply a causal mask
-          } else if (q_pos == k_pos) {
+          } else if (__builtin_expect((q_pos == k_pos), 0)) {
             // Apply the causal mask to [0, 0] and set [0, 1:4] to -inf
             make_causal<0, 0, neg_inf_v>(P_ij, P_ij);
             mov<0, 1, neg_inf_v>(P_ij);
@@ -1549,10 +1549,10 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         // Dot slice 1
         if constexpr (causal) {
           // If the query position is less than the key position, set P_ij to -inf
-          if (q_pos < k_pos) {
+          if (__builtin_expect((q_pos < k_pos), 0)) {
             mov<neg_inf_v>(P_ij);
           // If the query position is equal to the key position, we need to apply a causal mask
-          } else if (q_pos == k_pos) {
+          } else if (__builtin_expect((q_pos == k_pos), 0)) {
             // Apply the causal mask to [0, 1] and set [0, 2:4] to -inf
             make_causal<0, 1, neg_inf_v>(P_ij, P_ij);
             mov<0, 2, neg_inf_v>(P_ij);
@@ -1766,10 +1766,10 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         // Dot slice 2
         if constexpr (causal) {
           // If the query position is less than the key position, set P_ij to -inf
-          if (q_pos < k_pos) {
+          if (__builtin_expect((q_pos < k_pos), 0)) {
             mov<neg_inf_v>(P_ij);
           // If the query position is equal to the key position, we need to apply a causal mask
-          } else if (q_pos == k_pos) {
+          } else if (__builtin_expect((q_pos == k_pos), 0)) {
             // Apply the causal mask to [0, 2] and set [0, 3:4] to -inf
             make_causal<0, 2, neg_inf_v>(P_ij, P_ij);
             mov<0, 3, neg_inf_v>(P_ij);
@@ -1982,10 +1982,10 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         // Dot slice 3
         if constexpr (causal) {
           // If the query position is less than the key position, set P_ij to -inf
-          if (q_pos < k_pos) {
+          if (__builtin_expect((q_pos < k_pos), 0)) {
             mov<neg_inf_v>(P_ij);
           // If the query position is equal to the key position, we need to apply a causal mask
-          } else if (q_pos == k_pos) {
+          } else if (__builtin_expect((q_pos == k_pos), 0)) {
             // Apply the causal mask to [0, 3]
             make_causal<0, 3, neg_inf_v>(P_ij, P_ij);
           }
@@ -2207,10 +2207,10 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       // Dot slice 0
       if constexpr (causal) {
         // If the query position is less than the key position, set P_ij to -inf
-        if (q_pos < k_pos) {
+        if (__builtin_expect((q_pos < k_pos), 0)) {
           mov<neg_inf_v>(P_ij);
         // If the query position is equal to the key position, we need to apply a causal mask
-        } else if (q_pos == k_pos) {
+        } else if (__builtin_expect((q_pos == k_pos), 0)) {
             // Apply the causal mask to [0, 0] and set [0, 1:4] to -inf
             make_causal<0, 0, neg_inf_v>(P_ij, P_ij);
             mov<0, 1, neg_inf_v>(P_ij);
@@ -2428,10 +2428,10 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       // Dot slice 1
       if constexpr (causal) {
         // If the query position is less than the key position, set P_ij to -inf
-        if (q_pos < k_pos) {
+        if (__builtin_expect((q_pos < k_pos), 0)) {
           mov<neg_inf_v>(P_ij);
         // If the query position is equal to the key position, we need to apply a causal mask
-        } else if (q_pos == k_pos) {
+        } else if (__builtin_expect((q_pos == k_pos), 0)) {
             // Apply the causal mask to [0, 1] and set [0, 2:4] to -inf
             make_causal<0, 1, neg_inf_v>(P_ij, P_ij);
             mov<0, 2, neg_inf_v>(P_ij);
@@ -2644,10 +2644,10 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       // Dot slice 2
       if constexpr (causal) {
         // If the query position is less than the key position, set P_ij to -inf
-        if (q_pos < k_pos) {
+        if (__builtin_expect((q_pos < k_pos), 0)) {
           mov<neg_inf_v>(P_ij);
         // If the query position is equal to the key position, we need to apply a causal mask
-        } else if (q_pos == k_pos) {
+        } else if (__builtin_expect((q_pos == k_pos), 0)) {
             // Apply the causal mask to [0, 2] and set [0, 3:4] to -inf
             make_causal<0, 2, neg_inf_v>(P_ij, P_ij);
             mov<0, 3, neg_inf_v>(P_ij);
@@ -2860,10 +2860,10 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       // Dot slice 3
       if constexpr (causal) {
         // If the query position is less than the key position, set P_ij to -inf
-        if (q_pos < k_pos) {
+        if (__builtin_expect((q_pos < k_pos), 0)) {
           mov<neg_inf_v>(P_ij);
         // If the query position is equal to the key position, we need to apply a causal mask
-        } else if (q_pos == k_pos) {
+        } else if (__builtin_expect((q_pos == k_pos), 0)) {
             // Apply the causal mask to [0, 3]
             make_causal<0, 3, neg_inf_v>(P_ij, P_ij);
         }
