@@ -156,7 +156,14 @@ template<int D> struct attn_prep_globals {
     gl<bf16, -1, -1, -1, -1> dOg; 
     gl<float, -1, -1, -1, -1> delta;
     hipStream_t stream;
-    dim3 grid() { return dim3(ATTN_B, ATTN_H, ATTN_N / (DOT_SLICE_QO * NUM_WARPS)); }
+    // Use runtime tensor extents.  O is BSHD = (B, N, H, D) so
+    // .batch()=B, .depth()=N.  This matches the actual user input rather
+    // than the compile-time defaults (ATTN_B=16, ATTN_N=8192).
+    dim3 grid() {
+        const int b_runtime = Og.batch();
+        const int n_runtime = Og.depth();
+        return dim3(b_runtime, ATTN_H, n_runtime / (DOT_SLICE_QO * NUM_WARPS));
+    }
     dim3 block() { return dim3(NUM_THREADS); }
     size_t dynamic_shared_memory() { return MAX_SHARED_MEMORY; }
 };
@@ -196,7 +203,15 @@ void dispatch_prep(attn_prep_globals<D> g) {
 template<int D> struct attn_dq_shuffle_globals { 
     gl<bf16, -1, -1, -1, -1> dQg_in, dQg_out;
     hipStream_t stream;
-    dim3 grid() { return dim3(ATTN_B, ATTN_H, ATTN_N / (DOT_SLICE_QO * NUM_WARPS)); }
+    // Use runtime extents.  dQg_out is BSHD = (B, N, H, D) so
+    // .batch()=B, .depth()=N.  dQg_in is BHND = (B, H, N, D) but B is the
+    // same; we read from dQg_out for the BSHD orientation that matches
+    // ATTN_H along dim2.  Either source works since B/N must agree.
+    dim3 grid() {
+        const int b_runtime = dQg_out.batch();
+        const int n_runtime = dQg_out.depth();
+        return dim3(b_runtime, ATTN_H, n_runtime / (DOT_SLICE_QO * NUM_WARPS));
+    }
     dim3 block() { return dim3(NUM_THREADS); }
     size_t dynamic_shared_memory() { return MAX_SHARED_MEMORY; }
 };

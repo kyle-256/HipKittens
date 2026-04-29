@@ -40,7 +40,16 @@ template<int D> struct attn_bwd_combined_globals {
   gl<bf16, -1, -1, -1, -1> dOg, dQg, dKg, dVg;
   gl<float, -1, -1, -1, -1> L_vec, delta_vec;
   hipStream_t stream;
-  dim3 grid() { return dim3(ATTN_H_KV, (ATTN_N / BLOCK_SIZE_KV), ATTN_B); }
+  // Use runtime tensor extents (Q is BSHD = (B, N, H, D), so .batch()=B,
+  // .depth()=N).  This matches the actual user input rather than the
+  // compile-time defaults.  The metric harness uses (B=4 N=1024),
+  // (B=16 N=4096), (B=4 N=8192) against a single ATTN_N=8192/ATTN_B=16
+  // build, so a fixed compile-time grid would over-launch and OOB.
+  dim3 grid() {
+    const int n_runtime = Q.depth();
+    const int b_runtime = Q.batch();
+    return dim3(ATTN_H_KV, (n_runtime / BLOCK_SIZE_KV), b_runtime);
+  }
   dim3 block() { return dim3(NUM_THREADS); }
   size_t dynamic_shared_memory() { return MAX_SHARED_MEMORY; }
 };
@@ -66,8 +75,11 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
   const float dq_scale_active = (warpid < 2) ? ((D == 128) ? 0.08838834764f : 0.125f) : 0.0f;
   const int j = seq_idx * NUM_WARPS + warpid;
 
-  // optimization on loops bounds
-  const int total_steps_per_head = ATTN_N / STEP_QO;
+  // optimization on loops bounds.  Use the runtime sequence length
+  // (g.Q.depth()) so this kernel works correctly for any N up to the
+  // compile-time ATTN_N upper bound (the .so is built once with
+  // ATTN_N=8192 but the metric exercises it on N=1024/4096/8192).
+  const int total_steps_per_head = g.Q.depth() / STEP_QO;
   const int j_min = seq_idx * NUM_WARPS;
   const int k_start_min = j_min * WARP_SIZE_KV;
   // first Q step that can overlap this K_span:

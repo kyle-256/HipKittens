@@ -152,7 +152,18 @@ template<int D> struct attn_globals {
     _gl_QKVO Qg, Kg, Vg, Og; 
     gl<float, -1, -1, -1, -1> L_vec;
     hipStream_t stream;
-    dim3 grid() { return dim3(ATTN_H, ((ATTN_N / Q_BLOCK_SIZE + NUM_WARPS - 1) / NUM_WARPS), ATTN_B); }
+    // Use runtime tensor extents (Qg.depth() == N, Qg.batch() == B) so the grid
+    // matches the *actual* input shape rather than the compile-time defaults.
+    // This is required for the metric / auto_optimize harness which builds the
+    // .so with ATTN_N=8192 ATTN_B=16 but exercises (B=4 N=1024), (B=16 N=4096),
+    // (B=4 N=8192).  Q is BSHD = (B, N, H, D) so .batch()=B, .depth()=N.
+    dim3 grid() {
+        const int n_runtime = Qg.depth();
+        const int b_runtime = Qg.batch();
+        return dim3(ATTN_H,
+                    ((n_runtime / Q_BLOCK_SIZE + NUM_WARPS - 1) / NUM_WARPS),
+                    b_runtime);
+    }
     dim3 block() { return dim3(NUM_THREADS); }
     size_t dynamic_shared_memory() { return MAX_SHARED_MEMORY; }
 };
