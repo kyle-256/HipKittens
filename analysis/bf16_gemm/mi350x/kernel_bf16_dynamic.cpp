@@ -321,7 +321,7 @@ template<Layout L, int KI_HINT,
          typename A_reg_t, typename B_reg_t>
 __device__ __forceinline__ void device_gemm_tile_body(
     const _gl& a_gl, const _gl& b_gl,
-    int m_subtile_A, int group_idx,
+    int m_subtile_A, int group_idx, int k_offset_tiles,
     ST_A_T (&As)[2][2], ST_B_T (&Bs)[2][2],
     const uint32_t* swizzled_offsets_A,
     const uint32_t* swizzled_offsets_B,
@@ -342,18 +342,22 @@ __device__ __forceinline__ void device_gemm_tile_body(
 
     // Coord helpers — `m_subtile_A` shifts A's M-axis (= 0 for dense,
     // = m_start_g/HALF_BLOCK_SIZE for grouped); `group_idx` indexes B's
-    // depth axis (= 0 for dense, = persistent group index for grouped).
+    // depth axis (= 0 for dense, = persistent group index for grouped);
+    // `k_offset_tiles` shifts the K-axis in K_STEP units (= 0 for dense
+    // and forward grouped where K is fixed; = m_start_g/K_STEP for
+    // variable-K dB grouped where the K-reduction dimension is the
+    // per-group M_g segment of a [M_total, *] input).
     auto a_coord = [&](int spatial, int k) {
         if constexpr (L == Layout::CRR)
-            return coord<ST_A_T>{0, 0, k, m_subtile_A + spatial};
+            return coord<ST_A_T>{0, 0, k_offset_tiles + k, m_subtile_A + spatial};
         else
-            return coord<ST_A_T>{0, 0, m_subtile_A + spatial, k};
+            return coord<ST_A_T>{0, 0, m_subtile_A + spatial, k_offset_tiles + k};
     };
     auto b_coord = [&](int spatial, int k) {
         if constexpr (L == Layout::RCR)
-            return coord<ST_B_T>{0, group_idx, spatial, k};
+            return coord<ST_B_T>{0, group_idx, spatial, k_offset_tiles + k};
         else
-            return coord<ST_B_T>{0, group_idx, k, spatial};
+            return coord<ST_B_T>{0, group_idx, k_offset_tiles + k, spatial};
     };
 
     auto load_a_subtile = [&](A_reg_t& dst, auto& smem_tile, int warp_idx) {
@@ -748,7 +752,7 @@ void gemm_kernel(const layout_globals g) {
     // pre-refactor kernel.
     device_gemm_tile_body<L, KI_HINT, ST_A, ST_B, A_reg_t, B_reg_t>(
         g.a, g.b,
-        /*m_subtile_A=*/0, /*group_idx=*/0,
+        /*m_subtile_A=*/0, /*group_idx=*/0, /*k_offset_tiles=*/0,
         As, Bs,
         swizzled_offsets_A, swizzled_offsets_B,
         a_srsrc_base, b_srsrc_base,
@@ -1585,7 +1589,7 @@ void grouped_kernel(const grouped_layout_globals g) {
         // correct (group, M-slice) sub-tensor.
         device_gemm_tile_body<L, KI_HINT, ST_A, ST_B, A_reg_t, B_reg_t>(
             g.a, g.b,
-            m_subtile_A, group_idx,
+            m_subtile_A, group_idx, /*k_offset_tiles=*/0,
             As, Bs,
             swizzled_offsets_A, swizzled_offsets_B,
             a_srsrc_base, b_srsrc_base,
@@ -1758,6 +1762,287 @@ static void grouped_dispatch(pybind11::object a, pybind11::object b, pybind11::o
     else dispatch_grouped<Layout::CRR>(g);
 }
 
+// =============================================================================
+// Persistent CPU-sync-free grouped variable-K (CRR / dB) kernel.
+//
+// Math (per group ``g``):
+//
+//     C[g, n, k] = sum_{m in [offs[g], offs[g+1]) }
+//                      A[m, n] * B[m, k]
+//
+// where:
+//   * A is the upstream gradient ``grad_out`` (2D ``[M_total, n]``) and is
+//     reinterpreted as CRR-A ``[K=M_total, M=n]``.
+//   * B is the activation tensor ``x``      (2D ``[M_total, k]``) and is
+//     reinterpreted as CRR-B ``[K=M_total, N=k]``.
+//   * C is the weight gradient ``grad_b``   (3D ``[G, n, k]``) — group_idx
+//     is the depth axis, n is the kernel's M-output, k is the kernel's
+//     N-output.
+//
+// Replaces the 32× per-group ``dense_run`` loop in
+// ``GroupedGEMMVariableKHipKittenBackend.execute`` (Primus side); the
+// per-group launch was the dominant bottleneck for backward dB
+// (the breakdown probe — gpt_oss-Down B=4 M=2048 — showed dB took
+//  92% of the total backward time and only 56 TF, vs ~650 TF for dA).
+//
+// Layout differences from the forward grouped kernel:
+//   * n and k are *group-uniform* (output [G, n, k]); the variable axis
+//     is the K-reduction dim ``M_g = offs[g+1] - offs[g]``.
+//   * Per-group tile count is therefore *uniform*: ``bpr * bpc``. No
+//     LDS-cached per-group cumsum is needed — group_idx is simply
+//     ``gt / (bpr * bpc)`` and ``ki_g = M_g / K_STEP`` only matters
+//     for the dynamic K-loop bound.
+//   * The K-axis SHIFT per group is delivered through the new
+//     ``k_offset_tiles = m_start_g / K_STEP`` parameter on
+//     ``device_gemm_tile_body`` (forward grouped passes 0 there; the
+//     constant folds away in dense and forward grouped codegen).
+//
+// CRR-only for now — the dB autograd path always wants CRR-trans_c. The
+// kernel falls back to ``Layout::CRR`` ST/RT types directly to avoid the
+// dispatcher boilerplate the forward grouped kernel needs for L-templating.
+// =============================================================================
+struct grouped_var_k_layout_globals {
+    _gl a;                       // [1, 1, M_total, n] — grad_out
+    _gl b;                       // [1, 1, M_total, k] — x
+    _gl c;                       // [1, G, n, k]       — grad_b
+    const int64_t* group_offs;   // [G+1] int64 device prefix-sum of M_g
+    hipStream_t stream;
+    int G;
+    int M_total;
+    int n;          // kernel M-output dim (= N_fwd)
+    int k;          // kernel N-output dim (= K_fwd)
+    int group_m;
+    int num_xcds;
+    int bpr;        // n / BLOCK_SIZE — output row tiles
+    int bpc;        // k / BLOCK_SIZE — output col tiles
+    int ki_max;     // upper bound on per-group ki (for KI_HINT specialization)
+    // Aligned-region dims. v0 only: aligned-only. fast_{n,k} == n,k and
+    // m_aligned == M_total are required by ``can_handle`` on the Python
+    // side; the dispatcher otherwise falls back to the per-group loop.
+    int fast_n, fast_k;
+    dim3 block() { return dim3(NUM_THREADS); }
+    size_t dynamic_shared_memory() { return MAX_SHARED_MEMORY; }
+};
+
+template<int KI_HINT>
+__global__ __launch_bounds__(NUM_THREADS, 1)
+void grouped_var_k_kernel(const grouped_var_k_layout_globals g) {
+    extern __shared__ alignment_dummy __shm[];
+    shared_allocator al((int*)&__shm[0]);
+
+    // CRR-only ST/RT types (mirror the L=Layout::CRR branch of the
+    // dense / forward-grouped kernel).
+    using ST_A = st_bf<K_STEP, HALF_BLOCK_SIZE, st_32x16_s>;
+    using ST_B = st_bf<K_STEP, HALF_BLOCK_SIZE, st_32x16_s>;
+    ST_A (&As)[2][2] = al.allocate<ST_A, 2, 2>();
+    ST_B (&Bs)[2][2] = al.allocate<ST_B, 2, 2>();
+    using A_reg_t = rt_bf<K_STEP, HALF_REG_BLOCK_M, col_l, rt_32x16_s>;
+    using B_reg_t = rt_bf<K_STEP, HALF_REG_BLOCK_N, col_l, rt_32x16_s>;
+    rt_fl<HALF_REG_BLOCK_M, HALF_REG_BLOCK_N, col_l, rt_16x16_s> C_accum[2][2];
+
+    // [grouped-var-k] LDS-cached group_offs. Read O(N_iter * G) times by
+    // the per-tile coord scan; caching to LDS once at kernel entry
+    // mirrors the forward grouped kernel.
+    constexpr int MAX_G_PLUS_1 = 65;
+    __shared__ int s_offs[MAX_G_PLUS_1];
+    if (threadIdx.x == 0) {
+        #pragma unroll 1
+        for (int gi = 0; gi <= g.G; ++gi) {
+            s_offs[gi] = static_cast<int>(g.group_offs[gi]);
+        }
+    }
+    __syncthreads();
+
+    // Persistent: chiplet-swizzle pid against full grid (NUM_CUS).
+    int pid = chiplet_transform_chunked(blockIdx.x, NUM_CUS, g.num_xcds, 64);
+
+    // Per-group tile count uniform: bpr * bpc.
+    const int tiles_per_group = g.bpr * g.bpc;
+    const int total_tiles = g.G * tiles_per_group;
+    const int num_pid_m = g.bpr;
+    const int num_pid_n = g.bpc;
+
+    // Full-tensor SRDs (A and B span [M_total, *]; the K-axis shift per
+    // group is delivered to ``device_gemm_tile_body`` via k_offset_tiles).
+    const bf16* a_base = (bf16*)&g.a[{0, 0, 0, 0}];
+    const bf16* b_base = (bf16*)&g.b[{0, 0, 0, 0}];
+    const int a_row_stride = g.a.template stride<2>() * sizeof(bf16);  // = n * sizeof(bf16)
+    const int b_row_stride = g.b.template stride<2>() * sizeof(bf16);  // = k * sizeof(bf16)
+    const int a_total_rows = g.M_total;
+    const int b_total_rows = g.M_total;
+    i32x4 a_srsrc_base = make_srsrc(a_base, a_total_rows * a_row_stride, a_row_stride);
+    i32x4 b_srsrc_base = make_srsrc(b_base, b_total_rows * b_row_stride, b_row_stride);
+
+    // LDS double-buffered per-warp slots (mirror grouped_kernel).
+    const int wid = warpid() % NUM_WARPS;
+    constexpr int elem_per_warp = (16 / sizeof(bf16)) * kittens::WARP_THREADS;
+    constexpr uint32_t A_TILE_LDS = sizeof(ST_A);
+    constexpr uint32_t B_TILE_LDS = sizeof(ST_B);
+    uint32_t a_lds = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(
+        reinterpret_cast<uintptr_t>(&As[0][0].data[0]) + wid * elem_per_warp * sizeof(bf16)));
+    uint32_t b_lds = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(
+        reinterpret_cast<uintptr_t>(&Bs[0][0].data[0]) + wid * elem_per_warp * sizeof(bf16)));
+    const uint32_t a_lds_00 = a_lds;
+    const uint32_t a_lds_01 = a_lds + A_TILE_LDS;
+    const uint32_t a_lds_10 = a_lds + 2 * A_TILE_LDS;
+    const uint32_t a_lds_11 = a_lds + 3 * A_TILE_LDS;
+    const uint32_t b_lds_00 = b_lds;
+    const uint32_t b_lds_01 = b_lds + B_TILE_LDS;
+    const uint32_t b_lds_10 = b_lds + 2 * B_TILE_LDS;
+    const uint32_t b_lds_11 = b_lds + 3 * B_TILE_LDS;
+
+    using T = typename st_bf<BLOCK_SIZE, K_STEP, st_32x16_s>::dtype;
+    constexpr int bytes_per_thread = st_32x16_s::template bytes_per_thread<T>();
+    constexpr int bytes_per_memcpy = bytes_per_thread * NUM_THREADS;
+    constexpr int memcpy_per_tile = BLOCK_SIZE * K_STEP * sizeof(T) / bytes_per_memcpy;
+    uint32_t swizzled_offsets_A[memcpy_per_tile/2];
+    uint32_t swizzled_offsets_B[memcpy_per_tile/2];
+    G::prefill_swizzled_offsets(As[0][0], g.a, swizzled_offsets_A);
+    G::prefill_swizzled_offsets(Bs[0][0], g.b, swizzled_offsets_B);
+
+    const int warp_id = kittens::warpid();
+    const int warp_row = warp_id / 4;
+    const int warp_col = warp_id % 4;
+
+    // [grouped-var-k] Persistent outer loop: stream (group, tile) pairs through this CU.
+    for (int gt = pid; gt < total_tiles; gt += NUM_CUS) {
+        const int group_idx = gt / tiles_per_group;
+        const int local_tile = gt - group_idx * tiles_per_group;
+
+        const int m_start_g = s_offs[group_idx];
+        const int M_g = s_offs[group_idx + 1] - m_start_g;
+        const int ki_g = M_g / K_STEP;
+        // Need at least 2 K-tiles for the prologue + epilog schedule; same
+        // constraint as dense / forward grouped (caller enforces M_g >= 128).
+        if (ki_g < 2) continue;
+
+        // Within-group tile mapping (mirror dense gemm_compute_block_coords).
+        // Both axes (m=output rows, n=output cols) are uniform; same dual
+        // tall-N / tall-M swizzle as dense.
+        int pid_m, pid_n;
+        if (num_pid_n > num_pid_m) {
+            const int WGN = g.group_m;
+            const int num_wgid_in_group = num_pid_m * WGN;
+            int group_id = local_tile / num_wgid_in_group;
+            int first_pid_n = group_id * WGN;
+            int group_size_n = min(num_pid_n - first_pid_n, WGN);
+            if (group_size_n <= 0) continue;
+            pid_n = first_pid_n + ((local_tile % num_wgid_in_group) % group_size_n);
+            pid_m = (local_tile % num_wgid_in_group) / group_size_n;
+        } else {
+            const int WGM = g.group_m;
+            const int num_wgid_in_group = WGM * num_pid_n;
+            int group_id = local_tile / num_wgid_in_group;
+            int first_pid_m = group_id * WGM;
+            int group_size_m = min(num_pid_m - first_pid_m, WGM);
+            if (group_size_m <= 0) continue;
+            pid_m = first_pid_m + ((local_tile % num_wgid_in_group) % group_size_m);
+            pid_n = (local_tile % num_wgid_in_group) / group_size_m;
+        }
+        if (pid_m >= num_pid_m || pid_n >= num_pid_n) continue;
+        const int row = pid_m;
+        const int col = pid_n;
+
+        // K-axis offset in K_STEP units. m_start_g is BLK-aligned (256),
+        // K_STEP=64 divides BLK so this is exact.
+        const int k_offset_tiles = m_start_g / K_STEP;
+
+        // Reset accumulators.
+        zero(C_accum[0][0]); zero(C_accum[0][1]);
+        zero(C_accum[1][0]); zero(C_accum[1][1]);
+
+        // Reuse the shared GEMM body with CRR layout. m_subtile_A=0
+        // (kernel n is group-uniform; row is the M-output tile) and
+        // group_idx=0 (B is 2D, no depth axis). The variable-K piece is
+        // delivered through k_offset_tiles which adds m_start_g/K_STEP
+        // to every a_coord/b_coord K-axis lookup.
+        device_gemm_tile_body<Layout::CRR, KI_HINT, ST_A, ST_B, A_reg_t, B_reg_t>(
+            g.a, g.b,
+            /*m_subtile_A=*/0, /*group_idx=*/0, k_offset_tiles,
+            As, Bs,
+            swizzled_offsets_A, swizzled_offsets_B,
+            a_srsrc_base, b_srsrc_base,
+            a_base, b_base,
+            a_lds_00, a_lds_01, a_lds_10, a_lds_11,
+            b_lds_00, b_lds_01, b_lds_10, b_lds_11,
+            row, col, warp_row, warp_col,
+            ki_g,
+            C_accum);
+
+        if (warp_row == 0) { __builtin_amdgcn_s_barrier(); }
+
+        // Store C[group_idx, m=row*BLK..., n=col*BLK...]. Output is
+        // 3D-grouped; depth axis is group_idx.
+        store(g.c, C_accum[0][0], {0, group_idx,
+            (row * 2) * WARPS_M + warp_row,
+            col * 2 * WARPS_N + warp_col});
+        store(g.c, C_accum[0][1], {0, group_idx,
+            (row * 2) * WARPS_M + warp_row,
+            col * 2 * WARPS_N + WARPS_N + warp_col});
+        store(g.c, C_accum[1][0], {0, group_idx,
+            (row * 2) * WARPS_M + WARPS_M + warp_row,
+            col * 2 * WARPS_N + warp_col});
+        store(g.c, C_accum[1][1], {0, group_idx,
+            (row * 2) * WARPS_M + WARPS_M + warp_row,
+            col * 2 * WARPS_N + WARPS_N + warp_col});
+
+        asm volatile("s_waitcnt vmcnt(0) lgkmcnt(0)");
+        __builtin_amdgcn_s_barrier();
+    }
+}
+
+// KI=0 dynamic only for v0; round-2 can add specializations once the
+// numerics are validated and bench data identifies hot ki values.
+template __global__ void grouped_var_k_kernel<0>(const grouped_var_k_layout_globals);
+
+static inline void launch_grouped_var_k(grouped_var_k_layout_globals& g) {
+    unsigned long mem_size = g.dynamic_shared_memory();
+    static bool attr_set = false;
+    if (!attr_set) {
+        hipFuncSetAttribute((void*)grouped_var_k_kernel<0>,
+                            hipFuncAttributeMaxDynamicSharedMemorySize, mem_size);
+        attr_set = true;
+    }
+    grouped_var_k_kernel<0><<<dim3(NUM_CUS), g.block(), mem_size, g.stream>>>(g);
+}
+
+void dispatch_grouped_var_k(grouped_var_k_layout_globals g) {
+    g.n = static_cast<int>(g.a.cols());     // kernel M-output dim
+    g.k = static_cast<int>(g.b.cols());     // kernel N-output dim
+    g.M_total = static_cast<int>(g.a.rows());
+
+    // v0 alignment requirements (caller checked, but enforce here for
+    // safety): n % BLOCK_SIZE == 0 and k % BLOCK_SIZE == 0. Returning
+    // early on misaligned shapes leaves C unchanged — caller must check
+    // and fall back to the per-group dense_run loop.
+    g.fast_n = (g.n / BLOCK_SIZE) * BLOCK_SIZE;
+    g.fast_k = (g.k / BLOCK_SIZE) * BLOCK_SIZE;
+    g.bpr = g.fast_n / BLOCK_SIZE;
+    g.bpc = g.fast_k / BLOCK_SIZE;
+
+    if (g.bpr <= 0 || g.bpc <= 0 || g.G <= 0) return;
+    if (g.fast_n != g.n || g.fast_k != g.k) return;  // misaligned: caller falls back
+
+    launch_grouped_var_k(g);
+}
+
+static void grouped_var_k_crr_fn(pybind11::object a, pybind11::object b, pybind11::object c,
+                                 pybind11::object group_offs, int gm, int num_xcds) {
+    auto group_offs_ptr = group_offs.attr("data_ptr")().cast<uintptr_t>();
+    int G = group_offs.attr("numel")().cast<int>() - 1;
+
+    grouped_var_k_layout_globals g{
+        py::from_object<_gl>::make(a),
+        py::from_object<_gl>::make(b),
+        py::from_object<_gl>::make(c),
+        reinterpret_cast<const int64_t*>(group_offs_ptr),
+        {},
+        G, 0, 0, 0, gm, num_xcds, 0, 0, 0,
+        0, 0,  // fast_n, fast_k populated in dispatch.
+    };
+    dispatch_grouped_var_k(g);
+}
+
 // Round-9 binding signature: extra ``m_per_group`` int defaults to 0
 // (non-uniform). When > 0 and a TAIL_BLOCK_M multiple, the dispatcher
 // activates the LDS-staged interior K-tail correction kernel. Existing
@@ -1793,6 +2078,15 @@ PYBIND11_MODULE(tk_bf16_layouts, m) {
           "group_offs"_a, "group_m"_a=4, "num_xcds"_a=8, "m_per_group"_a=0);
     m.def("grouped_crr", &grouped_crr_fn, "a"_a, "b"_a, "c"_a,
           "group_offs"_a, "group_m"_a=4, "num_xcds"_a=8, "m_per_group"_a=0);
+    // [grouped-var-k] Persistent CPU-sync-free grouped variable-K (CRR / dB)
+    // launcher. Different from grouped_crr (forward CRR with variable
+    // M_total): here the variable axis is the K-reduction (= M_g per
+    // group), and outputs are 3D ``[G, n, k]`` instead of 2D
+    // ``[M_total, n]``. Used by the BF16 dB autograd path. v0 requires
+    // n % BLOCK_SIZE == 0 and k % BLOCK_SIZE == 0; misaligned shapes
+    // must use the per-group ``gemm_crr`` fallback.
+    m.def("grouped_variable_k_crr", &grouped_var_k_crr_fn, "a"_a, "b"_a, "c"_a,
+          "group_offs"_a, "group_m"_a=4, "num_xcds"_a=8);
     m.attr("BLOCK_SIZE") = BLOCK_SIZE;
     m.attr("K_STEP") = K_STEP;
 }
