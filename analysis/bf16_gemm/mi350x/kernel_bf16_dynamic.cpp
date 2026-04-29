@@ -286,6 +286,90 @@ __device__ __forceinline__ void store_c_tile_n_masked(
 }
 
 // =============================================================================
+// store_c_tile_mn_masked_grouped — two-axis-masked C store for the
+// persistent variable-K (CRR / dB) grouped kernel.
+//
+// Output layout is 3D-grouped ``[G, m_kernel, n_kernel]``; per-group
+// ``m_kernel`` (= N_fwd) and ``n_kernel`` (= K_fwd) can both be partially
+// misaligned (gpt_oss-Down has both = 2880, neither a 256-multiple).
+// Caller sets ``bpr = ceil_div(m_kernel, BLOCK_SIZE)`` and ``bpc =
+// ceil_div(n_kernel, BLOCK_SIZE)``; the last tile in either axis may
+// straddle the real boundary.
+//
+// 4-way fast path:
+//   * fully OOB (m0 >= m_limit OR n0 >= n_limit): no-op.
+//   * fully in-bounds (m1 <= m_limit AND n1 <= n_limit): forward to
+//     the original ``store(...)``. Aligned shapes pay zero overhead.
+//   * partial in N only: ~mirror ``store_c_tile_n_masked`` but with
+//     the depth axis (group_idx) propagated.
+//   * partial in M (with or without N partial): per-row + per-col mask.
+//
+// MMA reads OOB cols/rows from A and B (full-tensor SRD bound covers
+// the contiguous tensors so no fault), produces garbage for OOB
+// (m, n) cells, then we drop those cells here. In-bounds cells still
+// reduce over the correct K range, so their values are exact.
+// =============================================================================
+template<ducks::gl::all GL>
+__device__ __forceinline__ void store_c_tile_mn_masked_grouped(
+    const GL& g_c, const C_rt_accum_t& src,
+    int group_idx, int r_tile, int c_tile,
+    int m_limit, int n_limit) {
+    using T = base_types::packing<typename C_rt_accum_t::dtype>::unpacked_type;
+    using U = typename GL::dtype;
+    constexpr int packing = base_types::packing<typename C_rt_accum_t::dtype>::num();
+    static_assert(std::is_same_v<U, bf16>, "C is bf16 global");
+
+    const int m0 = r_tile * C_rt_accum_t::rows;
+    const int m1 = m0 + C_rt_accum_t::rows;
+    const int n0 = c_tile * C_rt_accum_t::cols;
+    const int n1 = n0 + C_rt_accum_t::cols;
+
+    if (m0 >= m_limit || n0 >= n_limit) return;
+    if (m1 <= m_limit && n1 <= n_limit) {
+        store(g_c, src, {0, group_idx, r_tile, c_tile});
+        return;
+    }
+
+    constexpr int axis = 2;
+    U* dst_ptr = (U*)&g_c[(coord<C_rt_accum_t>{0, group_idx, r_tile, c_tile}
+                            .template unit_coord<axis, 3>())];
+    const int row_stride = g_c.template stride<axis>();
+    const int laneid = kittens::laneid();
+    const int row_offset = src.base_tile_stride * (laneid / src.base_tile_cols);
+    const int col_offset = laneid % src.base_tile_cols;
+
+    #pragma unroll
+    for (int i = 0; i < src.height; i++) {
+        #pragma unroll
+        for (int j = 0; j < src.width; j++) {
+            const int col = j * src.base_tile_cols + col_offset;
+            if (n0 + col >= n_limit) continue;
+            #pragma unroll
+            for (int k = 0; k < src.base_tile_num_strides; k++) {
+                int row = i * src.base_tile_rows + row_offset +
+                          k * src.base_tile_elements_per_stride_group;
+                #pragma unroll
+                for (int l = 0; l < src.base_tile_stride / packing; l++) {
+                    int idx = l + k * src.base_tile_stride / packing;
+                    int row_a = row + l * 2;
+                    int row_b = row + l * 2 + 1;
+                    if (m0 + row_a < m_limit) {
+                        dst_ptr[row_a * row_stride + col] =
+                            base_types::convertor<U, T>::convert(
+                                src.tiles[i][j].data[idx].x);
+                    }
+                    if (m0 + row_b < m_limit) {
+                        dst_ptr[row_b * row_stride + col] =
+                            base_types::convertor<U, T>::convert(
+                                src.tiles[i][j].data[idx].y);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// =============================================================================
 // device_gemm_tile_body — shared GEMM main-loop body (Phase 2 refactor).
 //
 // The dense `gemm_kernel<L, KI_HINT>` and the persistent grouped
@@ -1972,19 +2056,30 @@ void grouped_var_k_kernel(const grouped_var_k_layout_globals g) {
         if (warp_row == 0) { __builtin_amdgcn_s_barrier(); }
 
         // Store C[group_idx, m=row*BLK..., n=col*BLK...]. Output is
-        // 3D-grouped; depth axis is group_idx.
-        store(g.c, C_accum[0][0], {0, group_idx,
+        // 3D-grouped; depth axis is group_idx. Two-axis-masked store
+        // drops OOB cells when ``row`` or ``col`` is the partial last
+        // tile in m_kernel (= g.n) or n_kernel (= g.k); aligned tiles
+        // hit the fast forward to ``store(...)`` with no overhead.
+        store_c_tile_mn_masked_grouped(g.c, C_accum[0][0],
+            group_idx,
             (row * 2) * WARPS_M + warp_row,
-            col * 2 * WARPS_N + warp_col});
-        store(g.c, C_accum[0][1], {0, group_idx,
+            col * 2 * WARPS_N + warp_col,
+            g.n, g.k);
+        store_c_tile_mn_masked_grouped(g.c, C_accum[0][1],
+            group_idx,
             (row * 2) * WARPS_M + warp_row,
-            col * 2 * WARPS_N + WARPS_N + warp_col});
-        store(g.c, C_accum[1][0], {0, group_idx,
+            col * 2 * WARPS_N + WARPS_N + warp_col,
+            g.n, g.k);
+        store_c_tile_mn_masked_grouped(g.c, C_accum[1][0],
+            group_idx,
             (row * 2) * WARPS_M + WARPS_M + warp_row,
-            col * 2 * WARPS_N + warp_col});
-        store(g.c, C_accum[1][1], {0, group_idx,
+            col * 2 * WARPS_N + warp_col,
+            g.n, g.k);
+        store_c_tile_mn_masked_grouped(g.c, C_accum[1][1],
+            group_idx,
             (row * 2) * WARPS_M + WARPS_M + warp_row,
-            col * 2 * WARPS_N + WARPS_N + warp_col});
+            col * 2 * WARPS_N + WARPS_N + warp_col,
+            g.n, g.k);
 
         asm volatile("s_waitcnt vmcnt(0) lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
@@ -2011,17 +2106,27 @@ void dispatch_grouped_var_k(grouped_var_k_layout_globals g) {
     g.k = static_cast<int>(g.b.cols());     // kernel N-output dim
     g.M_total = static_cast<int>(g.a.rows());
 
-    // v0 alignment requirements (caller checked, but enforce here for
-    // safety): n % BLOCK_SIZE == 0 and k % BLOCK_SIZE == 0. Returning
-    // early on misaligned shapes leaves C unchanged — caller must check
-    // and fall back to the per-group dense_run loop.
-    g.fast_n = (g.n / BLOCK_SIZE) * BLOCK_SIZE;
-    g.fast_k = (g.k / BLOCK_SIZE) * BLOCK_SIZE;
-    g.bpr = g.fast_n / BLOCK_SIZE;
-    g.bpc = g.fast_k / BLOCK_SIZE;
+    // Round-2 native non-aligned: bpr / bpc are ceil_div'ed so the
+    // last tile in each output axis can be partial; the kernel's
+    // ``store_c_tile_mn_masked_grouped`` drops OOB (m, n) cells. The
+    // partial tiles still issue OOB A/B input loads, which are safe
+    // because (a) A and B are 2D contiguous with full-tensor SRDs —
+    // no SRD wrap into a different group's data (the issue that
+    // blocks the forward grouped kernel from doing this), and
+    // (b) MMA output cells whose (m, n) are OOB are dropped before
+    // any store.
+    //
+    // Still need M_g >= 2*K_STEP (= 128) per group to satisfy the
+    // prologue + epilog 1 + epilog 2 schedule of
+    // ``device_gemm_tile_body`` — caller (Primus uniform_M >= 128
+    // gate) enforces this; the persistent loop's ``ki_g < 2`` skip
+    // is a defensive fallback.
+    g.fast_n = g.n;
+    g.fast_k = g.k;
+    g.bpr = kittens::ceil_div(g.n, BLOCK_SIZE);
+    g.bpc = kittens::ceil_div(g.k, BLOCK_SIZE);
 
     if (g.bpr <= 0 || g.bpc <= 0 || g.G <= 0) return;
-    if (g.fast_n != g.n || g.fast_k != g.k) return;  // misaligned: caller falls back
 
     launch_grouped_var_k(g);
 }
