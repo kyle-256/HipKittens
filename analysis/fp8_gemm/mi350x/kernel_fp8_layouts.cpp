@@ -2418,11 +2418,34 @@ void grouped_var_k_kernel_fp8(const grouped_var_k_layout_globals_fp8 g) {
         auto load_b = [&](B_col_reg& dst, ST_crr_b& tile, int wi) {
             load_col_from_st(dst, tile, wi * RBN);
         };
+        // Use full-tensor SRD load (``rcr_8w_load_hoist``) instead of the
+        // tile-local SRD path in ``G::load`` (= ``kittens::load`` line 187
+        // in include/ops/warp/memory/tile/global_to_shared.cuh). The
+        // tile-local SRD has range = ``row_stride * ST::rows * sizeof(T)``
+        // bytes from ``global_ptr`` — fine for in-bounds tiles, but for
+        // the partial last M-tile (s = 2*(bpr-1)+1 = 45 on n=5760, where
+        // unit_coord col = 5760 = past last col), the last row of the
+        // tile (lds row 127) crosses tensor end on the last K-iter.
+        // Concretely on gpt_oss-GateUP B4 M2048 (M_total=8192, n=5760,
+        // tile bytes = 128 cols × 1 byte): SRD bound = global_ptr +
+        // 128 * 5760 = global_ptr + 737280, but tensor_end - global_ptr
+        // = 47185920 - 46454400 = 731520 < 737280 — buffer_load on the
+        // last 128-row tile reads past tensor end → memory fault.
+        //
+        // ``rcr_8w_load_hoist`` (line 396) constructs the SRD as
+        // ``make_srsrc(tensor_base, total_bytes)`` — bound = the FULL
+        // tensor size, OOB byte reads clamp to 0 by hardware. The
+        // ``offen lds`` buffer_load + SOFFSET (= per-tile byte offset
+        // from tensor_base) makes the bound check work correctly. Same
+        // signature as ``G::load(dst, src, idx, swizzled_offsets)``.
+        // Despite the name, this helper is layout-agnostic — used here
+        // for CRR variable-K. Verified safe on round-3 ceil_div +
+        // masked-store design via the Round-4 SNR probe.
         auto global_load_a = [&](ST_crr_a& tile, int s, int k) {
-            G::load(tile, g.a, a_co(s, k), soA);
+            rcr_8w_load_hoist<_NUM_THREADS>(tile, g.a, a_co(s, k), soA);
         };
         auto global_load_b = [&](ST_crr_b& tile, int s, int k) {
-            G::load(tile, g.b, b_co(s, k), soB);
+            rcr_8w_load_hoist<_NUM_THREADS>(tile, g.b, b_co(s, k), soB);
         };
 
         zero(cA); zero(cB); zero(cC); zero(cD);
