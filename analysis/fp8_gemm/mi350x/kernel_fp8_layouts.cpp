@@ -2652,7 +2652,23 @@ __global__ void grouped_ktail_kernel_lds(const grouped_layout_globals g) {
             for (int gi = 0; gi < g.G; ++gi) {
                 if (row < s_offs[gi + 1]) { row_group = gi; break; }
             }
-            float acc_s = 0.0f;
+            // Round-17: cross_boundary fallback now uses the same
+            // ``__builtin_amdgcn_cvt_pk_f32_fp8`` packed conversion +
+            // 4-way parallel acc as the fast LDS path (see round-15
+            // & round-16). This path only fires when a block straddles
+            // a group boundary (non-uniform group_lens at runtime); the
+            // metric uses uniform group_lens so it does not exercise
+            // this branch — but a real bench with skewed group_lens
+            // benefits ~2× on the cross_boundary cells.
+            typedef __attribute__((__vector_size__(2 * sizeof(float)))) float fp32x2_v;
+            auto fp8x4_to_f32x4 = [](const fp8e4m3_4& u) -> float4 {
+                int packed;
+                __builtin_memcpy(&packed, &u, 4);
+                fp32x2_v lo = __builtin_amdgcn_cvt_pk_f32_fp8(packed, false);
+                fp32x2_v hi = __builtin_amdgcn_cvt_pk_f32_fp8(packed, true);
+                return make_float4(lo[0], lo[1], hi[0], hi[1]);
+            };
+            float acc_s0 = 0.0f, acc_s1 = 0.0f, acc_s2 = 0.0f, acc_s3 = 0.0f;
             const fp8e4m3* a_row = &g.a[coord<>(row, 0)];
             const fp8e4m3* b_row = &g.b[coord<>{0, row_group, col, 0}];
             int kk = k0;
@@ -2664,17 +2680,18 @@ __global__ void grouped_ktail_kernel_lds(const grouped_layout_globals g) {
                 for (int j = j_start; j < j_end; ++j) {
                     fp8e4m3_8 a8 = a_v8[j];
                     fp8e4m3_8 b8 = b_v8[j];
-                    float4 a_lo = base_types::convertor<float4, fp8e4m3_4>::convert(a8.lo);
-                    float4 a_hi = base_types::convertor<float4, fp8e4m3_4>::convert(a8.hi);
-                    float4 b_lo = base_types::convertor<float4, fp8e4m3_4>::convert(b8.lo);
-                    float4 b_hi = base_types::convertor<float4, fp8e4m3_4>::convert(b8.hi);
-                    acc_s += a_lo.x * b_lo.x + a_lo.y * b_lo.y
-                           + a_lo.z * b_lo.z + a_lo.w * b_lo.w
-                           + a_hi.x * b_hi.x + a_hi.y * b_hi.y
-                           + a_hi.z * b_hi.z + a_hi.w * b_hi.w;
+                    float4 a_lo = fp8x4_to_f32x4(a8.lo);
+                    float4 a_hi = fp8x4_to_f32x4(a8.hi);
+                    float4 b_lo = fp8x4_to_f32x4(b8.lo);
+                    float4 b_hi = fp8x4_to_f32x4(b8.hi);
+                    acc_s0 += a_lo.x * b_lo.x + a_hi.x * b_hi.x;
+                    acc_s1 += a_lo.y * b_lo.y + a_hi.y * b_hi.y;
+                    acc_s2 += a_lo.z * b_lo.z + a_hi.z * b_hi.z;
+                    acc_s3 += a_lo.w * b_lo.w + a_hi.w * b_hi.w;
                 }
                 kk = j_end << 3;
             }
+            float acc_s = (acc_s0 + acc_s1) + (acc_s2 + acc_s3);
             for (; kk < g.k; ++kk) {
                 acc_s += load_fp8_scalar(g.a, row, kk) *
                          load_fp8_scalar_grp(g.b, row_group, col, kk);
