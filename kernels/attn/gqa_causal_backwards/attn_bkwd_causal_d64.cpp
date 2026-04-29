@@ -2907,7 +2907,9 @@ void dispatch_bwd_combined(attn_bwd_combined_globals<D> g) {
     unsigned long mem_size = g.dynamic_shared_memory();
     hipFuncSetAttribute((void*)attend_bwd_combined_ker<D>, hipFuncAttributeMaxDynamicSharedMemorySize, mem_size);
     attend_bwd_combined_ker<D><<<g.grid(), g.block(), mem_size, g.stream>>>(g);
-    hipDeviceSynchronize();
+    // No internal hipDeviceSynchronize -- see comment in dispatch_fwd.  The
+    // following dispatch_dq_shuffle and the harness's torch.cuda.synchronize
+    // both ensure correctness without adding per-call launch latency here.
 }
 
 PYBIND11_MODULE(tk_kernel_bkwd_d64, m) {

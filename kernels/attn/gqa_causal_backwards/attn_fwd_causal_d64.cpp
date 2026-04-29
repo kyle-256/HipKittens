@@ -637,7 +637,12 @@ void dispatch_fwd(attn_globals<D> g) {
     unsigned long mem_size = g.dynamic_shared_memory();
     hipFuncSetAttribute((void*)attend_ker<D>, hipFuncAttributeMaxDynamicSharedMemorySize, mem_size);
     attend_ker<D><<<g.grid(), g.block(), mem_size, g.stream>>>(g);
-    hipDeviceSynchronize();
+    // No internal hipDeviceSynchronize:  the PyTorch default-stream model
+    // already serialises the next call (prep / bwd) behind this one, and the
+    // benchmark harness does its own torch.cuda.synchronize() at trial
+    // boundaries.  An explicit device-wide sync per dispatch was costing
+    // ~5-10us of CPU launch latency per call, which dominates the small-N
+    // (N=1024) wall-clock and contributes a few % at the larger shapes.
 }
 
 PYBIND11_MODULE(tk_kernel_fwd_d64, m) {

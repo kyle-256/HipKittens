@@ -197,7 +197,9 @@ void dispatch_prep(attn_prep_globals<D> g) {
     unsigned long mem_size = g.dynamic_shared_memory();
     hipFuncSetAttribute((void*)attend_prep_ker<D>, hipFuncAttributeMaxDynamicSharedMemorySize, mem_size);
     attend_prep_ker<D><<<g.grid(), g.block(), mem_size, g.stream>>>(g);
-    hipDeviceSynchronize();
+    // No internal hipDeviceSynchronize -- see comment in dispatch_fwd.  The
+    // bwd combined kernel that follows will serialise on the same default
+    // stream and the harness syncs at trial boundaries.
 }
 
 template<int D> struct attn_dq_shuffle_globals { 
