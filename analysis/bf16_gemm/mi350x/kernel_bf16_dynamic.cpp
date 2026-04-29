@@ -197,6 +197,13 @@ __device__ __forceinline__ void store_bf16_scalar(const _gl& dst, int row, int c
     dst[coord<>(row, col)] = base_types::convertor<bf16, float>::convert(value);
 }
 
+// Scalar bf16 load for a 3D-grouped tensor (B in grouped GEMM is laid out
+// as `[1, G, *, *]`, where the 2nd axis indexes the group). Used by
+// `grouped_tail_kernel` to read B at `(group_idx, row, col)`.
+__device__ __forceinline__ float load_bf16_scalar_grp(const _gl& src, int g_idx, int row, int col) {
+    return base_types::convertor<float, bf16>::convert(src[coord<>{0, g_idx, row, col}]);
+}
+
 // =============================================================================
 // device_gemm_tile_body — shared GEMM main-loop body (Phase 2 refactor).
 //
@@ -898,14 +905,101 @@ struct grouped_layout_globals {
     int G;                       // number of groups
     int n;                       // N
     int k;                       // K
-    int ki;                      // K / K_STEP
-    int bpc;                     // n / BLOCK_SIZE  (constant across groups)
+    int ki;                      // fast_k / K_STEP
+    int bpc;                     // fast_n / BLOCK_SIZE
     int group_m;                 // tile-scheduling super-block factor
     int num_xcds;                // XCD swizzle factor
     int M_total;                 // sum of group sizes (= a.shape[0])
+    // Aligned-region dimensions consumed by the main grouped kernel
+    // (mirror dense kernel layout_globals).
+    //   fast_n = (n / BLOCK_SIZE) * BLOCK_SIZE
+    //   fast_k = (k / K_TWO_TILE) * K_TWO_TILE
+    // Per-group M tail (M_g % BLOCK_SIZE != 0) is detected on-device by
+    // `grouped_tail_kernel` reading `group_offs`. Cells outside
+    // [0, fast_m_g) × [0, fast_n) (per group) plus the K-tail in
+    // [fast_k, k) are handled by the tail kernel (scalar fp32).
+    int fast_n, fast_k;
     dim3 block() { return dim3(NUM_THREADS); }
     size_t dynamic_shared_memory() { return MAX_SHARED_MEMORY; }
 };
+
+// Scalar fp32 tail kernel for grouped GEMM — one (row, col) per thread.
+//
+// Mirror of dense `gemm_tail_kernel<L>` but with B 3D-grouped (per-thread
+// O(G) LDS scan to recover `group_idx` for B indexing).
+//
+// Caller contract (Phase 3): each group's M_g is a BLOCK_SIZE multiple,
+// so the main kernel covers full rows of every group. This tail kernel
+// only handles N-tail (col >= fast_n) and the K-tail correction
+// (fast_k < k for interior cells). Per-group M-tail is a Phase ≥ 4
+// concern that requires reworking the main kernel's tile addressing
+// (m_subtile_A is in HALF_BLOCK_SIZE=128 units, so non-128-aligned
+// m_start_g of a subsequent group truncates and silently corrupts that
+// group's tiles — the fix is non-trivial and beyond Phase 3 scope).
+//
+// Three cases per cell:
+//   * col < fast_n  AND fast_k == k  → main covers fully → early-return.
+//   * col < fast_n  AND fast_k <  k  → main wrote partial; add K-tail.
+//   * col >= fast_n                  → main did not run; full-K reduction.
+template<Layout L>
+__global__ void grouped_tail_kernel(const grouped_layout_globals g) {
+    constexpr int MAX_G_PLUS_1 = 65;
+    __shared__ int s_offs[MAX_G_PLUS_1];
+
+    if (threadIdx.x == 0 && threadIdx.y == 0) {
+        #pragma unroll 1
+        for (int gi = 0; gi <= g.G; ++gi) {
+            s_offs[gi] = static_cast<int>(g.group_offs[gi]);
+        }
+    }
+    __syncthreads();
+
+    // Cheap quick-exit when fully N/K-aligned (most common path).
+    const bool needs_k_tail = g.fast_k < g.k;
+    const bool needs_n_tail = g.fast_n < g.n;
+    if (!needs_k_tail && !needs_n_tail) return;
+
+    const int row = blockIdx.y * blockDim.y + threadIdx.y;
+    const int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= g.M_total || col >= g.n) return;
+
+    // Locate the group that contains `row` (needed to index B).
+    int group_idx = 0;
+    #pragma unroll 1
+    for (int gi = 0; gi < g.G; ++gi) {
+        if (row < s_offs[gi + 1]) { group_idx = gi; break; }
+    }
+
+    const bool interior_n       = col < g.fast_n;
+    const bool fast_covers_cell = interior_n && g.fast_n > 0 && g.fast_k > 0;
+    if (fast_covers_cell && !needs_k_tail) return;
+
+    const int k0 = fast_covers_cell ? g.fast_k : 0;
+    float acc = 0.0f;
+    for (int kk = k0; kk < g.k; ++kk) {
+        if constexpr (L == Layout::RCR) {
+            acc += load_bf16_scalar(g.a, row, kk) *
+                   load_bf16_scalar_grp(g.b, group_idx, col, kk);
+        } else if constexpr (L == Layout::RRR) {
+            acc += load_bf16_scalar(g.a, row, kk) *
+                   load_bf16_scalar_grp(g.b, group_idx, kk, col);
+        } else { // CRR — A is [K, M_total], no group dim on A.
+            acc += load_bf16_scalar(g.a, kk, row) *
+                   load_bf16_scalar_grp(g.b, group_idx, kk, col);
+        }
+    }
+
+    if (fast_covers_cell && needs_k_tail) {
+        store_bf16_scalar(g.c, row, col,
+                          load_bf16_scalar(g.c, row, col) + acc);
+    } else {
+        store_bf16_scalar(g.c, row, col, acc);
+    }
+}
+
+template __global__ void grouped_tail_kernel<Layout::RCR>(const grouped_layout_globals);
+template __global__ void grouped_tail_kernel<Layout::RRR>(const grouped_layout_globals);
+template __global__ void grouped_tail_kernel<Layout::CRR>(const grouped_layout_globals);
 
 // Persistent kernel: grid_x = NUM_CUS. One block per CU; each block iterates
 // many (group, tile) pairs in a single launch.
@@ -1188,22 +1282,50 @@ void dispatch_grouped(grouped_layout_globals g) {
     g.M_total = static_cast<int>(g.c.rows());
     if constexpr (L == Layout::CRR) g.k = static_cast<int>(g.a.rows());
     else g.k = static_cast<int>(g.a.cols());
-    g.ki = g.k / K_STEP;
-    g.bpc = g.n / BLOCK_SIZE;
 
-    switch (g.ki) {
-        case 56:  launch_one_grouped<L, 56> (g); return;
-        case 64:  launch_one_grouped<L, 64> (g); return;
-        case 112: launch_one_grouped<L, 112>(g); return;
-        case 128: launch_one_grouped<L, 128>(g); return;
-        case 172: launch_one_grouped<L, 172>(g); return;
-        case 224: launch_one_grouped<L, 224>(g); return;
-        case 256: launch_one_grouped<L, 256>(g); return;
-        case 296: launch_one_grouped<L, 296>(g); return;
-        case 448: launch_one_grouped<L, 448>(g); return;
-        case 462: launch_one_grouped<L, 462>(g); return;
-        case 832: launch_one_grouped<L, 832>(g); return;
-        default:  launch_one_grouped<L, 0>  (g); return;
+    // Phase 3: native non-aligned N/K (mirror dense dispatch_gemm). Per-group
+    // M tail (M_g % BLOCK_SIZE != 0) is handled by `grouped_tail_kernel`.
+    g.fast_n = (g.n / BLOCK_SIZE) * BLOCK_SIZE;
+    g.fast_k = (g.k / K_TWO_TILE) * K_TWO_TILE;
+    g.bpc    = g.fast_n / BLOCK_SIZE;
+    g.ki     = g.fast_k / K_STEP;
+
+    if (g.bpc > 0 && g.ki >= 2) {
+        switch (g.ki) {
+            case 56:  launch_one_grouped<L, 56> (g); break;
+            case 64:  launch_one_grouped<L, 64> (g); break;
+            case 112: launch_one_grouped<L, 112>(g); break;
+            case 128: launch_one_grouped<L, 128>(g); break;
+            case 172: launch_one_grouped<L, 172>(g); break;
+            case 224: launch_one_grouped<L, 224>(g); break;
+            case 256: launch_one_grouped<L, 256>(g); break;
+            case 296: launch_one_grouped<L, 296>(g); break;
+            case 448: launch_one_grouped<L, 448>(g); break;
+            case 462: launch_one_grouped<L, 462>(g); break;
+            case 832: launch_one_grouped<L, 832>(g); break;
+            default:  launch_one_grouped<L, 0>  (g); break;
+        }
+    } else {
+        // Main kernel can't run (N < BLOCK_SIZE or K < K_TWO_TILE). Reset
+        // fast_* so the tail kernel treats every cell as "kernel never
+        // ran here" and computes the full output from scratch.
+        g.fast_n = 0;
+        g.fast_k = 0;
+        g.bpc    = 0;
+        g.ki     = 0;
+    }
+
+    // Launch the tail kernel only when N or K is non-aligned. When the
+    // shape is fully aligned, the main kernel already wrote every cell;
+    // launching tail would still early-exit all threads on the first
+    // sync but adds an unnecessary launch + LDS-init pass.
+    if (g.fast_n != g.n || g.fast_k != g.k) {
+        dim3 tail_block(TAIL_BLOCK_N, TAIL_BLOCK_M);
+        dim3 tail_grid(
+            kittens::ceil_div(g.n, TAIL_BLOCK_N),
+            kittens::ceil_div(g.M_total, TAIL_BLOCK_M)
+        );
+        grouped_tail_kernel<L><<<tail_grid, tail_block, 0, g.stream>>>(g);
     }
 }
 
@@ -1220,6 +1342,7 @@ static void grouped_dispatch(pybind11::object a, pybind11::object b, pybind11::o
         reinterpret_cast<const int64_t*>(group_offs_ptr),
         {},
         G, 0, 0, 0, 0, gm, num_xcds, 0,
+        0, 0, // fast_n, fast_k — populated inside dispatch_grouped<L>.
     };
 
     if (layout_name[0] == 'r' && layout_name[1] == 'c') dispatch_grouped<Layout::RCR>(g);
