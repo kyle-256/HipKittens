@@ -2118,11 +2118,301 @@ void grouped_rcr_kernel(const grouped_layout_globals g) {
 template __global__ void grouped_rcr_kernel<0>(const grouped_layout_globals);
 
 // =============================================================================
+// Persistent RRR grouped kernel — round-1 mirror of grouped_rcr_kernel.
+//
+// Identical persistent + CPU-sync-free skeleton (LDS group_offs cache, 6-step
+// branch-free binary search over s_cum_tiles, group-by-M/N tile swizzle,
+// chiplet pid permutation), with the inner per-tile body swapped for the
+// FP8 RRR dense schedule (lines 1389-1526). Layout-specific differences:
+//
+//   * B layout : [1, G, K, N] row-major (K outer, N inner stride-1).
+//                ``b_co(s, k)`` maps a tile coord to {0, g_idx, k, s}, i.e.
+//                the K-tile index sits on row axis and the N-tile index sits
+//                on col axis (vs RCR which puts N on row, K on col).
+//
+//   * Shared B : ST_v2 (st_fp8e4m3<HB, BK, st_16x128_v2_s>) — same row-tile
+//                shape as ST_rcr but the underlying load/store patterns are
+//                the v2 col-major-swizzle layout that the RRR mma reads
+//                from.
+//
+//   * Shared A : ST_row (st_fp8e4m3<HB, BK, st_16x128_s>) — straight row-
+//                major. RCR reuses ST_v2 for A; RRR uses the simpler ST_row.
+//
+//   * Register : A_row_reg + B_col_reg (B is column-loaded into the col
+//                register layout via load_col_from_st).
+//
+//   * MMA      : rrr_mma (mma_AB) instead of rcr_mma (mma_ABt).
+//
+//   * Loads    : G::load (kittens::load with swizzled offsets) for both A
+//                and B. The 8-wave m0-broadcast hoist (rcr_8w_load_hoist)
+//                is RCR-specific; RRR keeps the standard kittens load path
+//                used by the FP8 dense RRR kernel.
+//
+// Coord shifts inside the persistent loop:
+//   * A row    : m_subtile_A = m_start_g / HB              (HB = 128)
+//                a_co(s, k) -> {0, 0, m_subtile_A + s, k}
+//   * B group  : b_co(s, k) -> {0, group_idx, k, s}       (G as depth axis)
+//   * C row    : m_subtile_C = m_start_g / RBM             (RBM = 64)
+//                store(g.c, ..., {0, 0, m_subtile_C + R, C})
+//
+// Aligned interior: ``g.fast_n = (n / BLOCK_SIZE) * BLOCK_SIZE``,
+// ``g.fast_k = (k / K_BLOCK) * K_BLOCK``. Cells outside (col >= fast_n) and
+// the K-tail correction in [fast_k, k) for interior cells are handled by
+// ``grouped_tail_kernel<Layout::RRR>`` (scalar fp32, mirror BF16 RRR).
+// =============================================================================
+template<int KI_HINT = 0>
+__global__ __launch_bounds__(_NUM_THREADS, 1)
+void grouped_rrr_kernel(const grouped_layout_globals g) {
+    __shared__ ST_row As[2][2];
+    __shared__ ST_v2  Bs[2][2];
+    constexpr int MAX_G_PLUS_1 = 65;
+    __shared__ int s_offs[MAX_G_PLUS_1];
+    __shared__ int s_cum_tiles[MAX_G_PLUS_1];
+    __shared__ int s_total_tiles;
+
+    A_row_reg a;
+    B_col_reg b0, b1;
+    rt_fl<RBM, RBN, col_l, rt_16x16_s> cA, cB, cC, cD;
+
+    int pid = chiplet_transform_chunked(
+        blockIdx.x, NUM_CUS, BLOCK_SWIZZLE_NUM_XCDS, 64);
+
+    int wm = warpid() / WARPS_N;
+    int wn = warpid() % WARPS_N;
+    const int num_pid_n = g.bpc;
+    const int ki_dyn   = (KI_HINT > 0) ? KI_HINT : g.ki;
+
+    if (threadIdx.x == 0) {
+        int prev = static_cast<int>(g.group_offs[0]);
+        s_offs[0] = prev;
+        s_cum_tiles[0] = 0;
+        int t = 0;
+        #pragma unroll 1
+        for (int gi = 0; gi < g.G; ++gi) {
+            const int next = static_cast<int>(g.group_offs[gi + 1]);
+            s_offs[gi + 1] = next;
+            t += ((next - prev) / BLOCK_SIZE) * num_pid_n;
+            s_cum_tiles[gi + 1] = t;
+            prev = next;
+        }
+        s_total_tiles = t;
+        #pragma unroll 1
+        for (int gi = g.G + 1; gi < MAX_G_PLUS_1; ++gi) {
+            s_cum_tiles[gi] = 0x7FFFFFFF;
+        }
+    }
+    __syncthreads();
+    const int total_tiles = s_total_tiles;
+
+    constexpr int bptA = ST_row::underlying_subtile_bytes_per_thread;
+    constexpr int bpmA = bptA * _NUM_THREADS;
+    constexpr int mptA = ST_row::rows * ST_row::cols * sizeof(fp8e4m3) / bpmA;
+    uint32_t soA[mptA];
+    G::prefill_swizzled_offsets(As[0][0], g.a, soA);
+
+    constexpr int bptB = ST_v2::underlying_subtile_bytes_per_thread;
+    constexpr int bpmB = bptB * _NUM_THREADS;
+    constexpr int mptB = ST_v2::rows * ST_v2::cols * sizeof(fp8e4m3) / bpmB;
+    uint32_t soB[mptB];
+    G::prefill_swizzled_offsets(Bs[0][0], g.b, soB);
+
+    for (int gt = pid; gt < total_tiles; gt += NUM_CUS) {
+        int lo = 0;
+        int hi = MAX_G_PLUS_1 - 1;
+        #pragma unroll
+        for (int level = 0; level < 6; ++level) {
+            const int mid = (lo + hi + 1) >> 1;
+            if (gt >= s_cum_tiles[mid]) lo = mid;
+            else hi = mid - 1;
+        }
+        const int group_idx = lo;
+        const int tile_start = s_cum_tiles[lo];
+        const int local_tile = gt - tile_start;
+        const int m_start_g = s_offs[group_idx];
+        const int M_g = s_offs[group_idx + 1] - m_start_g;
+        const int bpr_g = M_g / BLOCK_SIZE;
+
+        int br, bc;
+        if (g.bpc > bpr_g) {
+            const int WGN = g.group_m;
+            const int num_wgid_in_group = bpr_g * WGN;
+            int group_id = local_tile / num_wgid_in_group;
+            int first_pid_n = group_id * WGN;
+            int group_size_n = min(num_pid_n - first_pid_n, WGN);
+            if (group_size_n <= 0) continue;
+            bc = first_pid_n + ((local_tile % num_wgid_in_group) % group_size_n);
+            br = (local_tile % num_wgid_in_group) / group_size_n;
+        } else {
+            const int WGM = g.group_m;
+            const int num_wgid_in_group = WGM * num_pid_n;
+            int group_id = local_tile / num_wgid_in_group;
+            int first_pid_m = group_id * WGM;
+            int group_size_m = min(bpr_g - first_pid_m, WGM);
+            if (group_size_m <= 0) continue;
+            br = first_pid_m + ((local_tile % num_wgid_in_group) % group_size_m);
+            bc = (local_tile % num_wgid_in_group) / group_size_m;
+        }
+        if (br >= bpr_g || bc >= num_pid_n) continue;
+
+        const int m_subtile_A = m_start_g / HB;
+        const int m_subtile_C = m_start_g / RBM;
+
+        // RRR coord conventions (mirror of dense gemm_kernel<RRR>):
+        //   a_co(s, k) : A is [M_total, K]      → row-shift by m_subtile_A.
+        //   b_co(s, k) : B is [1, G, K, N]      → K on row, N on col, group
+        //                                         depth = group_idx.
+        auto a_co = [&](int s, int k) -> coord<ST_row> {
+            return {0, 0, m_subtile_A + s, k};
+        };
+        auto b_co = [&](int s, int k) -> coord<ST_v2> {
+            return {0, group_idx, k, s};
+        };
+
+        auto load_a = [&](A_row_reg& dst, ST_row& tile, int wi) {
+            auto sub = subtile_inplace<RBM, BK>(tile, {wi, 0});
+            load(dst, sub);
+        };
+        auto load_b = [&](B_col_reg& dst, ST_v2& tile, int wi) {
+            load_col_from_st(dst, tile, wi * RBN);
+        };
+
+        zero(cA); zero(cB); zero(cC); zero(cD);
+
+        int tic = 0, toc = 1;
+        // Prologue: tile-0 + tile-1 (mirrors dense gemm_kernel<RRR>
+        // lines 1421-1435).
+        G::load(Bs[tic][0], g.b, b_co(bc*2,   0), soB);
+        G::load(As[tic][0], g.a, a_co(br*2,   0), soA);
+        G::load(Bs[tic][1], g.b, b_co(bc*2+1, 0), soB);
+        G::load(As[tic][1], g.a, a_co(br*2+1, 0), soA);
+
+        if (wm == 1) __builtin_amdgcn_s_barrier();
+        TK_WAIT_VMCNT(RRR_INIT0_VMCNT);
+        __builtin_amdgcn_s_barrier();
+
+        G::load(Bs[toc][0], g.b, b_co(bc*2,   1), soB);
+        G::load(As[toc][0], g.a, a_co(br*2,   1), soA);
+        G::load(Bs[toc][1], g.b, b_co(bc*2+1, 1), soB);
+
+        TK_WAIT_VMCNT(RRR_INIT1_VMCNT);
+        __builtin_amdgcn_s_barrier();
+
+        // Single-tile main loop (mirror dense lines 1437-1470).
+        TK_PRAGMA_UNROLL(RRR_MAIN_UNROLL)
+        for (int k = 0; k < ki_dyn - 2; k++, tic ^= 1, toc ^= 1) {
+            load_b(b0, Bs[tic][0], wn);
+            load_a(a, As[tic][0], wm);
+            G::load(As[toc][1], g.a, a_co(br*2+1, k+1), soA);
+            TK_WAIT_LGKM(RRR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); rrr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier(); RRR_SCHED_BARRIER();
+
+            load_b(b1, Bs[tic][1], wn);
+            G::load(Bs[tic][0], g.b, b_co(bc*2, k+2), soB);
+            __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); rrr_mma(cB, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_a(a, As[tic][1], wm);
+            G::load(Bs[tic][1], g.b, b_co(bc*2+1, k+2), soB);
+            __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); rrr_mma(cC, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier(); RRR_SCHED_BARRIER();
+
+            G::load(As[tic][0], g.a, a_co(br*2, k+2), soA);
+            TK_WAIT_VMCNT(RRR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); rrr_mma(cD, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+        }
+
+        // Epilog 1 (mirror dense lines 1472-1501).
+        {
+            load_b(b0, Bs[tic][0], wn);
+            load_a(a, As[tic][0], wm);
+            G::load(As[toc][1], g.a, a_co(br*2+1, ki_dyn-1), soA);
+            __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); rrr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier(); RRR_SCHED_BARRIER();
+
+            load_b(b1, Bs[tic][1], wn);
+            __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); rrr_mma(cB, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_a(a, As[tic][1], wm);
+            __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); rrr_mma(cC, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_b(b0, Bs[toc][0], wn);
+            TK_WAIT_VMCNT(RRR_EPILOGUE_VMCNT); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); rrr_mma(cD, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier(); RRR_SCHED_BARRIER();
+            tic ^= 1; toc ^= 1;
+        }
+
+        // Epilog 2 (mirror dense lines 1503-1526).
+        {
+            load_a(a, As[tic][0], wm);
+            asm volatile("s_waitcnt vmcnt(0)"); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); rrr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_b(b1, Bs[tic][1], wn);
+            __builtin_amdgcn_s_barrier(); RRR_SCHED_BARRIER();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); rrr_mma(cB, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_a(a, As[tic][1], wm);
+            __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1);
+            rrr_mma(cC, a, b0);
+            rrr_mma(cD, a, b1);
+            __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+        }
+
+        const float combined_scale = resolve_combined_scale_grp(g);
+        mul(cA, cA, combined_scale);
+        mul(cB, cB, combined_scale);
+        mul(cC, cC, combined_scale);
+        mul(cD, cD, combined_scale);
+
+        if (wm == 0) __builtin_amdgcn_s_barrier();
+        store(g.c, cA, {0, 0, m_subtile_C + br*WARPS_M*2+wm,
+                              bc*WARPS_N*2+wn});
+        store(g.c, cB, {0, 0, m_subtile_C + br*WARPS_M*2+wm,
+                              bc*WARPS_N*2+WARPS_N+wn});
+        store(g.c, cC, {0, 0, m_subtile_C + br*WARPS_M*2+WARPS_M+wm,
+                              bc*WARPS_N*2+wn});
+        store(g.c, cD, {0, 0, m_subtile_C + br*WARPS_M*2+WARPS_M+wm,
+                              bc*WARPS_N*2+WARPS_N+wn});
+
+        asm volatile("s_waitcnt vmcnt(0) lgkmcnt(0)");
+        __builtin_amdgcn_s_barrier();
+    }
+}
+
+template __global__ void grouped_rrr_kernel<0>(const grouped_layout_globals);
+
+// =============================================================================
 // Grouped tail kernel — scalar fp32 fixup for cells the main grouped kernel
 // does not cover (col >= fast_n) and the K-tail correction in [fast_k, k)
 // for interior cells. Mirror of `gemm_tail_kernel` (FP8 dense) but with
-// per-group B indexing via `group_offs`. RCR layout only (matches the only
-// FP8 grouped binding currently exposed).
+// per-group B indexing via `group_offs`. Templated over Layout to support
+// both RCR (forward) and RRR (backward dA) — see also the BF16 mirror in
+// kernel_bf16_dynamic.cpp::grouped_tail_kernel.
 //
 // Three cases per cell:
 //   * col <  fast_n  AND fast_k == k  → main covers fully → early-return.
@@ -2130,10 +2420,16 @@ template __global__ void grouped_rcr_kernel<0>(const grouped_layout_globals);
 //   * col >= fast_n                   → main did not run; full-K reduction.
 //
 // Per-group M-tail (M_g % BLOCK_SIZE != 0) is NOT handled — caller contract.
+//
+// B layout per Layout L:
+//   * RCR : g.b is [1, G, N, K]  → B[g_idx, col, kk] (stride-1 in K).
+//           Vec8 fast path enabled: A and B both contiguous in K.
+//   * RRR : g.b is [1, G, K, N]  → B[g_idx, kk, col] (stride-1 in N).
+//           B not vectorisable along K → scalar K-loop only.
 template<Layout L>
 __global__ void grouped_tail_kernel(const grouped_layout_globals g) {
-    static_assert(L == Layout::RCR,
-                  "FP8 grouped only supports RCR (mirror of grouped_rcr_kernel).");
+    static_assert(L == Layout::RCR || L == Layout::RRR,
+                  "FP8 grouped tail kernel: RCR or RRR only.");
     constexpr int MAX_G_PLUS_1 = 65;
     __shared__ int s_offs[MAX_G_PLUS_1];
 
@@ -2166,40 +2462,52 @@ __global__ void grouped_tail_kernel(const grouped_layout_globals g) {
     const int k0 = fast_covers_cell ? g.fast_k : 0;
     float acc = 0.0f;
 
-    // Vec8 (8-byte = 8 fp8e4m3) fast path. Both A[row, kk] and
-    // B[group_idx, col, kk] are stride-1 in K, so consecutive fp8s
-    // along K can be loaded as a single dwordx2. ``g.k`` is bounded
-    // below the K_BLOCK alignment by host pad in the gpt_oss-K=2880
-    // path which is currently the only K-tail caller; for K=2880,
-    // (g.k - k0) is 64 (K-tail correction) or 2880 (N-tail full
-    // reduction) — both multiples of 8. The scalar tail handles any
-    // residual when g.k % 8 != 0.
-    const fp8e4m3* a_row = &g.a[coord<>(row, 0)];
-    const fp8e4m3* b_row = &g.b[coord<>{0, group_idx, col, 0}];
-    int kk = k0;
-    if ((g.k % 8 == 0) && ((k0 & 7) == 0)) {
-        const fp8e4m3_8* a_v8 = reinterpret_cast<const fp8e4m3_8*>(a_row);
-        const fp8e4m3_8* b_v8 = reinterpret_cast<const fp8e4m3_8*>(b_row);
-        const int j_start = k0 >> 3;
-        const int j_end   = g.k >> 3;
-        #pragma unroll 4
-        for (int j = j_start; j < j_end; ++j) {
-            fp8e4m3_8 a8 = a_v8[j];
-            fp8e4m3_8 b8 = b_v8[j];
-            float4 a_lo = base_types::convertor<float4, fp8e4m3_4>::convert(a8.lo);
-            float4 a_hi = base_types::convertor<float4, fp8e4m3_4>::convert(a8.hi);
-            float4 b_lo = base_types::convertor<float4, fp8e4m3_4>::convert(b8.lo);
-            float4 b_hi = base_types::convertor<float4, fp8e4m3_4>::convert(b8.hi);
-            acc += a_lo.x * b_lo.x + a_lo.y * b_lo.y
-                 + a_lo.z * b_lo.z + a_lo.w * b_lo.w
-                 + a_hi.x * b_hi.x + a_hi.y * b_hi.y
-                 + a_hi.z * b_hi.z + a_hi.w * b_hi.w;
+    if constexpr (L == Layout::RCR) {
+        // Vec8 (8-byte = 8 fp8e4m3) fast path. Both A[row, kk] and
+        // B[group_idx, col, kk] are stride-1 in K, so consecutive fp8s
+        // along K can be loaded as a single dwordx2. ``g.k`` is bounded
+        // below the K_BLOCK alignment by host pad in the gpt_oss-K=2880
+        // path which is currently the only K-tail caller; for K=2880,
+        // (g.k - k0) is 64 (K-tail correction) or 2880 (N-tail full
+        // reduction) — both multiples of 8. The scalar tail handles any
+        // residual when g.k % 8 != 0.
+        const fp8e4m3* a_row = &g.a[coord<>(row, 0)];
+        const fp8e4m3* b_row = &g.b[coord<>{0, group_idx, col, 0}];
+        int kk = k0;
+        if ((g.k % 8 == 0) && ((k0 & 7) == 0)) {
+            const fp8e4m3_8* a_v8 = reinterpret_cast<const fp8e4m3_8*>(a_row);
+            const fp8e4m3_8* b_v8 = reinterpret_cast<const fp8e4m3_8*>(b_row);
+            const int j_start = k0 >> 3;
+            const int j_end   = g.k >> 3;
+            #pragma unroll 4
+            for (int j = j_start; j < j_end; ++j) {
+                fp8e4m3_8 a8 = a_v8[j];
+                fp8e4m3_8 b8 = b_v8[j];
+                float4 a_lo = base_types::convertor<float4, fp8e4m3_4>::convert(a8.lo);
+                float4 a_hi = base_types::convertor<float4, fp8e4m3_4>::convert(a8.hi);
+                float4 b_lo = base_types::convertor<float4, fp8e4m3_4>::convert(b8.lo);
+                float4 b_hi = base_types::convertor<float4, fp8e4m3_4>::convert(b8.hi);
+                acc += a_lo.x * b_lo.x + a_lo.y * b_lo.y
+                     + a_lo.z * b_lo.z + a_lo.w * b_lo.w
+                     + a_hi.x * b_hi.x + a_hi.y * b_hi.y
+                     + a_hi.z * b_hi.z + a_hi.w * b_hi.w;
+            }
+            kk = j_end << 3;
         }
-        kk = j_end << 3;
-    }
-    for (; kk < g.k; ++kk) {
-        acc += load_fp8_scalar(g.a, row, kk) *
-               load_fp8_scalar_grp(g.b, group_idx, col, kk);
+        for (; kk < g.k; ++kk) {
+            acc += load_fp8_scalar(g.a, row, kk) *
+                   load_fp8_scalar_grp(g.b, group_idx, col, kk);
+        }
+    } else {
+        // RRR: A stride-1 in K, B[group_idx, kk, col] stride-N in K — B
+        // is not vectorisable along K. Stay scalar (this kernel is the
+        // FP8 grad-X / backward dA path; performance gap to a native main
+        // kernel is intentional and tracked as a follow-up — round 1 only
+        // unblocks correctness so the bench can produce numbers).
+        for (int kk = k0; kk < g.k; ++kk) {
+            acc += load_fp8_scalar(g.a, row, kk) *
+                   load_fp8_scalar_grp(g.b, group_idx, kk, col);
+        }
     }
 
     const float scaled = acc * resolve_combined_scale_grp(g);
@@ -2212,6 +2520,7 @@ __global__ void grouped_tail_kernel(const grouped_layout_globals g) {
 }
 
 template __global__ void grouped_tail_kernel<Layout::RCR>(const grouped_layout_globals);
+template __global__ void grouped_tail_kernel<Layout::RRR>(const grouped_layout_globals);
 
 void dispatch_grouped_rcr(grouped_layout_globals g) {
     g.n = static_cast<int>(g.c.cols());
@@ -2243,6 +2552,52 @@ void dispatch_grouped_rcr(grouped_layout_globals g) {
             kittens::ceil_div(g.M_total, TAIL_BLOCK_M)
         );
         grouped_tail_kernel<Layout::RCR>
+            <<<tail_grid, tail_block, 0, g.stream>>>(g);
+    }
+}
+
+// =============================================================================
+// Persistent grouped RRR dispatcher — FP8 (forward-A backward dA path).
+//
+// Mirror of ``dispatch_grouped_rcr``: aligned interior swept by the
+// persistent main kernel (``grouped_rrr_kernel``), cells outside go
+// through ``grouped_tail_kernel<Layout::RRR>`` (scalar fp32 with the
+// same N-tail / K-tail correction logic as RCR — see template body).
+//
+// Per-group M_g must still be a BLOCK_SIZE multiple (the persistent
+// loop derives ``bpr_g = M_g / BLOCK_SIZE`` and steps in HB units);
+// other invariants are identical to the RCR path.
+// =============================================================================
+void dispatch_grouped_rrr(grouped_layout_globals g) {
+    g.n = static_cast<int>(g.c.cols());
+    g.M_total = static_cast<int>(g.c.rows());
+    g.k = static_cast<int>(g.a.cols());
+
+    g.fast_n = (g.n / BLOCK_SIZE) * BLOCK_SIZE;
+    g.fast_k = (g.k / K_BLOCK)    * K_BLOCK;
+    g.bpc    = g.fast_n / BLOCK_SIZE;
+    g.ki     = g.fast_k / K_BLOCK;
+
+    if (g.M_total <= 0 || g.n <= 0 || g.k <= 0 || g.G <= 0) return;
+
+    if (g.bpc > 0 && g.ki > 0) {
+        grouped_rrr_kernel<0><<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
+    } else {
+        // No aligned interior at all — main kernel cannot run; tail handles
+        // every cell with a full-K reduction.
+        g.fast_n = 0;
+        g.fast_k = 0;
+        g.bpc = 0;
+        g.ki = 0;
+    }
+
+    if (g.fast_n != g.n || g.fast_k != g.k) {
+        dim3 tail_block(TAIL_BLOCK_N, TAIL_BLOCK_M);
+        dim3 tail_grid(
+            kittens::ceil_div(g.n, TAIL_BLOCK_N),
+            kittens::ceil_div(g.M_total, TAIL_BLOCK_M)
+        );
+        grouped_tail_kernel<Layout::RRR>
             <<<tail_grid, tail_block, 0, g.stream>>>(g);
     }
 }
@@ -2791,6 +3146,54 @@ static void grouped_rcr_dscale_fn(
     dispatch_grouped_rcr(g);
 }
 
+// Round-1 host wrappers for grouped RRR (backward dA) FP8 kernel.
+// Same global struct as RCR (identical scale + group_offs plumbing); the
+// dispatcher pins ``fast_n = fast_k = 0`` so the entire compute happens
+// in ``grouped_tail_kernel<Layout::RRR>``.
+static void grouped_rrr_fn(pybind11::object a, pybind11::object b, pybind11::object c,
+                           pybind11::object scale_a_obj, pybind11::object scale_b_obj,
+                           pybind11::object group_offs_obj,
+                           int group_m) {
+    auto group_offs_ptr = group_offs_obj.attr("data_ptr")().cast<uintptr_t>();
+    int G = group_offs_obj.attr("numel")().cast<int>() - 1;
+    grouped_layout_globals g{
+        py::from_object<_gl_fp8>::make(a),
+        py::from_object<_gl_fp8>::make(b),
+        py::from_object<_gl_bf16>::make(c),
+        to_float(scale_a_obj),
+        to_float(scale_b_obj),
+        nullptr,
+        nullptr,
+        reinterpret_cast<const int64_t*>(group_offs_ptr),
+        {},
+        G, 0, 0, 0, 0, group_m, 0, 0, 0,
+    };
+    dispatch_grouped_rrr(g);
+}
+
+static void grouped_rrr_dscale_fn(
+    pybind11::object a, pybind11::object b, pybind11::object c,
+    pybind11::object scale_a_obj, pybind11::object scale_b_obj,
+    pybind11::object group_offs_obj,
+    int group_m) {
+    auto sa_ptr = scale_a_obj.attr("data_ptr")().cast<uintptr_t>();
+    auto sb_ptr = scale_b_obj.attr("data_ptr")().cast<uintptr_t>();
+    auto group_offs_ptr = group_offs_obj.attr("data_ptr")().cast<uintptr_t>();
+    int G = group_offs_obj.attr("numel")().cast<int>() - 1;
+    grouped_layout_globals g{
+        py::from_object<_gl_fp8>::make(a),
+        py::from_object<_gl_fp8>::make(b),
+        py::from_object<_gl_bf16>::make(c),
+        0.f, 0.f,
+        reinterpret_cast<const float*>(sa_ptr),
+        reinterpret_cast<const float*>(sb_ptr),
+        reinterpret_cast<const int64_t*>(group_offs_ptr),
+        {},
+        G, 0, 0, 0, 0, group_m, 0, 0, 0,
+    };
+    dispatch_grouped_rrr(g);
+}
+
 // Host wrappers for grouped variable-K (CRR / dB) FP8 kernel
 // (host-scalar + dscale variants).
 static void grouped_variable_k_crr_fp8_fn(
@@ -2877,6 +3280,19 @@ PYBIND11_MODULE(tk_fp8_layouts, m) {
           pybind11::arg("group_offs"),
           pybind11::arg("group_m") = DEFAULT_GROUP_M);
     m.def("grouped_rcr_dscale", &grouped_rcr_dscale_fn,
+          pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("c"),
+          pybind11::arg("scale_a"), pybind11::arg("scale_b"),
+          pybind11::arg("group_offs"),
+          pybind11::arg("group_m") = DEFAULT_GROUP_M);
+    // [grouped] Round-1 RRR launcher (FP8 backward dA path). Same
+    // ``group_offs``-driven contract as ``grouped_rcr``; uses the scalar
+    // tail kernel for the full compute (no native main kernel yet).
+    m.def("grouped_rrr", &grouped_rrr_fn,
+          pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("c"),
+          pybind11::arg("scale_a"), pybind11::arg("scale_b"),
+          pybind11::arg("group_offs"),
+          pybind11::arg("group_m") = DEFAULT_GROUP_M);
+    m.def("grouped_rrr_dscale", &grouped_rrr_dscale_fn,
           pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("c"),
           pybind11::arg("scale_a"), pybind11::arg("scale_b"),
           pybind11::arg("group_offs"),
