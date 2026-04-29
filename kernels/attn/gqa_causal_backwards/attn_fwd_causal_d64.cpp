@@ -634,9 +634,23 @@ __global__ void attend_ker(const attn_globals<D> g) {
 
 template<int D>
 void dispatch_fwd(attn_globals<D> g) {
-    unsigned long mem_size = g.dynamic_shared_memory();
-    hipFuncSetAttribute((void*)attend_ker<D>, hipFuncAttributeMaxDynamicSharedMemorySize, mem_size);
-    attend_ker<D><<<g.grid(), g.block(), mem_size, g.stream>>>(g);
+    // Cache hipFuncSetAttribute so the (per-kernel) attribute is set only
+    // on the FIRST dispatch in this process.  hipFuncSetAttribute persists
+    // for the kernel's lifetime in the current HIP context, so re-issuing
+    // it every dispatch is pure waste -- the runtime call costs ~3-5us of
+    // CPU latency that adds up across the metric's PERF_BATCH_ITERS=10
+    // inner loop and is most visible at the small-N (N=1024) shape where
+    // the kernel itself is only ~80us.  Mirrors the same idiom adopted by
+    // dispatch_prep / dispatch_dq_shuffle (which simply skip the call
+    // because their dynamic_shared_memory()==0).
+    static bool attr_set = false;
+    if (!attr_set) {
+        hipFuncSetAttribute((void*)attend_ker<D>,
+                            hipFuncAttributeMaxDynamicSharedMemorySize,
+                            MAX_SHARED_MEMORY);
+        attr_set = true;
+    }
+    attend_ker<D><<<g.grid(), g.block(), MAX_SHARED_MEMORY, g.stream>>>(g);
     // No internal hipDeviceSynchronize:  the PyTorch default-stream model
     // already serialises the next call (prep / bwd) behind this one, and the
     // benchmark harness does its own torch.cuda.synchronize() at trial

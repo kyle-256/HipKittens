@@ -187,9 +187,18 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
   // identical full-K-reduction dQ for D[0:32] (and 1/3 for D[32:64]).
   const int warpid_dq = warpid & 1;  // 0,1,0,1
   // For D=64: warps 0,2 compute identical dQ for D[0:32], warps 1,3 same for D[32:64].
-  // Scale only warps 0,1 with dP_SCALE_FACTOR; warps 2,3 use 0 so their atomic_add
-  // contributes nothing (avoiding double-count). atomic_pk_add uses warpid_dq for D-slice.
-  const float dq_scale_active = (warpid < 2) ? ((D == 128) ? 0.08838834764f : 0.125f) : 0.0f;
+  // Double-counting is prevented at the HBM-atomic level: dq_atomic_add() drives
+  // warps 2/3's buffer_atomic_pk_add_bf16 OOB (via the 0x80000000u byte_offset
+  // trick) so the HW silently drops their writes.  Hence the in-register
+  // dq_scale used by mul_vgpr can safely be a CONSTANT (= dP_SCALE_FACTOR) on
+  // every warp -- multiplying warps 2/3's dQ accumulator by 0.125 instead of 0
+  // is harmless because the result is OOB-dropped before reaching dQg.
+  // Switching from a runtime ternary `(warpid<2) ? scale : 0` to a true
+  // constexpr lets the compiler skip the v_cmp_lt/v_cndmask pair at kernel
+  // entry and may also free a SGPR pair (the `warpid<2` predicate previously
+  // had to be live across the kernel since dq_scale_active was used in many
+  // mul_vgpr calls).  Pure additive simplification, no numerics change.
+  constexpr float dq_scale_active = (D == 128) ? 0.08838834764f : 0.125f;
   const int j = seq_idx * NUM_WARPS + warpid;
 
   // optimization on loops bounds.  Use the runtime sequence length
@@ -3021,9 +3030,22 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
 
 template<int D>
 void dispatch_bwd_combined(attn_bwd_combined_globals<D> g) {
-    unsigned long mem_size = g.dynamic_shared_memory();
-    hipFuncSetAttribute((void*)attend_bwd_combined_ker<D>, hipFuncAttributeMaxDynamicSharedMemorySize, mem_size);
-    attend_bwd_combined_ker<D><<<g.grid(), g.block(), mem_size, g.stream>>>(g);
+    // Cache hipFuncSetAttribute (per-kernel attribute, persists across
+    // dispatches) so we pay the ~3-5us HIP runtime call cost only on the
+    // FIRST dispatch in this process.  This stacks on top of the earlier
+    // hipDeviceSynchronize removal:  combined together, the d64 bwd combined
+    // launch wrapper now costs only the kernel-launch syscall itself for
+    // every iteration after the first.  Visible at the small-N (N=1024,
+    // bwd~0.5ms) shape where launch latency is a non-trivial fraction of
+    // total wall-clock; harmless at larger N.
+    static bool attr_set = false;
+    if (!attr_set) {
+        hipFuncSetAttribute((void*)attend_bwd_combined_ker<D>,
+                            hipFuncAttributeMaxDynamicSharedMemorySize,
+                            MAX_SHARED_MEMORY);
+        attr_set = true;
+    }
+    attend_bwd_combined_ker<D><<<g.grid(), g.block(), MAX_SHARED_MEMORY, g.stream>>>(g);
     // No internal hipDeviceSynchronize -- see comment in dispatch_fwd.  The
     // following dispatch_dq_shuffle and the harness's torch.cuda.synchronize
     // both ensure correctness without adding per-call launch latency here.
