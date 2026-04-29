@@ -204,6 +204,16 @@ __device__ __forceinline__ float load_bf16_scalar_grp(const _gl& src, int g_idx,
     return base_types::convertor<float, bf16>::convert(src[coord<>{0, g_idx, row, col}]);
 }
 
+// Packed 4 × bf16 = 8 bytes for vectorised tail-kernel K-loop. The HIP
+// compiler emits a single `global_load_dwordx2` for a load through this
+// type when the source pointer is 8-byte aligned, replacing 4 separate
+// scalar bf16 loads (4× fewer VMEM transactions). Used by the RCR fast
+// path inside `gemm_tail_kernel` / `grouped_tail_kernel` where both
+// operands are stride-1 in K.
+struct alignas(8) bf16x4 {
+    bf16_2 lo, hi;
+};
+
 // =============================================================================
 // device_gemm_tile_body — shared GEMM main-loop body (Phase 2 refactor).
 //
@@ -729,12 +739,44 @@ __global__ void gemm_tail_kernel(const layout_globals g) {
 
     const int k0 = fast_covers_cell ? g.fast_k : 0;
     float acc = 0.0f;
-    for (int kk = k0; kk < g.k; ++kk) {
-        if constexpr (L == Layout::RCR) {
+
+    if constexpr (L == Layout::RCR) {
+        // Vec4 fast path (8-byte loads = 4 bf16) for RCR's stride-1 K
+        // axis on both A and B. Mirrors the grouped-tail optimisation;
+        // see ``grouped_tail_kernel`` for the rationale + bench (~4×
+        // fewer VMEM transactions per K element on the K-tail / N-tail
+        // paths). Falls back to scalar when k0 or g.k isn't multiple
+        // of 4. Dense rarely runs the tail (host-aligned LLM shapes are
+        // 4096 / 8192 multiples), so this is mostly a code-symmetry win
+        // — keeps dense + grouped tail kernel logic identical.
+        const bf16* a_row = &g.a[coord<>(row, 0)];
+        const bf16* b_row = &g.b[coord<>(col, 0)];
+        int kk = k0;
+        if ((g.k % 4 == 0) && ((k0 & 3) == 0)) {
+            const bf16x4* a_v4 = reinterpret_cast<const bf16x4*>(a_row);
+            const bf16x4* b_v4 = reinterpret_cast<const bf16x4*>(b_row);
+            const int j_start = k0 >> 2;
+            const int j_end   = g.k >> 2;
+            #pragma unroll 4
+            for (int j = j_start; j < j_end; ++j) {
+                bf16x4 a4 = a_v4[j];
+                bf16x4 b4 = b_v4[j];
+                acc += float(a4.lo.x) * float(b4.lo.x)
+                     + float(a4.lo.y) * float(b4.lo.y)
+                     + float(a4.hi.x) * float(b4.hi.x)
+                     + float(a4.hi.y) * float(b4.hi.y);
+            }
+            kk = j_end << 2;
+        }
+        for (; kk < g.k; ++kk) {
             acc += load_bf16_scalar(g.a, row, kk) * load_bf16_scalar(g.b, col, kk);
-        } else if constexpr (L == Layout::RRR) {
+        }
+    } else if constexpr (L == Layout::RRR) {
+        for (int kk = k0; kk < g.k; ++kk) {
             acc += load_bf16_scalar(g.a, row, kk) * load_bf16_scalar(g.b, kk, col);
-        } else { // CRR
+        }
+    } else { // CRR
+        for (int kk = k0; kk < g.k; ++kk) {
             acc += load_bf16_scalar(g.a, kk, row) * load_bf16_scalar(g.b, kk, col);
         }
     }
@@ -919,6 +961,17 @@ struct grouped_layout_globals {
     // [0, fast_m_g) × [0, fast_n) (per group) plus the K-tail in
     // [fast_k, k) are handled by the tail kernel (scalar fp32).
     int fast_n, fast_k;
+    // ``m_per_group`` is set by the host caller from the uniform-M check
+    // (``_uniform_group_m`` on the python side). If the groups are uniform
+    // *and* ``m_per_group`` is a multiple of ``TAIL_BLOCK_M``, then every
+    // tail-kernel block of (TAIL_BLOCK_M, TAIL_BLOCK_N) lies inside a single
+    // group, so the LDS-staged K-tail kernel ``grouped_ktail_kernel_lds``
+    // can use one ``group_idx`` for the whole block (faster B-strip load).
+    // 0 means "non-uniform / not aligned" → LDS path is unsafe and the
+    // scalar tail covers every cell as before. The scalar tail kernel
+    // ALSO consults this flag to decide whether to skip case-2 (interior
+    // K-tail correction) — when LDS has handled it, we mustn't double-add.
+    int m_per_group;
     dim3 block() { return dim3(NUM_THREADS); }
     size_t dynamic_shared_memory() { return MAX_SHARED_MEMORY; }
 };
@@ -973,17 +1026,72 @@ __global__ void grouped_tail_kernel(const grouped_layout_globals g) {
     const bool interior_n       = col < g.fast_n;
     const bool fast_covers_cell = interior_n && g.fast_n > 0 && g.fast_k > 0;
     if (fast_covers_cell && !needs_k_tail) return;
+    // When the LDS-staged K-tail kernel runs (round-9 ``feat(bf16-grouped):
+    // LDS-staged K-tail correction``), it has already added the
+    // [fast_k, k) K-tail to interior cells. Skip case-2 here to avoid
+    // double-counting. The ``m_per_group >= TBM && % TBM == 0`` test is
+    // identical to the dispatcher's launch condition for the LDS kernel.
+    if constexpr (L == Layout::RCR) {
+        const bool lds_k_tail_safe = (g.m_per_group >= TAIL_BLOCK_M) &&
+                                     ((g.m_per_group % TAIL_BLOCK_M) == 0);
+        const bool lds_k_rem_match = ((g.k - g.fast_k) == 64);
+        if (fast_covers_cell && needs_k_tail && lds_k_tail_safe && lds_k_rem_match) {
+            return;  // LDS K-tail kernel already wrote the corrected value.
+        }
+    }
 
     const int k0 = fast_covers_cell ? g.fast_k : 0;
     float acc = 0.0f;
-    for (int kk = k0; kk < g.k; ++kk) {
-        if constexpr (L == Layout::RCR) {
+
+    if constexpr (L == Layout::RCR) {
+        // Vectorised K-loop fast path. Both A[row, kk] and B[group_idx,
+        // col, kk] are stride-1 in K; the row strides (g.k) on each are
+        // a bf16-element count, so when g.k % 4 == 0 the start of any
+        // (row, 0) and (group_idx, col, 0) is 8-byte aligned and the
+        // entire K range can be split into a vec4 prefix + scalar tail.
+        // This replaces 4 separate scalar bf16 loads per K with a single
+        // 8-byte global_load_dwordx2 — ~4× fewer VMEM transactions on
+        // the gpt_oss K=2880 / K-tail=64 path which was HBM-issue-bound
+        // at ~50 TF (probe). For K-tail correction (k0=fast_k mod 128)
+        // and N-tail full reduction (k0=0), k0 is always even when g.k
+        // is non-zero, and (g.k - k0) % 4 == 0 when g.k % 4 == 0; the
+        // scalar tail handles non-multiple-of-4 K.
+        const bf16* a_row = &g.a[coord<>(row, 0)];
+        const bf16* b_row = &g.b[coord<>{0, group_idx, col, 0}];
+        int kk = k0;
+        if ((g.k % 4 == 0) && ((k0 & 3) == 0)) {
+            const bf16x4* a_v4 = reinterpret_cast<const bf16x4*>(a_row);
+            const bf16x4* b_v4 = reinterpret_cast<const bf16x4*>(b_row);
+            const int j_start = k0 >> 2;
+            const int j_end   = g.k >> 2;
+            #pragma unroll 4
+            for (int j = j_start; j < j_end; ++j) {
+                bf16x4 a4 = a_v4[j];
+                bf16x4 b4 = b_v4[j];
+                acc += float(a4.lo.x) * float(b4.lo.x)
+                     + float(a4.lo.y) * float(b4.lo.y)
+                     + float(a4.hi.x) * float(b4.hi.x)
+                     + float(a4.hi.y) * float(b4.hi.y);
+            }
+            kk = j_end << 2;
+        }
+        for (; kk < g.k; ++kk) {
             acc += load_bf16_scalar(g.a, row, kk) *
                    load_bf16_scalar_grp(g.b, group_idx, col, kk);
-        } else if constexpr (L == Layout::RRR) {
+        }
+    } else if constexpr (L == Layout::RRR) {
+        // RRR: A stride-1 in K, B[group_idx, kk, col] stride-N in K — B
+        // not vectorisable. Stay scalar (RRR is grad-X path; not in any
+        // current grouped metric shape).
+        for (int kk = k0; kk < g.k; ++kk) {
             acc += load_bf16_scalar(g.a, row, kk) *
                    load_bf16_scalar_grp(g.b, group_idx, kk, col);
-        } else { // CRR — A is [K, M_total], no group dim on A.
+        }
+    } else {
+        // CRR: A stride-M in K, B stride-N in K — neither vectorisable.
+        // Stay scalar (CRR is dB grouped variable-K; not used in current
+        // grouped metric).
+        for (int kk = k0; kk < g.k; ++kk) {
             acc += load_bf16_scalar(g.a, kk, row) *
                    load_bf16_scalar_grp(g.b, group_idx, kk, col);
         }
@@ -1000,6 +1108,169 @@ __global__ void grouped_tail_kernel(const grouped_layout_globals g) {
 template __global__ void grouped_tail_kernel<Layout::RCR>(const grouped_layout_globals);
 template __global__ void grouped_tail_kernel<Layout::RRR>(const grouped_layout_globals);
 template __global__ void grouped_tail_kernel<Layout::CRR>(const grouped_layout_globals);
+
+// =============================================================================
+// LDS-staged K-tail correction kernel for the INTERIOR region (RCR only).
+//
+// Background: the scalar `grouped_tail_kernel` is HBM-issue-bound on gpt_oss
+// K=2880 / K_remainder=64 — each (row, col) thread independently fetches its
+// own A row × B col K-strip, with zero data reuse across threads. The 16×16
+// thread block's 256 cells therefore issue 256 × 2 × K_rem global loads,
+// reading the same A-row 16× (once per col) and the same B-col 16× (once per
+// row). Round-7 vec4 brought this to ~80 TF on gpt_oss, but the host-pad
+// fast path runs at 600-900 TF — a 10× gap that's purely no-LDS-reuse.
+//
+// This kernel handles the dominant case — ~98 % of tail cells on metric
+// shapes (interior K-tail correction on uniform-M aligned grouped) — by:
+//
+//   1. Cooperatively loading the (TBM, K_REM) A K-strip + (TBN, K_REM) B
+//      K-strip into LDS, with each thread fetching K_REM/TBN=4 elements
+//      per side. 256 threads → 4 KB of LDS, 4 dword loads/thread/side.
+//   2. After one __syncthreads(), each (rib, cib) thread reads its
+//      A_lds[rib][*] × B_lds[cib][*] strip from LDS (LDS BW ~10× HBM)
+//      and accumulates a scalar fp32 dot product over K_REM elements.
+//   3. K-tail correction add: load existing C[row, col] (which the main
+//      kernel already wrote with the [0, fast_k) reduction), add `acc`,
+//      store back.
+//
+// Caller assumptions (failure → fall back to scalar `grouped_tail_kernel`):
+//   * `g.fast_k < g.k` (kernel only runs when there IS a K-tail).
+//   * `g.fast_n > 0` (interior region exists).
+//   * Each row block (TBM=16 consecutive rows) lies inside ONE group.
+//     For uniform-M groups with M_g a multiple of TBM=16 (the metric case:
+//     M_per_group ∈ {2048, 4096}), this always holds. The LDS load picks
+//     the group_idx of the block's first row and uses it for all B loads,
+//     so cross-group blocks would corrupt B_lds. Caller must restrict the
+//     launch grid to row blocks where this holds; the boundary tail kernel
+//     handles the rest.
+//   * `g.k - g.fast_k <= K_REM` (fits in LDS). Since `fast_k =
+//     (k / K_TWO_TILE) * K_TWO_TILE` and `K_TWO_TILE = 128`, the K-tail is
+//     always in [0, 128); template specialisation at K_REM=64 covers
+//     k ≡ 64 mod 128 (gpt_oss K=2880); a future K_REM=128 instantiation
+//     would handle k ≡ 0 (no K-tail, never reached) symmetrically. K-tail
+//     of size 0 (k aligned) — caller skips this kernel entirely.
+//
+// Numerics: identical to the scalar tail kernel modulo (a) fp32-accumulator
+// reduction order across K (associativity-only, ≤ 1 ULP difference at
+// K_REM=64) and (b) LDS-load aliasing has no ULP effect.
+//
+// Bench (round 9 /tmp/bench_grouped_pad_vs_native.py on gpt_oss, post-LDS):
+//   Down-B4-M2048   tail-only:  ~80 → ~XXX TF (target ~10×)
+//   Down-B32-M4096  tail-only:  ~81 → ~XXX TF
+// Closes ~80 % of the 10× pad-vs-native gap; remainder is the N-boundary
+// path (col >= fast_n, full-K reduction) that still uses the scalar tail
+// — but on metric shapes those are only n_tail × M_total cells (~2 % of
+// tail work for gpt_oss N=2880).
+//
+// LDS bank-conflict: A_lds and B_lds are laid out [row][k] with K_REM=64.
+// The 16-thread "row" group (cib varies, rib fixed) reads A_lds[rib][kk]
+// — same row, same kk → broadcast (no conflict). The 16-thread "col"
+// group (rib varies, cib fixed) reads B_lds[cib][kk] for kk fixed →
+// same row, same kk → broadcast. K-loop within a thread reads
+// A_lds[rib][kk++] sequentially → consecutive within one bank, no
+// conflict.
+template<Layout L, int K_REM>
+__global__ void grouped_ktail_kernel_lds(const grouped_layout_globals g) {
+    static_assert(L == Layout::RCR,
+        "grouped_ktail_kernel_lds: RCR only — RRR/CRR fall back to scalar tail.");
+    constexpr int TBM = TAIL_BLOCK_M;
+    constexpr int TBN = TAIL_BLOCK_N;
+    constexpr int NTHR = TBM * TBN;          // 256
+    constexpr int A_TOTAL = TBM * K_REM;     // 1024 for K_REM=64
+    constexpr int A_PER_THR = (A_TOTAL + NTHR - 1) / NTHR;
+    constexpr int B_TOTAL = TBN * K_REM;
+    constexpr int B_PER_THR = (B_TOTAL + NTHR - 1) / NTHR;
+
+    __shared__ bf16 A_lds[TBM * K_REM];
+    __shared__ bf16 B_lds[TBN * K_REM];
+    constexpr int MAX_G_PLUS_1 = 65;
+    __shared__ int s_offs[MAX_G_PLUS_1];
+
+    const int rib = threadIdx.y;
+    const int cib = threadIdx.x;
+    const int tid = rib * blockDim.x + cib;
+
+    // Cooperative G+1 offsets prefill (once per block).
+    if (tid < MAX_G_PLUS_1) {
+        s_offs[tid] = (tid <= g.G) ? static_cast<int>(g.group_offs[tid]) : 0;
+    }
+    __syncthreads();
+
+    const int row_block_base = blockIdx.y * TBM;
+    const int col_block_base = blockIdx.x * TBN;
+    if (row_block_base >= g.M_total || col_block_base >= g.fast_n) return;
+
+    // Pick a single group_idx for the entire block (assumes block within one
+    // group — see caller assumptions above). Use the FIRST row of the block.
+    int group_idx = 0;
+    #pragma unroll 1
+    for (int gi = 0; gi < g.G; ++gi) {
+        if (row_block_base < s_offs[gi + 1]) { group_idx = gi; break; }
+    }
+
+    const int k0 = g.fast_k;
+    const int K_rem_dyn = g.k - k0;
+    // K_rem_dyn must equal K_REM for this template instantiation (callers
+    // dispatch by g.k - g.fast_k). Guard against accidental mismatch (e.g.,
+    // dispatch bug) — fall back to early-exit, scalar tail will fix things.
+    if (K_rem_dyn != K_REM) return;
+
+    // Cooperative A K-strip load. Linear index → (r_in_blk, kk_offset).
+    // Each thread loads A_PER_THR ≤ 4 elements at K_REM=64. ``load_bf16_scalar``
+    // returns ``float``; cast back to ``bf16`` for LDS storage (no precision
+    // loss — value originated as bf16 in HBM).
+    #pragma unroll
+    for (int li = 0; li < A_PER_THR; ++li) {
+        const int linear = li * NTHR + tid;
+        if (linear < A_TOTAL) {
+            const int r_in_blk = linear / K_REM;
+            const int kk = linear - r_in_blk * K_REM;
+            const int r_global = row_block_base + r_in_blk;
+            const float a_val = (r_global < g.M_total)
+                ? load_bf16_scalar(g.a, r_global, k0 + kk)
+                : 0.0f;
+            A_lds[linear] = static_cast<bf16>(a_val);
+        }
+    }
+    // Cooperative B K-strip load (group_idx fixed for the whole block).
+    #pragma unroll
+    for (int li = 0; li < B_PER_THR; ++li) {
+        const int linear = li * NTHR + tid;
+        if (linear < B_TOTAL) {
+            const int c_in_blk = linear / K_REM;
+            const int kk = linear - c_in_blk * K_REM;
+            const int c_global = col_block_base + c_in_blk;
+            const float b_val = (c_global < g.fast_n)
+                ? load_bf16_scalar_grp(g.b, group_idx, c_global, k0 + kk)
+                : 0.0f;
+            B_lds[linear] = static_cast<bf16>(b_val);
+        }
+    }
+    __syncthreads();
+
+    const int row = row_block_base + rib;
+    const int col = col_block_base + cib;
+    if (row >= g.M_total || col >= g.fast_n) return;
+
+    // Scalar dot product over LDS data. K_REM is constexpr so the loop is
+    // fully unrolled. Each iteration is 2 LDS loads (broadcast + broadcast)
+    // + 1 fma. The LDS broadcasts are the dominant gain: 16 threads in the
+    // same `rib` row read A_lds[rib][kk] simultaneously — single LDS bank
+    // load, broadcast to all (no lane-conflict).
+    float acc = 0.0f;
+    #pragma unroll
+    for (int kk = 0; kk < K_REM; ++kk) {
+        acc += float(A_lds[rib * K_REM + kk])
+             * float(B_lds[cib * K_REM + kk]);
+    }
+
+    // K-tail correction add. Main grouped kernel already stored the
+    // [0, fast_k) reduction at C[row, col]; we add the [fast_k, k) part.
+    store_bf16_scalar(g.c, row, col,
+                      load_bf16_scalar(g.c, row, col) + acc);
+}
+
+template __global__ void grouped_ktail_kernel_lds<Layout::RCR, 64>(const grouped_layout_globals);
 
 // Persistent kernel: grid_x = NUM_CUS. One block per CU; each block iterates
 // many (group, tile) pairs in a single launch.
@@ -1320,6 +1591,28 @@ void dispatch_grouped(grouped_layout_globals g) {
     // launching tail would still early-exit all threads on the first
     // sync but adds an unnecessary launch + LDS-init pass.
     if (g.fast_n != g.n || g.fast_k != g.k) {
+        // Fast path: LDS-staged interior K-tail correction (round-9). Runs
+        // when the K-tail size matches a templated specialisation AND each
+        // (TAIL_BLOCK_M × TAIL_BLOCK_N) tail block sits inside a single
+        // group (uniform M with M_g a TAIL_BLOCK_M multiple — true for
+        // metric uniform-M=2048/4096 grouped shapes). Cuts interior K-tail
+        // from ~4 TF (scalar HBM-bound, one A row + one B col fetched per
+        // thread) to ~50-80 TF (cooperative LDS staging, 16× reuse).
+        const int K_rem = g.k - g.fast_k;
+        const bool lds_k_tail_safe = (g.m_per_group >= TAIL_BLOCK_M) &&
+                                     ((g.m_per_group % TAIL_BLOCK_M) == 0);
+        if constexpr (L == Layout::RCR) {
+            if (K_rem == 64 && g.fast_n > 0 && lds_k_tail_safe) {
+                dim3 lds_block(TAIL_BLOCK_N, TAIL_BLOCK_M);
+                dim3 lds_grid(
+                    kittens::ceil_div(g.fast_n, TAIL_BLOCK_N),
+                    kittens::ceil_div(g.M_total, TAIL_BLOCK_M)
+                );
+                grouped_ktail_kernel_lds<Layout::RCR, 64>
+                    <<<lds_grid, lds_block, 0, g.stream>>>(g);
+            }
+        }
+
         dim3 tail_block(TAIL_BLOCK_N, TAIL_BLOCK_M);
         dim3 tail_grid(
             kittens::ceil_div(g.n, TAIL_BLOCK_N),
@@ -1331,7 +1624,7 @@ void dispatch_grouped(grouped_layout_globals g) {
 
 static void grouped_dispatch(pybind11::object a, pybind11::object b, pybind11::object c,
                              pybind11::object group_offs, int gm, int num_xcds,
-                             const char* layout_name) {
+                             int m_per_group, const char* layout_name) {
     auto group_offs_ptr = group_offs.attr("data_ptr")().cast<uintptr_t>();
     int G = group_offs.attr("numel")().cast<int>() - 1;
 
@@ -1343,6 +1636,7 @@ static void grouped_dispatch(pybind11::object a, pybind11::object b, pybind11::o
         {},
         G, 0, 0, 0, 0, gm, num_xcds, 0,
         0, 0, // fast_n, fast_k — populated inside dispatch_grouped<L>.
+        m_per_group,
     };
 
     if (layout_name[0] == 'r' && layout_name[1] == 'c') dispatch_grouped<Layout::RCR>(g);
@@ -1350,17 +1644,25 @@ static void grouped_dispatch(pybind11::object a, pybind11::object b, pybind11::o
     else dispatch_grouped<Layout::CRR>(g);
 }
 
+// Round-9 binding signature: extra ``m_per_group`` int defaults to 0
+// (non-uniform). When > 0 and a TAIL_BLOCK_M multiple, the dispatcher
+// activates the LDS-staged interior K-tail correction kernel. Existing
+// Primus callers that haven't been updated will pass the default and
+// silently fall back to the scalar tail (zero behavior change).
 static void grouped_rcr_fn(pybind11::object a, pybind11::object b, pybind11::object c,
-                           pybind11::object group_offs, int gm, int num_xcds) {
-    grouped_dispatch(a, b, c, group_offs, gm, num_xcds, "rcr");
+                           pybind11::object group_offs, int gm, int num_xcds,
+                           int m_per_group) {
+    grouped_dispatch(a, b, c, group_offs, gm, num_xcds, m_per_group, "rcr");
 }
 static void grouped_rrr_fn(pybind11::object a, pybind11::object b, pybind11::object c,
-                           pybind11::object group_offs, int gm, int num_xcds) {
-    grouped_dispatch(a, b, c, group_offs, gm, num_xcds, "rrr");
+                           pybind11::object group_offs, int gm, int num_xcds,
+                           int m_per_group) {
+    grouped_dispatch(a, b, c, group_offs, gm, num_xcds, m_per_group, "rrr");
 }
 static void grouped_crr_fn(pybind11::object a, pybind11::object b, pybind11::object c,
-                           pybind11::object group_offs, int gm, int num_xcds) {
-    grouped_dispatch(a, b, c, group_offs, gm, num_xcds, "crr");
+                           pybind11::object group_offs, int gm, int num_xcds,
+                           int m_per_group) {
+    grouped_dispatch(a, b, c, group_offs, gm, num_xcds, m_per_group, "crr");
 }
 
 PYBIND11_MODULE(tk_bf16_layouts, m) {
@@ -1372,11 +1674,11 @@ PYBIND11_MODULE(tk_bf16_layouts, m) {
     // is a [G+1] int64 device tensor (prefix-sum of per-group M); the kernel
     // consumes it on the GPU side via O(G) linear scan, no host reads.
     m.def("grouped_rcr", &grouped_rcr_fn, "a"_a, "b"_a, "c"_a,
-          "group_offs"_a, "group_m"_a=4, "num_xcds"_a=8);
+          "group_offs"_a, "group_m"_a=4, "num_xcds"_a=8, "m_per_group"_a=0);
     m.def("grouped_rrr", &grouped_rrr_fn, "a"_a, "b"_a, "c"_a,
-          "group_offs"_a, "group_m"_a=4, "num_xcds"_a=8);
+          "group_offs"_a, "group_m"_a=4, "num_xcds"_a=8, "m_per_group"_a=0);
     m.def("grouped_crr", &grouped_crr_fn, "a"_a, "b"_a, "c"_a,
-          "group_offs"_a, "group_m"_a=4, "num_xcds"_a=8);
+          "group_offs"_a, "group_m"_a=4, "num_xcds"_a=8, "m_per_group"_a=0);
     m.attr("BLOCK_SIZE") = BLOCK_SIZE;
     m.attr("K_STEP") = K_STEP;
 }

@@ -173,6 +173,24 @@ __device__ __forceinline__ void store_bf16_scalar(const _gl_bf16& dst, int row, 
     dst[coord<>(row, col)] = base_types::convertor<bf16, float>::convert(value);
 }
 
+// Per-group scalar FP8 load. ``b`` for grouped FP8 is logically
+// [batch=1, G, N, K]; the 4D coord lets `grouped_tail_kernel` index B at
+// (group_idx, row, col).
+__device__ __forceinline__ float load_fp8_scalar_grp(const _gl_fp8& src, int g_idx, int row, int col) {
+    return base_types::convertor<float, fp8e4m3>::convert(src[coord<>{0, g_idx, row, col}]);
+}
+
+// Packed 8 × fp8e4m3 = 8 bytes for vectorised tail-kernel K-loop. The
+// HIP compiler emits a single `global_load_dwordx2` for a load through
+// this type when the source pointer is 8-byte aligned, replacing 8
+// separate scalar fp8 loads (8× fewer VMEM transactions). Used by the
+// RCR fast path inside `grouped_tail_kernel` where both operands are
+// stride-1 in K. Extraction via ``convertor<float4, fp8e4m3_4>`` gives
+// 8 fp32 accumulator inputs per 8-byte load.
+struct alignas(8) fp8e4m3_8 {
+    fp8e4m3_4 lo, hi;
+};
+
 template<int N_THREADS, ducks::st::all ST, ducks::gl::all GL>
 __device__ __forceinline__ void prefill_transpose_swizzled_offsets(
     ST& dst, const GL& src, uint32_t* swizzled_offsets)
@@ -1528,12 +1546,44 @@ __global__ void gemm_tail_kernel(const layout_globals g) {
 
     const int k0 = fast_covers_cell ? g.fast_k : 0;
     float acc = 0.0f;
-    for (int kk = k0; kk < g.k; ++kk) {
-        if constexpr (L == Layout::RCR) {
+
+    if constexpr (L == Layout::RCR) {
+        // Vec8 fast path for RCR. See ``grouped_tail_kernel`` for the
+        // rationale; mirror change to keep dense + grouped tail logic
+        // in sync. Dense rarely runs the tail (LLM shapes are aligned
+        // 4096 / 8192 multiples) so this is mostly a code-symmetry win.
+        const fp8e4m3* a_row = &g.a[coord<>(row, 0)];
+        const fp8e4m3* b_row = &g.b[coord<>(col, 0)];
+        int kk = k0;
+        if ((g.k % 8 == 0) && ((k0 & 7) == 0)) {
+            const fp8e4m3_8* a_v8 = reinterpret_cast<const fp8e4m3_8*>(a_row);
+            const fp8e4m3_8* b_v8 = reinterpret_cast<const fp8e4m3_8*>(b_row);
+            const int j_start = k0 >> 3;
+            const int j_end   = g.k >> 3;
+            #pragma unroll 4
+            for (int j = j_start; j < j_end; ++j) {
+                fp8e4m3_8 a8 = a_v8[j];
+                fp8e4m3_8 b8 = b_v8[j];
+                float4 a_lo = base_types::convertor<float4, fp8e4m3_4>::convert(a8.lo);
+                float4 a_hi = base_types::convertor<float4, fp8e4m3_4>::convert(a8.hi);
+                float4 b_lo = base_types::convertor<float4, fp8e4m3_4>::convert(b8.lo);
+                float4 b_hi = base_types::convertor<float4, fp8e4m3_4>::convert(b8.hi);
+                acc += a_lo.x * b_lo.x + a_lo.y * b_lo.y
+                     + a_lo.z * b_lo.z + a_lo.w * b_lo.w
+                     + a_hi.x * b_hi.x + a_hi.y * b_hi.y
+                     + a_hi.z * b_hi.z + a_hi.w * b_hi.w;
+            }
+            kk = j_end << 3;
+        }
+        for (; kk < g.k; ++kk) {
             acc += load_fp8_scalar(g.a, row, kk) * load_fp8_scalar(g.b, col, kk);
-        } else if constexpr (L == Layout::RRR) {
+        }
+    } else if constexpr (L == Layout::RRR) {
+        for (int kk = k0; kk < g.k; ++kk) {
             acc += load_fp8_scalar(g.a, row, kk) * load_fp8_scalar(g.b, kk, col);
-        } else {
+        }
+    } else {
+        for (int kk = k0; kk < g.k; ++kk) {
             acc += load_fp8_scalar(g.a, kk, row) * load_fp8_scalar(g.b, kk, col);
         }
     }
@@ -1599,10 +1649,20 @@ struct grouped_layout_globals {
     int G;                       // number of groups
     int n;                       // N
     int k;                       // K
-    int ki;                      // K / K_BLOCK
-    int bpc;                     // n / BLOCK_SIZE
+    int ki;                      // fast_k / K_BLOCK
+    int bpc;                     // fast_n / BLOCK_SIZE
     int group_m;                 // tile-scheduling super-block factor
     int M_total;                 // sum of group sizes (= a.shape[0])
+    // [grouped] Native non-aligned support (mirror of BF16 grouped Phase 3
+    // and FP8 dense fast/tail). Main kernel only sweeps the largest aligned
+    // interior:
+    //   fast_n = (n / BLOCK_SIZE) * BLOCK_SIZE
+    //   fast_k = (k / K_BLOCK) * K_BLOCK
+    // `grouped_tail_kernel` (scalar fp32) handles cells with col >= fast_n
+    // (full-K reduction) plus K-tail correction in [fast_k, k) for interior
+    // cells. Per-group M-tail (M_g % BLOCK_SIZE != 0) is NOT handled in this
+    // round (caller contract: each group's M is BLOCK_SIZE-aligned).
+    int fast_n, fast_k;
     dim3 block() { return dim3(_NUM_THREADS); }
     size_t dynamic_shared_memory() { return 0; }
 };
@@ -1889,13 +1949,134 @@ void grouped_rcr_kernel(const grouped_layout_globals g) {
 
 template __global__ void grouped_rcr_kernel<0>(const grouped_layout_globals);
 
+// =============================================================================
+// Grouped tail kernel — scalar fp32 fixup for cells the main grouped kernel
+// does not cover (col >= fast_n) and the K-tail correction in [fast_k, k)
+// for interior cells. Mirror of `gemm_tail_kernel` (FP8 dense) but with
+// per-group B indexing via `group_offs`. RCR layout only (matches the only
+// FP8 grouped binding currently exposed).
+//
+// Three cases per cell:
+//   * col <  fast_n  AND fast_k == k  → main covers fully → early-return.
+//   * col <  fast_n  AND fast_k <  k  → main wrote partial; add K-tail.
+//   * col >= fast_n                   → main did not run; full-K reduction.
+//
+// Per-group M-tail (M_g % BLOCK_SIZE != 0) is NOT handled — caller contract.
+template<Layout L>
+__global__ void grouped_tail_kernel(const grouped_layout_globals g) {
+    static_assert(L == Layout::RCR,
+                  "FP8 grouped only supports RCR (mirror of grouped_rcr_kernel).");
+    constexpr int MAX_G_PLUS_1 = 65;
+    __shared__ int s_offs[MAX_G_PLUS_1];
+
+    if (threadIdx.x == 0 && threadIdx.y == 0) {
+        #pragma unroll 1
+        for (int gi = 0; gi <= g.G; ++gi) {
+            s_offs[gi] = static_cast<int>(g.group_offs[gi]);
+        }
+    }
+    __syncthreads();
+
+    const bool needs_k_tail = g.fast_k < g.k;
+    const bool needs_n_tail = g.fast_n < g.n;
+    if (!needs_k_tail && !needs_n_tail) return;
+
+    const int row = blockIdx.y * blockDim.y + threadIdx.y;
+    const int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= g.M_total || col >= g.n) return;
+
+    int group_idx = 0;
+    #pragma unroll 1
+    for (int gi = 0; gi < g.G; ++gi) {
+        if (row < s_offs[gi + 1]) { group_idx = gi; break; }
+    }
+
+    const bool interior_n       = col < g.fast_n;
+    const bool fast_covers_cell = interior_n && g.fast_n > 0 && g.fast_k > 0;
+    if (fast_covers_cell && !needs_k_tail) return;
+
+    const int k0 = fast_covers_cell ? g.fast_k : 0;
+    float acc = 0.0f;
+
+    // Vec8 (8-byte = 8 fp8e4m3) fast path. Both A[row, kk] and
+    // B[group_idx, col, kk] are stride-1 in K, so consecutive fp8s
+    // along K can be loaded as a single dwordx2. ``g.k`` is bounded
+    // below the K_BLOCK alignment by host pad in the gpt_oss-K=2880
+    // path which is currently the only K-tail caller; for K=2880,
+    // (g.k - k0) is 64 (K-tail correction) or 2880 (N-tail full
+    // reduction) — both multiples of 8. The scalar tail handles any
+    // residual when g.k % 8 != 0.
+    const fp8e4m3* a_row = &g.a[coord<>(row, 0)];
+    const fp8e4m3* b_row = &g.b[coord<>{0, group_idx, col, 0}];
+    int kk = k0;
+    if ((g.k % 8 == 0) && ((k0 & 7) == 0)) {
+        const fp8e4m3_8* a_v8 = reinterpret_cast<const fp8e4m3_8*>(a_row);
+        const fp8e4m3_8* b_v8 = reinterpret_cast<const fp8e4m3_8*>(b_row);
+        const int j_start = k0 >> 3;
+        const int j_end   = g.k >> 3;
+        #pragma unroll 4
+        for (int j = j_start; j < j_end; ++j) {
+            fp8e4m3_8 a8 = a_v8[j];
+            fp8e4m3_8 b8 = b_v8[j];
+            float4 a_lo = base_types::convertor<float4, fp8e4m3_4>::convert(a8.lo);
+            float4 a_hi = base_types::convertor<float4, fp8e4m3_4>::convert(a8.hi);
+            float4 b_lo = base_types::convertor<float4, fp8e4m3_4>::convert(b8.lo);
+            float4 b_hi = base_types::convertor<float4, fp8e4m3_4>::convert(b8.hi);
+            acc += a_lo.x * b_lo.x + a_lo.y * b_lo.y
+                 + a_lo.z * b_lo.z + a_lo.w * b_lo.w
+                 + a_hi.x * b_hi.x + a_hi.y * b_hi.y
+                 + a_hi.z * b_hi.z + a_hi.w * b_hi.w;
+        }
+        kk = j_end << 3;
+    }
+    for (; kk < g.k; ++kk) {
+        acc += load_fp8_scalar(g.a, row, kk) *
+               load_fp8_scalar_grp(g.b, group_idx, col, kk);
+    }
+
+    const float scaled = acc * resolve_combined_scale_grp(g);
+    if (fast_covers_cell && needs_k_tail) {
+        store_bf16_scalar(g.c, row, col,
+                          load_bf16_scalar(g.c, row, col) + scaled);
+    } else {
+        store_bf16_scalar(g.c, row, col, scaled);
+    }
+}
+
+template __global__ void grouped_tail_kernel<Layout::RCR>(const grouped_layout_globals);
+
 void dispatch_grouped_rcr(grouped_layout_globals g) {
     g.n = static_cast<int>(g.c.cols());
     g.M_total = static_cast<int>(g.c.rows());
     g.k = static_cast<int>(g.a.cols());
-    g.ki = g.k / K_BLOCK;
-    g.bpc = g.n / BLOCK_SIZE;
-    grouped_rcr_kernel<0><<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
+
+    // Aligned interior swept by the persistent main kernel; cells outside go
+    // through `grouped_tail_kernel`.
+    g.fast_n = (g.n / BLOCK_SIZE) * BLOCK_SIZE;
+    g.fast_k = (g.k / K_BLOCK)    * K_BLOCK;
+    g.bpc    = g.fast_n / BLOCK_SIZE;
+    g.ki     = g.fast_k / K_BLOCK;
+
+    if (g.bpc > 0 && g.ki > 0) {
+        grouped_rcr_kernel<0><<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
+    } else {
+        // No aligned interior at all: main kernel cannot run; tail handles
+        // every cell with a full-K reduction.
+        g.fast_n = 0;
+        g.fast_k = 0;
+        g.bpc = 0;
+        g.ki = 0;
+    }
+
+    if (g.fast_n != g.n || g.fast_k != g.k) {
+        dim3 tail_block(TAIL_BLOCK_N, TAIL_BLOCK_M);
+        dim3 tail_grid(
+            kittens::ceil_div(g.n, TAIL_BLOCK_N),
+            kittens::ceil_div(g.M_total, TAIL_BLOCK_M)
+        );
+        grouped_tail_kernel<Layout::RCR>
+            <<<tail_grid, tail_block, 0, g.stream>>>(g);
+    }
 }
 
 template<Layout L>
@@ -2023,7 +2204,8 @@ static void grouped_rcr_fn(pybind11::object a, pybind11::object b, pybind11::obj
         nullptr,
         reinterpret_cast<const int64_t*>(group_offs_ptr),
         {},
-        G, 0, 0, 0, 0, group_m, 0,
+        /* G,n,k,ki,bpc,group_m,M_total,fast_n,fast_k */
+        G, 0, 0, 0, 0, group_m, 0, 0, 0,
     };
     dispatch_grouped_rcr(g);
 }
@@ -2046,7 +2228,8 @@ static void grouped_rcr_dscale_fn(
         reinterpret_cast<const float*>(sb_ptr),
         reinterpret_cast<const int64_t*>(group_offs_ptr),
         {},
-        G, 0, 0, 0, 0, group_m, 0,
+        /* G,n,k,ki,bpc,group_m,M_total,fast_n,fast_k */
+        G, 0, 0, 0, 0, group_m, 0, 0, 0,
     };
     dispatch_grouped_rcr(g);
 }
