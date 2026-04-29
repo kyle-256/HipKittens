@@ -1199,9 +1199,20 @@ __global__ void grouped_tail_kernel(const grouped_layout_globals g) {
     }
     __syncthreads();
 
-    // Cheap quick-exit when fully N/K-aligned (most common path).
+    // Round 5: when the layout is RCR, ``dispatch_grouped`` launches the
+    // main kernel with ``bpc = ceil_div(g.n, BLOCK_SIZE)``; the per-group
+    // bounded B SRD + column-masked C store cover the entire [0, g.n)
+    // column range natively. In that mode the tail kernel only runs for
+    // K-tail (now applies to ALL cols [0, n), including the partial last
+    // col-tile) or per-group M-tail.
+    // RRR/CRR layouts can't activate ceil_div N coverage yet (B has N on
+    // the column axis, where SRD-clamp doesn't trigger for OOB N), so
+    // their N-tail still flows through the per-cell full-K reduction.
+    constexpr bool layout_supports_main_n = (L == Layout::RCR);
+    const bool main_covers_n =
+        layout_supports_main_n && (g.fast_k > 0) && (g.fast_k == g.k);
     const bool needs_k_tail = g.fast_k < g.k;
-    const bool needs_n_tail = g.fast_n < g.n;
+    const bool needs_n_tail = !main_covers_n && (g.fast_n < g.n);
     if (!needs_k_tail && !needs_n_tail) return;
 
     const int row = blockIdx.y * blockDim.y + threadIdx.y;
@@ -1215,8 +1226,13 @@ __global__ void grouped_tail_kernel(const grouped_layout_globals g) {
         if (row < s_offs[gi + 1]) { group_idx = gi; break; }
     }
 
-    const bool interior_n       = col < g.fast_n;
-    const bool fast_covers_cell = interior_n && g.fast_n > 0 && g.fast_k > 0;
+    // ``interior_n``: column lies inside the region the main kernel covered.
+    //   * main_covers_n (ceil_div bpc + masked store): main wrote [0, g.n).
+    //   * otherwise (bpc = fast_n / BLOCK_SIZE): main wrote [0, fast_n).
+    const bool interior_n       = main_covers_n
+                                      ? (col < g.n)
+                                      : (col < g.fast_n);
+    const bool fast_covers_cell = interior_n && g.fast_k > 0;
     if (fast_covers_cell && !needs_k_tail) return;
     // When the LDS-staged K-tail kernel runs (round-9 ``feat(bf16-grouped):
     // LDS-staged K-tail correction``), it has already added the
@@ -1539,8 +1555,16 @@ void grouped_kernel(const grouped_layout_globals g) {
     __syncthreads();
     const int total_tiles = s_total_tiles;
 
-    // [grouped] SRD setup. Bounds span the FULL A and B tensors (across all
-    // groups) so the same SRD is valid across persistent iterations.
+    // [grouped] SRD setup. Bounds span the FULL A and C tensors (across all
+    // groups) so the same A SRD is valid across persistent iterations.
+    // The B SRD is computed PER PERSISTENT ITERATION below — its bound is
+    // ``(group_idx + 1) * <inner_rows> * sizeof(bf16)`` so a partial col-tile
+    // (from ``g.bpc = ceil_div(g.n, BLOCK_SIZE)`` when N is misaligned and K
+    // is aligned) cannot wrap into the NEXT group's region. With a global
+    // SRD bound the OOB row would still land inside ``[0, G*N*K)`` and read
+    // garbage; clipping to the current group's slice forces ``buffer_load_lds``
+    // to clamp those lanes to 0 — the column-masked C store below then
+    // drops the OOB cells from the write-back.
     const bf16* a_base = (bf16*)&g.a[{0, 0, 0, 0}];
     const bf16* b_base = (bf16*)&g.b[{0, 0, 0, 0}];
     const int a_row_stride = g.a.template stride<2>() * sizeof(bf16);
@@ -1548,12 +1572,13 @@ void grouped_kernel(const grouped_layout_globals g) {
     // For "normal" A layout (M×K): A_total_rows = M_total. For CRR A (K×M_total):
     // A_total_rows = K (M dimension lives on the col axis).
     const int a_total_rows = (L == Layout::CRR) ? g.k : g.M_total;
-    // For B (3D [G, N, K] (RCR) or [G, K, N] (RRR/CRR)): SRD must cover all
-    // groups. ``b_row_stride`` already encodes the inner-row pitch (K or N).
-    // The total row count is groups × per-group rows.
-    const int b_total_rows = (L == Layout::RCR) ? (g.G * g.n) : (g.G * g.k);
     i32x4 a_srsrc_base = make_srsrc(a_base, a_total_rows * a_row_stride, a_row_stride);
-    i32x4 b_srsrc_base = make_srsrc(b_base, b_total_rows * b_row_stride, b_row_stride);
+    // ``b_inner_rows`` is the number of rows per group along B's row axis:
+    //   * RCR     : B is [G, N, K] — row axis is N → ``g.n``.
+    //   * RRR/CRR : B is [G, K, N] — row axis is K → ``g.k``.
+    // We multiply by ``(group_idx + 1)`` per-iteration to get the per-group
+    // SRD upper bound.
+    const int b_inner_rows = (L == Layout::RCR) ? g.n : g.k;
 
     const int wid = warpid() % NUM_WARPS;
     constexpr int elem_per_warp = (16 / sizeof(bf16)) * kittens::WARP_THREADS;
@@ -1584,6 +1609,15 @@ void grouped_kernel(const grouped_layout_globals g) {
     const int warp_id = kittens::warpid();
     const int warp_row = warp_id / 4;
     const int warp_col = warp_id % 4;
+
+    // Per-group bounded B SRD cache. The persistent loop streams many
+    // (group, tile) pairs through this CU; ``group_idx`` typically stays
+    // constant for a run of 8-32 tiles before advancing. We keep the
+    // most recently constructed SRD and only rebuild on group change,
+    // which lifts the 4-SGPR ``make_srsrc`` cost out of the inner store
+    // path on aligned DeepSeek shapes.
+    int last_group_idx = -1;
+    i32x4 b_srsrc_curr = make_srsrc(b_base, b_inner_rows * b_row_stride, b_row_stride);
 
     // [grouped] Persistent outer loop: stream (group, tile) pairs through this CU.
     for (int gt = pid; gt < total_tiles; gt += NUM_CUS) {
@@ -1666,6 +1700,20 @@ void grouped_kernel(const grouped_layout_globals g) {
         zero(C_accum[0][0]); zero(C_accum[0][1]);
         zero(C_accum[1][0]); zero(C_accum[1][1]);
 
+        // Per-group bounded B SRD: limits the buffer-flat range to the
+        // current group's slice ``[group_idx * <inner_rows>, (group_idx+1)
+        // * <inner_rows>)``. ``buffer_load_lds`` then SRD-clamps any OOB
+        // row (from a partial last col-tile when ``g.bpc =
+        // ceil_div(g.n, BLOCK_SIZE)``) to 0 instead of wrapping into the
+        // NEXT group. Rebuilt only on ``group_idx`` transitions to avoid
+        // 4-SGPR-op overhead on every persistent iteration.
+        if (group_idx != last_group_idx) {
+            const int b_grp_total_rows = (group_idx + 1) * b_inner_rows;
+            b_srsrc_curr = make_srsrc(
+                b_base, b_grp_total_rows * b_row_stride, b_row_stride);
+            last_group_idx = group_idx;
+        }
+
         // Phase 2: shared device function above runs the same prologue +
         // main_loop + epilog 1/2 as the dense kernel. Grouped passes
         // m_subtile_A (A row shift in HALF_BLOCK_SIZE units) and group_idx
@@ -1676,7 +1724,7 @@ void grouped_kernel(const grouped_layout_globals g) {
             m_subtile_A, group_idx, /*k_offset_tiles=*/0,
             As, Bs,
             swizzled_offsets_A, swizzled_offsets_B,
-            a_srsrc_base, b_srsrc_base,
+            a_srsrc_base, b_srsrc_curr,
             a_base, b_base,
             a_lds_00, a_lds_01, a_lds_10, a_lds_11,
             b_lds_00, b_lds_01, b_lds_10, b_lds_11,
@@ -1686,21 +1734,30 @@ void grouped_kernel(const grouped_layout_globals g) {
 
         if (warp_row == 0) { __builtin_amdgcn_s_barrier(); }
 
-        // [grouped] Store with C row shifted by m_subtile_C. Grouped uses
-        // bpc = fast_n / BLOCK_SIZE so all stores are fully in-bounds; no
-        // column mask needed (see dispatch_grouped Phase-4 note).
-        store(g.c, C_accum[0][0], {0, 0,
-            m_subtile_C + (row * 2) * WARPS_M + warp_row,
-            col * 2 * WARPS_N + warp_col});
-        store(g.c, C_accum[0][1], {0, 0,
-            m_subtile_C + (row * 2) * WARPS_M + warp_row,
-            col * 2 * WARPS_N + WARPS_N + warp_col});
-        store(g.c, C_accum[1][0], {0, 0,
-            m_subtile_C + (row * 2) * WARPS_M + WARPS_M + warp_row,
-            col * 2 * WARPS_N + warp_col});
-        store(g.c, C_accum[1][1], {0, 0,
-            m_subtile_C + (row * 2) * WARPS_M + WARPS_M + warp_row,
-            col * 2 * WARPS_N + WARPS_N + warp_col});
+        // [grouped] Store with C row shifted by m_subtile_C. When
+        // ``g.bpc = ceil_div(g.n, BLOCK_SIZE)`` (round 5 path, K aligned)
+        // the last col-tile may straddle ``[fast_n, n)``; the masked store
+        // drops OOB columns. The launch-uniform branch on
+        // ``g.n % BLOCK_SIZE == 0`` keeps the aligned path on the raw
+        // ``store(...)`` call (zero compare/branch in the store inner
+        // loop) — DeepSeek-V3 N=4096/7168 hit this and pay no masked-store
+        // cost. Misaligned shapes (gpt_oss N=2880/5760) take the
+        // column-masked branch.
+        const int r0 = m_subtile_C + (row * 2) * WARPS_M + warp_row;
+        const int r1 = m_subtile_C + (row * 2) * WARPS_M + WARPS_M + warp_row;
+        const int c0 = col * 2 * WARPS_N + warp_col;
+        const int c1 = col * 2 * WARPS_N + WARPS_N + warp_col;
+        if ((g.n % BLOCK_SIZE) == 0) {
+            store(g.c, C_accum[0][0], {0, 0, r0, c0});
+            store(g.c, C_accum[0][1], {0, 0, r0, c1});
+            store(g.c, C_accum[1][0], {0, 0, r1, c0});
+            store(g.c, C_accum[1][1], {0, 0, r1, c1});
+        } else {
+            store_c_tile_n_masked(g.c, C_accum[0][0], r0, c0, g.n);
+            store_c_tile_n_masked(g.c, C_accum[0][1], r0, c1, g.n);
+            store_c_tile_n_masked(g.c, C_accum[1][0], r1, c0, g.n);
+            store_c_tile_n_masked(g.c, C_accum[1][1], r1, c1, g.n);
+        }
 
         // [grouped] Drain in-flight ops before the next persistent iteration so
         // the next tile's prologue starts from a clean state.
@@ -1751,18 +1808,65 @@ void dispatch_grouped(grouped_layout_globals g) {
     // Phase 3: native non-aligned N/K. Per-group M tail (M_g % BLOCK_SIZE != 0)
     // is handled by `grouped_tail_kernel`.
     //
-    // NOTE: grouped uses bpc = fast_n / BLOCK_SIZE (NOT ceil_div). Multi-group B
-    // is laid out [G, N, K]; a partial col-tile (col*BLOCK in [fast_n, n)) issues
-    // B loads at coord{0, group_idx, spatial_OOB, k_tile} where the buffer-flat
-    // address can land in the NEXT group's region (still within SRD bounds, no
-    // SRD-clamp-to-zero), reading garbage memory that the hardware then attempts
-    // to forward through the swizzle/cache-line path and segfaults.
-    // Dense (bpc=ceil_div, store_c_tile_n_masked) does NOT have this issue
-    // because dense B is [N, K] and OOB rows are SRD-clamped. Grouped N-tail
-    // therefore stays in `grouped_tail_kernel` until the B load path is fixed.
+    // Phase 4 (round 5): main kernel covers the entire N range via column-
+    // masked C store + per-group bounded B SRD. Previously the docstring
+    // here warned that bpc = ceil_div was unsafe for grouped because a
+    // partial col-tile (spatial >= N) would issue B loads at
+    // coord{0, group_idx, spatial_OOB, k_tile} where the buffer-flat
+    // address wraps into the NEXT group's region (still within the
+    // shared global SRD bound, no SRD clamp-to-zero) and segfaults
+    // through the swizzle/cache path.
+    //
+    // Round-5 fix: in ``grouped_kernel`` we now reconstruct the B SRD
+    // per-iteration with a bound of ``(group_idx + 1) * <inner-rows> *
+    // sizeof(bf16)`` so the SOFF for any OOB-row tile lands beyond
+    // the SRD limit and the hardware clamps the load to 0. This matches
+    // the dense kernel's ceil_div + ``store_c_tile_n_masked`` design
+    // (g.bpc widening below) — when fast_k == g.k we let the main
+    // kernel sweep the full N axis. K-tail still falls through to
+    // ``grouped_tail_kernel`` (single-axis correction).
+    //
+    // Restriction: ceil_div coverage of N is only enabled when K is
+    // fully aligned (``fast_k == g.k``). When BOTH N and K are
+    // misaligned, the partial col-tile interacts with the K-tail
+    // correction in a way that triggers a memory fault on certain
+    // shape combos (mirror of dense Phase 4 fallback).
     g.fast_n = (g.n / BLOCK_SIZE) * BLOCK_SIZE;
     g.fast_k = (g.k / K_TWO_TILE) * K_TWO_TILE;
-    g.bpc    = g.fast_n / BLOCK_SIZE;
+    // ceil_div N coverage is RCR-only:
+    //   * RCR     : B is [G, N, K] — row axis is N, ``b_row_stride`` =
+    //               K bytes, so an OOB N row's buffer-flat offset
+    //               exceeds the per-group SRD bound and gets clamped
+    //               to 0. The masked C store then drops the OOB cells.
+    //               Round 5 path: the K-tail correction is added on top
+    //               of the masked main kernel write by ``grouped_tail_kernel``
+    //               for ALL cells col in [0, g.n) — including the partial
+    //               last col-tile — because main now wrote the
+    //               [0, fast_k) partial reduction there.
+    //   * RRR/CRR : B is [G, K, N] — N lives on the COLUMN axis, so
+    //               an OOB N column lands at byte-offset
+    //               ``row*N_stride + col_oob``, which is still inside
+    //               the per-group SRD (just wraps to the next K row's
+    //               valid columns) — no clamp triggers, garbage data
+    //               feeds the MMA. Until we add a column-mask path on
+    //               the B load itself (Phase 6+), RRR/CRR keep the
+    //               legacy ``bpc = fast_n / BLOCK_SIZE`` and N-tail
+    //               flows through ``grouped_tail_kernel``.
+    // Restriction: ceil_div coverage of N is only enabled when K is
+    // fully aligned (``fast_k == g.k``). When BOTH N and K are
+    // misaligned, the partial col-tile interacts with the scalar
+    // K-tail kernel's read-modify-write on g.c in a way that
+    // triggers a memory fault on certain shape combos (e.g.,
+    // gpt_oss-Down N=K=2880). Keep the K-aligned restriction until
+    // we wire an LDS-staged K-tail kernel for the entire [0, n)
+    // range (round 6+).
+    if constexpr (L == Layout::RCR) {
+        g.bpc = (g.fast_k == g.k)
+            ? kittens::ceil_div(g.n, BLOCK_SIZE)
+            : (g.fast_n / BLOCK_SIZE);
+    } else {
+        g.bpc = g.fast_n / BLOCK_SIZE;
+    }
     g.ki     = g.fast_k / K_STEP;
 
     if (g.bpc > 0 && g.ki >= 2) {
@@ -1790,9 +1894,21 @@ void dispatch_grouped(grouped_layout_globals g) {
         g.ki     = 0;
     }
 
-    // Launch tail kernel for N-tail or K-tail (grouped main kernel still
-    // uses bpc=fast_n/BLOCK_SIZE; cols [fast_n, n) come from the tail).
-    if (g.fast_n != g.n || g.fast_k != g.k) {
+    // Launch tail kernel for N-tail or K-tail. When the layout is RCR
+    // the main kernel always uses bpc = ceil_div(n, BLOCK_SIZE) — the
+    // per-group bounded B SRD + column-masked C store cover the entire
+    // [0, n) column range natively. The scalar tail kernel still runs
+    // for any K-tail correction (which now spans ALL cols in [0, n)
+    // when fast_k < k) and per-group M-tail.
+    // RRR/CRR can't activate ceil_div N coverage yet (see dispatch
+    // comment above) — N-tail still runs through the scalar tail kernel
+    // for those layouts.
+    constexpr bool layout_supports_main_n = (L == Layout::RCR);
+    const bool main_covers_n = layout_supports_main_n && (g.fast_k == g.k);
+    const bool need_tail_run =
+        (g.fast_k != g.k) ||
+        (!main_covers_n && g.fast_n != g.n);
+    if (need_tail_run) {
         // Fast path: LDS-staged interior K-tail correction (round-9). Runs
         // when the K-tail size matches a templated specialisation AND each
         // (TAIL_BLOCK_M × TAIL_BLOCK_N) tail block sits inside a single
