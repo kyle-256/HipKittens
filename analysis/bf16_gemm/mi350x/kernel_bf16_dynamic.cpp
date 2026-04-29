@@ -197,205 +197,89 @@ __device__ __forceinline__ void store_bf16_scalar(const _gl& dst, int row, int c
     dst[coord<>(row, col)] = base_types::convertor<bf16, float>::convert(value);
 }
 
-// KI_HINT > 0: compile-time num_tiles (K / K_STEP) -> full #pragma unroll
-// KI_HINT == 0: dynamic num_tiles from g.ki, #pragma unroll 2
-template<Layout L, int KI_HINT>
-__global__ __launch_bounds__(NUM_THREADS, 2)
-void gemm_kernel(const layout_globals g) {
-    extern __shared__ alignment_dummy __shm[];
-    shared_allocator al((int*)&__shm[0]);
-
-    // Shared memory tile types: "normal" = <128,64,st_16x32_s>, "transposed" = <64,128,st_32x16_s>
-    // The swizzle must match: row_l registers use rt_16x32 -> st_16x32_s;
-    //                         col_l registers use rt_32x16 -> st_32x16_s.
-    //
-    // P23 S2 Dev C: when RCR_PADDED_B128_MODE=1, the RCR-specific shape is
-    // `st_64x32_padded_b128_s` (Route 1). RRR/CRR are unchanged. The shape
-    // swap stays inside `if constexpr (L == Layout::RCR)` so RRR/CRR codegen
-    // is byte-identical regardless of the flag.
-#if RCR_PADDED_B128_MODE
-    using ST_A_RCR = st_bf<HALF_BLOCK_SIZE, K_STEP, rcr_padded_st_shape>;
-    using ST_B_RCR = st_bf<HALF_BLOCK_SIZE, K_STEP, rcr_padded_st_shape>;
-#else
-    using ST_A_RCR = st_bf<HALF_BLOCK_SIZE, K_STEP, st_16x32_s>;
-    using ST_B_RCR = st_bf<HALF_BLOCK_SIZE, K_STEP, st_16x32_s>;
-#endif
-
-    using ST_A = std::conditional_t<L == Layout::CRR,
-        st_bf<K_STEP, HALF_BLOCK_SIZE, st_32x16_s>,
-        std::conditional_t<L == Layout::RCR,
-            ST_A_RCR,
-            st_bf<HALF_BLOCK_SIZE, K_STEP, st_16x32_s>>>;
-    using ST_B = std::conditional_t<L == Layout::RCR,
-        ST_B_RCR,
-        st_bf<K_STEP, HALF_BLOCK_SIZE, st_32x16_s>>;
-
-    ST_A (&As)[2][2] = al.allocate<ST_A, 2, 2>();
-    ST_B (&Bs)[2][2] = al.allocate<ST_B, 2, 2>();
-
-    // Register tile types
-    using A_reg_t = std::conditional_t<L == Layout::CRR,
-        rt_bf<K_STEP, HALF_REG_BLOCK_M, col_l, rt_32x16_s>,
-        rt_bf<HALF_REG_BLOCK_M, K_STEP, row_l, rt_16x32_s>>;
-    using B_reg_t = std::conditional_t<L == Layout::RCR,
-        rt_bf<HALF_REG_BLOCK_N, K_STEP, row_l, rt_16x32_s>,
-        rt_bf<K_STEP, HALF_REG_BLOCK_N, col_l, rt_32x16_s>>;
-
+// =============================================================================
+// device_gemm_tile_body — shared GEMM main-loop body (Phase 2 refactor).
+//
+// The dense `gemm_kernel<L, KI_HINT>` and the persistent grouped
+// `grouped_kernel<L, KI_HINT>` previously contained two byte-identical
+// copies of: subtile-load lambdas + DO_MMA macro + prologue (4 G::load) +
+// main_loop_iter (~85 line lambda over a two-tile schedule) + epilog 1 +
+// epilog 2. This single `__forceinline__` device function is the shared
+// implementation; both callers see the identical instruction schedule
+// after inlining (constants like `m_subtile_A=0, group_idx=0` are folded
+// in the dense path).
+//
+// Caller responsibilities:
+//   * Allocate ST_A As[2][2] and ST_B Bs[2][2] in shared memory.
+//   * Compute SRD bases (a_srsrc_base, b_srsrc_base) and element bases
+//     (a_base, b_base) covering one tile (dense) or the full A / B
+//     tensors (grouped).
+//   * Compute the 8 LDS double-buffer offsets (a_lds_{00,01,10,11},
+//     b_lds_{00,01,10,11}) for the wave's per-warp slots.
+//   * Prefill swizzled_offsets_A / swizzled_offsets_B once.
+//   * `zero(C_accum[i][j])` before invoking this helper.
+//   * Pass `m_subtile_A = 0` and `group_idx = 0` from the dense kernel;
+//     pass `m_start_g / HALF_BLOCK_SIZE` and the persistent group index
+//     from the grouped kernel.
+//   * On return, store C_accum to the output tensor (plus optional row
+//     shift for grouped) and, for grouped, drain in-flight ops before
+//     the next persistent iteration.
+//
+// `num_tiles_dyn` is only consulted when KI_HINT == 0 (dynamic K). For
+// KI_HINT > 0 the loop bound is constant-folded.
+// =============================================================================
+template<Layout L, int KI_HINT,
+         typename ST_A_T, typename ST_B_T,
+         typename A_reg_t, typename B_reg_t>
+__device__ __forceinline__ void device_gemm_tile_body(
+    const _gl& a_gl, const _gl& b_gl,
+    int m_subtile_A, int group_idx,
+    ST_A_T (&As)[2][2], ST_B_T (&Bs)[2][2],
+    const uint32_t* swizzled_offsets_A,
+    const uint32_t* swizzled_offsets_B,
+    i32x4 a_srsrc_base, i32x4 b_srsrc_base,
+    const bf16* a_base, const bf16* b_base,
+    uint32_t a_lds_00, uint32_t a_lds_01,
+    uint32_t a_lds_10, uint32_t a_lds_11,
+    uint32_t b_lds_00, uint32_t b_lds_01,
+    uint32_t b_lds_10, uint32_t b_lds_11,
+    int row, int col,
+    int warp_row, int warp_col,
+    int num_tiles_dyn,
+    rt_fl<HALF_REG_BLOCK_M, HALF_REG_BLOCK_N, col_l, rt_16x16_s> (&C_accum)[2][2])
+{
     A_reg_t A_tile;
     B_reg_t B_tile_0, B_tile_1;
-    rt_fl<HALF_REG_BLOCK_M, HALF_REG_BLOCK_N, col_l, rt_16x16_s> C_accum[2][2];
-    zero(C_accum[0][0]); zero(C_accum[0][1]);
-    zero(C_accum[1][0]); zero(C_accum[1][1]);
-
-    const int total_tiles = g.bpr * g.bpc;
-    int wgid = blockIdx.x;
-
-    // Block mapping with XCD swizzle. Dual strategy: for tall-N problems
-    // (bpc > bpr), group-by-N so WGs in a super-block share pid_n and
-    // cycle pid_m — this optimizes B-reuse (B is larger than A on tall-N).
-    // For tall-M / square, use group-by-M so WGs share pid_m and cycle
-    // pid_n — this optimizes A-reuse. The user-specified group_m becomes
-    // WGM on tall-M path or WGN on tall-N path.
-    //
-    // The split encodes g.group_m meaning as a generic "super-block length
-    // along the narrower dimension". Threshold bpc > bpr picks tall-N vs
-    // non-tall-N. The two paths produce different (pid_m, pid_n) mappings
-    // but both preserve the XCD-swizzled traversal order.
-    const int NUM_WGS = total_tiles;
-    wgid = chiplet_transform_chunked(wgid, NUM_WGS, g.num_xcds, 64);
-    const int num_pid_m = g.bpr;
-    const int num_pid_n = g.bpc;
-    const int WG  = g.group_m;
-    int pid_m, pid_n;
-    if (g.bpc > g.bpr) {
-        // Tall-N: group-by-N. Super-block = all_M × WGN
-        const int WGN = WG;
-        const int num_wgid_in_group = num_pid_m * WGN;
-        int group_id = wgid / num_wgid_in_group;
-        int first_pid_n = group_id * WGN;
-        int group_size_n = min(num_pid_n - first_pid_n, WGN);
-        if (group_size_n <= 0) return;
-        pid_n = first_pid_n + ((wgid % num_wgid_in_group) % group_size_n);
-        pid_m = (wgid % num_wgid_in_group) / group_size_n;
-    } else {
-        // Tall-M / square: group-by-M. Super-block = WGM × all_N
-        const int WGM = WG;
-        const int num_wgid_in_group = WGM * num_pid_n;
-        int group_id = wgid / num_wgid_in_group;
-        int first_pid_m = group_id * WGM;
-        int group_size_m = min(num_pid_m - first_pid_m, WGM);
-        if (group_size_m <= 0) return;
-        pid_m = first_pid_m + ((wgid % num_wgid_in_group) % group_size_m);
-        pid_n = (wgid % num_wgid_in_group) / group_size_m;
-    }
-    if (pid_m >= g.bpr || pid_n >= g.bpc) return;
-    int row = pid_m;
-    int col = pid_n;
-
-    const int warp_id = kittens::warpid();
-    const int warp_row = warp_id / 4;
-    const int warp_col = warp_id % 4;
-
-    // K-specialization: compile-time vs dynamic.
-    // For the KI_HINT>0 path we use constexpr num_tiles so the main loop can unroll fully.
-    // For the KI_HINT==0 path we use dynamic g.ki and #pragma unroll 2 (limited).
-
-    // Coordinate helpers: coords are in tile units, scaled by ST::rows / ST::cols
-    auto a_coord = [&](int spatial, int k) {
-        if constexpr (L == Layout::CRR) return coord<ST_A>{0, 0, k, spatial};
-        else                            return coord<ST_A>{0, 0, spatial, k};
-    };
-    auto b_coord = [&](int spatial, int k) {
-        if constexpr (L == Layout::RCR) return coord<ST_B>{0, 0, spatial, k};
-        else                            return coord<ST_B>{0, 0, k, spatial};
-    };
-
-    /********** SRD setup **********/
-    const bf16* a_base = (bf16*)&g.a[{0, 0, 0, 0}];
-    const bf16* b_base = (bf16*)&g.b[{0, 0, 0, 0}];
-    const int a_row_stride = g.a.template stride<2>() * sizeof(bf16);
-    const int b_row_stride = g.b.template stride<2>() * sizeof(bf16);
-    // For "normal" layout (M×K or N×K): num_rows = M or N
-    // For "transposed" layout (K×M or K×N): num_rows = K
-    const int a_num_rows = (L == Layout::CRR) ? g.k : g.m;
-    const int b_num_rows = (L == Layout::RCR) ? g.n : g.k;
-    i32x4 a_srsrc_base = make_srsrc(a_base, a_num_rows * a_row_stride, a_row_stride);
-    i32x4 b_srsrc_base = make_srsrc(b_base, b_num_rows * b_row_stride, b_row_stride);
-
-    const int wid = warpid() % NUM_WARPS;
-    constexpr int elem_per_warp = (16 / sizeof(bf16)) * kittens::WARP_THREADS;
-    constexpr uint32_t A_TILE_LDS = sizeof(ST_A);
-    constexpr uint32_t B_TILE_LDS = sizeof(ST_B);
-    uint32_t a_lds = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(
-        reinterpret_cast<uintptr_t>(&As[0][0].data[0]) + wid * elem_per_warp * sizeof(bf16)));
-    uint32_t b_lds = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(
-        reinterpret_cast<uintptr_t>(&Bs[0][0].data[0]) + wid * elem_per_warp * sizeof(bf16)));
-    const uint32_t a_lds_00 = a_lds;
-    const uint32_t a_lds_01 = a_lds + A_TILE_LDS;
-    const uint32_t a_lds_10 = a_lds + 2 * A_TILE_LDS;
-    const uint32_t a_lds_11 = a_lds + 3 * A_TILE_LDS;
-    const uint32_t b_lds_00 = b_lds;
-    const uint32_t b_lds_01 = b_lds + B_TILE_LDS;
-    const uint32_t b_lds_10 = b_lds + 2 * B_TILE_LDS;
-    const uint32_t b_lds_11 = b_lds + 3 * B_TILE_LDS;
-
     int tic = 0, toc = 1;
 
-    using T = typename st_bf<BLOCK_SIZE, K_STEP, st_32x16_s>::dtype;
-    constexpr int bytes_per_thread = st_32x16_s::template bytes_per_thread<T>();
-    constexpr int bytes_per_memcpy = bytes_per_thread * NUM_THREADS;
-    constexpr int memcpy_per_tile = BLOCK_SIZE * K_STEP * sizeof(T) / bytes_per_memcpy;
-    uint32_t swizzled_offsets_A[memcpy_per_tile/2];
-    uint32_t swizzled_offsets_B[memcpy_per_tile/2];
-    G::prefill_swizzled_offsets(As[0][0], g.a, swizzled_offsets_A);
-    G::prefill_swizzled_offsets(Bs[0][0], g.b, swizzled_offsets_B);
-
-    // P21 Dev D — gated DTL hoist. Layout-isolated via `if constexpr` so the
-    // CRR codegen path is byte-identical to the BF16_HOIST_M0=0 build.
-    auto bf16_dtl_load = [&]<typename DST>(DST& dst, const _gl& gl, auto coord_,
-                                            const uint32_t* swo, i32x4 srd,
-                                            const bf16* base, uint32_t lds_off) {
-#if BF16_HOIST_M0
-        if constexpr (L == Layout::RCR || L == Layout::RRR) {
-            bf16_dev_d::load_hoist<NUM_THREADS>(dst, gl, coord_, swo, srd, base, lds_off);
-        } else {
-            G::load(dst, gl, coord_, swo, srd, base, lds_off);
-        }
-#else
-        G::load(dst, gl, coord_, swo, srd, base, lds_off);
-#endif
+    // Coord helpers — `m_subtile_A` shifts A's M-axis (= 0 for dense,
+    // = m_start_g/HALF_BLOCK_SIZE for grouped); `group_idx` indexes B's
+    // depth axis (= 0 for dense, = persistent group index for grouped).
+    auto a_coord = [&](int spatial, int k) {
+        if constexpr (L == Layout::CRR)
+            return coord<ST_A_T>{0, 0, k, m_subtile_A + spatial};
+        else
+            return coord<ST_A_T>{0, 0, m_subtile_A + spatial, k};
+    };
+    auto b_coord = [&](int spatial, int k) {
+        if constexpr (L == Layout::RCR)
+            return coord<ST_B_T>{0, group_idx, spatial, k};
+        else
+            return coord<ST_B_T>{0, group_idx, k, spatial};
     };
 
-    // Subtile extraction helpers.
-    //
-    // P23 S2 Dev C — when RCR_PADDED_B128_MODE=1, both `load(dst, sub)` calls
-    // in the RCR branch dispatch into `kittens::load(rt_bf<...,row_l,...>&,
-    // const st_subtile<st<bf16,128,64,st_64x32_padded_b128_s>,64,64>&)` at
-    //   include/ops/warp/memory/tile/shared_to_register.cuh:29 (load(row_l, ST)).
-    // Branch A (subtile >= register, line 50) is the live branch:
-    //   ST::underlying_subtile_rows = 64 >= RT::base_tile_rows = 16, AND
-    //   ST::underlying_subtile_cols = 32 >= RT::base_tile_cols = 32.
-    //   register_subtiles_per_shared_subtile_col = 64/16 = 4,
-    //   register_subtiles_per_shared_subtile_row = 32/32 = 1,
-    //   ST::subtiles_per_col = 64/64 = 1, ST::subtiles_per_row = 64/32 = 2.
-    //   underlying_subtile_stride_bytes = 4096 + 32 = 4128 (carries padding).
-    // Dev A (Path A) or Dev B (Path B) is expected to add a new dispatch branch
-    // here (or upgrade the existing Branch A) so the b128 LDS-write lane mapping
-    // produced by the padded shape is actually consumed without bank conflicts.
     auto load_a_subtile = [&](A_reg_t& dst, auto& smem_tile, int warp_idx) {
         if constexpr (L == Layout::CRR) {
             auto sub = subtile_inplace<K_STEP, HALF_REG_BLOCK_M>(smem_tile, {0, warp_idx});
             load(dst, sub);
         } else {
             auto sub = subtile_inplace<HALF_REG_BLOCK_M, K_STEP>(smem_tile, {warp_idx, 0});
-            // <<< Dev A/B b128 entry point will be needed HERE for RCR_PADDED_B128_MODE=1 >>>
             load(dst, sub);
         }
     };
     auto load_b_subtile = [&](B_reg_t& dst, auto& smem_tile, int warp_idx) {
         if constexpr (L == Layout::RCR) {
             auto sub = subtile_inplace<HALF_REG_BLOCK_N, K_STEP>(smem_tile, {warp_idx, 0});
-            // <<< Dev A/B b128 entry point will be needed HERE for RCR_PADDED_B128_MODE=1 >>>
             load(dst, sub);
         } else {
             auto sub = subtile_inplace<K_STEP, HALF_REG_BLOCK_N>(smem_tile, {0, warp_idx});
@@ -403,12 +287,9 @@ void gemm_kernel(const layout_globals g) {
         }
     };
 
-    // MMA dispatch
-    // For CRR: use mma_AtB directly (A in col_l, B in col_l) — no register transpose needed.
-    // mma_AtB_base uses the same hardware instruction as mma_AB_base (mfma_f32_16x16x32_bf16)
-    // but interprets A as transposed, eliminating the register shuffle overhead.
-    // Expanded inline so the outer #pragma unroll on the main_loop_iter lambda
-    // can see through to the base MMA calls (matches JIT path).
+    // MMA dispatch (same as dense baseline). For CRR we use mma_AtB_base
+    // directly to skip the register-transpose dance; the macro form keeps
+    // the outer #pragma unroll over the main-loop lambda transparent.
     #define DO_MMA(D, A, B, C) \
         do { \
             if constexpr (L == Layout::RCR) { mma_ABt(D, A, B, C); } \
@@ -432,18 +313,18 @@ void gemm_kernel(const layout_globals g) {
         } while(0)
 
     /********** Prologue: load first two K-tiles **********/
-    G::load(Bs[tic][0], g.b, b_coord(col*2, 0), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_00);
-    G::load(As[tic][0], g.a, a_coord(row*2, 0), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_00);
-    G::load(Bs[tic][1], g.b, b_coord(col*2+1, 0), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_01);
-    G::load(As[tic][1], g.a, a_coord(row*2+1, 0), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_01);
+    G::load(Bs[tic][0], b_gl, b_coord(col*2, 0), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_00);
+    G::load(As[tic][0], a_gl, a_coord(row*2, 0), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_00);
+    G::load(Bs[tic][1], b_gl, b_coord(col*2+1, 0), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_01);
+    G::load(As[tic][1], a_gl, a_coord(row*2+1, 0), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_01);
 
     if (warp_row == 1) { __builtin_amdgcn_s_barrier(); }
     asm volatile("s_waitcnt vmcnt(4)");
     __builtin_amdgcn_s_barrier();
 
-    G::load(Bs[toc][0], g.b, b_coord(col*2, 1), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_10);
-    G::load(As[toc][0], g.a, a_coord(row*2, 1), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_10);
-    G::load(Bs[toc][1], g.b, b_coord(col*2+1, 1), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_11);
+    G::load(Bs[toc][0], b_gl, b_coord(col*2, 1), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_10);
+    G::load(As[toc][0], a_gl, a_coord(row*2, 1), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_10);
+    G::load(Bs[toc][1], b_gl, b_coord(col*2+1, 1), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_11);
 
     asm volatile("s_waitcnt vmcnt(6)");
     __builtin_amdgcn_s_barrier();
@@ -452,7 +333,7 @@ void gemm_kernel(const layout_globals g) {
     auto main_loop_iter = [&](int tile) {
         load_b_subtile(B_tile_0, Bs[0][0], warp_col);
         load_a_subtile(A_tile, As[0][0], warp_row);
-        G::load(As[1][1], g.a, a_coord(row*2+1, tile+1), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_11);
+        G::load(As[1][1], a_gl, a_coord(row*2+1, tile+1), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_11);
         asm volatile("s_waitcnt lgkmcnt(8)");
         __builtin_amdgcn_s_barrier();
 
@@ -464,7 +345,7 @@ void gemm_kernel(const layout_globals g) {
         __builtin_amdgcn_sched_barrier(0);
 
         load_b_subtile(B_tile_1, Bs[0][1], warp_col);
-        G::load(Bs[0][0], g.b, b_coord(col*2, tile+2), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_00);
+        G::load(Bs[0][0], b_gl, b_coord(col*2, tile+2), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_00);
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
@@ -474,7 +355,7 @@ void gemm_kernel(const layout_globals g) {
         __builtin_amdgcn_s_barrier();
 
         load_a_subtile(A_tile, As[0][1], warp_row);
-        G::load(As[0][0], g.a, a_coord(row*2, tile+2), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_00);
+        G::load(As[0][0], a_gl, a_coord(row*2, tile+2), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_00);
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
@@ -485,7 +366,7 @@ void gemm_kernel(const layout_globals g) {
         __builtin_amdgcn_sched_barrier(0);
 
         load_b_subtile(B_tile_0, Bs[1][0], warp_col);
-        G::load(Bs[0][1], g.b, b_coord(col*2+1, tile+2), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_01);
+        G::load(Bs[0][1], b_gl, b_coord(col*2+1, tile+2), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_01);
         asm volatile("s_waitcnt vmcnt(6)");
         __builtin_amdgcn_s_barrier();
 
@@ -495,7 +376,7 @@ void gemm_kernel(const layout_globals g) {
         __builtin_amdgcn_s_barrier();
 
         load_a_subtile(A_tile, As[1][0], warp_row);
-        G::load(As[0][1], g.a, a_coord(row*2+1, tile+2), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_01);
+        G::load(As[0][1], a_gl, a_coord(row*2+1, tile+2), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_01);
         asm volatile("s_waitcnt lgkmcnt(8)");
         __builtin_amdgcn_s_barrier();
 
@@ -507,7 +388,7 @@ void gemm_kernel(const layout_globals g) {
         __builtin_amdgcn_sched_barrier(0);
 
         load_b_subtile(B_tile_1, Bs[1][1], warp_col);
-        G::load(Bs[1][0], g.b, b_coord(col*2, tile+3), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_10);
+        G::load(Bs[1][0], b_gl, b_coord(col*2, tile+3), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_10);
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
@@ -517,7 +398,7 @@ void gemm_kernel(const layout_globals g) {
         __builtin_amdgcn_s_barrier();
 
         load_a_subtile(A_tile, As[1][1], warp_row);
-        G::load(As[1][0], g.a, a_coord(row*2, tile+3), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_10);
+        G::load(As[1][0], a_gl, a_coord(row*2, tile+3), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_10);
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
@@ -527,7 +408,7 @@ void gemm_kernel(const layout_globals g) {
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
-        G::load(Bs[1][1], g.b, b_coord(col*2+1, tile+3), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_11);
+        G::load(Bs[1][1], b_gl, b_coord(col*2+1, tile+3), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_11);
         asm volatile("s_waitcnt vmcnt(6)");
         __builtin_amdgcn_s_barrier();
 
@@ -537,12 +418,12 @@ void gemm_kernel(const layout_globals g) {
         __builtin_amdgcn_s_barrier();
     };
 
-    // Matching the JIT-path schedule:
-    //   RCR/RRR: use full #pragma unroll (compile-time KI_HINT).
-    //   CRR:     use #pragma unroll 2 (hides barrier latency). Some KI values
-    //            (128, 172, 296) see 7-26 SGPR spills under unroll 2, but the
-    //            barrier-hiding benefit still outweighs the spill cost.
-    // KI_HINT==0 dynamic fallback always uses unroll 2.
+    // Schedule selection (matches the original baseline):
+    //   RCR/RRR + KI_HINT > 0:  full #pragma unroll over compile-time KI.
+    //   CRR     + KI_HINT > 0:  #pragma unroll 2 (some KIs see 7-26 SGPR
+    //                            spills under unroll-2, but barrier-hiding
+    //                            still wins).
+    //   KI_HINT == 0 dynamic:    #pragma unroll 2 (all layouts).
     if constexpr (KI_HINT > 0) {
         constexpr int num_tiles = KI_HINT;
         if constexpr (L == Layout::CRR) {
@@ -553,17 +434,17 @@ void gemm_kernel(const layout_globals g) {
             for (int tile = 0; tile < num_tiles - 2; tile += 2) main_loop_iter(tile);
         }
     } else {
-        const int num_tiles = g.ki;
+        const int num_tiles = num_tiles_dyn;
         #pragma unroll 2
         for (int tile = 0; tile < num_tiles - 2; tile += 2) main_loop_iter(tile);
     }
 
     /********** Epilog 1: second-to-last K-tile pair **********/
     {
-        const int tile = (KI_HINT > 0) ? (KI_HINT - 2) : (g.ki - 2);
+        const int tile = (KI_HINT > 0) ? (KI_HINT - 2) : (num_tiles_dyn - 2);
         load_b_subtile(B_tile_0, Bs[tic][0], warp_col);
         load_a_subtile(A_tile, As[tic][0], warp_row);
-        G::load(As[toc][1], g.a, a_coord(row*2+1, tile+1), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_11);
+        G::load(As[toc][1], a_gl, a_coord(row*2+1, tile+1), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_11);
         __builtin_amdgcn_s_barrier();
         asm volatile("s_waitcnt lgkmcnt(0)");
 
@@ -629,6 +510,166 @@ void gemm_kernel(const layout_globals g) {
     }
 
     #undef DO_MMA
+}
+
+// KI_HINT > 0: compile-time num_tiles (K / K_STEP) -> full #pragma unroll
+// KI_HINT == 0: dynamic num_tiles from g.ki, #pragma unroll 2
+template<Layout L, int KI_HINT>
+__global__ __launch_bounds__(NUM_THREADS, 2)
+void gemm_kernel(const layout_globals g) {
+    extern __shared__ alignment_dummy __shm[];
+    shared_allocator al((int*)&__shm[0]);
+
+    // Shared memory tile types: "normal" = <128,64,st_16x32_s>, "transposed" = <64,128,st_32x16_s>
+    // The swizzle must match: row_l registers use rt_16x32 -> st_16x32_s;
+    //                         col_l registers use rt_32x16 -> st_32x16_s.
+    //
+    // P23 S2 Dev C: when RCR_PADDED_B128_MODE=1, the RCR-specific shape is
+    // `st_64x32_padded_b128_s` (Route 1). RRR/CRR are unchanged. The shape
+    // swap stays inside `if constexpr (L == Layout::RCR)` so RRR/CRR codegen
+    // is byte-identical regardless of the flag.
+#if RCR_PADDED_B128_MODE
+    using ST_A_RCR = st_bf<HALF_BLOCK_SIZE, K_STEP, rcr_padded_st_shape>;
+    using ST_B_RCR = st_bf<HALF_BLOCK_SIZE, K_STEP, rcr_padded_st_shape>;
+#else
+    using ST_A_RCR = st_bf<HALF_BLOCK_SIZE, K_STEP, st_16x32_s>;
+    using ST_B_RCR = st_bf<HALF_BLOCK_SIZE, K_STEP, st_16x32_s>;
+#endif
+
+    using ST_A = std::conditional_t<L == Layout::CRR,
+        st_bf<K_STEP, HALF_BLOCK_SIZE, st_32x16_s>,
+        std::conditional_t<L == Layout::RCR,
+            ST_A_RCR,
+            st_bf<HALF_BLOCK_SIZE, K_STEP, st_16x32_s>>>;
+    using ST_B = std::conditional_t<L == Layout::RCR,
+        ST_B_RCR,
+        st_bf<K_STEP, HALF_BLOCK_SIZE, st_32x16_s>>;
+
+    ST_A (&As)[2][2] = al.allocate<ST_A, 2, 2>();
+    ST_B (&Bs)[2][2] = al.allocate<ST_B, 2, 2>();
+
+    // Register tile types
+    using A_reg_t = std::conditional_t<L == Layout::CRR,
+        rt_bf<K_STEP, HALF_REG_BLOCK_M, col_l, rt_32x16_s>,
+        rt_bf<HALF_REG_BLOCK_M, K_STEP, row_l, rt_16x32_s>>;
+    using B_reg_t = std::conditional_t<L == Layout::RCR,
+        rt_bf<HALF_REG_BLOCK_N, K_STEP, row_l, rt_16x32_s>,
+        rt_bf<K_STEP, HALF_REG_BLOCK_N, col_l, rt_32x16_s>>;
+
+    // C accumulators stay in this outer scope so they survive the helper
+    // call and are still live during the store epilog below.
+    rt_fl<HALF_REG_BLOCK_M, HALF_REG_BLOCK_N, col_l, rt_16x16_s> C_accum[2][2];
+    zero(C_accum[0][0]); zero(C_accum[0][1]);
+    zero(C_accum[1][0]); zero(C_accum[1][1]);
+
+    const int total_tiles = g.bpr * g.bpc;
+    int wgid = blockIdx.x;
+
+    // Block mapping with XCD swizzle. Dual strategy: for tall-N problems
+    // (bpc > bpr), group-by-N so WGs in a super-block share pid_n and
+    // cycle pid_m — this optimizes B-reuse (B is larger than A on tall-N).
+    // For tall-M / square, use group-by-M so WGs share pid_m and cycle
+    // pid_n — this optimizes A-reuse. The user-specified group_m becomes
+    // WGM on tall-M path or WGN on tall-N path.
+    //
+    // The split encodes g.group_m meaning as a generic "super-block length
+    // along the narrower dimension". Threshold bpc > bpr picks tall-N vs
+    // non-tall-N. The two paths produce different (pid_m, pid_n) mappings
+    // but both preserve the XCD-swizzled traversal order.
+    const int NUM_WGS = total_tiles;
+    wgid = chiplet_transform_chunked(wgid, NUM_WGS, g.num_xcds, 64);
+    const int num_pid_m = g.bpr;
+    const int num_pid_n = g.bpc;
+    const int WG  = g.group_m;
+    int pid_m, pid_n;
+    if (g.bpc > g.bpr) {
+        // Tall-N: group-by-N. Super-block = all_M × WGN
+        const int WGN = WG;
+        const int num_wgid_in_group = num_pid_m * WGN;
+        int group_id = wgid / num_wgid_in_group;
+        int first_pid_n = group_id * WGN;
+        int group_size_n = min(num_pid_n - first_pid_n, WGN);
+        if (group_size_n <= 0) return;
+        pid_n = first_pid_n + ((wgid % num_wgid_in_group) % group_size_n);
+        pid_m = (wgid % num_wgid_in_group) / group_size_n;
+    } else {
+        // Tall-M / square: group-by-M. Super-block = WGM × all_N
+        const int WGM = WG;
+        const int num_wgid_in_group = WGM * num_pid_n;
+        int group_id = wgid / num_wgid_in_group;
+        int first_pid_m = group_id * WGM;
+        int group_size_m = min(num_pid_m - first_pid_m, WGM);
+        if (group_size_m <= 0) return;
+        pid_m = first_pid_m + ((wgid % num_wgid_in_group) % group_size_m);
+        pid_n = (wgid % num_wgid_in_group) / group_size_m;
+    }
+    if (pid_m >= g.bpr || pid_n >= g.bpc) return;
+    int row = pid_m;
+    int col = pid_n;
+
+    const int warp_id = kittens::warpid();
+    const int warp_row = warp_id / 4;
+    const int warp_col = warp_id % 4;
+
+    // K-specialization: compile-time vs dynamic.
+    // For the KI_HINT>0 path the helper sees constexpr KI_HINT so the
+    // main loop can unroll fully. For the KI_HINT==0 path we forward
+    // g.ki via num_tiles_dyn and the helper uses #pragma unroll 2.
+
+    /********** SRD setup **********/
+    const bf16* a_base = (bf16*)&g.a[{0, 0, 0, 0}];
+    const bf16* b_base = (bf16*)&g.b[{0, 0, 0, 0}];
+    const int a_row_stride = g.a.template stride<2>() * sizeof(bf16);
+    const int b_row_stride = g.b.template stride<2>() * sizeof(bf16);
+    // For "normal" layout (M×K or N×K): num_rows = M or N
+    // For "transposed" layout (K×M or K×N): num_rows = K
+    const int a_num_rows = (L == Layout::CRR) ? g.k : g.m;
+    const int b_num_rows = (L == Layout::RCR) ? g.n : g.k;
+    i32x4 a_srsrc_base = make_srsrc(a_base, a_num_rows * a_row_stride, a_row_stride);
+    i32x4 b_srsrc_base = make_srsrc(b_base, b_num_rows * b_row_stride, b_row_stride);
+
+    const int wid = warpid() % NUM_WARPS;
+    constexpr int elem_per_warp = (16 / sizeof(bf16)) * kittens::WARP_THREADS;
+    constexpr uint32_t A_TILE_LDS = sizeof(ST_A);
+    constexpr uint32_t B_TILE_LDS = sizeof(ST_B);
+    uint32_t a_lds = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(
+        reinterpret_cast<uintptr_t>(&As[0][0].data[0]) + wid * elem_per_warp * sizeof(bf16)));
+    uint32_t b_lds = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(
+        reinterpret_cast<uintptr_t>(&Bs[0][0].data[0]) + wid * elem_per_warp * sizeof(bf16)));
+    const uint32_t a_lds_00 = a_lds;
+    const uint32_t a_lds_01 = a_lds + A_TILE_LDS;
+    const uint32_t a_lds_10 = a_lds + 2 * A_TILE_LDS;
+    const uint32_t a_lds_11 = a_lds + 3 * A_TILE_LDS;
+    const uint32_t b_lds_00 = b_lds;
+    const uint32_t b_lds_01 = b_lds + B_TILE_LDS;
+    const uint32_t b_lds_10 = b_lds + 2 * B_TILE_LDS;
+    const uint32_t b_lds_11 = b_lds + 3 * B_TILE_LDS;
+
+    using T = typename st_bf<BLOCK_SIZE, K_STEP, st_32x16_s>::dtype;
+    constexpr int bytes_per_thread = st_32x16_s::template bytes_per_thread<T>();
+    constexpr int bytes_per_memcpy = bytes_per_thread * NUM_THREADS;
+    constexpr int memcpy_per_tile = BLOCK_SIZE * K_STEP * sizeof(T) / bytes_per_memcpy;
+    uint32_t swizzled_offsets_A[memcpy_per_tile/2];
+    uint32_t swizzled_offsets_B[memcpy_per_tile/2];
+    G::prefill_swizzled_offsets(As[0][0], g.a, swizzled_offsets_A);
+    G::prefill_swizzled_offsets(Bs[0][0], g.b, swizzled_offsets_B);
+
+    // Phase 2: shared device function (above) runs the prologue + main loop
+    // + epilog 1/2. Dense passes m_subtile_A=0 and group_idx=0; the
+    // compiler folds those constants and emits the same code as the
+    // pre-refactor kernel.
+    device_gemm_tile_body<L, KI_HINT, ST_A, ST_B, A_reg_t, B_reg_t>(
+        g.a, g.b,
+        /*m_subtile_A=*/0, /*group_idx=*/0,
+        As, Bs,
+        swizzled_offsets_A, swizzled_offsets_B,
+        a_srsrc_base, b_srsrc_base,
+        a_base, b_base,
+        a_lds_00, a_lds_01, a_lds_10, a_lds_11,
+        b_lds_00, b_lds_01, b_lds_10, b_lds_11,
+        row, col, warp_row, warp_col,
+        g.ki,
+        C_accum);
 
     if (warp_row == 0) { __builtin_amdgcn_s_barrier(); }
 
@@ -910,8 +951,9 @@ void grouped_kernel(const grouped_layout_globals g) {
         rt_bf<HALF_REG_BLOCK_N, K_STEP, row_l, rt_16x32_s>,
         rt_bf<K_STEP, HALF_REG_BLOCK_N, col_l, rt_32x16_s>>;
 
-    A_reg_t A_tile;
-    B_reg_t B_tile_0, B_tile_1;
+    // C accumulators stay in this outer scope so they survive the helper
+    // call and are still live during the per-tile store epilog inside the
+    // persistent loop below.
     rt_fl<HALF_REG_BLOCK_M, HALF_REG_BLOCK_N, col_l, rt_16x16_s> C_accum[2][2];
 
     // [grouped] Persistent: chiplet-swizzle pid against full grid (NUM_CUS).
@@ -1063,265 +1105,27 @@ void grouped_kernel(const grouped_layout_globals g) {
         const int m_subtile_A = m_start_g / HALF_BLOCK_SIZE;
         const int m_subtile_C = m_start_g / HALF_REG_BLOCK_M;
 
-        // Coordinate helpers — identical structure to dense kernel, but A/C
-        // shift by m_subtile_* and B uses ``group_idx`` as the depth dim.
-        auto a_coord = [&](int spatial, int kk) {
-            if constexpr (L == Layout::CRR)
-                return coord<ST_A>{0, 0, kk, m_subtile_A + spatial};
-            else
-                return coord<ST_A>{0, 0, m_subtile_A + spatial, kk};
-        };
-        auto b_coord = [&](int spatial, int kk) {
-            if constexpr (L == Layout::RCR)
-                return coord<ST_B>{0, group_idx, spatial, kk};
-            else
-                return coord<ST_B>{0, group_idx, kk, spatial};
-        };
-
-        // Reset accumulators + double-buffer indices for this tile.
+        // Reset accumulators for this tile.
         zero(C_accum[0][0]); zero(C_accum[0][1]);
         zero(C_accum[1][0]); zero(C_accum[1][1]);
-        int tic = 0, toc = 1;
 
-        auto bf16_dtl_load = [&]<typename DST>(DST& dst, const _gl& gl, auto coord_,
-                                                const uint32_t* swo, i32x4 srd,
-                                                const bf16* base, uint32_t lds_off) {
-            G::load(dst, gl, coord_, swo, srd, base, lds_off);
-        };
-
-        auto load_a_subtile = [&](A_reg_t& dst, auto& smem_tile, int warp_idx) {
-            if constexpr (L == Layout::CRR) {
-                auto sub = subtile_inplace<K_STEP, HALF_REG_BLOCK_M>(smem_tile, {0, warp_idx});
-                load(dst, sub);
-            } else {
-                auto sub = subtile_inplace<HALF_REG_BLOCK_M, K_STEP>(smem_tile, {warp_idx, 0});
-                load(dst, sub);
-            }
-        };
-        auto load_b_subtile = [&](B_reg_t& dst, auto& smem_tile, int warp_idx) {
-            if constexpr (L == Layout::RCR) {
-                auto sub = subtile_inplace<HALF_REG_BLOCK_N, K_STEP>(smem_tile, {warp_idx, 0});
-                load(dst, sub);
-            } else {
-                auto sub = subtile_inplace<K_STEP, HALF_REG_BLOCK_N>(smem_tile, {0, warp_idx});
-                load(dst, sub);
-            }
-        };
-
-        #define DO_MMA(D, A, B, C) \
-            do { \
-                if constexpr (L == Layout::RCR) { mma_ABt(D, A, B, C); } \
-                else if constexpr (L == Layout::RRR) { mma_AB(D, A, B, C); } \
-                else { \
-                    constexpr int NH = std::remove_reference_t<decltype(D)>::height; \
-                    constexpr int NW = std::remove_reference_t<decltype(D)>::width; \
-                    constexpr int KH = std::remove_reference_t<decltype(A)>::height; \
-                    _Pragma("unroll") \
-                    for (int _n = 0; _n < NH; _n++) { \
-                        _Pragma("unroll") \
-                        for (int _m = 0; _m < NW; _m++) { \
-                            mma_AtB_base(D.tiles[_n][_m], A.tiles[0][_n], B.tiles[0][_m], C.tiles[_n][_m]); \
-                            _Pragma("unroll") \
-                            for (int _k = 1; _k < KH; _k++) { \
-                                mma_AtB_base(D.tiles[_n][_m], A.tiles[_k][_n], B.tiles[_k][_m], D.tiles[_n][_m]); \
-                            } \
-                        } \
-                    } \
-                } \
-            } while(0)
-
-        /********** Prologue: load first two K-tiles **********/
-        G::load(Bs[tic][0], g.b, b_coord(col*2, 0), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_00);
-        G::load(As[tic][0], g.a, a_coord(row*2, 0), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_00);
-        G::load(Bs[tic][1], g.b, b_coord(col*2+1, 0), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_01);
-        G::load(As[tic][1], g.a, a_coord(row*2+1, 0), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_01);
-
-        if (warp_row == 1) { __builtin_amdgcn_s_barrier(); }
-        asm volatile("s_waitcnt vmcnt(4)");
-        __builtin_amdgcn_s_barrier();
-
-        G::load(Bs[toc][0], g.b, b_coord(col*2, 1), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_10);
-        G::load(As[toc][0], g.a, a_coord(row*2, 1), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_10);
-        G::load(Bs[toc][1], g.b, b_coord(col*2+1, 1), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_11);
-
-        asm volatile("s_waitcnt vmcnt(6)");
-        __builtin_amdgcn_s_barrier();
-
-        /********** Main loop **********/
-        auto main_loop_iter = [&](int tile) {
-            load_b_subtile(B_tile_0, Bs[0][0], warp_col);
-            load_a_subtile(A_tile, As[0][0], warp_row);
-            G::load(As[1][1], g.a, a_coord(row*2+1, tile+1), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_11);
-            asm volatile("s_waitcnt lgkmcnt(8)");
-            __builtin_amdgcn_s_barrier();
-
-            asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1);
-            DO_MMA(C_accum[0][0], A_tile, B_tile_0, C_accum[0][0]);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-            __builtin_amdgcn_sched_barrier(0);
-
-            load_b_subtile(B_tile_1, Bs[0][1], warp_col);
-            G::load(Bs[0][0], g.b, b_coord(col*2, tile+2), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_00);
-            __builtin_amdgcn_s_barrier();
-
-            asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1);
-            DO_MMA(C_accum[0][1], A_tile, B_tile_1, C_accum[0][1]);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-
-            load_a_subtile(A_tile, As[0][1], warp_row);
-            G::load(As[0][0], g.a, a_coord(row*2, tile+2), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_00);
-            __builtin_amdgcn_s_barrier();
-
-            asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1);
-            DO_MMA(C_accum[1][0], A_tile, B_tile_0, C_accum[1][0]);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-            __builtin_amdgcn_sched_barrier(0);
-
-            load_b_subtile(B_tile_0, Bs[1][0], warp_col);
-            G::load(Bs[0][1], g.b, b_coord(col*2+1, tile+2), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_01);
-            asm volatile("s_waitcnt vmcnt(6)");
-            __builtin_amdgcn_s_barrier();
-
-            __builtin_amdgcn_s_setprio(1);
-            DO_MMA(C_accum[1][1], A_tile, B_tile_1, C_accum[1][1]);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-
-            load_a_subtile(A_tile, As[1][0], warp_row);
-            G::load(As[0][1], g.a, a_coord(row*2+1, tile+2), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_01);
-            asm volatile("s_waitcnt lgkmcnt(8)");
-            __builtin_amdgcn_s_barrier();
-
-            asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1);
-            DO_MMA(C_accum[0][0], A_tile, B_tile_0, C_accum[0][0]);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-            __builtin_amdgcn_sched_barrier(0);
-
-            load_b_subtile(B_tile_1, Bs[1][1], warp_col);
-            G::load(Bs[1][0], g.b, b_coord(col*2, tile+3), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_10);
-            __builtin_amdgcn_s_barrier();
-
-            asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1);
-            DO_MMA(C_accum[0][1], A_tile, B_tile_1, C_accum[0][1]);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-
-            load_a_subtile(A_tile, As[1][1], warp_row);
-            G::load(As[1][0], g.a, a_coord(row*2, tile+3), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_10);
-            __builtin_amdgcn_s_barrier();
-
-            asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1);
-            DO_MMA(C_accum[1][0], A_tile, B_tile_0, C_accum[1][0]);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-            __builtin_amdgcn_sched_barrier(0);
-
-            G::load(Bs[1][1], g.b, b_coord(col*2+1, tile+3), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_11);
-            asm volatile("s_waitcnt vmcnt(6)");
-            __builtin_amdgcn_s_barrier();
-
-            __builtin_amdgcn_s_setprio(1);
-            DO_MMA(C_accum[1][1], A_tile, B_tile_1, C_accum[1][1]);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-        };
-
-        if constexpr (KI_HINT > 0) {
-            constexpr int num_tiles = KI_HINT;
-            if constexpr (L == Layout::CRR) {
-                #pragma unroll 2
-                for (int tile = 0; tile < num_tiles - 2; tile += 2) main_loop_iter(tile);
-            } else {
-                #pragma unroll
-                for (int tile = 0; tile < num_tiles - 2; tile += 2) main_loop_iter(tile);
-            }
-        } else {
-            const int num_tiles = g.ki;
-            #pragma unroll 2
-            for (int tile = 0; tile < num_tiles - 2; tile += 2) main_loop_iter(tile);
-        }
-
-        /********** Epilog 1: second-to-last K-tile pair **********/
-        {
-            const int tile = (KI_HINT > 0) ? (KI_HINT - 2) : (g.ki - 2);
-            load_b_subtile(B_tile_0, Bs[tic][0], warp_col);
-            load_a_subtile(A_tile, As[tic][0], warp_row);
-            G::load(As[toc][1], g.a, a_coord(row*2+1, tile+1), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_11);
-            __builtin_amdgcn_s_barrier();
-            asm volatile("s_waitcnt lgkmcnt(0)");
-
-            __builtin_amdgcn_s_setprio(1);
-            DO_MMA(C_accum[0][0], A_tile, B_tile_0, C_accum[0][0]);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-
-            load_b_subtile(B_tile_1, Bs[tic][1], warp_col);
-            __builtin_amdgcn_s_barrier();
-
-            asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1);
-            DO_MMA(C_accum[0][1], A_tile, B_tile_1, C_accum[0][1]);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-
-            load_a_subtile(A_tile, As[tic][1], warp_row);
-            asm volatile("s_waitcnt vmcnt(4)");
-            __builtin_amdgcn_s_barrier();
-
-            asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1);
-            DO_MMA(C_accum[1][0], A_tile, B_tile_0, C_accum[1][0]);
-            DO_MMA(C_accum[1][1], A_tile, B_tile_1, C_accum[1][1]);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-            tic ^= 1; toc ^= 1;
-        }
-
-        /********** Epilog 2: last K-tile **********/
-        {
-            load_b_subtile(B_tile_0, Bs[tic][0], warp_col);
-            load_a_subtile(A_tile, As[tic][0], warp_row);
-            asm volatile("s_waitcnt vmcnt(2)");
-            __builtin_amdgcn_s_barrier();
-
-            asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1);
-            DO_MMA(C_accum[0][0], A_tile, B_tile_0, C_accum[0][0]);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-
-            load_b_subtile(B_tile_1, Bs[tic][1], warp_col);
-            asm volatile("s_waitcnt vmcnt(0)");
-            __builtin_amdgcn_s_barrier();
-
-            asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1);
-            DO_MMA(C_accum[0][1], A_tile, B_tile_1, C_accum[0][1]);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-
-            load_a_subtile(A_tile, As[tic][1], warp_row);
-            __builtin_amdgcn_s_barrier();
-
-            asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1);
-            DO_MMA(C_accum[1][0], A_tile, B_tile_0, C_accum[1][0]);
-            DO_MMA(C_accum[1][1], A_tile, B_tile_1, C_accum[1][1]);
-            __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
-        }
-
-        #undef DO_MMA
+        // Phase 2: shared device function above runs the same prologue +
+        // main_loop + epilog 1/2 as the dense kernel. Grouped passes
+        // m_subtile_A (A row shift in HALF_BLOCK_SIZE units) and group_idx
+        // (B depth axis) so the helper's a_coord / b_coord land on the
+        // correct (group, M-slice) sub-tensor.
+        device_gemm_tile_body<L, KI_HINT, ST_A, ST_B, A_reg_t, B_reg_t>(
+            g.a, g.b,
+            m_subtile_A, group_idx,
+            As, Bs,
+            swizzled_offsets_A, swizzled_offsets_B,
+            a_srsrc_base, b_srsrc_base,
+            a_base, b_base,
+            a_lds_00, a_lds_01, a_lds_10, a_lds_11,
+            b_lds_00, b_lds_01, b_lds_10, b_lds_11,
+            row, col, warp_row, warp_col,
+            g.ki,
+            C_accum);
 
         if (warp_row == 0) { __builtin_amdgcn_s_barrier(); }
 
