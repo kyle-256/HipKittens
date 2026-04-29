@@ -1411,8 +1411,20 @@ __global__ void grouped_ktail_kernel_lds(const grouped_layout_globals g) {
     constexpr int B_TOTAL = TBN * K_REM;
     constexpr int B_PER_THR = (B_TOTAL + NTHR - 1) / NTHR;
 
-    __shared__ bf16 A_lds[TBM * K_REM];
-    __shared__ bf16 B_lds[TBN * K_REM];
+    // Round-14: LDS row padding to break the (cib * K_REM) bank-conflict
+    // pattern. With K_REM=64 bf16, the row stride is 128 bytes = 32 banks,
+    // so all 16 ``cib`` lanes within a wave hit banks {0,1} on B (16-way
+    // conflict) and all 4 ``rib`` lanes hit banks {0,1} on A (4-way
+    // conflict). Padding the row to 68 bf16 = 136 bytes = 34 banks (= 2
+    // mod 32) makes ``cib * 34 mod 32 = cib * 2``, so each cib lane lands
+    // on a distinct (even, odd) bank pair → 32 banks fully covered, no
+    // conflict on either operand. Rocprof on gpt_oss-GateUP-B32-M4096
+    // (round-13): K-tail kernel was 77.3 % of total wall (12.4 ms / call,
+    // ~6 TF on 64-fma cells), this fix brings ds_read_b64 from 8-cycle
+    // serialised banks down to 1-cycle parallel banks.
+    constexpr int K_REM_LDS = K_REM + 4;     // 68 bf16 / 136 bytes / 34 banks
+    __shared__ bf16 A_lds[TBM * K_REM_LDS];
+    __shared__ bf16 B_lds[TBN * K_REM_LDS];
     constexpr int MAX_G_PLUS_1 = 65;
     __shared__ int s_offs[MAX_G_PLUS_1];
 
@@ -1521,7 +1533,7 @@ __global__ void grouped_ktail_kernel_lds(const grouped_layout_globals g) {
             const bf16* ap = &g.a[coord<>(r_global, k0 + kk_start)];
             va = *reinterpret_cast<const bf16x4*>(ap);
         }
-        *reinterpret_cast<bf16x4*>(&A_lds[r_in_blk * K_REM + kk_start]) = va;
+        *reinterpret_cast<bf16x4*>(&A_lds[r_in_blk * K_REM_LDS + kk_start]) = va;
     }
     {
         const int c_in_blk = tid / VECS_PER_ROW;
@@ -1537,7 +1549,7 @@ __global__ void grouped_ktail_kernel_lds(const grouped_layout_globals g) {
             const bf16* bp = &g.b[coord<>{0, group_idx, c_global, k0 + kk_start}];
             vb = *reinterpret_cast<const bf16x4*>(bp);
         }
-        *reinterpret_cast<bf16x4*>(&B_lds[c_in_blk * K_REM + kk_start]) = vb;
+        *reinterpret_cast<bf16x4*>(&B_lds[c_in_blk * K_REM_LDS + kk_start]) = vb;
     }
     __syncthreads();
 
@@ -1560,9 +1572,9 @@ __global__ void grouped_ktail_kernel_lds(const grouped_layout_globals g) {
     #pragma unroll
     for (int kk_v = 0; kk_v < K_VECS; ++kk_v) {
         bf16x4 a4 = *reinterpret_cast<const bf16x4*>(
-            &A_lds[rib * K_REM + kk_v * FMA_VEC]);
+            &A_lds[rib * K_REM_LDS + kk_v * FMA_VEC]);
         bf16x4 b4 = *reinterpret_cast<const bf16x4*>(
-            &B_lds[cib * K_REM + kk_v * FMA_VEC]);
+            &B_lds[cib * K_REM_LDS + kk_v * FMA_VEC]);
         acc += float(a4.lo.x) * float(b4.lo.x)
              + float(a4.lo.y) * float(b4.lo.y)
              + float(a4.hi.x) * float(b4.hi.x)
