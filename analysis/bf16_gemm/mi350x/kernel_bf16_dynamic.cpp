@@ -1239,11 +1239,23 @@ __global__ void grouped_tail_kernel(const grouped_layout_globals g) {
     // [fast_k, k) K-tail to interior cells. Skip case-2 here to avoid
     // double-counting. The ``m_per_group >= TBM && % TBM == 0`` test is
     // identical to the dispatcher's launch condition for the LDS kernel.
+    //
+    // Round-6 cross-group safety: the LDS K-tail kernel internally
+    // early-exits when its block straddles a group boundary
+    // (row_block_base + TBM > s_offs[group_idx + 1]) — those cells are
+    // NOT written by LDS, so scalar tail must NOT skip them. We
+    // replicate the same per-block group-containment check here so the
+    // skip predicate matches what LDS actually executed (rather than
+    // what the host hint told us was safe).
     if constexpr (L == Layout::RCR) {
         const bool lds_k_tail_safe = (g.m_per_group >= TAIL_BLOCK_M) &&
                                      ((g.m_per_group % TAIL_BLOCK_M) == 0);
         const bool lds_k_rem_match = ((g.k - g.fast_k) == 64);
-        if (fast_covers_cell && needs_k_tail && lds_k_tail_safe && lds_k_rem_match) {
+        const int row_block_base = (row / TAIL_BLOCK_M) * TAIL_BLOCK_M;
+        const bool block_in_group =
+            (row_block_base + TAIL_BLOCK_M <= s_offs[group_idx + 1]);
+        if (fast_covers_cell && needs_k_tail && lds_k_tail_safe &&
+            lds_k_rem_match && block_in_group) {
             return;  // LDS K-tail kernel already wrote the corrected value.
         }
     }
@@ -1415,6 +1427,19 @@ __global__ void grouped_ktail_kernel_lds(const grouped_layout_globals g) {
     for (int gi = 0; gi < g.G; ++gi) {
         if (row_block_base < s_offs[gi + 1]) { group_idx = gi; break; }
     }
+
+    // [round-6 cross-group safety] If the block straddles a group
+    // boundary (row_block_base + TBM > s_offs[group_idx + 1]) the
+    // single-``group_idx`` B-strip load below would feed wrong B rows
+    // for the upper rows of the block. Instead of doing per-row
+    // group_idx (slow), early-exit and let the scalar tail kernel handle
+    // every cell in this row-block. The host's ``m_per_group`` hint
+    // gates the LDS launch on uniform-aligned cases (where this check
+    // never triggers); the runtime check is a defensive backstop for
+    // non-uniform group_lens whose ``avg`` happened to be a multiple
+    // of TBM (would otherwise pass the host gate but corrupt B for
+    // cross-boundary rows).
+    if (row_block_base + TBM > s_offs[group_idx + 1]) return;
 
     const int k0 = g.fast_k;
     const int K_rem_dyn = g.k - k0;
