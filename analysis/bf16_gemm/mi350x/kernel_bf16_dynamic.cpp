@@ -215,6 +215,77 @@ struct alignas(8) bf16x4 {
 };
 
 // =============================================================================
+// N-mask C-store helper (Phase 4 enabler):
+//
+// Lets the main GEMM kernel cover the N-tail directly. Caller sets
+// ``g.bpc = ceil_div(n, BLOCK_SIZE)``; the last tile-column may straddle the
+// real N boundary, so its store must drop OOB columns.
+//
+// Three-way fast path:
+//   * n0 >= n_limit               -> entire tile OOB, skip (no work).
+//   * n1 <= n_limit               -> tile fully in-bounds, dispatch the
+//                                    original ``store(g_c, src, ...)`` (zero
+//                                    overhead vs. pre-Phase-4 baseline).
+//   * partial (n0 < n_limit < n1) -> lane-level skip on per-column OOB.
+//
+// Garbage data the main loop reads from B in OOB columns is harmless: the
+// MFMA still writes a result to C_accum's OOB columns, but those columns are
+// dropped here and never reach global memory.
+// =============================================================================
+using C_rt_accum_t =
+    rt_fl<HALF_REG_BLOCK_M, HALF_REG_BLOCK_N, col_l, rt_16x16_s>;
+
+template<ducks::gl::all GL>
+__device__ __forceinline__ void store_c_tile_n_masked(
+    const GL& g_c, const C_rt_accum_t& src,
+    int r_tile, int c_tile, int n_limit) {
+    using T = base_types::packing<typename C_rt_accum_t::dtype>::unpacked_type;
+    using U = typename GL::dtype;
+    constexpr int packing = base_types::packing<typename C_rt_accum_t::dtype>::num();
+    static_assert(std::is_same_v<U, bf16>, "C is bf16 global");
+
+    const int n0 = c_tile * C_rt_accum_t::cols;
+    const int n1 = n0 + C_rt_accum_t::cols;
+    if (n0 >= n_limit) return;
+    if (n1 <= n_limit) {
+        store(g_c, src, {0, 0, r_tile, c_tile});
+        return;
+    }
+
+    constexpr int axis = 2;
+    U* dst_ptr = (U*)&g_c[(coord<C_rt_accum_t>{0, 0, r_tile, c_tile}
+                            .template unit_coord<axis, 3>())];
+    const int row_stride = g_c.template stride<axis>();
+    const int laneid = kittens::laneid();
+    const int row_offset = src.base_tile_stride * (laneid / src.base_tile_cols);
+    const int col_offset = laneid % src.base_tile_cols;
+
+    #pragma unroll
+    for (int i = 0; i < src.height; i++) {
+        #pragma unroll
+        for (int j = 0; j < src.width; j++) {
+            const int col = j * src.base_tile_cols + col_offset;
+            if (n0 + col >= n_limit) continue;
+            #pragma unroll
+            for (int k = 0; k < src.base_tile_num_strides; k++) {
+                int row = i * src.base_tile_rows + row_offset +
+                          k * src.base_tile_elements_per_stride_group;
+                #pragma unroll
+                for (int l = 0; l < src.base_tile_stride / packing; l++) {
+                    int idx = l + k * src.base_tile_stride / packing;
+                    dst_ptr[(row + l * 2) * row_stride + col] =
+                        base_types::convertor<U, T>::convert(
+                            src.tiles[i][j].data[idx].x);
+                    dst_ptr[(row + l * 2 + 1) * row_stride + col] =
+                        base_types::convertor<U, T>::convert(
+                            src.tiles[i][j].data[idx].y);
+                }
+            }
+        }
+    }
+}
+
+// =============================================================================
 // device_gemm_tile_body — shared GEMM main-loop body (Phase 2 refactor).
 //
 // The dense `gemm_kernel<L, KI_HINT>` and the persistent grouped
@@ -690,18 +761,22 @@ void gemm_kernel(const layout_globals g) {
 
     if (warp_row == 0) { __builtin_amdgcn_s_barrier(); }
 
-    store(g.c, C_accum[0][0], {0, 0,
+    store_c_tile_n_masked(g.c, C_accum[0][0],
         (row * 2) * WARPS_M + warp_row,
-        col * 2 * WARPS_N + warp_col});
-    store(g.c, C_accum[0][1], {0, 0,
+        col * 2 * WARPS_N + warp_col,
+        g.n);
+    store_c_tile_n_masked(g.c, C_accum[0][1],
         (row * 2) * WARPS_M + warp_row,
-        col * 2 * WARPS_N + WARPS_N + warp_col});
-    store(g.c, C_accum[1][0], {0, 0,
+        col * 2 * WARPS_N + WARPS_N + warp_col,
+        g.n);
+    store_c_tile_n_masked(g.c, C_accum[1][0],
         (row * 2) * WARPS_M + WARPS_M + warp_row,
-        col * 2 * WARPS_N + warp_col});
-    store(g.c, C_accum[1][1], {0, 0,
+        col * 2 * WARPS_N + warp_col,
+        g.n);
+    store_c_tile_n_masked(g.c, C_accum[1][1],
         (row * 2) * WARPS_M + WARPS_M + warp_row,
-        col * 2 * WARPS_N + WARPS_N + warp_col});
+        col * 2 * WARPS_N + WARPS_N + warp_col,
+        g.n);
 }
 
 // ---- Explicit instantiations ----
@@ -729,9 +804,17 @@ __global__ void gemm_tail_kernel(const layout_globals g) {
         return;
     }
 
-    const bool interior_mn      = row < g.fast_m && col < g.fast_n;
-    const bool fast_covers_cell = interior_mn && g.fast_m > 0 &&
-                                  g.fast_n > 0 && g.fast_k > 0;
+    // Phase 4: main kernel coverage depends on K alignment (see
+    // dispatch_gemm bpc computation):
+    //   * K aligned (fast_k == k): main covers [0, fast_m) × [0, n) via
+    //     ceil_div bpc + column-masked C store.
+    //   * K not aligned: main covers [0, fast_m) × [0, fast_n) (OG behavior);
+    //     cols [fast_n, n) need full K reduction in tail kernel.
+    const bool main_covers_n   = (g.fast_k == g.k);
+    const bool main_ran_for_cell =
+        row < g.fast_m && g.fast_m > 0 && g.fast_k > 0 &&
+        (main_covers_n || col < g.fast_n);
+    const bool fast_covers_cell = main_ran_for_cell;
     const bool needs_k_tail     = g.fast_k < g.k;
     if (fast_covers_cell && !needs_k_tail) {
         return;
@@ -853,7 +936,19 @@ void dispatch_gemm(layout_globals g) {
     g.fast_n = (g.n / BLOCK_SIZE) * BLOCK_SIZE;
     g.fast_k = (g.k / K_TWO_TILE) * K_TWO_TILE;
     g.bpr = g.fast_m / BLOCK_SIZE;
-    g.bpc = g.fast_n / BLOCK_SIZE;
+    // Phase 4: main kernel covers the entire N range via column-masked C
+    // store. Last tile-column may straddle [fast_n, n) boundary.
+    //
+    // Restriction: ceil_div coverage of N is only enabled when K is fully
+    // aligned (fast_k == k). When BOTH N and K are misaligned, the partial
+    // col-tile interacts with the K-tail correction in a way that triggers
+    // a memory fault on certain shape combinations (e.g., N=K=2880 with
+    // M>=1024 in KI_HINT=0 dynamic kernel). In that case we fall back to
+    // bpc = fast_n / BLOCK_SIZE and the scalar tail kernel covers cols
+    // [fast_n, n).
+    g.bpc = (g.fast_k == g.k)
+        ? kittens::ceil_div(g.n, BLOCK_SIZE)
+        : (g.fast_n / BLOCK_SIZE);
     g.ki  = g.fast_k / K_STEP;
 
     if (g.bpr > 0 && g.bpc > 0 && g.ki >= 2) {
@@ -880,7 +975,16 @@ void dispatch_gemm(layout_globals g) {
         g.ki     = 0;
     }
 
-    if (g.fast_m != g.m || g.fast_n != g.n || g.fast_k != g.k) {
+    // Tail kernel runs when:
+    //   * M-tail (row >= fast_m): full K reduction.
+    //   * K-tail (fast_k < k): K-tail correction (and N-tail full reduction
+    //     when K is misaligned and main bpc is fast_n / BLOCK_SIZE).
+    //   * N-tail with K aligned: handled inline by main kernel masked store.
+    const bool main_covers_n = (g.fast_k == g.k);
+    const bool need_tail =
+        (g.fast_m != g.m) || (g.fast_k != g.k) ||
+        (!main_covers_n && g.fast_n != g.n);
+    if (need_tail) {
         dim3 tail_block(TAIL_BLOCK_N, TAIL_BLOCK_M);
         dim3 tail_grid(
             kittens::ceil_div(g.n, TAIL_BLOCK_N),
@@ -1494,7 +1598,9 @@ void grouped_kernel(const grouped_layout_globals g) {
 
         if (warp_row == 0) { __builtin_amdgcn_s_barrier(); }
 
-        // [grouped] Store with C row shifted by m_subtile_C.
+        // [grouped] Store with C row shifted by m_subtile_C. Grouped uses
+        // bpc = fast_n / BLOCK_SIZE so all stores are fully in-bounds; no
+        // column mask needed (see dispatch_grouped Phase-4 note).
         store(g.c, C_accum[0][0], {0, 0,
             m_subtile_C + (row * 2) * WARPS_M + warp_row,
             col * 2 * WARPS_N + warp_col});
@@ -1554,8 +1660,18 @@ void dispatch_grouped(grouped_layout_globals g) {
     if constexpr (L == Layout::CRR) g.k = static_cast<int>(g.a.rows());
     else g.k = static_cast<int>(g.a.cols());
 
-    // Phase 3: native non-aligned N/K (mirror dense dispatch_gemm). Per-group
-    // M tail (M_g % BLOCK_SIZE != 0) is handled by `grouped_tail_kernel`.
+    // Phase 3: native non-aligned N/K. Per-group M tail (M_g % BLOCK_SIZE != 0)
+    // is handled by `grouped_tail_kernel`.
+    //
+    // NOTE: grouped uses bpc = fast_n / BLOCK_SIZE (NOT ceil_div). Multi-group B
+    // is laid out [G, N, K]; a partial col-tile (col*BLOCK in [fast_n, n)) issues
+    // B loads at coord{0, group_idx, spatial_OOB, k_tile} where the buffer-flat
+    // address can land in the NEXT group's region (still within SRD bounds, no
+    // SRD-clamp-to-zero), reading garbage memory that the hardware then attempts
+    // to forward through the swizzle/cache-line path and segfaults.
+    // Dense (bpc=ceil_div, store_c_tile_n_masked) does NOT have this issue
+    // because dense B is [N, K] and OOB rows are SRD-clamped. Grouped N-tail
+    // therefore stays in `grouped_tail_kernel` until the B load path is fixed.
     g.fast_n = (g.n / BLOCK_SIZE) * BLOCK_SIZE;
     g.fast_k = (g.k / K_TWO_TILE) * K_TWO_TILE;
     g.bpc    = g.fast_n / BLOCK_SIZE;
@@ -1586,10 +1702,8 @@ void dispatch_grouped(grouped_layout_globals g) {
         g.ki     = 0;
     }
 
-    // Launch the tail kernel only when N or K is non-aligned. When the
-    // shape is fully aligned, the main kernel already wrote every cell;
-    // launching tail would still early-exit all threads on the first
-    // sync but adds an unnecessary launch + LDS-init pass.
+    // Launch tail kernel for N-tail or K-tail (grouped main kernel still
+    // uses bpc=fast_n/BLOCK_SIZE; cols [fast_n, n) come from the tail).
     if (g.fast_n != g.n || g.fast_k != g.k) {
         // Fast path: LDS-staged interior K-tail correction (round-9). Runs
         // when the K-tail size matches a templated specialisation AND each
