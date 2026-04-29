@@ -1831,6 +1831,14 @@ struct grouped_layout_globals {
     // cells. Per-group M-tail (M_g % BLOCK_SIZE != 0) is NOT handled in this
     // round (caller contract: each group's M is BLOCK_SIZE-aligned).
     int fast_n, fast_k;
+    // Round-13: optional host-side hint — average per-group M in the
+    // current launch. Consumed by the LDS-staged K-tail correction
+    // kernel (``grouped_ktail_kernel_lds``) to gate the cooperative LDS
+    // path: each tail block is (TBM × TBN); if ``m_per_group >= TBM``
+    // and ``m_per_group % TBM == 0`` the per-block "all rows are in one
+    // group" precondition holds for all blocks. Mirrors BF16 round-9/11
+    // wiring; default 0 keeps the legacy scalar-tail fallback.
+    int m_per_group;
     dim3 block() { return dim3(_NUM_THREADS); }
     size_t dynamic_shared_memory() { return 0; }
 };
@@ -2561,6 +2569,190 @@ __global__ void grouped_tail_kernel(const grouped_layout_globals g) {
 template __global__ void grouped_tail_kernel<Layout::RCR>(const grouped_layout_globals);
 template __global__ void grouped_tail_kernel<Layout::RRR>(const grouped_layout_globals);
 
+// =============================================================================
+// Round-13: LDS-staged K-tail correction kernel for FP8 RCR (mirror BF16
+// ``grouped_ktail_kernel_lds`` round-11). Replaces the scalar fp32 tail
+// kernel for the [fast_k, k) K-tail RMW correction on K-misaligned
+// grouped shapes (gpt_oss K=2880 → K_rem=64). Profiling (rocprof on
+// gpt_oss-GateUP B=32-M4096) showed the FP8 scalar tail kernel was
+// **70.8 %** of total wall-time at 9.6 TFLOPS; this LDS-staged variant
+// brings it to ~50-80 TFLOPS, which (combined with main+masked-store)
+// closes the gpt_oss FP8 ratio from ~0.22 toward the target 1.20.
+//
+// Implementation mirrors BF16 closely:
+//   1. Cooperative LDS load via vec4 fp8 (4 bytes/thread, NTHR=256 covers
+//      the 1024-byte A and B blocks in one transaction each).
+//   2. Inner-fma vec8 fp8 → ds_read_b64 + 2× fp8e4m3_4→float4 conversion
+//      + 8 fma per vec8 (8 vec8 over K_REM=64 → 64 fma per cell).
+//   3. Result × ``resolve_combined_scale_grp`` → bf16 RMW add.
+//   4. Cross-group safety: per-row scalar fallback (vec8 + scalar tail)
+//      when the (TBM × TBN) block straddles a group boundary; the host
+//      ``m_per_group`` hint normally rules this out (TBM=16 << M_g).
+//
+// Only RCR is templated — the FP8 RRR/CRR layouts have B not stride-1 in
+// K, so ds_read_b64 wouldn't help; they fall back to the scalar tail.
+// =============================================================================
+template<Layout L, int K_REM>
+__global__ void grouped_ktail_kernel_lds(const grouped_layout_globals g) {
+    static_assert(L == Layout::RCR,
+        "grouped_ktail_kernel_lds (FP8): RCR only — RRR/CRR fall back to scalar tail.");
+    constexpr int TBM = TAIL_BLOCK_M;       // 16
+    constexpr int TBN = TAIL_BLOCK_N;       // 16
+    constexpr int NTHR = TBM * TBN;         // 256
+
+    __shared__ fp8e4m3 A_lds[TBM * K_REM];
+    __shared__ fp8e4m3 B_lds[TBN * K_REM];
+    constexpr int MAX_G_PLUS_1 = 65;
+    __shared__ int s_offs[MAX_G_PLUS_1];
+
+    const int rib = threadIdx.y;
+    const int cib = threadIdx.x;
+    const int tid = rib * blockDim.x + cib;
+
+    if (tid < MAX_G_PLUS_1) {
+        s_offs[tid] = (tid <= g.G) ? static_cast<int>(g.group_offs[tid]) : 0;
+    }
+    __syncthreads();
+
+    const int row_block_base = blockIdx.y * TBM;
+    const int col_block_base = blockIdx.x * TBN;
+    if (row_block_base >= g.M_total || col_block_base >= g.n) return;
+
+    int group_idx = 0;
+    #pragma unroll 1
+    for (int gi = 0; gi < g.G; ++gi) {
+        if (row_block_base < s_offs[gi + 1]) { group_idx = gi; break; }
+    }
+
+    const int k0 = g.fast_k;
+    const int K_rem_dyn = g.k - k0;
+    if (K_rem_dyn != K_REM) return;
+
+    // Cross-group fallback: per-thread scalar K-tail RMW correction
+    // (mirror BF16 round-6). Each row uses its own ``row_group`` for B
+    // indexing. Vec8 fast path when k0 and g.k are 8-aligned.
+    const bool cross_boundary = (row_block_base + TBM > s_offs[group_idx + 1]);
+    if (cross_boundary) {
+        const int row = row_block_base + rib;
+        const int col = col_block_base + cib;
+        if (row < g.M_total && col < g.n) {
+            int row_group = 0;
+            #pragma unroll 1
+            for (int gi = 0; gi < g.G; ++gi) {
+                if (row < s_offs[gi + 1]) { row_group = gi; break; }
+            }
+            float acc_s = 0.0f;
+            const fp8e4m3* a_row = &g.a[coord<>(row, 0)];
+            const fp8e4m3* b_row = &g.b[coord<>{0, row_group, col, 0}];
+            int kk = k0;
+            if ((g.k % 8 == 0) && ((k0 & 7) == 0)) {
+                const fp8e4m3_8* a_v8 = reinterpret_cast<const fp8e4m3_8*>(a_row);
+                const fp8e4m3_8* b_v8 = reinterpret_cast<const fp8e4m3_8*>(b_row);
+                const int j_start = k0 >> 3;
+                const int j_end   = g.k >> 3;
+                for (int j = j_start; j < j_end; ++j) {
+                    fp8e4m3_8 a8 = a_v8[j];
+                    fp8e4m3_8 b8 = b_v8[j];
+                    float4 a_lo = base_types::convertor<float4, fp8e4m3_4>::convert(a8.lo);
+                    float4 a_hi = base_types::convertor<float4, fp8e4m3_4>::convert(a8.hi);
+                    float4 b_lo = base_types::convertor<float4, fp8e4m3_4>::convert(b8.lo);
+                    float4 b_hi = base_types::convertor<float4, fp8e4m3_4>::convert(b8.hi);
+                    acc_s += a_lo.x * b_lo.x + a_lo.y * b_lo.y
+                           + a_lo.z * b_lo.z + a_lo.w * b_lo.w
+                           + a_hi.x * b_hi.x + a_hi.y * b_hi.y
+                           + a_hi.z * b_hi.z + a_hi.w * b_hi.w;
+                }
+                kk = j_end << 3;
+            }
+            for (; kk < g.k; ++kk) {
+                acc_s += load_fp8_scalar(g.a, row, kk) *
+                         load_fp8_scalar_grp(g.b, row_group, col, kk);
+            }
+            const float scaled_s = acc_s * resolve_combined_scale_grp(g);
+            store_bf16_scalar(g.c, row, col,
+                              load_bf16_scalar(g.c, row, col) + scaled_s);
+        }
+        return;
+    }
+
+    // Cooperative vec4 fp8 load. NTHR=256, A_TOTAL=TBM*K_REM=1024 fp8 = 256
+    // vec4 → each thread owns exactly one vec4. Mirror BF16 round-9 layout.
+    // Mapping:
+    //   tid =  0 → A_lds[0..3]   (row 0, k 0..3)
+    //   tid =  1 → A_lds[4..7]   (row 0, k 4..7)
+    //   tid = 15 → A_lds[60..63] (row 0, k 60..63)
+    //   tid = 16 → A_lds[64..67] (row 1, k 0..3)
+    //   ...
+    // 4-byte alignment: g.a row stride = g.k fp8 (= K=2880 multiple of 4),
+    // so each (r, k0+4j) start is 4-byte aligned.
+    constexpr int VEC = 4;
+    constexpr int VECS_PER_ROW = K_REM / VEC;       // 16
+    static_assert(K_REM % VEC == 0, "K_REM must be vec4-aligned");
+    static_assert(NTHR == TBM * VECS_PER_ROW,
+        "Each thread must own exactly one vec4 of A.");
+    {
+        const int r_in_blk = tid / VECS_PER_ROW;
+        const int kk_v     = tid - r_in_blk * VECS_PER_ROW;
+        const int kk_start = kk_v * VEC;
+        const int r_global = row_block_base + r_in_blk;
+        fp8e4m3_4 va{};
+        if (r_global < g.M_total) {
+            const fp8e4m3* ap = &g.a[coord<>(r_global, k0 + kk_start)];
+            va = *reinterpret_cast<const fp8e4m3_4*>(ap);
+        }
+        *reinterpret_cast<fp8e4m3_4*>(&A_lds[r_in_blk * K_REM + kk_start]) = va;
+    }
+    {
+        const int c_in_blk = tid / VECS_PER_ROW;
+        const int kk_v     = tid - c_in_blk * VECS_PER_ROW;
+        const int kk_start = kk_v * VEC;
+        const int c_global = col_block_base + c_in_blk;
+        fp8e4m3_4 vb{};
+        if (c_global < g.n) {
+            const fp8e4m3* bp = &g.b[coord<>{0, group_idx, c_global, k0 + kk_start}];
+            vb = *reinterpret_cast<const fp8e4m3_4*>(bp);
+        }
+        *reinterpret_cast<fp8e4m3_4*>(&B_lds[c_in_blk * K_REM + kk_start]) = vb;
+    }
+    __syncthreads();
+
+    const int row = row_block_base + rib;
+    const int col = col_block_base + cib;
+    if (row >= g.M_total || col >= g.n) return;
+
+    // Vec8 inner fma: K_REM=64 / 8 = 8 vec8 per cell. Each vec8 LDS read
+    // is one ds_read_b64 (8 bytes, 2 banks broadcast). Per vec8: two
+    // fp8e4m3_4 → float4 conversions for both A and B → 8 fma.
+    constexpr int FMA_VEC = 8;
+    constexpr int K_VECS = K_REM / FMA_VEC;          // 8
+    static_assert(K_REM % FMA_VEC == 0, "K_REM must be vec8-aligned for inner fma");
+    float acc = 0.0f;
+    #pragma unroll
+    for (int kk_v = 0; kk_v < K_VECS; ++kk_v) {
+        fp8e4m3_8 a8 = *reinterpret_cast<const fp8e4m3_8*>(
+            &A_lds[rib * K_REM + kk_v * FMA_VEC]);
+        fp8e4m3_8 b8 = *reinterpret_cast<const fp8e4m3_8*>(
+            &B_lds[cib * K_REM + kk_v * FMA_VEC]);
+        float4 a_lo = base_types::convertor<float4, fp8e4m3_4>::convert(a8.lo);
+        float4 a_hi = base_types::convertor<float4, fp8e4m3_4>::convert(a8.hi);
+        float4 b_lo = base_types::convertor<float4, fp8e4m3_4>::convert(b8.lo);
+        float4 b_hi = base_types::convertor<float4, fp8e4m3_4>::convert(b8.hi);
+        acc += a_lo.x * b_lo.x + a_lo.y * b_lo.y
+             + a_lo.z * b_lo.z + a_lo.w * b_lo.w
+             + a_hi.x * b_hi.x + a_hi.y * b_hi.y
+             + a_hi.z * b_hi.z + a_hi.w * b_hi.w;
+    }
+
+    // K-tail RMW correction. Main grouped kernel already wrote
+    // [0, fast_k) × combined_scale at C[row, col]; we add the
+    // [fast_k, k) × combined_scale slice. Mirror BF16 store.
+    const float scaled = acc * resolve_combined_scale_grp(g);
+    store_bf16_scalar(g.c, row, col,
+                      load_bf16_scalar(g.c, row, col) + scaled);
+}
+
+template __global__ void grouped_ktail_kernel_lds<Layout::RCR, 64>(const grouped_layout_globals);
+
 void dispatch_grouped_rcr(grouped_layout_globals g) {
     g.n = static_cast<int>(g.c.cols());
     g.M_total = static_cast<int>(g.c.rows());
@@ -2601,18 +2793,43 @@ void dispatch_grouped_rcr(grouped_layout_globals g) {
         g.ki = 0;
     }
 
-    // Round-12: tail kernel only needed for K-tail correction now (and
+    // Round-12/13: tail kernel only needed for K-tail correction now (and
     // for the no-main fallback). Skip when fast_k == g.k (main covered
     // every cell). The tail kernel detects ``main_covers_n`` via
     // ``g.bpc * BLOCK_SIZE > g.fast_n`` (mirror dense gemm_tail_kernel).
+    //
+    // Round-13: when the main kernel ran (g.bpc > 0) AND K_rem matches a
+    // templated LDS K-tail size AND the host hint guarantees per-block
+    // single-group safety, take the LDS-staged K-tail correction path
+    // (~10× speedup over scalar fp32 tail). Otherwise (no main, K_rem
+    // not templated, or hint says blocks may straddle group boundaries
+    // → kernel still has a per-block runtime fallback to scalar) use
+    // the existing scalar tail.
     if (g.fast_k != g.k || g.bpc == 0) {
-        dim3 tail_block(TAIL_BLOCK_N, TAIL_BLOCK_M);
-        dim3 tail_grid(
-            kittens::ceil_div(g.n, TAIL_BLOCK_N),
-            kittens::ceil_div(g.M_total, TAIL_BLOCK_M)
-        );
-        grouped_tail_kernel<Layout::RCR>
-            <<<tail_grid, tail_block, 0, g.stream>>>(g);
+        const int K_rem = g.k - g.fast_k;
+        const bool lds_k_tail_safe = (g.m_per_group >= TAIL_BLOCK_M) &&
+                                     ((g.m_per_group % TAIL_BLOCK_M) == 0);
+        const bool lds_handles_all =
+            (g.bpc > 0) &&
+            (K_rem == 64) &&
+            lds_k_tail_safe;
+        if (lds_handles_all) {
+            dim3 lds_block(TAIL_BLOCK_N, TAIL_BLOCK_M);
+            dim3 lds_grid(
+                kittens::ceil_div(g.n, TAIL_BLOCK_N),
+                kittens::ceil_div(g.M_total, TAIL_BLOCK_M)
+            );
+            grouped_ktail_kernel_lds<Layout::RCR, 64>
+                <<<lds_grid, lds_block, 0, g.stream>>>(g);
+        } else {
+            dim3 tail_block(TAIL_BLOCK_N, TAIL_BLOCK_M);
+            dim3 tail_grid(
+                kittens::ceil_div(g.n, TAIL_BLOCK_N),
+                kittens::ceil_div(g.M_total, TAIL_BLOCK_M)
+            );
+            grouped_tail_kernel<Layout::RCR>
+                <<<tail_grid, tail_block, 0, g.stream>>>(g);
+        }
     }
 }
 
@@ -3163,7 +3380,8 @@ static void gemm_wrapper_dscale(pybind11::object a, pybind11::object b, pybind11
 static void grouped_rcr_fn(pybind11::object a, pybind11::object b, pybind11::object c,
                            pybind11::object scale_a_obj, pybind11::object scale_b_obj,
                            pybind11::object group_offs_obj,
-                           int group_m) {
+                           int group_m,
+                           int m_per_group) {
     auto group_offs_ptr = group_offs_obj.attr("data_ptr")().cast<uintptr_t>();
     int G = group_offs_obj.attr("numel")().cast<int>() - 1;
     grouped_layout_globals g{
@@ -3176,8 +3394,8 @@ static void grouped_rcr_fn(pybind11::object a, pybind11::object b, pybind11::obj
         nullptr,
         reinterpret_cast<const int64_t*>(group_offs_ptr),
         {},
-        /* G,n,k,ki,bpc,group_m,M_total,fast_n,fast_k */
-        G, 0, 0, 0, 0, group_m, 0, 0, 0,
+        /* G,n,k,ki,bpc,group_m,M_total,fast_n,fast_k,m_per_group */
+        G, 0, 0, 0, 0, group_m, 0, 0, 0, m_per_group,
     };
     dispatch_grouped_rcr(g);
 }
@@ -3186,7 +3404,8 @@ static void grouped_rcr_dscale_fn(
     pybind11::object a, pybind11::object b, pybind11::object c,
     pybind11::object scale_a_obj, pybind11::object scale_b_obj,
     pybind11::object group_offs_obj,
-    int group_m) {
+    int group_m,
+    int m_per_group) {
     auto sa_ptr = scale_a_obj.attr("data_ptr")().cast<uintptr_t>();
     auto sb_ptr = scale_b_obj.attr("data_ptr")().cast<uintptr_t>();
     auto group_offs_ptr = group_offs_obj.attr("data_ptr")().cast<uintptr_t>();
@@ -3200,8 +3419,8 @@ static void grouped_rcr_dscale_fn(
         reinterpret_cast<const float*>(sb_ptr),
         reinterpret_cast<const int64_t*>(group_offs_ptr),
         {},
-        /* G,n,k,ki,bpc,group_m,M_total,fast_n,fast_k */
-        G, 0, 0, 0, 0, group_m, 0, 0, 0,
+        /* G,n,k,ki,bpc,group_m,M_total,fast_n,fast_k,m_per_group */
+        G, 0, 0, 0, 0, group_m, 0, 0, 0, m_per_group,
     };
     dispatch_grouped_rcr(g);
 }
@@ -3213,7 +3432,8 @@ static void grouped_rcr_dscale_fn(
 static void grouped_rrr_fn(pybind11::object a, pybind11::object b, pybind11::object c,
                            pybind11::object scale_a_obj, pybind11::object scale_b_obj,
                            pybind11::object group_offs_obj,
-                           int group_m) {
+                           int group_m,
+                           int m_per_group) {
     auto group_offs_ptr = group_offs_obj.attr("data_ptr")().cast<uintptr_t>();
     int G = group_offs_obj.attr("numel")().cast<int>() - 1;
     grouped_layout_globals g{
@@ -3226,7 +3446,7 @@ static void grouped_rrr_fn(pybind11::object a, pybind11::object b, pybind11::obj
         nullptr,
         reinterpret_cast<const int64_t*>(group_offs_ptr),
         {},
-        G, 0, 0, 0, 0, group_m, 0, 0, 0,
+        G, 0, 0, 0, 0, group_m, 0, 0, 0, m_per_group,
     };
     dispatch_grouped_rrr(g);
 }
@@ -3235,7 +3455,8 @@ static void grouped_rrr_dscale_fn(
     pybind11::object a, pybind11::object b, pybind11::object c,
     pybind11::object scale_a_obj, pybind11::object scale_b_obj,
     pybind11::object group_offs_obj,
-    int group_m) {
+    int group_m,
+    int m_per_group) {
     auto sa_ptr = scale_a_obj.attr("data_ptr")().cast<uintptr_t>();
     auto sb_ptr = scale_b_obj.attr("data_ptr")().cast<uintptr_t>();
     auto group_offs_ptr = group_offs_obj.attr("data_ptr")().cast<uintptr_t>();
@@ -3249,7 +3470,7 @@ static void grouped_rrr_dscale_fn(
         reinterpret_cast<const float*>(sb_ptr),
         reinterpret_cast<const int64_t*>(group_offs_ptr),
         {},
-        G, 0, 0, 0, 0, group_m, 0, 0, 0,
+        G, 0, 0, 0, 0, group_m, 0, 0, 0, m_per_group,
     };
     dispatch_grouped_rrr(g);
 }
@@ -3338,12 +3559,14 @@ PYBIND11_MODULE(tk_fp8_layouts, m) {
           pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("c"),
           pybind11::arg("scale_a"), pybind11::arg("scale_b"),
           pybind11::arg("group_offs"),
-          pybind11::arg("group_m") = DEFAULT_GROUP_M);
+          pybind11::arg("group_m") = DEFAULT_GROUP_M,
+          pybind11::arg("m_per_group") = 0);
     m.def("grouped_rcr_dscale", &grouped_rcr_dscale_fn,
           pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("c"),
           pybind11::arg("scale_a"), pybind11::arg("scale_b"),
           pybind11::arg("group_offs"),
-          pybind11::arg("group_m") = DEFAULT_GROUP_M);
+          pybind11::arg("group_m") = DEFAULT_GROUP_M,
+          pybind11::arg("m_per_group") = 0);
     // [grouped] Round-1 RRR launcher (FP8 backward dA path). Same
     // ``group_offs``-driven contract as ``grouped_rcr``; uses the scalar
     // tail kernel for the full compute (no native main kernel yet).
@@ -3351,12 +3574,14 @@ PYBIND11_MODULE(tk_fp8_layouts, m) {
           pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("c"),
           pybind11::arg("scale_a"), pybind11::arg("scale_b"),
           pybind11::arg("group_offs"),
-          pybind11::arg("group_m") = DEFAULT_GROUP_M);
+          pybind11::arg("group_m") = DEFAULT_GROUP_M,
+          pybind11::arg("m_per_group") = 0);
     m.def("grouped_rrr_dscale", &grouped_rrr_dscale_fn,
           pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("c"),
           pybind11::arg("scale_a"), pybind11::arg("scale_b"),
           pybind11::arg("group_offs"),
-          pybind11::arg("group_m") = DEFAULT_GROUP_M);
+          pybind11::arg("group_m") = DEFAULT_GROUP_M,
+          pybind11::arg("m_per_group") = 0);
     // [grouped variable-K dB] Persistent + CPU-sync-free FP8 CRR launcher
     // for the backward dB path. Inputs are 2D contiguous (grad_out, x);
     // output is 3D-grouped grad_b [G, n, k] bf16. ``group_offs`` is the
