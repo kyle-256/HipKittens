@@ -2727,6 +2727,13 @@ __global__ void grouped_ktail_kernel_lds(const grouped_layout_globals g) {
     constexpr int K_VECS = K_REM / FMA_VEC;          // 8
     static_assert(K_REM % FMA_VEC == 0, "K_REM must be vec8-aligned for inner fma");
     float acc = 0.0f;
+    // Round-15: split into 4 parallel fp32 accumulators to break the
+    // 8-deep dependency chain in the per-thread fma loop. With 1
+    // accumulator the inner-loop ILP is bounded by fma latency (~4
+    // cycles on CDNA4 VALU); 4 parallel chains let the compiler /
+    // scheduler hide that latency by interleaving independent fmas
+    // from each chain. Final acc = sum of 4 partials.
+    float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
     #pragma unroll
     for (int kk_v = 0; kk_v < K_VECS; ++kk_v) {
         fp8e4m3_8 a8 = *reinterpret_cast<const fp8e4m3_8*>(
@@ -2737,11 +2744,12 @@ __global__ void grouped_ktail_kernel_lds(const grouped_layout_globals g) {
         float4 a_hi = base_types::convertor<float4, fp8e4m3_4>::convert(a8.hi);
         float4 b_lo = base_types::convertor<float4, fp8e4m3_4>::convert(b8.lo);
         float4 b_hi = base_types::convertor<float4, fp8e4m3_4>::convert(b8.hi);
-        acc += a_lo.x * b_lo.x + a_lo.y * b_lo.y
-             + a_lo.z * b_lo.z + a_lo.w * b_lo.w
-             + a_hi.x * b_hi.x + a_hi.y * b_hi.y
-             + a_hi.z * b_hi.z + a_hi.w * b_hi.w;
+        acc0 += a_lo.x * b_lo.x + a_hi.x * b_hi.x;
+        acc1 += a_lo.y * b_lo.y + a_hi.y * b_hi.y;
+        acc2 += a_lo.z * b_lo.z + a_hi.z * b_hi.z;
+        acc3 += a_lo.w * b_lo.w + a_hi.w * b_hi.w;
     }
+    acc = (acc0 + acc1) + (acc2 + acc3);
 
     // K-tail RMW correction. Main grouped kernel already wrote
     // [0, fast_k) × combined_scale at C[row, col]; we add the
