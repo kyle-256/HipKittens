@@ -2600,8 +2600,19 @@ __global__ void grouped_ktail_kernel_lds(const grouped_layout_globals g) {
     constexpr int TBN = TAIL_BLOCK_N;       // 16
     constexpr int NTHR = TBM * TBN;         // 256
 
-    __shared__ fp8e4m3 A_lds[TBM * K_REM];
-    __shared__ fp8e4m3 B_lds[TBN * K_REM];
+    // Round-17: pad LDS row to break (cib * K_REM) bank conflict
+    // pattern. Within a wave, 16 ``cib`` lanes read B_lds at strides of
+    // 64 bytes (= 16 banks); the addresses hit only banks {0,1} and
+    // {16,17} → 8-way conflict, ds_read_b64 takes 8 cycles instead of
+    // 1. K_REM_LDS = 72 fp8 = 72 bytes = 18 banks (= 18 mod 32) makes
+    // ``cib * 18 mod 32`` distribute the 16 cib lanes across all 16
+    // distinct even banks → no conflict. (Round-15 tested this in
+    // isolation, was lost in noise behind the much larger fp8->fp32
+    // cvt overhead. After round-16 cvt_pk_f32_fp8 fix, LDS is now the
+    // bigger fraction of inner-loop time, so re-test.)
+    constexpr int K_REM_LDS = K_REM + 8;
+    __shared__ fp8e4m3 A_lds[TBM * K_REM_LDS];
+    __shared__ fp8e4m3 B_lds[TBN * K_REM_LDS];
     constexpr int MAX_G_PLUS_1 = 65;
     __shared__ int s_offs[MAX_G_PLUS_1];
 
@@ -2700,7 +2711,7 @@ __global__ void grouped_ktail_kernel_lds(const grouped_layout_globals g) {
             const fp8e4m3* ap = &g.a[coord<>(r_global, k0 + kk_start)];
             va = *reinterpret_cast<const fp8e4m3_4*>(ap);
         }
-        *reinterpret_cast<fp8e4m3_4*>(&A_lds[r_in_blk * K_REM + kk_start]) = va;
+        *reinterpret_cast<fp8e4m3_4*>(&A_lds[r_in_blk * K_REM_LDS + kk_start]) = va;
     }
     {
         const int c_in_blk = tid / VECS_PER_ROW;
@@ -2712,7 +2723,7 @@ __global__ void grouped_ktail_kernel_lds(const grouped_layout_globals g) {
             const fp8e4m3* bp = &g.b[coord<>{0, group_idx, c_global, k0 + kk_start}];
             vb = *reinterpret_cast<const fp8e4m3_4*>(bp);
         }
-        *reinterpret_cast<fp8e4m3_4*>(&B_lds[c_in_blk * K_REM + kk_start]) = vb;
+        *reinterpret_cast<fp8e4m3_4*>(&B_lds[c_in_blk * K_REM_LDS + kk_start]) = vb;
     }
     __syncthreads();
 
@@ -2748,9 +2759,9 @@ __global__ void grouped_ktail_kernel_lds(const grouped_layout_globals g) {
     #pragma unroll
     for (int kk_v = 0; kk_v < K_VECS; ++kk_v) {
         fp8e4m3_8 a8 = *reinterpret_cast<const fp8e4m3_8*>(
-            &A_lds[rib * K_REM + kk_v * FMA_VEC]);
+            &A_lds[rib * K_REM_LDS + kk_v * FMA_VEC]);
         fp8e4m3_8 b8 = *reinterpret_cast<const fp8e4m3_8*>(
-            &B_lds[cib * K_REM + kk_v * FMA_VEC]);
+            &B_lds[cib * K_REM_LDS + kk_v * FMA_VEC]);
         float4 a_lo = fp8x4_to_f32x4(a8.lo);
         float4 a_hi = fp8x4_to_f32x4(a8.hi);
         float4 b_lo = fp8x4_to_f32x4(b8.lo);
