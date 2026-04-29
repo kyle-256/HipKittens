@@ -1560,11 +1560,19 @@ __global__ void grouped_ktail_kernel_lds(const grouped_layout_globals g) {
     // (column-masked C store), and we must not RMW them.
     if (row >= g.M_total || col >= g.n) return;
 
-    // [round-10] Vec4 LDS inner fma: 1 vec4 LDS read = 8 bytes = 2 banks
-    // broadcast across the rib lane-group (no conflict). 64 scalar reads
-    // per K_REM=64 -> 16 vec4 reads. Compiler emits ds_read_b64_b for
-    // the 8-byte LDS load; per vec4 we do 4 fma over the 4 bf16 ->
-    // float32 conversions, matching the scalar-tail vec4 path style.
+    // Round-15: replace the scalar fp32 fma chain with
+    // ``v_dot2_f32_bf16`` (CDNA4 packed bf16 dot-product), which does
+    // 2 bf16 muls + 1 fp32 add in 1 cycle on the VALU, vs 2 separate
+    // fp32 fmas (2 cycles) in the bf16-cast-to-float path. K_REM=64 was
+    // 64 scalar fp32 fmas per thread (~64 cycles); now it's 32
+    // ``v_dot2`` ops (~32 cycles) — halves the K-tail compute latency
+    // and saves the 4 bf16->fp32 converts per kk_v.
+    //
+    // Numerics: identical math (a.x*b.x + a.y*b.y added to acc) to the
+    // fp32-cast path; the intrinsic accumulates in fp32 as well.
+    // Compiler emits ``v_dot2c_f32_bf16`` directly (verified by
+    // -save-temps assembly).
+    typedef __attribute__((__vector_size__(2 * sizeof(__bf16)))) __bf16 bf16x2_v;
     constexpr int FMA_VEC = 4;
     constexpr int K_VECS = K_REM / FMA_VEC;
     static_assert(K_REM % FMA_VEC == 0, "K_REM must be vec4-aligned for inner fma");
@@ -1575,10 +1583,14 @@ __global__ void grouped_ktail_kernel_lds(const grouped_layout_globals g) {
             &A_lds[rib * K_REM_LDS + kk_v * FMA_VEC]);
         bf16x4 b4 = *reinterpret_cast<const bf16x4*>(
             &B_lds[cib * K_REM_LDS + kk_v * FMA_VEC]);
-        acc += float(a4.lo.x) * float(b4.lo.x)
-             + float(a4.lo.y) * float(b4.lo.y)
-             + float(a4.hi.x) * float(b4.hi.x)
-             + float(a4.hi.y) * float(b4.hi.y);
+        acc = __builtin_amdgcn_fdot2_f32_bf16(
+            *reinterpret_cast<const bf16x2_v*>(&a4.lo),
+            *reinterpret_cast<const bf16x2_v*>(&b4.lo),
+            acc, false);
+        acc = __builtin_amdgcn_fdot2_f32_bf16(
+            *reinterpret_cast<const bf16x2_v*>(&a4.hi),
+            *reinterpret_cast<const bf16x2_v*>(&b4.hi),
+            acc, false);
     }
 
     // K-tail correction add. Main grouped kernel already stored the
