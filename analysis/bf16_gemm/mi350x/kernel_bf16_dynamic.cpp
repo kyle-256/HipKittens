@@ -1199,18 +1199,18 @@ __global__ void grouped_tail_kernel(const grouped_layout_globals g) {
     }
     __syncthreads();
 
-    // Round 5: when the layout is RCR, ``dispatch_grouped`` launches the
-    // main kernel with ``bpc = ceil_div(g.n, BLOCK_SIZE)``; the per-group
+    // Round-11: RCR's ``dispatch_grouped`` always launches the main
+    // kernel with ``bpc = ceil_div(g.n, BLOCK_SIZE)``; the per-group
     // bounded B SRD + column-masked C store cover the entire [0, g.n)
-    // column range natively. In that mode the tail kernel only runs for
-    // K-tail (now applies to ALL cols [0, n), including the partial last
-    // col-tile) or per-group M-tail.
-    // RRR/CRR layouts can't activate ceil_div N coverage yet (B has N on
+    // column range natively, regardless of K alignment. In that mode
+    // the tail kernel only runs for K-tail (which applies to ALL cols
+    // [0, n) including the partial last col-tile) or per-group M-tail.
+    // RRR/CRR layouts can't activate ceil_div N coverage (B has N on
     // the column axis, where SRD-clamp doesn't trigger for OOB N), so
     // their N-tail still flows through the per-cell full-K reduction.
     constexpr bool layout_supports_main_n = (L == Layout::RCR);
     const bool main_covers_n =
-        layout_supports_main_n && (g.fast_k > 0) && (g.fast_k == g.k);
+        layout_supports_main_n && (g.fast_k > 0);
     const bool needs_k_tail = g.fast_k < g.k;
     const bool needs_n_tail = !main_covers_n && (g.fast_n < g.n);
     if (!needs_k_tail && !needs_n_tail) return;
@@ -1428,7 +1428,11 @@ __global__ void grouped_ktail_kernel_lds(const grouped_layout_globals g) {
 
     const int row_block_base = blockIdx.y * TBM;
     const int col_block_base = blockIdx.x * TBN;
-    if (row_block_base >= g.M_total || col_block_base >= g.fast_n) return;
+    // Round-11: cover the ENTIRE [0, g.n) col range, not just
+    // [0, g.fast_n). The partial last col-tile (col_block_base + TBN
+    // straddling g.n) is handled per-thread via the ``col < g.n`` check
+    // below, mirroring main kernel's ``store_c_tile_n_masked`` behaviour.
+    if (row_block_base >= g.M_total || col_block_base >= g.n) return;
 
     // Pick a single group_idx for the entire block (assumes block within one
     // group — see caller assumptions above). Use the FIRST row of the block.
@@ -1457,7 +1461,7 @@ __global__ void grouped_ktail_kernel_lds(const grouped_layout_globals g) {
     if (cross_boundary) {
         const int row = row_block_base + rib;
         const int col = col_block_base + cib;
-        if (row < g.M_total && col < g.fast_n) {
+        if (row < g.M_total && col < g.n) {
             int row_group = 0;
             #pragma unroll 1
             for (int gi = 0; gi < g.G; ++gi) {
@@ -1525,7 +1529,11 @@ __global__ void grouped_ktail_kernel_lds(const grouped_layout_globals g) {
         const int kk_start = kk_v * VEC;
         const int c_global = col_block_base + c_in_blk;
         bf16x4 vb{};
-        if (c_global < g.fast_n) {
+        // Round-11: load up to ``g.n`` (was ``g.fast_n``). For the
+        // partial last col-tile (col >= g.n) we use the zero pad below;
+        // the main kernel's ``store_c_tile_n_masked`` ensures we don't
+        // read uninitialised C cells in the col >= g.n region either.
+        if (c_global < g.n) {
             const bf16* bp = &g.b[coord<>{0, group_idx, c_global, k0 + kk_start}];
             vb = *reinterpret_cast<const bf16x4*>(bp);
         }
@@ -1535,7 +1543,10 @@ __global__ void grouped_ktail_kernel_lds(const grouped_layout_globals g) {
 
     const int row = row_block_base + rib;
     const int col = col_block_base + cib;
-    if (row >= g.M_total || col >= g.fast_n) return;
+    // Round-11: skip cells whose col is beyond the real ``g.n`` (the
+    // partial last col-tile). Main kernel did NOT write those cells
+    // (column-masked C store), and we must not RMW them.
+    if (row >= g.M_total || col >= g.n) return;
 
     // [round-10] Vec4 LDS inner fma: 1 vec4 LDS read = 8 bytes = 2 banks
     // broadcast across the rib lane-group (no conflict). 64 scalar reads
@@ -1898,8 +1909,22 @@ void grouped_kernel(const grouped_layout_globals g) {
     // most recently constructed SRD and only rebuild on group change,
     // which lifts the 4-SGPR ``make_srsrc`` cost out of the inner store
     // path on aligned DeepSeek shapes.
+    //
+    // Round-11: B SRD must NOT enable the cache-swizzle stride field —
+    // when ``b_row_stride`` is not a power-of-2 (gpt_oss K=2880 → stride
+    // 5760 bytes, K=7168 → stride 14336 bytes), the buffer-LDS path's
+    // OOB-clamp behaviour is undefined for the partial last col-tile
+    // (rows >= b_inner_rows but < range_bytes / row_stride). Empirically
+    // this leads to a memory access fault on K=2880 + N=2880 when main
+    // sweeps cols [0, ceil_div(g.n, BLOCK_SIZE)*BLOCK_SIZE). Passing
+    // ``row_stride=0`` to ``make_srsrc`` keeps the linear range-bytes
+    // bound check (which clamps OOB lanes to 0 reliably) without the
+    // swizzle. The cost is the lost cache-swizzle benefit on the
+    // aligned interior tiles — we accept that on the grouped path
+    // because (a) DSV3 N=4096/7168-aligned still hits ~1.15 vs Triton,
+    // and (b) without the disable, gpt_oss N=K=2880 crashes.
     int last_group_idx = -1;
-    i32x4 b_srsrc_curr = make_srsrc(b_base, b_inner_rows * b_row_stride, b_row_stride);
+    i32x4 b_srsrc_curr = make_srsrc(b_base, b_inner_rows * b_row_stride, /*row_stride_bytes=*/0);
 
     // [grouped] Persistent outer loop: stream (group, tile) pairs through this CU.
     for (int gt = pid; gt < total_tiles; gt += NUM_CUS) {
@@ -1992,7 +2017,8 @@ void grouped_kernel(const grouped_layout_globals g) {
         if (group_idx != last_group_idx) {
             const int b_grp_total_rows = (group_idx + 1) * b_inner_rows;
             b_srsrc_curr = make_srsrc(
-                b_base, b_grp_total_rows * b_row_stride, b_row_stride);
+                b_base, b_grp_total_rows * b_row_stride,
+                /*row_stride_bytes=*/0);
             last_group_idx = group_idx;
         }
 
@@ -2102,17 +2128,24 @@ void dispatch_grouped(grouped_layout_globals g) {
     // Round-5 fix: in ``grouped_kernel`` we now reconstruct the B SRD
     // per-iteration with a bound of ``(group_idx + 1) * <inner-rows> *
     // sizeof(bf16)`` so the SOFF for any OOB-row tile lands beyond
-    // the SRD limit and the hardware clamps the load to 0. This matches
-    // the dense kernel's ceil_div + ``store_c_tile_n_masked`` design
-    // (g.bpc widening below) — when fast_k == g.k we let the main
-    // kernel sweep the full N axis. K-tail still falls through to
-    // ``grouped_tail_kernel`` (single-axis correction).
+    // the SRD limit and the hardware clamps the load to 0.
     //
-    // Restriction: ceil_div coverage of N is only enabled when K is
-    // fully aligned (``fast_k == g.k``). When BOTH N and K are
-    // misaligned, the partial col-tile interacts with the K-tail
-    // correction in a way that triggers a memory fault on certain
-    // shape combos (mirror of dense Phase 4 fallback).
+    // Round-11 (auto_optimize): RCR uses ``ceil_div(g.n, BLOCK_SIZE)``
+    // unconditionally. The previous restriction (only when K is also
+    // aligned) was lifted by (a) extending the LDS K-tail kernel grid
+    // to ``ceil_div(g.n, TBN)`` (covers the partial last col-tile too),
+    // and (b) DISABLING the cache-swizzle stride field on the per-group
+    // B SRD inside ``grouped_kernel`` — non-power-of-2 K strides
+    // (gpt_oss K=2880 → 5760 bytes) made the swizzled OOB clamp
+    // unreliable, leading to a GPU memory fault for the OOB partial
+    // col-tile rows. The unswizzled SRD's linear range-bytes bound
+    // clamps reliably; the cost is lost cache-swizzle on the
+    // interior tiles, but DSV3 still hits ~1.15 vs Triton on the
+    // K-power-of-2 path. The N-tail LDS kernel is no longer launched
+    // on RCR because the main kernel + LDS K-tail combination now
+    // writes every cell in [0, g.n) × [0, g.k) natively. This removes
+    // the entire ~32% wall-time spent on grouped_ntail_kernel_lds for
+    // gpt_oss N=2880/5760, K=2880.
     g.fast_n = (g.n / BLOCK_SIZE) * BLOCK_SIZE;
     g.fast_k = (g.k / K_TWO_TILE) * K_TWO_TILE;
     // ceil_div N coverage is RCR-only:
@@ -2134,18 +2167,13 @@ void dispatch_grouped(grouped_layout_globals g) {
     //               the B load itself (Phase 6+), RRR/CRR keep the
     //               legacy ``bpc = fast_n / BLOCK_SIZE`` and N-tail
     //               flows through ``grouped_tail_kernel``.
-    // Restriction: ceil_div coverage of N is only enabled when K is
-    // fully aligned (``fast_k == g.k``). When BOTH N and K are
-    // misaligned, the partial col-tile interacts with the scalar
-    // K-tail kernel's read-modify-write on g.c in a way that
-    // triggers a memory fault on certain shape combos (e.g.,
-    // gpt_oss-Down N=K=2880). Keep the K-aligned restriction until
-    // we wire an LDS-staged K-tail kernel for the entire [0, n)
-    // range (round 6+).
+    // Round-11: ceil_div N coverage is enabled unconditionally for RCR
+    // (no K-alignment gate). The unswizzled per-group B SRD inside
+    // ``grouped_kernel`` clamps OOB rows reliably, and the LDS K-tail
+    // kernel grid ``ceil_div(g.n, TBN)`` covers the partial last
+    // col-tile of the K-tail correction.
     if constexpr (L == Layout::RCR) {
-        g.bpc = (g.fast_k == g.k)
-            ? kittens::ceil_div(g.n, BLOCK_SIZE)
-            : (g.fast_n / BLOCK_SIZE);
+        g.bpc = kittens::ceil_div(g.n, BLOCK_SIZE);
     } else {
         g.bpc = g.fast_n / BLOCK_SIZE;
     }
@@ -2176,17 +2204,17 @@ void dispatch_grouped(grouped_layout_globals g) {
         g.ki     = 0;
     }
 
-    // Launch tail kernel for N-tail or K-tail. When the layout is RCR
-    // the main kernel always uses bpc = ceil_div(n, BLOCK_SIZE) — the
-    // per-group bounded B SRD + column-masked C store cover the entire
-    // [0, n) column range natively. The scalar tail kernel still runs
-    // for any K-tail correction (which now spans ALL cols in [0, n)
-    // when fast_k < k) and per-group M-tail.
-    // RRR/CRR can't activate ceil_div N coverage yet (see dispatch
-    // comment above) — N-tail still runs through the scalar tail kernel
-    // for those layouts.
+    // Round-11: main kernel always covers [0, g.n) × [0, g.fast_k) on
+    // RCR. The LDS K-tail kernel (when launched) covers the K-tail
+    // correction for ALL cols [0, g.n), including the partial last
+    // col-tile via a wider grid. The dedicated LDS N-tail kernel is
+    // therefore no longer launched on RCR — main + LDS K-tail together
+    // cover every cell.
+    // RRR/CRR can't activate ceil_div N coverage (see dispatch comment
+    // above) — N-tail still runs through the scalar tail kernel for
+    // those layouts.
     constexpr bool layout_supports_main_n = (L == Layout::RCR);
-    const bool main_covers_n = layout_supports_main_n && (g.fast_k == g.k);
+    const bool main_covers_n = layout_supports_main_n;
     const bool need_tail_run =
         (g.fast_k != g.k) ||
         (!main_covers_n && g.fast_n != g.n);
@@ -2202,45 +2230,41 @@ void dispatch_grouped(grouped_layout_globals g) {
         const bool lds_k_tail_safe = (g.m_per_group >= TAIL_BLOCK_M) &&
                                      ((g.m_per_group % TAIL_BLOCK_M) == 0);
         if constexpr (L == Layout::RCR) {
-            if (K_rem == 64 && g.fast_n > 0 && lds_k_tail_safe) {
+            // Round-11: LDS K-tail grid covers ALL cols [0, g.n), not
+            // just [0, fast_n). The partial last col-tile of the K-tail
+            // RMW is now handled here too (kernel skips ``col >= g.n``);
+            // the dedicated N-tail kernel below is dropped because main
+            // already wrote the partial col-tile via
+            // ``store_c_tile_n_masked`` and this kernel adds the K-tail
+            // correction on top.
+            if (K_rem == 64 && lds_k_tail_safe) {
                 dim3 lds_block(TAIL_BLOCK_N, TAIL_BLOCK_M);
                 dim3 lds_grid(
-                    kittens::ceil_div(g.fast_n, TAIL_BLOCK_N),
+                    kittens::ceil_div(g.n, TAIL_BLOCK_N),
                     kittens::ceil_div(g.M_total, TAIL_BLOCK_M)
                 );
                 grouped_ktail_kernel_lds<Layout::RCR, 64>
                     <<<lds_grid, lds_block, 0, g.stream>>>(g);
             }
-            // [round-7] LDS-staged N-tail full-K reduction for cols
-            // [fast_n, n). Only when main_covers_n is FALSE (i.e., main
-            // kernel uses bpc = fast_n / BLOCK_SIZE and never wrote the
-            // partial last col-tile). Mirrored launch gate as LDS K-tail:
-            // m_per_group hint passes alignment, plus per-block runtime
-            // cross-group check inside the kernel.
-            if (!main_covers_n && g.fast_n < g.n && lds_k_tail_safe) {
-                const int n_tail = g.n - g.fast_n;
-                dim3 ntail_block(TAIL_BLOCK_N, TAIL_BLOCK_M);
-                dim3 ntail_grid(
-                    kittens::ceil_div(n_tail, TAIL_BLOCK_N),
-                    kittens::ceil_div(g.M_total, TAIL_BLOCK_M)
-                );
-                grouped_ntail_kernel_lds<Layout::RCR, 64>
-                    <<<ntail_grid, ntail_block, 0, g.stream>>>(g);
-            }
+            // Round-11: LDS N-tail kernel removed for RCR. Main kernel's
+            // ``bpc = ceil_div(g.n, BLOCK_SIZE)`` + per-group bounded B
+            // SRD (unswizzled, see grouped_kernel comment) + column-
+            // masked C store handles the partial last col-tile natively;
+            // the LDS K-tail above adds the K-tail correction for all
+            // cols in [0, g.n) including that partial col-tile.
+            // Profiling (rocprof on gpt_oss-Down B=4-M2048) showed the
+            // dropped N-tail kernel was 32% of total wall-time; this
+            // change removes that whole kernel from the launch graph.
         }
 
-        // [round-10] Skip scalar tail launch when LDS K-tail + LDS N-tail
-        // (RCR only) cover every cell — including the cross-boundary
-        // backstop (now inlined in both LDS kernels). Profiling on
-        // gpt_oss B=32-M4096 showed scalar tail running for ~6.4 ms even
-        // when its only role was a no-op skip path. The LDS kernels'
-        // inlined per-row scalar fallback covers cross-boundary
-        // correctness without paying for a separate ~3M-block dispatch.
+        // [round-10] Skip scalar tail launch when LDS K-tail covers
+        // every cell. Round-11: ``g.fast_n > 0`` is dropped because
+        // main now ALWAYS covers [0, g.n) for RCR — the LDS K-tail
+        // grid is ``ceil_div(g.n, TBN)``, never empty.
         const bool lds_handles_all =
             (L == Layout::RCR) &&
             (K_rem == 64) &&
-            lds_k_tail_safe &&
-            (g.fast_n > 0);
+            lds_k_tail_safe;
         if (!lds_handles_all) {
             dim3 tail_block(TAIL_BLOCK_N, TAIL_BLOCK_M);
             dim3 tail_grid(
