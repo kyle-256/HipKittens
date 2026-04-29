@@ -379,7 +379,16 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       // dot slice 0
       {
         load(L_smem[toc], g.L_vec, {batch_idx, next_q_head_idx, 0, next_q_seq_idx});
-        G::load<1, false>(Q_i_smem[toc][0], g.Q, {batch_idx, next_q_seq_idx * 2, next_q_head_idx, 0});
+        // Reuse the prefilled swizzled offsets (computed once at line 313)
+        // for the prologue's first toc-buffer Q load.  Every other Q/dO
+        // load in the main loop already uses this overload; this single
+        // remaining call previously fell through to the inline-swizzle
+        // overload (~30 cycles + a couple intermediate VGPRs of swizzle
+        // math per call).  prefill_swizzled_offsets is GL/ST-type
+        // dependent (not ST-instance dependent), so the offsets are
+        // valid for any Q_i_smem[*][0] instance.  Pure consistency with
+        // the rest of the loop; correctness preserved (cos unchanged).
+        G::load<1, false>(Q_i_smem[toc][0], g.Q, {batch_idx, next_q_seq_idx * 2, next_q_head_idx, 0}, swizzled_offsets_Q_dO);
 
         // Load Q_i from shared memory to registers
         // load(Q_i, subtile_inplace<DOT_SLICE_QO, D>(Q_i_smem[tic][0], {0, 0}));
