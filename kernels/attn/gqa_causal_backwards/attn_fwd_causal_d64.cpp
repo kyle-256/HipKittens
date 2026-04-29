@@ -370,7 +370,19 @@ __global__ void attend_ker(const attn_globals<D> g) {
         load(v_reg, v_smem[1]);
         if constexpr (causal) {
             const int kv_end_pos = (j) * KV_BLOCK_SIZE;
-            if (q_start_pos < kv_end_pos) {  // Only mask if needed
+            // Hot-loop K tile (j-1) is BEFORE the diagonal for most CTAs/warps
+            // (max_num_tiles only includes K tiles up to the last Q tile's
+            // diagonal, so the inner loop's iterations are dominated by
+            // strictly-past-Q K tiles where masking is unnecessary). Mark
+            // the masking branch as cold so the compiler lays out
+            // mask_kv_tile's body behind a forward branch instead of
+            // speculating the v_cmp/v_cndmask sequence inline -- mirrors the
+            // hint=0 pattern already used at lines 254 (prologue, K tile 0)
+            // and 441 (epilogue, K tile max_num_tiles-3) and the 24
+            // analogous hints in attn_bkwd_causal_d64.cpp added in commit
+            // bd4bc392 ("perf: hint causal mask branches in D=64 bwd as
+            // cold paths").
+            if (__builtin_expect((q_start_pos < kv_end_pos), 0)) {  // Only mask if needed
                 mask_kv_tile(att_block[0], tile_idx, j - 1, neg_inf_v, lane);
             }
         }
