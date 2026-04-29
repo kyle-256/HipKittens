@@ -165,10 +165,16 @@ template<int D> struct attn_prep_globals {
         return dim3(b_runtime, ATTN_H, n_runtime / (DOT_SLICE_QO * NUM_WARPS));
     }
     dim3 block() { return dim3(NUM_THREADS); }
-    size_t dynamic_shared_memory() { return MAX_SHARED_MEMORY; }
+    // Prep is HBM->register->HBM and never touches LDS (the kernel body
+    // declares only register tiles).  Reserving MAX_SHARED_MEMORY (160 KiB)
+    // per CTA at launch was a stale carry-over and pinned the runtime to
+    // 1 CTA/CU even though compile-time Occupancy reports 8 waves/SIMD.
+    // Setting smem=0 lets CDNA4 schedule 2 CTAs/CU (32 wavefronts/CU max
+    // = 16 warps × 2 CTAs), which matches the kernel's compile-time max.
+    size_t dynamic_shared_memory() { return 0; }
 };
 
-template<int D> __launch_bounds__(NUM_THREADS, 1)
+template<int D> __launch_bounds__(NUM_THREADS, 2)
 __global__ void attend_prep_ker(const attn_prep_globals<D> g) {
     
     const int batch_idx = blockIdx.x;
@@ -194,12 +200,14 @@ __global__ void attend_prep_ker(const attn_prep_globals<D> g) {
 
 template<int D>
 void dispatch_prep(attn_prep_globals<D> g) {
-    unsigned long mem_size = g.dynamic_shared_memory();
-    hipFuncSetAttribute((void*)attend_prep_ker<D>, hipFuncAttributeMaxDynamicSharedMemorySize, mem_size);
-    attend_prep_ker<D><<<g.grid(), g.block(), mem_size, g.stream>>>(g);
+    // No hipFuncSetAttribute: dynamic_shared_memory()==0 is well below the
+    // default cap, so the per-call runtime API call (which costs a few us
+    // of CPU time and matters for the small-N (B=4 N=1024) shape where the
+    // kernel itself is only ~15 us) is unnecessary.
     // No internal hipDeviceSynchronize -- see comment in dispatch_fwd.  The
     // bwd combined kernel that follows will serialise on the same default
     // stream and the harness syncs at trial boundaries.
+    attend_prep_ker<D><<<g.grid(), g.block(), 0, g.stream>>>(g);
 }
 
 template<int D> struct attn_dq_shuffle_globals { 
@@ -215,10 +223,13 @@ template<int D> struct attn_dq_shuffle_globals {
         return dim3(b_runtime, ATTN_H, n_runtime / (DOT_SLICE_QO * NUM_WARPS));
     }
     dim3 block() { return dim3(NUM_THREADS); }
-    size_t dynamic_shared_memory() { return MAX_SHARED_MEMORY; }
+    // Same rationale as attn_prep_globals -- dq_shuffle is a pure HBM
+    // BHND->BSHD layout transpose and never touches LDS.  Drop the stale
+    // MAX_SHARED_MEMORY reservation so 2 CTAs/CU can coexist.
+    size_t dynamic_shared_memory() { return 0; }
 };
 
-template<int D> __launch_bounds__(NUM_THREADS, 1)
+template<int D> __launch_bounds__(NUM_THREADS, 2)
 __global__ void attend_dq_shuffle_ker(const attn_dq_shuffle_globals<D> g) {
     
     const int batch_idx = blockIdx.x;
@@ -235,9 +246,8 @@ __global__ void attend_dq_shuffle_ker(const attn_dq_shuffle_globals<D> g) {
 
 template<int D>
 void dispatch_dq_shuffle(attn_dq_shuffle_globals<D> g) {
-    unsigned long mem_size = g.dynamic_shared_memory();
-    hipFuncSetAttribute((void*)attend_dq_shuffle_ker<D>, hipFuncAttributeMaxDynamicSharedMemorySize, mem_size);
-    attend_dq_shuffle_ker<D><<<g.grid(), g.block(), mem_size, g.stream>>>(g);
+    // dynamic_shared_memory()==0 -> skip hipFuncSetAttribute.
+    attend_dq_shuffle_ker<D><<<g.grid(), g.block(), 0, g.stream>>>(g);
 }
 
 PYBIND11_MODULE(tk_kernel_bkwd_prep_d64, m) {
