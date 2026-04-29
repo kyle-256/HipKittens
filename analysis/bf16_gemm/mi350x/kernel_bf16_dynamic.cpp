@@ -12,6 +12,18 @@ constexpr int REG_BLOCK_N      = BLOCK_SIZE / WARPS_N;
 constexpr int HALF_REG_BLOCK_M = REG_BLOCK_M / 2;
 constexpr int HALF_REG_BLOCK_N = REG_BLOCK_N / 2;
 
+// Tail-kernel tile (mirror FP8 dense kernel_fp8_layouts.cpp:34-35). The
+// scalar fp32 fallback runs one (row, col) per thread; 16x16 was chosen
+// in FP8 to keep launch overhead bounded for the small tail region while
+// still hitting full occupancy. Used when M/N/K are not a multiple of
+// the main-kernel block size.
+constexpr int TAIL_BLOCK_M     = 16;
+constexpr int TAIL_BLOCK_N     = 16;
+// Two-tile schedule of the BF16 main kernel (`for tile = 0; tile < num_tiles - 2; tile += 2`)
+// requires `ki = K / K_STEP` to be EVEN, i.e. K must be a multiple of
+// `2 * K_STEP = 128`. Anything else has to fall through to the tail.
+constexpr int K_TWO_TILE       = 2 * K_STEP;
+
 #define NUM_WARPS (WARPS_M * WARPS_N)
 #define NUM_THREADS (kittens::WARP_THREADS * NUM_WARPS)
 
@@ -162,9 +174,28 @@ struct layout_globals {
     _gl a, b, c;
     hipStream_t stream;
     int m, n, k, ki, bpr, bpc, group_m, num_xcds;
+    // Aligned-region dimensions consumed by the main kernel:
+    //   fast_m = (m / BLOCK_SIZE) * BLOCK_SIZE
+    //   fast_n = (n / BLOCK_SIZE) * BLOCK_SIZE
+    //   fast_k = (k / K_TWO_TILE) * K_TWO_TILE
+    // Cells outside [0,fast_m) × [0,fast_n) plus the K-tail in
+    // [fast_k, k) are handled by `gemm_tail_kernel` (scalar fp32).
+    int fast_m, fast_n, fast_k;
     dim3 block() { return dim3(NUM_THREADS); }
     size_t dynamic_shared_memory() { return MAX_SHARED_MEMORY; }
 };
+
+// Scalar bf16 helpers used by `gemm_tail_kernel` (mirror the FP8 versions
+// in analysis/fp8_gemm/mi350x/kernel_fp8_layouts.cpp:168-174). One element
+// per call; intentionally NOT vectorised because the tail region is small
+// (<=2*BLOCK_SIZE rows/cols + K_TWO_TILE-1 K-tail) and the launch is rare.
+__device__ __forceinline__ float load_bf16_scalar(const _gl& src, int row, int col) {
+    return base_types::convertor<float, bf16>::convert(src[coord<>(row, col)]);
+}
+
+__device__ __forceinline__ void store_bf16_scalar(const _gl& dst, int row, int col, float value) {
+    dst[coord<>(row, col)] = base_types::convertor<bf16, float>::convert(value);
+}
 
 // KI_HINT > 0: compile-time num_tiles (K / K_STEP) -> full #pragma unroll
 // KI_HINT == 0: dynamic num_tiles from g.ki, #pragma unroll 2
@@ -616,6 +647,62 @@ void gemm_kernel(const layout_globals g) {
 }
 
 // ---- Explicit instantiations ----
+
+// Scalar fp32 tail kernel — one thread per (row, col) of g.c.
+//
+// Mirror of the FP8 dense tail in analysis/fp8_gemm/mi350x/kernel_fp8_layouts.cpp:1515-1547,
+// minus the FP8 scale epilog. Two distinct cases based on (row, col):
+//
+//   1) `interior_mn`  (row < fast_m AND col < fast_n) AND `needs_k_tail`
+//      (fast_k < g.k):  the main kernel already wrote the [0..fast_k) inner
+//      product to g.c[row, col]. We add the K-tail [fast_k..k) on top.
+//
+//   2) Boundary cell (row >= fast_m OR col >= fast_n) OR main kernel did
+//      not run at all (`fast_m`/`fast_n`/`fast_k` == 0): compute the full
+//      K reduction from scratch and overwrite g.c[row, col].
+//
+// `fast_covers_cell && !needs_k_tail` early-returns: those cells are the
+// fully-aligned interior already produced by the main kernel.
+template<Layout L>
+__global__ void gemm_tail_kernel(const layout_globals g) {
+    const int row = blockIdx.y * blockDim.y + threadIdx.y;
+    const int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= g.m || col >= g.n) {
+        return;
+    }
+
+    const bool interior_mn      = row < g.fast_m && col < g.fast_n;
+    const bool fast_covers_cell = interior_mn && g.fast_m > 0 &&
+                                  g.fast_n > 0 && g.fast_k > 0;
+    const bool needs_k_tail     = g.fast_k < g.k;
+    if (fast_covers_cell && !needs_k_tail) {
+        return;
+    }
+
+    const int k0 = fast_covers_cell ? g.fast_k : 0;
+    float acc = 0.0f;
+    for (int kk = k0; kk < g.k; ++kk) {
+        if constexpr (L == Layout::RCR) {
+            acc += load_bf16_scalar(g.a, row, kk) * load_bf16_scalar(g.b, col, kk);
+        } else if constexpr (L == Layout::RRR) {
+            acc += load_bf16_scalar(g.a, row, kk) * load_bf16_scalar(g.b, kk, col);
+        } else { // CRR
+            acc += load_bf16_scalar(g.a, kk, row) * load_bf16_scalar(g.b, kk, col);
+        }
+    }
+
+    if (fast_covers_cell && needs_k_tail) {
+        store_bf16_scalar(g.c, row, col,
+                          load_bf16_scalar(g.c, row, col) + acc);
+    } else {
+        store_bf16_scalar(g.c, row, col, acc);
+    }
+}
+
+template __global__ void gemm_tail_kernel<Layout::RCR>(const layout_globals);
+template __global__ void gemm_tail_kernel<Layout::RRR>(const layout_globals);
+template __global__ void gemm_tail_kernel<Layout::CRR>(const layout_globals);
+
 // KI_HINT = 0 dynamic fallback
 template __global__ void gemm_kernel<Layout::RCR, 0>(const layout_globals);
 template __global__ void gemm_kernel<Layout::RRR, 0>(const layout_globals);
@@ -659,22 +746,57 @@ void dispatch_gemm(layout_globals g) {
     g.n = static_cast<int>(g.c.cols());
     if constexpr (L == Layout::CRR) g.k = static_cast<int>(g.a.rows());
     else g.k = static_cast<int>(g.a.cols());
-    g.ki = g.k / K_STEP;
-    g.bpr = g.m / BLOCK_SIZE;
-    g.bpc = g.n / BLOCK_SIZE;
 
-    switch (g.ki) {
-        case 56:  launch_one<L, 56> (g); return;
-        case 64:  launch_one<L, 64> (g); return;
-        case 128: launch_one<L, 128>(g); return;
-        case 172: launch_one<L, 172>(g); return;
-        case 224: launch_one<L, 224>(g); return;
-        case 256: launch_one<L, 256>(g); return;
-        case 296: launch_one<L, 296>(g); return;
-        case 448: launch_one<L, 448>(g); return;
-        case 462: launch_one<L, 462>(g); return;
-        case 832: launch_one<L, 832>(g); return;
-        default:  launch_one<L, 0>  (g); return;
+    // Native non-aligned-shape support (mirror FP8 dense dispatch in
+    // analysis/fp8_gemm/mi350x/kernel_fp8_layouts.cpp:1900-1953):
+    //   * `fast_*` is the largest aligned sub-region the BLOCK_SIZE-tiled
+    //     two-tile-K main kernel can cover. Misaligned M / N / K is no
+    //     longer pre-padded by the host — the kernel handles it natively
+    //     via a scalar fp32 tail kernel.
+    //   * K alignment is `K_TWO_TILE = 2 * K_STEP = 128` (NOT just K_STEP)
+    //     because the main loop is two-tile (`tile += 2`) and silently
+    //     reads OOB on odd `ki` (root cause of the SNR=16.55 dB regression
+    //     the task spec calls out for K=2880).
+    //   * If the main kernel can't run at all (fast region empty), we still
+    //     drop into the tail kernel below to compute the full output.
+    g.fast_m = (g.m / BLOCK_SIZE) * BLOCK_SIZE;
+    g.fast_n = (g.n / BLOCK_SIZE) * BLOCK_SIZE;
+    g.fast_k = (g.k / K_TWO_TILE) * K_TWO_TILE;
+    g.bpr = g.fast_m / BLOCK_SIZE;
+    g.bpc = g.fast_n / BLOCK_SIZE;
+    g.ki  = g.fast_k / K_STEP;
+
+    if (g.bpr > 0 && g.bpc > 0 && g.ki >= 2) {
+        switch (g.ki) {
+            case 56:  launch_one<L, 56> (g); break;
+            case 64:  launch_one<L, 64> (g); break;
+            case 128: launch_one<L, 128>(g); break;
+            case 172: launch_one<L, 172>(g); break;
+            case 224: launch_one<L, 224>(g); break;
+            case 256: launch_one<L, 256>(g); break;
+            case 296: launch_one<L, 296>(g); break;
+            case 448: launch_one<L, 448>(g); break;
+            case 462: launch_one<L, 462>(g); break;
+            case 832: launch_one<L, 832>(g); break;
+            default:  launch_one<L, 0>  (g); break;
+        }
+    } else {
+        // Fast region empty (M < BLOCK_SIZE or N < BLOCK_SIZE or K < K_TWO_TILE)
+        // — let the tail kernel compute the entire output. Reset fast_* so
+        // tail logic treats every cell as "kernel never ran here".
+        g.fast_m = 0;
+        g.fast_n = 0;
+        g.fast_k = 0;
+        g.ki     = 0;
+    }
+
+    if (g.fast_m != g.m || g.fast_n != g.n || g.fast_k != g.k) {
+        dim3 tail_block(TAIL_BLOCK_N, TAIL_BLOCK_M);
+        dim3 tail_grid(
+            kittens::ceil_div(g.n, TAIL_BLOCK_N),
+            kittens::ceil_div(g.m, TAIL_BLOCK_M)
+        );
+        gemm_tail_kernel<L><<<tail_grid, tail_block, 0, g.stream>>>(g);
     }
 }
 
@@ -683,7 +805,9 @@ static void gemm_dispatch(pybind11::object a, pybind11::object b, pybind11::obje
     auto c_gl = py::from_object<_gl>::make(c);
     layout_globals g{py::from_object<_gl>::make(a), py::from_object<_gl>::make(b),
                      c_gl, {},
-                     0, 0, 0, 0, 0, 0, gm, num_xcds};
+                     /* m, n, k, ki, bpr, bpc */ 0, 0, 0, 0, 0, 0,
+                     /* group_m, num_xcds */ gm, num_xcds,
+                     /* fast_m, fast_n, fast_k */ 0, 0, 0};
 
     if (layout_name[0] == 'r' && layout_name[1] == 'c') dispatch_gemm<Layout::RCR>(g);
     else if (layout_name[0] == 'r' && layout_name[1] == 'r') dispatch_gemm<Layout::RRR>(g);
