@@ -416,6 +416,11 @@ __device__ static inline void mul_vgpr(T0 &dst, const T1 &lhs, const U &rhs) {
     bin_map<N, M, macros::mul_vgpr, T0, T1>(dst, lhs, rhs);
 }
 
+template<int N, int M, int R, ducks::art::all T0, ducks::art::all T1, typename U>
+__device__ static inline void mul_vgpr(T0 &dst, const T1 &lhs, const U &rhs) {
+    bin_map<N, M, R, macros::mul_vgpr, T0, T1>(dst, lhs, rhs);
+}
+
 /**
  * @brief Subtracts row values from each row of a tile.
  *

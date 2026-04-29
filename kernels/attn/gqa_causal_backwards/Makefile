@@ -63,7 +63,9 @@ LOGFILE := $(LOGDIR)/make_build.log
 # --------------------------------------------------------------------
 # Default target: build all three kernels
 # --------------------------------------------------------------------
-all: tk_kernel_bkwd tk_kernel_bkwd_prep tk_kernel_fwd
+all: tk_kernel_bkwd tk_kernel_bkwd_prep tk_kernel_fwd tk_kernel_fwd_d64 tk_kernel_bkwd_prep_d64 tk_kernel_bkwd_d64
+
+d64: tk_kernel_fwd_d64 tk_kernel_bkwd_prep_d64 tk_kernel_bkwd_d64
 
 # --------------------------------------------------------------------
 # Explicit rules for each kernel
@@ -84,9 +86,23 @@ tk_kernel_fwd: attn_fwd_causal.cpp
 	$(HIPCXX) $< $(HIPFLAGS) $(ICXXFLAGS) $(ICPPFLAGS) $(ILDFLAGS) \
 	    -o $@$(shell python3-config --extension-suffix) 2>&1 | tee $(LOGFILE)
 
-# Clean target
+tk_kernel_fwd_d64: attn_fwd_causal_d64.cpp
+	@mkdir -p $(LOGDIR)
+	$(HIPCXX) $< $(HIPFLAGS) $(ICXXFLAGS) $(ICPPFLAGS) $(ILDFLAGS) \
+	    -o $@$(shell python3-config --extension-suffix) 2>&1 | tee $(LOGFILE)
+
+tk_kernel_bkwd_prep_d64: attn_bkwd_prep_d64.cpp
+	@mkdir -p $(LOGDIR)
+	$(HIPCXX) $< $(HIPFLAGS) $(ICXXFLAGS) $(ICPPFLAGS) $(ILDFLAGS) \
+	    -o $@$(shell python3-config --extension-suffix) 2>&1 | tee $(LOGFILE)
+
+tk_kernel_bkwd_d64: attn_bkwd_causal_d64.cpp
+	@mkdir -p $(LOGDIR)
+	$(HIPCXX) $< $(HIPFLAGS) $(ICXXFLAGS) $(ICPPFLAGS) $(ILDFLAGS) \
+	    -o $@$(shell python3-config --extension-suffix) 2>&1 | tee $(LOGFILE)
+
 clean:
 	rm -f tk_kernel_bkwd* tk_kernel_bkwd_prep* tk_kernel_fwd*
 
-.PHONY: all clean
+.PHONY: all clean d64
 
