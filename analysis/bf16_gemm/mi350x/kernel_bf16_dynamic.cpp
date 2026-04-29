@@ -1438,25 +1438,59 @@ __global__ void grouped_ktail_kernel_lds(const grouped_layout_globals g) {
         if (row_block_base < s_offs[gi + 1]) { group_idx = gi; break; }
     }
 
-    // [round-6 cross-group safety] If the block straddles a group
-    // boundary (row_block_base + TBM > s_offs[group_idx + 1]) the
-    // single-``group_idx`` B-strip load below would feed wrong B rows
-    // for the upper rows of the block. Instead of doing per-row
-    // group_idx (slow), early-exit and let the scalar tail kernel handle
-    // every cell in this row-block. The host's ``m_per_group`` hint
-    // gates the LDS launch on uniform-aligned cases (where this check
-    // never triggers); the runtime check is a defensive backstop for
-    // non-uniform group_lens whose ``avg`` happened to be a multiple
-    // of TBM (would otherwise pass the host gate but corrupt B for
-    // cross-boundary rows).
-    if (row_block_base + TBM > s_offs[group_idx + 1]) return;
-
     const int k0 = g.fast_k;
     const int K_rem_dyn = g.k - k0;
     // K_rem_dyn must equal K_REM for this template instantiation (callers
     // dispatch by g.k - g.fast_k). Guard against accidental mismatch (e.g.,
     // dispatch bug) — fall back to early-exit, scalar tail will fix things.
     if (K_rem_dyn != K_REM) return;
+
+    // [round-6 cross-group safety] If the block straddles a group
+    // boundary, fall back to per-row scalar K-tail correction in this
+    // same kernel. Each row uses its own group_idx for B indexing.
+    // [round-10] Inlined fallback so the host can drop the scalar tail
+    // kernel launch entirely on the RCR uniform-aligned path. The
+    // host's ``m_per_group`` gate ensures cross_boundary is rare (only
+    // happens for non-uniform group_lens whose avg happens to be
+    // m_per_group-aligned).
+    const bool cross_boundary = (row_block_base + TBM > s_offs[group_idx + 1]);
+    if (cross_boundary) {
+        const int row = row_block_base + rib;
+        const int col = col_block_base + cib;
+        if (row < g.M_total && col < g.fast_n) {
+            int row_group = 0;
+            #pragma unroll 1
+            for (int gi = 0; gi < g.G; ++gi) {
+                if (row < s_offs[gi + 1]) { row_group = gi; break; }
+            }
+            float acc_s = 0.0f;
+            const bf16* a_row = &g.a[coord<>(row, 0)];
+            const bf16* b_row = &g.b[coord<>{0, row_group, col, 0}];
+            int kk = k0;
+            if ((g.k % 4 == 0) && ((k0 & 3) == 0)) {
+                const bf16x4* a_v4 = reinterpret_cast<const bf16x4*>(a_row);
+                const bf16x4* b_v4 = reinterpret_cast<const bf16x4*>(b_row);
+                const int j_start = k0 >> 2;
+                const int j_end   = g.k >> 2;
+                for (int j = j_start; j < j_end; ++j) {
+                    bf16x4 a4 = a_v4[j];
+                    bf16x4 b4 = b_v4[j];
+                    acc_s += float(a4.lo.x) * float(b4.lo.x)
+                           + float(a4.lo.y) * float(b4.lo.y)
+                           + float(a4.hi.x) * float(b4.hi.x)
+                           + float(a4.hi.y) * float(b4.hi.y);
+                }
+                kk = j_end << 2;
+            }
+            for (; kk < g.k; ++kk) {
+                acc_s += load_bf16_scalar(g.a, row, kk) *
+                         load_bf16_scalar_grp(g.b, row_group, col, kk);
+            }
+            store_bf16_scalar(g.c, row, col,
+                              load_bf16_scalar(g.c, row, col) + acc_s);
+        }
+        return;
+    }
 
     // [round-9] Vec4 cooperative load (1 dwordx2 / thread instead of 4
     // separate scalar bf16 loads). With NTHR=256 threads and A_TOTAL=1024
@@ -1503,16 +1537,25 @@ __global__ void grouped_ktail_kernel_lds(const grouped_layout_globals g) {
     const int col = col_block_base + cib;
     if (row >= g.M_total || col >= g.fast_n) return;
 
-    // Scalar dot product over LDS data. K_REM is constexpr so the loop is
-    // fully unrolled. Each iteration is 2 LDS loads (broadcast + broadcast)
-    // + 1 fma. The LDS broadcasts are the dominant gain: 16 threads in the
-    // same `rib` row read A_lds[rib][kk] simultaneously — single LDS bank
-    // load, broadcast to all (no lane-conflict).
+    // [round-10] Vec4 LDS inner fma: 1 vec4 LDS read = 8 bytes = 2 banks
+    // broadcast across the rib lane-group (no conflict). 64 scalar reads
+    // per K_REM=64 -> 16 vec4 reads. Compiler emits ds_read_b64_b for
+    // the 8-byte LDS load; per vec4 we do 4 fma over the 4 bf16 ->
+    // float32 conversions, matching the scalar-tail vec4 path style.
+    constexpr int FMA_VEC = 4;
+    constexpr int K_VECS = K_REM / FMA_VEC;
+    static_assert(K_REM % FMA_VEC == 0, "K_REM must be vec4-aligned for inner fma");
     float acc = 0.0f;
     #pragma unroll
-    for (int kk = 0; kk < K_REM; ++kk) {
-        acc += float(A_lds[rib * K_REM + kk])
-             * float(B_lds[cib * K_REM + kk]);
+    for (int kk_v = 0; kk_v < K_VECS; ++kk_v) {
+        bf16x4 a4 = *reinterpret_cast<const bf16x4*>(
+            &A_lds[rib * K_REM + kk_v * FMA_VEC]);
+        bf16x4 b4 = *reinterpret_cast<const bf16x4*>(
+            &B_lds[cib * K_REM + kk_v * FMA_VEC]);
+        acc += float(a4.lo.x) * float(b4.lo.x)
+             + float(a4.lo.y) * float(b4.lo.y)
+             + float(a4.hi.x) * float(b4.hi.x)
+             + float(a4.hi.y) * float(b4.hi.y);
     }
 
     // K-tail correction add. Main grouped kernel already stored the
@@ -1594,10 +1637,46 @@ __global__ void grouped_ntail_kernel_lds(const grouped_layout_globals g) {
     }
 
     // [round-7] Cross-group safety mirror. Single-group_idx B-strip load
-    // would feed wrong rows for the upper part of a cross-boundary block;
-    // early-exit and let the scalar tail handle every cell with per-row
-    // group_idx (it has the same block_in_group skip we add in this round).
-    if (row_block_base + TBM > s_offs[group_idx + 1]) return;
+    // would feed wrong rows for the upper part of a cross-boundary block.
+    // [round-10] Inlined scalar fallback so the host can drop the scalar
+    // tail launch on the RCR uniform-aligned path. Per-row group_idx +
+    // full-K reduction (vec4 inner where K%4==0).
+    const bool cross_boundary = (row_block_base + TBM > s_offs[group_idx + 1]);
+    if (cross_boundary) {
+        const int row_s = row_block_base + rib;
+        const int col_s = col_block_base + cib;
+        if (row_s < g.M_total && col_s < g.n) {
+            int row_group = 0;
+            #pragma unroll 1
+            for (int gi = 0; gi < g.G; ++gi) {
+                if (row_s < s_offs[gi + 1]) { row_group = gi; break; }
+            }
+            float acc_s = 0.0f;
+            const bf16* a_row = &g.a[coord<>(row_s, 0)];
+            const bf16* b_row = &g.b[coord<>{0, row_group, col_s, 0}];
+            int kk = 0;
+            if (g.k % 4 == 0) {
+                const bf16x4* a_v4 = reinterpret_cast<const bf16x4*>(a_row);
+                const bf16x4* b_v4 = reinterpret_cast<const bf16x4*>(b_row);
+                const int j_end = g.k >> 2;
+                for (int j = 0; j < j_end; ++j) {
+                    bf16x4 a4 = a_v4[j];
+                    bf16x4 b4 = b_v4[j];
+                    acc_s += float(a4.lo.x) * float(b4.lo.x)
+                           + float(a4.lo.y) * float(b4.lo.y)
+                           + float(a4.hi.x) * float(b4.hi.x)
+                           + float(a4.hi.y) * float(b4.hi.y);
+                }
+                kk = j_end << 2;
+            }
+            for (; kk < g.k; ++kk) {
+                acc_s += load_bf16_scalar(g.a, row_s, kk) *
+                         load_bf16_scalar_grp(g.b, row_group, col_s, kk);
+            }
+            store_bf16_scalar(g.c, row_s, col_s, acc_s);
+        }
+        return;
+    }
 
     const int row = row_block_base + rib;
     const int col = col_block_base + cib;
@@ -1646,16 +1725,29 @@ __global__ void grouped_ntail_kernel_lds(const grouped_layout_globals g) {
         __syncthreads();
 
         if (active_cell) {
-            // Bound the inner unroll by the actual K_remaining when k_chunk_start
-            // + K_CHUNK exceeds g.k (last partial chunk). The 0.0f-pad on load
-            // also makes excess kk safe, but skipping the multiply saves cycles.
+            // [round-10] Vec4 LDS inner fma. K_CHUNK=64 -> 16 vec4 reads per
+            // chunk per operand. 0.0f pad on the load above keeps the last
+            // partial chunk (k_iters_v < K_CHUNK_VECS) numerically safe; the
+            // ``break`` guard also short-circuits the unrolled loop on the
+            // last chunk for K not a multiple of K_CHUNK.
+            constexpr int FMA_VEC = 4;
+            constexpr int K_CHUNK_VECS = K_CHUNK / FMA_VEC;
+            static_assert(K_CHUNK % FMA_VEC == 0,
+                "K_CHUNK must be vec4-aligned for inner fma");
             const int k_left = g.k - k_chunk_start;
-            const int k_iters = (k_left < K_CHUNK) ? k_left : K_CHUNK;
+            const int k_iters_v = (k_left < K_CHUNK)
+                ? (k_left + FMA_VEC - 1) / FMA_VEC : K_CHUNK_VECS;
             #pragma unroll
-            for (int kk = 0; kk < K_CHUNK; ++kk) {
-                if (kk >= k_iters) break;
-                acc += float(A_lds[rib * K_CHUNK + kk])
-                     * float(B_lds[cib * K_CHUNK + kk]);
+            for (int kk_v = 0; kk_v < K_CHUNK_VECS; ++kk_v) {
+                if (kk_v >= k_iters_v) break;
+                bf16x4 a4 = *reinterpret_cast<const bf16x4*>(
+                    &A_lds[rib * K_CHUNK + kk_v * FMA_VEC]);
+                bf16x4 b4 = *reinterpret_cast<const bf16x4*>(
+                    &B_lds[cib * K_CHUNK + kk_v * FMA_VEC]);
+                acc += float(a4.lo.x) * float(b4.lo.x)
+                     + float(a4.lo.y) * float(b4.lo.y)
+                     + float(a4.hi.x) * float(b4.hi.x)
+                     + float(a4.hi.y) * float(b4.hi.y);
             }
         }
         __syncthreads();  // before next chunk overwrites LDS
@@ -2137,12 +2229,26 @@ void dispatch_grouped(grouped_layout_globals g) {
             }
         }
 
-        dim3 tail_block(TAIL_BLOCK_N, TAIL_BLOCK_M);
-        dim3 tail_grid(
-            kittens::ceil_div(g.n, TAIL_BLOCK_N),
-            kittens::ceil_div(g.M_total, TAIL_BLOCK_M)
-        );
-        grouped_tail_kernel<L><<<tail_grid, tail_block, 0, g.stream>>>(g);
+        // [round-10] Skip scalar tail launch when LDS K-tail + LDS N-tail
+        // (RCR only) cover every cell — including the cross-boundary
+        // backstop (now inlined in both LDS kernels). Profiling on
+        // gpt_oss B=32-M4096 showed scalar tail running for ~6.4 ms even
+        // when its only role was a no-op skip path. The LDS kernels'
+        // inlined per-row scalar fallback covers cross-boundary
+        // correctness without paying for a separate ~3M-block dispatch.
+        const bool lds_handles_all =
+            (L == Layout::RCR) &&
+            (K_rem == 64) &&
+            lds_k_tail_safe &&
+            (g.fast_n > 0);
+        if (!lds_handles_all) {
+            dim3 tail_block(TAIL_BLOCK_N, TAIL_BLOCK_M);
+            dim3 tail_grid(
+                kittens::ceil_div(g.n, TAIL_BLOCK_N),
+                kittens::ceil_div(g.M_total, TAIL_BLOCK_M)
+            );
+            grouped_tail_kernel<L><<<tail_grid, tail_block, 0, g.stream>>>(g);
+        }
     }
 }
 
