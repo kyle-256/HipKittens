@@ -3132,6 +3132,24 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
 
   store<1>(g.dVg, dV_j, {batch_idx, 0, kv_head_idx, 0}, {0, j, 0, 0});
   __builtin_amdgcn_s_waitcnt(0);
+  // Mirror the prologue canonicalization from commit 1ea76fc5: pin
+  // `sched_barrier(0)` BETWEEN s_waitcnt(0) and s_barrier() so the
+  // LLVM post-RA scheduler cannot slide the epilogue's
+  // `accvgpr_read(dV_j_T, dK_j_T) / mul / store dKg / mul_vgpr /
+  // dq_atomic_add` past the explicit drain.  Before this hint, the
+  // post-loop epilogue was the lone remaining outlier (matching the
+  // prologue's pre-fix layout) where the wait + barrier pair had no
+  // sched_barrier pin between them — every other one of the kernel's
+  // 38 wait/barrier sites already follows the canonical
+  // `wait; sched_barrier(0); s_barrier;` ordering.  Keeps the
+  // wave-collective drain semantically tight to the trailing `store
+  // dVg` HBM commit and stops LLVM from hoisting the
+  // accvgpr_read/mul/store-dKg trio across the drain (which would
+  // overlap them with the dVg HBM commit's vmcnt timeline that the
+  // wait(0) is meant to bound).  Pure scheduling hint — no
+  // instruction emitted, no numerics change, lgkmcnt/vmcnt semantics
+  // unchanged.
+  __builtin_amdgcn_sched_barrier(0);
   __builtin_amdgcn_s_barrier();
 
   // We first copy dV_j_T from accumulator GPRs to vector GPRs and then perform the store
