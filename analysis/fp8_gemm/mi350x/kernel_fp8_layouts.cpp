@@ -286,125 +286,18 @@ __device__ __forceinline__ void prefill_transpose_swizzled_offsets(
     }
 }
 
-// =============================================================================
-// prefill_swizzled_offsets_partial_K — variant of kittens::prefill_swizzled_offsets
-// that tags lanes whose post-swizzle K-col chunk falls entirely outside
-// [0, K_REM_runtime) with a SENTINEL voffset (0x7FFFFFFFu). When a buffer
-// load uses a sentinel voffset, ``llvm.amdgcn.raw.buffer.load.lds`` clamps
-// SOFFSET + VOFFSET against SRD range_bytes; the OOB result (0) is what
-// gets stored to LDS. So OOB lanes auto-write 0 to LDS without an explicit
-// zero-init pass.
-//
-// Used by ``grouped_rcr_kernel<...,FUSED_KTAIL=true>`` (round-2 path A) to
-// load the K-tail (K=[fast_k, fast_k + K_BLOCK)) into the SAME ST_v2 LDS
-// tile that the main loop drained, so ``load_a / load_b + rcr_mma`` can
-// accumulate the K_REM contribution into the existing cA/cB/cC/cD register
-// tiles without a second kernel launch and without RMW on g.c.
-//
-// Granularity: lane covers ``elems_per_thread = bytes_per_thread / sizeof(T)``
-// contiguous K-cells per pass (16 fp8 cells for ST_v2). Lanes are tagged at
-// chunk granularity — i.e., we require K_REM_runtime to be a multiple of
-// elems_per_thread (true for K_REM=64 and any 16-multiple in fp8 path).
-// Mixed-validity lanes (partial chunks straddling K_REM) are not supported;
-// callers gate fuse activation at the dispatcher level.
-// =============================================================================
-template<int N_THREADS, ducks::st::all ST, ducks::gl::all GL>
-__device__ __forceinline__ void prefill_swizzled_offsets_partial_K(
-    ST& dst, const GL& src, uint32_t* swizzled_offsets, int K_REM_runtime)
-{
-    using T = typename ST::dtype;
-    constexpr uint32_t SENTINEL_VOFFSET = 0x7FFFFFFFu;
-
-    constexpr int bytes_per_thread = ST::underlying_subtile_bytes_per_thread;
-    constexpr int bytes_per_warp   = bytes_per_thread * kittens::WARP_THREADS;
-    constexpr int memcpy_per_tile  =
-        ST::rows * ST::cols * sizeof(T) / (bytes_per_thread * N_THREADS);
-    static_assert(
-        ST::rows * ST::cols * sizeof(T) >= bytes_per_warp,
-        "shared tile must be at least 1024 bytes"
-    );
-
-    constexpr int num_warps      = N_THREADS / kittens::WARP_THREADS;
-    constexpr int elems_per_thread = bytes_per_thread / sizeof(T);
-
-    const int laneid     = kittens::laneid();
-    const int warpid     = kittens::warpid() % num_warps;
-    const int row_stride = src.template stride<2>();
-
-    #pragma unroll
-    for (int i = 0; i < memcpy_per_tile; i++) {
-        const int lane_byte_offset =
-            (laneid  * bytes_per_thread) +
-            (warpid  * bytes_per_warp)   +
-            (i       * num_warps * bytes_per_warp);
-        const int subtile_id  = lane_byte_offset / ST::underlying_subtile_bytes;
-        const int subtile_row = subtile_id / ST::underlying_subtiles_per_row;
-        const int subtile_col = subtile_id % ST::underlying_subtiles_per_row;
-        const int subtile_lane_byte_offset =
-            lane_byte_offset % ST::underlying_subtile_bytes;
-
-        const int row = subtile_lane_byte_offset / ST::underlying_subtile_row_bytes;
-        const int col = (subtile_lane_byte_offset % ST::underlying_subtile_row_bytes) / sizeof(T);
-
-        const uint32_t swizzled_shared_byte_offset = dst.swizzle({row, col});
-        const int swizzled_global_row =
-            (swizzled_shared_byte_offset / ST::underlying_subtile_row_bytes) +
-            subtile_row * ST::underlying_subtile_rows;
-        const int swizzled_global_col =
-            (swizzled_shared_byte_offset % ST::underlying_subtile_row_bytes) / sizeof(T) +
-            subtile_col * ST::underlying_subtile_cols;
-        const uint32_t swizzled_global_byte_offset =
-            (swizzled_global_row * row_stride + swizzled_global_col) * sizeof(T);
-
-        // Tag lane invalid iff its 16-cell chunk starts at or beyond K_REM.
-        // Since lane chunks are 16-aligned and K_REM is required (by the
-        // dispatcher gate) to be a multiple of 16, the chunk is either
-        // fully valid or fully OOB — no partial-validity case here.
-        const bool fully_valid =
-            (swizzled_global_col + elems_per_thread) <= K_REM_runtime;
-        swizzled_offsets[i] =
-            fully_valid ? swizzled_global_byte_offset : SENTINEL_VOFFSET;
-    }
-
-    if constexpr (memcpy_per_tile * (bytes_per_thread * N_THREADS) !=
-                  ST::rows * ST::cols * sizeof(T)) {
-        constexpr int leftover_bytes =
-            ST::rows * ST::cols * sizeof(T) -
-            memcpy_per_tile * (bytes_per_thread * N_THREADS);
-        constexpr int leftover_threads = leftover_bytes / bytes_per_thread;
-        constexpr int leftover_warps   = leftover_threads / kittens::WARP_THREADS;
-
-        if (warpid < leftover_warps) {
-            const int lane_byte_offset =
-                (laneid  * bytes_per_thread) +
-                (warpid  * bytes_per_warp)   +
-                (memcpy_per_tile * num_warps * bytes_per_warp);
-            const int subtile_id  = lane_byte_offset / ST::underlying_subtile_bytes;
-            const int subtile_row = subtile_id / ST::underlying_subtiles_per_row;
-            const int subtile_col = subtile_id % ST::underlying_subtiles_per_row;
-            const int subtile_lane_byte_offset =
-                lane_byte_offset % ST::underlying_subtile_bytes;
-
-            const int row = subtile_lane_byte_offset / ST::underlying_subtile_row_bytes;
-            const int col = (subtile_lane_byte_offset % ST::underlying_subtile_row_bytes) / sizeof(T);
-
-            const uint32_t swizzled_shared_byte_offset = dst.swizzle({row, col});
-            const int swizzled_global_row =
-                (swizzled_shared_byte_offset / ST::underlying_subtile_row_bytes) +
-                subtile_row * ST::underlying_subtile_rows;
-            const int swizzled_global_col =
-                (swizzled_shared_byte_offset % ST::underlying_subtile_row_bytes) / sizeof(T) +
-                subtile_col * ST::underlying_subtile_cols;
-            const uint32_t swizzled_global_byte_offset =
-                (swizzled_global_row * row_stride + swizzled_global_col) * sizeof(T);
-
-            const bool fully_valid =
-                (swizzled_global_col + elems_per_thread) <= K_REM_runtime;
-            swizzled_offsets[memcpy_per_tile] =
-                fully_valid ? swizzled_global_byte_offset : SENTINEL_VOFFSET;
-        }
-    }
-}
+// Round-13 cleanup: ``prefill_swizzled_offsets_partial_K`` (round-2 path-A
+// scaffolding for LDS-staged K-tail) was deleted. Round-3 (commit 07354791)
+// shipped the K-tail fuse via path B (direct ``raw_buffer_load_b128``
+// HBM→register, lane-cell mapping derived in
+// ``analysis/_notes/round-3-fp8-ktail-path-b-success.md``) which sidesteps
+// swizzled offsets entirely. Round-11 (commit f9d591cb) dropped the now-dead
+// callers in ``grouped_rcr_kernel``'s prologue; round-13 dropped the helper
+// itself plus stale ~80-line path-A comment block from the fuse epilog.
+// Path-A SENTINEL-voffset scheme remains documented in
+// ``analysis/_notes/round-2-ktail-fuse-result.md`` and
+// ``round-3-fp8-ktail-path-a-saturation.md`` for historical context.
+// Codegen is unchanged — DCE was already firing on the unreferenced symbol.
 
 template<int N_THREADS,
          ducks::st::all ST,
@@ -1982,16 +1875,20 @@ __device__ __forceinline__ float resolve_combined_scale_grp(
 // When ``true`` (N misaligned, e.g. gpt_oss N=2880/5760) we use
 // ``store_c_tile_n_masked`` to drop OOB cols on the partial last tile.
 //
-// Round-2 path A (fused K-tail): ``FUSED_KTAIL`` selects between the legacy
-// "main kernel writes K=[0, fast_k) accum, standalone grouped_ktail_kernel_*
-// reads C, adds K=[fast_k, k) and writes C" RMW pipeline (FUSED_KTAIL=false)
-// and the new in-kernel fused epilog (FUSED_KTAIL=true) which does the
-// K-tail accumulation on cA/cB/cC/cD before scale + store. The fuse path
-// uses ``prefill_swizzled_offsets_partial_K`` to compute SENTINEL voffsets
-// for OOB lanes; ``buffer_load_lds`` clamps SOFFSET+VOFFSET against SRD
-// range_bytes and writes 0 to LDS for those lanes — no explicit zero-init,
-// no register increment beyond a second copy of soA/soB (only used when
-// FUSED_KTAIL=true).
+// K-tail fuse: ``FUSED_KTAIL`` selects between the legacy two-launch
+// pipeline ("main kernel writes K=[0, fast_k); standalone
+// ``grouped_ktail_kernel_*`` reads C, adds K=[fast_k, k), writes C back" —
+// FUSED_KTAIL=false) and the in-kernel fused epilog (FUSED_KTAIL=true)
+// which accumulates the K-tail directly into cA/cB/cC/cD before scale +
+// store. The fuse path is **path B** (round-3 commit 07354791): direct
+// per-lane ``raw_buffer_load_b128`` HBM→register, lane-cell mapping for
+// ``rt_16x128_s`` derived in
+// ``analysis/_notes/round-3-fp8-ktail-path-b-success.md``; OOB lanes get
+// SENTINEL voffsets so the SRD range_bytes check zero-fills the VGPR.
+// Path A's LDS-staged predecessor (round-2 commit 4f6a2dee, see
+// ``analysis/_notes/round-2-ktail-fuse-result.md``) was retired in
+// rounds 3-11; the supporting helper
+// ``prefill_swizzled_offsets_partial_K`` was deleted in round 13.
 template<int KI_HINT = 0, bool N_MASKED_STORE = false, bool FUSED_KTAIL = false>
 __global__ __launch_bounds__(_NUM_THREADS, 1)
 void grouped_rcr_kernel(const grouped_layout_globals g) {
@@ -2062,18 +1959,12 @@ void grouped_rcr_kernel(const grouped_layout_globals g) {
     G::prefill_swizzled_offsets(As[0][0], g.a, soA);
     G::prefill_swizzled_offsets(Bs[0][0], g.b, soB);
 
-    // Round-10 cleanup: round-2 path A used ``soA_tail``/``soB_tail`` +
-    // ``prefill_swizzled_offsets_partial_K`` (SENTINEL voffset tagging) to
-    // drive the cooperative ``buffer_load_lds`` K-tail path. Round-3/7 shipped
-    // path B (direct ``raw_buffer_load_b128`` HBM→register, no LDS round-trip,
-    // see fuse epilog body) which sidesteps swizzled offsets entirely. The
-    // path-A arrays were left in place across rounds 3-9 as defensive
-    // scaffolding; compiler DCE removes the dead writes (verified — function
-    // arg `swizzled_offsets` is thread-local stack with no outside reader),
-    // but the source is misleading. Removing the declarations + prefill calls
-    // here matches the BF16 RCR fuse path B (which never carried equivalent
-    // path-A scaffolding past round-1 — see kernel_bf16_dynamic.cpp:735+).
-    // Net change: source clarity; codegen unchanged (DCE was already firing).
+    // K-tail fuse uses path B (round-3 commit 07354791): direct per-lane
+    // ``raw_buffer_load_b128`` HBM→register inside the fuse epilog (~line
+    // 2300+ below), no LDS round-trip and no swizzled-offset prefill. The
+    // path-A scaffolding (``soA_tail`` / ``soB_tail`` declarations +
+    // ``prefill_swizzled_offsets_partial_K`` calls) was removed in round 11
+    // (commit f9d591cb); the helper itself was removed in round 13.
 
     // [grouped] Persistent outer loop.
     for (int gt = pid; gt < total_tiles; gt += NUM_CUS) {
@@ -2257,62 +2148,33 @@ void grouped_rcr_kernel(const grouped_layout_globals g) {
             __builtin_amdgcn_s_barrier();
         }
 
-        // === Round-2 path A: fused K-tail epilog ===
+        // === Fused K-tail epilog (path B, round-3 commit 07354791) ===
         // After Epilog 2, cA/cB/cC/cD hold sum over K=[0, fast_k). For
-        // K-misaligned shapes (e.g. gpt_oss K=2880, K_REM=64), accumulate
-        // K=[fast_k, fast_k + K_BLOCK) in-kernel using the same ST_v2 LDS
-        // tile slots that just drained from Epilog 2. soA_tail/soB_tail
-        // tag OOB lanes (post-swizzle K-col >= K_REM) with SENTINEL voffset
-        // so the OOB ``buffer_load_lds`` is rejected by the SRD range_bytes
-        // check; the four rcr_mma calls below then see real_K + zero_pad
-        // in the K=[0, K_BLOCK) span and accumulate exactly K_REM real
-        // cells per cell into cA/cB/cC/cD. No standalone K-tail launch,
-        // no RMW on g.c.
+        // K-misaligned shapes (e.g. gpt_oss K=2880, K_REM=64) we accumulate
+        // K=[fast_k, fast_k + K_BLOCK) directly into cA/cB/cC/cD inside this
+        // same launch — no standalone K-tail kernel, no RMW on g.c.
         //
-        // Round-3 (PARTIAL FIX, FP8 fwd-snr 16.8 → 20.7 dB):
-        // cooperatively zero the four LDS K-tail slots BEFORE the
-        // partial-K load. ``llvm.amdgcn.raw.buffer.load.lds`` is a NO-OP
-        // when ``soffset + voffset > range_bytes`` — it does NOT zero
-        // LDS (unlike ``raw.buffer.load.iX`` which returns 0 to vgpr on
-        // OOB). The SENTINEL voffset in
-        // ``prefill_swizzled_offsets_partial_K`` therefore leaves OOB
-        // lanes' LDS slots holding the *previous* main-loop K-tile data
-        // (K=[fast_k - K_BLOCK, fast_k)). rcr_mma would then accumulate
-        // that stale data into cA/cB/cC/cD with weight 1 (instead of
-        // weight 0 as required for the K=[K_REM, K_BLOCK) zero-pad
-        // region), producing SNR ~16.8 dB on K=2880 forward.
-        // Cooperative zero gives OOB lanes a clean 0 in LDS so the
-        // SENTINEL-no-op behaviour becomes equivalent to the documented
-        // zero-fill semantics; SNR climbs to 20.7 dB.
-        //
-        // The remaining 4-5 dB shortfall vs the no-fuse baseline
-        // (28.5 dB; passes the 25 dB FP8 SNR gate) is the same phantom
-        // LDS-read pattern documented in
-        // ``analysis/_notes/round-3-bf16-ktail-phantom-read.md``:
-        // ``load(reg, st_subtile)`` after epilog 2's main-loop SGPR
-        // state returns stale K-tile data on the warp subset
-        // ``warp_row=0 ∧ warp_col∈{1,3}`` independent of any sync /
-        // barrier / waitcnt combination. BF16 abandoned path A and
-        // shipped path B (direct HBM→Reg via buffer_load_b128). FP8
-        // round-2 commit (4f6a2dee) shipped a structurally identical
-        // path-A fuse and was always numerically broken; the metric
-        // correctness gate exposed it once round-1's binding fix
-        // unblocked the FP8 dA backward path.
-        //
-        // This round retains the path-A scaffolding + cooperative zero
-        // + restored barriers (round 6 commit 2035f1a1 had pruned them
-        // claiming no cross-thread dep — with cooperative zero added,
-        // restoring those barriers contributes the last ~0.7 dB).
-        // Next round (path B) replaces the LDS round-trip entirely
-        // with per-lane ``buffer_load_b128`` + register-tile lane→cell
-        // mapping for ``rt_16x128_s`` (FP8 A/B reg), removing the
-        // phantom-read code path that path A cannot escape.
-        //
-        // Cost of cooperative zero: 17408 / 512 ≈ 34 bytes/thread = ~9
-        // ds_write_b32 per thread per tile × 4 tiles = ~36 LDS writes
-        // per thread, fully pipelinable with the in-flight HBM→LDS
-        // reads issued below (compiler can interleave them; they hit
-        // different LDS banks).
+        // History (see ``analysis/_notes/round-{2,3}-fp8-ktail-*.md`` for
+        // full derivation):
+        //   * Round-2 (commit 4f6a2dee) shipped path A: LDS-staged K-tail
+        //     using ``prefill_swizzled_offsets_partial_K`` + SENTINEL
+        //     voffset + ``buffer_load_lds``. Saturated at SNR ~20.7 dB
+        //     because ``buffer_load_lds`` is a NO-OP on OOB voffset (it
+        //     does NOT zero LDS — only ``buffer_load.iX`` zero-fills VGPR
+        //     on OOB), leaving OOB lanes' LDS slots holding stale main-
+        //     loop K-tile data; ``load(reg, st_subtile)`` then accumulated
+        //     that stale data with weight 1.
+        //   * Round-3 (commit 07354791) shipped the live code below, path B:
+        //     each lane reads ``2 × buffer_load_b128`` directly from HBM
+        //     into A_row_reg / B_row_reg ``data[]``, lane-cell mapping
+        //     hand-derived for ``rt_16x128_s``. SRD range_bytes
+        //     auto-zero-fills VGPR for K-OOB lanes — exactly what path A
+        //     wanted but couldn't get from ``buffer_load_lds``. SNR
+        //     ≥25 dB on all 8 gpt_oss K=2880 cases; metric 153 → 465.
+        //   * Round-11 (commit f9d591cb) dropped the dead path-A scaffolding
+        //     (``soA_tail`` / ``soB_tail`` declarations + the two
+        //     ``prefill_swizzled_offsets_partial_K`` calls in the prologue);
+        //     round-13 dropped the helper definition itself.
         if constexpr (FUSED_KTAIL) {
             if (g.fast_k < g.k) {
                 // === Round-3 path B: direct HBM → register K-tail load ===
