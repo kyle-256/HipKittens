@@ -286,6 +286,126 @@ __device__ __forceinline__ void prefill_transpose_swizzled_offsets(
     }
 }
 
+// =============================================================================
+// prefill_swizzled_offsets_partial_K — variant of kittens::prefill_swizzled_offsets
+// that tags lanes whose post-swizzle K-col chunk falls entirely outside
+// [0, K_REM_runtime) with a SENTINEL voffset (0x7FFFFFFFu). When a buffer
+// load uses a sentinel voffset, ``llvm.amdgcn.raw.buffer.load.lds`` clamps
+// SOFFSET + VOFFSET against SRD range_bytes; the OOB result (0) is what
+// gets stored to LDS. So OOB lanes auto-write 0 to LDS without an explicit
+// zero-init pass.
+//
+// Used by ``grouped_rcr_kernel<...,FUSED_KTAIL=true>`` (round-2 path A) to
+// load the K-tail (K=[fast_k, fast_k + K_BLOCK)) into the SAME ST_v2 LDS
+// tile that the main loop drained, so ``load_a / load_b + rcr_mma`` can
+// accumulate the K_REM contribution into the existing cA/cB/cC/cD register
+// tiles without a second kernel launch and without RMW on g.c.
+//
+// Granularity: lane covers ``elems_per_thread = bytes_per_thread / sizeof(T)``
+// contiguous K-cells per pass (16 fp8 cells for ST_v2). Lanes are tagged at
+// chunk granularity — i.e., we require K_REM_runtime to be a multiple of
+// elems_per_thread (true for K_REM=64 and any 16-multiple in fp8 path).
+// Mixed-validity lanes (partial chunks straddling K_REM) are not supported;
+// callers gate fuse activation at the dispatcher level.
+// =============================================================================
+template<int N_THREADS, ducks::st::all ST, ducks::gl::all GL>
+__device__ __forceinline__ void prefill_swizzled_offsets_partial_K(
+    ST& dst, const GL& src, uint32_t* swizzled_offsets, int K_REM_runtime)
+{
+    using T = typename ST::dtype;
+    constexpr uint32_t SENTINEL_VOFFSET = 0x7FFFFFFFu;
+
+    constexpr int bytes_per_thread = ST::underlying_subtile_bytes_per_thread;
+    constexpr int bytes_per_warp   = bytes_per_thread * kittens::WARP_THREADS;
+    constexpr int memcpy_per_tile  =
+        ST::rows * ST::cols * sizeof(T) / (bytes_per_thread * N_THREADS);
+    static_assert(
+        ST::rows * ST::cols * sizeof(T) >= bytes_per_warp,
+        "shared tile must be at least 1024 bytes"
+    );
+
+    constexpr int num_warps      = N_THREADS / kittens::WARP_THREADS;
+    constexpr int elems_per_thread = bytes_per_thread / sizeof(T);
+
+    const int laneid     = kittens::laneid();
+    const int warpid     = kittens::warpid() % num_warps;
+    const int row_stride = src.template stride<2>();
+
+    #pragma unroll
+    for (int i = 0; i < memcpy_per_tile; i++) {
+        const int lane_byte_offset =
+            (laneid  * bytes_per_thread) +
+            (warpid  * bytes_per_warp)   +
+            (i       * num_warps * bytes_per_warp);
+        const int subtile_id  = lane_byte_offset / ST::underlying_subtile_bytes;
+        const int subtile_row = subtile_id / ST::underlying_subtiles_per_row;
+        const int subtile_col = subtile_id % ST::underlying_subtiles_per_row;
+        const int subtile_lane_byte_offset =
+            lane_byte_offset % ST::underlying_subtile_bytes;
+
+        const int row = subtile_lane_byte_offset / ST::underlying_subtile_row_bytes;
+        const int col = (subtile_lane_byte_offset % ST::underlying_subtile_row_bytes) / sizeof(T);
+
+        const uint32_t swizzled_shared_byte_offset = dst.swizzle({row, col});
+        const int swizzled_global_row =
+            (swizzled_shared_byte_offset / ST::underlying_subtile_row_bytes) +
+            subtile_row * ST::underlying_subtile_rows;
+        const int swizzled_global_col =
+            (swizzled_shared_byte_offset % ST::underlying_subtile_row_bytes) / sizeof(T) +
+            subtile_col * ST::underlying_subtile_cols;
+        const uint32_t swizzled_global_byte_offset =
+            (swizzled_global_row * row_stride + swizzled_global_col) * sizeof(T);
+
+        // Tag lane invalid iff its 16-cell chunk starts at or beyond K_REM.
+        // Since lane chunks are 16-aligned and K_REM is required (by the
+        // dispatcher gate) to be a multiple of 16, the chunk is either
+        // fully valid or fully OOB — no partial-validity case here.
+        const bool fully_valid =
+            (swizzled_global_col + elems_per_thread) <= K_REM_runtime;
+        swizzled_offsets[i] =
+            fully_valid ? swizzled_global_byte_offset : SENTINEL_VOFFSET;
+    }
+
+    if constexpr (memcpy_per_tile * (bytes_per_thread * N_THREADS) !=
+                  ST::rows * ST::cols * sizeof(T)) {
+        constexpr int leftover_bytes =
+            ST::rows * ST::cols * sizeof(T) -
+            memcpy_per_tile * (bytes_per_thread * N_THREADS);
+        constexpr int leftover_threads = leftover_bytes / bytes_per_thread;
+        constexpr int leftover_warps   = leftover_threads / kittens::WARP_THREADS;
+
+        if (warpid < leftover_warps) {
+            const int lane_byte_offset =
+                (laneid  * bytes_per_thread) +
+                (warpid  * bytes_per_warp)   +
+                (memcpy_per_tile * num_warps * bytes_per_warp);
+            const int subtile_id  = lane_byte_offset / ST::underlying_subtile_bytes;
+            const int subtile_row = subtile_id / ST::underlying_subtiles_per_row;
+            const int subtile_col = subtile_id % ST::underlying_subtiles_per_row;
+            const int subtile_lane_byte_offset =
+                lane_byte_offset % ST::underlying_subtile_bytes;
+
+            const int row = subtile_lane_byte_offset / ST::underlying_subtile_row_bytes;
+            const int col = (subtile_lane_byte_offset % ST::underlying_subtile_row_bytes) / sizeof(T);
+
+            const uint32_t swizzled_shared_byte_offset = dst.swizzle({row, col});
+            const int swizzled_global_row =
+                (swizzled_shared_byte_offset / ST::underlying_subtile_row_bytes) +
+                subtile_row * ST::underlying_subtile_rows;
+            const int swizzled_global_col =
+                (swizzled_shared_byte_offset % ST::underlying_subtile_row_bytes) / sizeof(T) +
+                subtile_col * ST::underlying_subtile_cols;
+            const uint32_t swizzled_global_byte_offset =
+                (swizzled_global_row * row_stride + swizzled_global_col) * sizeof(T);
+
+            const bool fully_valid =
+                (swizzled_global_col + elems_per_thread) <= K_REM_runtime;
+            swizzled_offsets[memcpy_per_tile] =
+                fully_valid ? swizzled_global_byte_offset : SENTINEL_VOFFSET;
+        }
+    }
+}
+
 template<int N_THREADS,
          ducks::st::all ST,
          ducks::gl::all GL,
@@ -1861,7 +1981,18 @@ __device__ __forceinline__ float resolve_combined_scale_grp(
 // low (no spill from the masked branch's lane-level row/col reconstruction).
 // When ``true`` (N misaligned, e.g. gpt_oss N=2880/5760) we use
 // ``store_c_tile_n_masked`` to drop OOB cols on the partial last tile.
-template<int KI_HINT = 0, bool N_MASKED_STORE = false>
+//
+// Round-2 path A (fused K-tail): ``FUSED_KTAIL`` selects between the legacy
+// "main kernel writes K=[0, fast_k) accum, standalone grouped_ktail_kernel_*
+// reads C, adds K=[fast_k, k) and writes C" RMW pipeline (FUSED_KTAIL=false)
+// and the new in-kernel fused epilog (FUSED_KTAIL=true) which does the
+// K-tail accumulation on cA/cB/cC/cD before scale + store. The fuse path
+// uses ``prefill_swizzled_offsets_partial_K`` to compute SENTINEL voffsets
+// for OOB lanes; ``buffer_load_lds`` clamps SOFFSET+VOFFSET against SRD
+// range_bytes and writes 0 to LDS for those lanes — no explicit zero-init,
+// no register increment beyond a second copy of soA/soB (only used when
+// FUSED_KTAIL=true).
+template<int KI_HINT = 0, bool N_MASKED_STORE = false, bool FUSED_KTAIL = false>
 __global__ __launch_bounds__(_NUM_THREADS, 1)
 void grouped_rcr_kernel(const grouped_layout_globals g) {
     using ST_rcr = ST_v2;
@@ -1930,6 +2061,20 @@ void grouped_rcr_kernel(const grouped_layout_globals g) {
     uint32_t soA[mpt], soB[mpt];
     G::prefill_swizzled_offsets(As[0][0], g.a, soA);
     G::prefill_swizzled_offsets(Bs[0][0], g.b, soB);
+
+    // Round-2 path A: prefill the partial-K (K-tail) swizzled offset arrays
+    // when the fused K-tail epilog is active. Lanes whose post-swizzle K-col
+    // chunk is fully past K_REM_runtime get tagged with the SENTINEL so the
+    // K-tail load auto-zeros their LDS slot. K_REM is wave-uniform (g.fast_k
+    // and g.k both uniform), and the helper itself is no-op when K_REM == 0.
+    uint32_t soA_tail[mpt], soB_tail[mpt];
+    if constexpr (FUSED_KTAIL) {
+        const int K_REM = g.k - g.fast_k;
+        prefill_swizzled_offsets_partial_K<_NUM_THREADS>(
+            As[0][0], g.a, soA_tail, K_REM);
+        prefill_swizzled_offsets_partial_K<_NUM_THREADS>(
+            Bs[0][0], g.b, soB_tail, K_REM);
+    }
 
     // [grouped] Persistent outer loop.
     for (int gt = pid; gt < total_tiles; gt += NUM_CUS) {
@@ -2113,6 +2258,54 @@ void grouped_rcr_kernel(const grouped_layout_globals g) {
             __builtin_amdgcn_s_barrier();
         }
 
+        // === Round-2 path A: fused K-tail epilog ===
+        // After Epilog 2, cA/cB/cC/cD hold sum over K=[0, fast_k). For
+        // K-misaligned shapes (e.g. gpt_oss K=2880, K_REM=64), accumulate
+        // K=[fast_k, fast_k + K_BLOCK) in-kernel using the same ST_v2 LDS
+        // tile slots that just drained from Epilog 2. soA_tail/soB_tail
+        // tag OOB lanes (post-swizzle K-col >= K_REM) with SENTINEL voffset,
+        // so buffer_load_lds clamps them to 0 in LDS — the four rcr_mma
+        // calls below see real_K + zero_pad in the K=[0, K_BLOCK) span and
+        // accumulate exactly K_REM real cells per cell into cA/cB/cC/cD.
+        // No standalone K-tail launch, no RMW on g.c.
+        if constexpr (FUSED_KTAIL) {
+            if (g.fast_k < g.k) {
+                const int k_tail_tile = g.ki;  // first K-tile after fast_k
+
+                rcr_8w_load_hoist<_NUM_THREADS>(
+                    b_tile(tic, 0), g.b, b_co(bc*2,   k_tail_tile), soB_tail);
+                rcr_8w_load_hoist<_NUM_THREADS>(
+                    As[tic][0],     g.a, a_co(br*2,   k_tail_tile), soA_tail);
+                rcr_8w_load_hoist<_NUM_THREADS>(
+                    b_tile(tic, 1), g.b, b_co(bc*2+1, k_tail_tile), soB_tail);
+                rcr_8w_load_hoist<_NUM_THREADS>(
+                    As[tic][1],     g.a, a_co(br*2+1, k_tail_tile), soA_tail);
+
+                asm volatile("s_waitcnt vmcnt(0)");
+                __builtin_amdgcn_s_barrier();
+
+                load_b(b0, b_tile(tic, 0), wn);
+                load_a(a, As[tic][0], wm);
+                load_b(b1, b_tile(tic, 1), wn);
+                __builtin_amdgcn_s_barrier();
+                asm volatile("s_waitcnt lgkmcnt(0)");
+                __builtin_amdgcn_s_setprio(1);
+                rcr_mma(cA, a, b0);
+                rcr_mma(cB, a, b1);
+                __builtin_amdgcn_s_setprio(0);
+                __builtin_amdgcn_s_barrier();
+
+                load_a(a, As[tic][1], wm);
+                __builtin_amdgcn_s_barrier();
+                asm volatile("s_waitcnt lgkmcnt(0)");
+                __builtin_amdgcn_s_setprio(1);
+                rcr_mma(cC, a, b0);
+                rcr_mma(cD, a, b1);
+                __builtin_amdgcn_s_setprio(0);
+                __builtin_amdgcn_s_barrier();
+            }
+        }
+
         // Apply scale + store with m_subtile_C row shift.
         const float combined_scale = resolve_combined_scale_grp(g);
         mul(cA, cA, combined_scale);
@@ -2185,8 +2378,10 @@ void grouped_rcr_kernel(const grouped_layout_globals g) {
     }
 }
 
-template __global__ void grouped_rcr_kernel<0, false>(const grouped_layout_globals);
-template __global__ void grouped_rcr_kernel<0, true >(const grouped_layout_globals);
+template __global__ void grouped_rcr_kernel<0, false, false>(const grouped_layout_globals);
+template __global__ void grouped_rcr_kernel<0, true , false>(const grouped_layout_globals);
+template __global__ void grouped_rcr_kernel<0, false, true >(const grouped_layout_globals);
+template __global__ void grouped_rcr_kernel<0, true , true >(const grouped_layout_globals);
 
 // =============================================================================
 // Persistent RRR grouped kernel — round-1 mirror of grouped_rcr_kernel.
@@ -4375,15 +4570,48 @@ void dispatch_grouped_rcr(grouped_layout_globals g) {
     g.bpc    = kittens::ceil_div(g.n, BLOCK_SIZE);
     g.ki     = g.fast_k / K_BLOCK;
 
+    // Round-2 path A (fused K-tail): select FUSED_KTAIL=true variant when
+    // K_REM matches the in-kernel partial-K load granularity (16-aligned)
+    // AND the host m_per_group hint guarantees that no persistent-loop
+    // (br, bc) tile straddles a group boundary on the K-tail load (same
+    // safety condition as the existing standalone K-tail kernels'
+    // mfma path: m_per_group >= TAIL_BLOCK_M and 16-aligned). When fuse is
+    // active, the main kernel itself accumulates the K=[fast_k, k) tail
+    // into cA/cB/cC/cD before scale + store; we then SKIP the standalone
+    // grouped_ktail_kernel_* launch below (no double-counting, no RMW on
+    // g.c, no extra launch overhead).
+    //
+    // Round-2 enables fuse only for K_REM == 64 (the gpt_oss K=2880 case,
+    // which is the only K_REM exercised by metric and the worst-perf
+    // section pre-fuse). Future rounds extend to K_REM ∈ {16, 32, 48,
+    // 80, 96, 112} once the K_REM=64 numerics pass.
+    const int K_rem_for_fuse = g.k - g.fast_k;
+    const bool lds_k_tail_safe_for_fuse =
+        (g.m_per_group >= TAIL_BLOCK_M) &&
+        ((g.m_per_group % TAIL_BLOCK_M) == 0);
+    const bool fuse_ktail_eligible =
+        (g.bpc > 0) && (g.ki > 0) &&
+        (K_rem_for_fuse == 64) &&
+        lds_k_tail_safe_for_fuse;
+
     if (g.bpc > 0 && g.ki > 0) {
         // Round-12: launch-uniform branch on N alignment selects the
         // masked-vs-raw store variant at compile time. DSV3 N=4096/7168
         // hits the raw-store instance (zero overhead, ratios stable);
         // gpt_oss N=2880/5760 hits the masked-store instance.
-        if (g.bpc * BLOCK_SIZE == g.n) {
-            grouped_rcr_kernel<0, false><<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
+        const bool n_aligned = (g.bpc * BLOCK_SIZE == g.n);
+        if (fuse_ktail_eligible) {
+            if (n_aligned) {
+                grouped_rcr_kernel<0, false, true><<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
+            } else {
+                grouped_rcr_kernel<0, true , true><<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
+            }
         } else {
-            grouped_rcr_kernel<0, true ><<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
+            if (n_aligned) {
+                grouped_rcr_kernel<0, false, false><<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
+            } else {
+                grouped_rcr_kernel<0, true , false><<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
+            }
         }
     } else {
         // No aligned interior at all: main kernel cannot run; tail handles
@@ -4406,7 +4634,12 @@ void dispatch_grouped_rcr(grouped_layout_globals g) {
     // not templated, or hint says blocks may straddle group boundaries
     // → kernel still has a per-block runtime fallback to scalar) use
     // the existing scalar tail.
-    if (g.fast_k != g.k || g.bpc == 0) {
+    //
+    // Round-2 path A: when fuse_ktail_eligible was true above, the main
+    // kernel ALREADY accumulated the K-tail into cA/cB/cC/cD before scale
+    // + store. The standalone K-tail kernels below would double-count
+    // and corrupt the result, so SKIP this entire block when fuse is on.
+    if (!fuse_ktail_eligible && (g.fast_k != g.k || g.bpc == 0)) {
         const int K_rem = g.k - g.fast_k;
         // Round-20: prefer 32x32x64 mfma kernel (100 % util) when
         // ``m_per_group`` is 32-aligned. Falls back to the round-18
