@@ -2062,19 +2062,18 @@ void grouped_rcr_kernel(const grouped_layout_globals g) {
     G::prefill_swizzled_offsets(As[0][0], g.a, soA);
     G::prefill_swizzled_offsets(Bs[0][0], g.b, soB);
 
-    // Round-2 path A: prefill the partial-K (K-tail) swizzled offset arrays
-    // when the fused K-tail epilog is active. Lanes whose post-swizzle K-col
-    // chunk is fully past K_REM_runtime get tagged with the SENTINEL so the
-    // K-tail load auto-zeros their LDS slot. K_REM is wave-uniform (g.fast_k
-    // and g.k both uniform), and the helper itself is no-op when K_REM == 0.
-    uint32_t soA_tail[mpt], soB_tail[mpt];
-    if constexpr (FUSED_KTAIL) {
-        const int K_REM = g.k - g.fast_k;
-        prefill_swizzled_offsets_partial_K<_NUM_THREADS>(
-            As[0][0], g.a, soA_tail, K_REM);
-        prefill_swizzled_offsets_partial_K<_NUM_THREADS>(
-            Bs[0][0], g.b, soB_tail, K_REM);
-    }
+    // Round-10 cleanup: round-2 path A used ``soA_tail``/``soB_tail`` +
+    // ``prefill_swizzled_offsets_partial_K`` (SENTINEL voffset tagging) to
+    // drive the cooperative ``buffer_load_lds`` K-tail path. Round-3/7 shipped
+    // path B (direct ``raw_buffer_load_b128`` HBM→register, no LDS round-trip,
+    // see fuse epilog body) which sidesteps swizzled offsets entirely. The
+    // path-A arrays were left in place across rounds 3-9 as defensive
+    // scaffolding; compiler DCE removes the dead writes (verified — function
+    // arg `swizzled_offsets` is thread-local stack with no outside reader),
+    // but the source is misleading. Removing the declarations + prefill calls
+    // here matches the BF16 RCR fuse path B (which never carried equivalent
+    // path-A scaffolding past round-1 — see kernel_bf16_dynamic.cpp:735+).
+    // Net change: source clarity; codegen unchanged (DCE was already firing).
 
     // [grouped] Persistent outer loop.
     for (int gt = pid; gt < total_tiles; gt += NUM_CUS) {
