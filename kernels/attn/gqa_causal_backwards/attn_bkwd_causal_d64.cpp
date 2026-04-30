@@ -152,6 +152,30 @@ __device__ inline static void dq_atomic_add(const GL &dst, const RT &src, const 
     }(std::make_index_sequence<RT::height>{});
 }
 
+// Actual LDS allocations performed by attend_bwd_combined_ker for D=64
+// (the only D this TU compiles -- ATTN_D=64). Matches the al.allocate<>()
+// sequence inside the kernel exactly:
+//   K_j_smem        st_bf<256, 64, st_16x16_s>      = 256*64*2 = 32768 B
+//   Q_i_smem[2][2]  st_bf< 32, 64, st_16x32_s>  *4  =  4*32*64*2 = 16384 B
+//   dO_i_smem[2][2] st_bf< 32, 64, st_16x32_s>  *4  = 16384 B
+//   attn_i_smem     st_bf<256, 16, st_16x16_swz_s>  = 256*16*2 = 8192  B
+//   L_smem[2]       sv_fl<64>                  *2  = 2*64*4   = 512   B
+//   delta_smem[2]   sv_fl<64>                  *2  = 512                  B
+// Total = 74752 B (~73 KiB).  Round up to 80 KiB for 16-byte allocator
+// alignment headroom (the allocator inserts up to 12 B of padding per
+// allocate() call).  Reserving 80000 B per CTA -- not the full
+// MAX_SHARED_MEMORY (160000 B) -- is the key occupancy unlock for D=64:
+// CDNA4 has 160 KiB LDS/CU, so 2*80000 < 160000 lets the runtime fit
+// 2 CTAs/CU instead of 1 (registers already permit 2: 192 VGPR * 2 waves
+// = 384 < 512/SIMD). The compile-time amdgpu_num_vgpr / launch_bounds(_,1)
+// stays unchanged so the compiler keeps optimizing for the single-CTA
+// register schedule (192 VGPR + 192 AGPR + 0 spill); only runtime is
+// allowed to schedule a second CTA when LDS permits.  Mirrors the same
+// "stale 160 KiB reservation" optimization done for the prep kernel in
+// commit 9edbd7d8 (which fits 0 LDS / 8 waves/SIMD), now applied to the
+// bwd combined kernel where D=64 LDS need is half the D=128 baseline.
+constexpr size_t BWD_D64_DYN_SMEM = 80000;
+
 template<int D> struct attn_bwd_combined_globals { 
   gl<bf16, -1, -1, -1, -1> Q, K, V;
   gl<bf16, -1, -1, -1, -1> dOg, dQg, dKg, dVg;
@@ -168,7 +192,7 @@ template<int D> struct attn_bwd_combined_globals {
     return dim3(ATTN_H_KV, (n_runtime / BLOCK_SIZE_KV), b_runtime);
   }
   dim3 block() { return dim3(NUM_THREADS); }
-  size_t dynamic_shared_memory() { return MAX_SHARED_MEMORY; }
+  size_t dynamic_shared_memory() { return BWD_D64_DYN_SMEM; }
 };
 
 
@@ -3101,12 +3125,18 @@ void dispatch_bwd_combined(attn_bwd_combined_globals<D> g) {
     // total wall-clock; harmless at larger N.
     static bool attr_set = false;
     if (!attr_set) {
+        // Set the per-kernel cap to BWD_D64_DYN_SMEM (80 KiB), not the
+        // global MAX_SHARED_MEMORY (160 KiB) cap.  Setting the cap to
+        // exactly what the kernel needs lets the runtime schedule
+        // 2 CTAs/CU on the same SMEM budget (2*80000 < 160000 = LDS/CU).
+        // The kernel's al.allocate() sequence sums to 74752 B (~73 KiB);
+        // 80000 leaves ~5 KiB of allocator-alignment headroom.
         hipFuncSetAttribute((void*)attend_bwd_combined_ker<D>,
                             hipFuncAttributeMaxDynamicSharedMemorySize,
-                            MAX_SHARED_MEMORY);
+                            BWD_D64_DYN_SMEM);
         attr_set = true;
     }
-    attend_bwd_combined_ker<D><<<g.grid(), g.block(), MAX_SHARED_MEMORY, g.stream>>>(g);
+    attend_bwd_combined_ker<D><<<g.grid(), g.block(), BWD_D64_DYN_SMEM, g.stream>>>(g);
     // No internal hipDeviceSynchronize -- see comment in dispatch_fwd.  The
     // following dispatch_dq_shuffle and the harness's torch.cuda.synchronize
     // both ensure correctness without adding per-call launch latency here.
