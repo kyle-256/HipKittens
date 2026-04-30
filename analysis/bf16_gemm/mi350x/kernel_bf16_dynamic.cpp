@@ -3202,7 +3202,17 @@ template __global__ void grouped_ntail_kernel_lds_rrr<64>(const grouped_layout_g
 // The inner per-tile body is duplicated from ``gemm_kernel<L, KI_HINT>`` with
 // minor coord adjustments. Code style follows the dense kernel for review
 // parity; mechanical changes are flagged with ``[grouped]`` comments.
-template<Layout L, int KI_HINT>
+//
+// Round-3 path A (fused K-tail): ``FUSED_KTAIL`` selects between the legacy
+// "main kernel writes [0, fast_k) → grouped_ktail_kernel_* reads C, adds
+// K=[fast_k, k) and writes C" RMW pipeline (FUSED_KTAIL=false) and the new
+// in-kernel fused epilog (FUSED_KTAIL=true) which does the entire K=[0, g.k)
+// reduction in one launch. Active only when L==RCR and K_REM == K_STEP
+// (gpt_oss K=2880 → K_REM=64 = K_STEP). Reuses Bs[0][*]/As[0][*] LDS slots
+// (stale from main_loop's last K_TWO_TILE iteration). Replaces ~30-35% of
+// the wall-time spent on grouped_ktail_kernel_mfma32x32_M{2,4} with 1 extra
+// K_STEP of mma in the persistent kernel epilog (≈ 1/45 of main loop work).
+template<Layout L, int KI_HINT, bool FUSED_KTAIL = false>
 __global__ __launch_bounds__(NUM_THREADS, 1)
 void grouped_kernel(const grouped_layout_globals g) {
     extern __shared__ alignment_dummy __shm[];
@@ -3463,6 +3473,50 @@ void grouped_kernel(const grouped_layout_globals g) {
             g.ki,
             C_accum);
 
+        // === Round-3 path A WIP: fused K-tail epilog (BF16 RCR mirror of FP8) ===
+        // Round 3 attempt #1: cooperative G::load into Bs[0][...] / As[0][...]
+        // followed by load(reg_tile, subtile_inplace<...>) + 4×mma_ABt.
+        // Numerical correctness hits a phantom LDS read bug that we have NOT
+        // root-caused yet:
+        //   • LDS bytes (printed via direct read by lane 0 of warp 0) contain
+        //     the correct K=[fast_k, fast_k + K_STEP) data after the
+        //     cooperative G::load + s_waitcnt vmcnt(0) lgkmcnt(0) +
+        //     __builtin_amdgcn_s_barrier().
+        //   • BUT load(B_tile_0, subtile_inplace<32,64>(Bs[0][0], {warp_col,
+        //     0})) reads STALE data (K=[fast_k - 2*K_STEP, fast_k - K_STEP),
+        //     i.e., main-loop's last load that targeted Bs[0][0]) for
+        //     warp_row=0 with warp_col ∈ {1, 3} — but reads the FRESH K-tail
+        //     data correctly for ALL warp_row=1 warp_cols, AND for
+        //     warp_row=0 warp_col ∈ {0, 2}.
+        //   • The same pattern occurs whether we use the precomputed
+        //     swizzled_offsets G::load form or the simple form, with or
+        //     without __syncthreads() / sched_barrier(0) / extra
+        //     s_waitcnt fences. The LDS data IS visible to all warps via
+        //     direct bf16* reads; only the load(reg, st_subtile) path
+        //     diverges.
+        //   • Hypothesis: some interaction between the LDS subtile_inplace
+        //     view + ds_read_b128 with shared_base_offset vs. how the
+        //     cooperative G::load wrote the underlying base tiles when the
+        //     sequence is "main loop drain (last G::load was at K-tile
+        //     g.ki - 2 into Bs[0][0]) → Epilog 2 drain (no new LDS writes)
+        //     → K-tail G::load (writes K-tile g.ki into Bs[0][0])". The
+        //     even/odd warp_col split rules out a simple bank conflict and
+        //     points to a layout-level issue we couldn't pin in this round.
+        //
+        // For now, gate the fuse OFF until the LDS read is fixed. This keeps
+        // the legacy standalone K-tail kernel path active so correctness +
+        // performance match the pre-round-3 baseline. Round 4 plan: switch
+        // to Path B (direct HBM-to-register K-tail load — no LDS
+        // intermediate, side-steps the phantom read bug entirely).
+        if constexpr (FUSED_KTAIL) {
+            if constexpr (L == Layout::RCR) {
+                // Empty body: dispatch always sets fuse_ktail_eligible=false
+                // for now (see dispatch_grouped below). Kept here so the
+                // template instantiation compiles and remains ready for the
+                // path B fix.
+            }
+        }
+
         if (warp_row == 0) { __builtin_amdgcn_s_barrier(); }
 
         // [grouped] Store with C row shifted by m_subtile_C. When
@@ -3501,6 +3555,11 @@ void grouped_kernel(const grouped_layout_globals g) {
 template __global__ void grouped_kernel<Layout::RCR, 0>(const grouped_layout_globals);
 template __global__ void grouped_kernel<Layout::RRR, 0>(const grouped_layout_globals);
 template __global__ void grouped_kernel<Layout::CRR, 0>(const grouped_layout_globals);
+
+// Round-3 path A: fused-K-tail RCR variant (KI_HINT=0 dynamic K only —
+// K=2880 / 2944 / 3008 etc. fall through to KI_HINT=0 because K_TWO_TILE
+// alignment + odd K_TWO_TILE count don't hit any compile-time KI case).
+template __global__ void grouped_kernel<Layout::RCR, 0, true>(const grouped_layout_globals);
 #define INSTANTIATE_K_GRP(KI) \
     template __global__ void grouped_kernel<Layout::RCR, KI>(const grouped_layout_globals); \
     template __global__ void grouped_kernel<Layout::RRR, KI>(const grouped_layout_globals); \
@@ -3602,20 +3661,51 @@ void dispatch_grouped(grouped_layout_globals g) {
     }
     g.ki     = g.fast_k / K_STEP;
 
+    // Round-3 path A (fused K-tail): RCR + K_REM == K_STEP (gpt_oss K=2880
+    // → K_REM=64) takes the FUSED_KTAIL=true variant which absorbs the
+    // K-tail accumulate inside the persistent kernel epilog. Saves an
+    // entire grouped_ktail_kernel_* launch + RMW on g.c. Only KI_HINT=0
+    // (dynamic K) is instantiated for the fused variant — K=2880 (g.ki=44)
+    // never matches a compile-time KI case anyway.
+    // Round 3 WIP: fuse_ktail_eligible is forced to false until we fix the
+    // phantom LDS read for warp_row=0 wc∈{1,3} (see grouped_kernel comment).
+    // Once Path B (direct HBM-to-register) lands, flip back to true for
+    // RCR + K_REM == K_STEP + alignment, dropping the standalone K-tail
+    // launch.
+    const int K_rem_for_fuse = g.k - g.fast_k;
+    const bool lds_k_tail_safe_for_fuse = (g.m_per_group >= TAIL_BLOCK_M) &&
+                                          ((g.m_per_group % TAIL_BLOCK_M) == 0);
+    const bool fuse_ktail_eligible =
+        false &&  // disabled: see "Round-3 path A WIP" comment in grouped_kernel
+        (L == Layout::RCR) && (g.bpc > 0) && (g.ki >= 2) &&
+        (K_rem_for_fuse == K_STEP) && lds_k_tail_safe_for_fuse;
+
     if (g.bpc > 0 && g.ki >= 2) {
-        switch (g.ki) {
-            case 56:  launch_one_grouped<L, 56> (g); break;
-            case 64:  launch_one_grouped<L, 64> (g); break;
-            case 112: launch_one_grouped<L, 112>(g); break;
-            case 128: launch_one_grouped<L, 128>(g); break;
-            case 172: launch_one_grouped<L, 172>(g); break;
-            case 224: launch_one_grouped<L, 224>(g); break;
-            case 256: launch_one_grouped<L, 256>(g); break;
-            case 296: launch_one_grouped<L, 296>(g); break;
-            case 448: launch_one_grouped<L, 448>(g); break;
-            case 462: launch_one_grouped<L, 462>(g); break;
-            case 832: launch_one_grouped<L, 832>(g); break;
-            default:  launch_one_grouped<L, 0>  (g); break;
+        if (fuse_ktail_eligible) {
+            unsigned long mem_size = g.dynamic_shared_memory();
+            static bool fuse_attr_set = false;
+            if (!fuse_attr_set) {
+                hipFuncSetAttribute((void*)grouped_kernel<Layout::RCR, 0, true>,
+                                    hipFuncAttributeMaxDynamicSharedMemorySize, mem_size);
+                fuse_attr_set = true;
+            }
+            grouped_kernel<Layout::RCR, 0, true>
+                <<<dim3(NUM_CUS), g.block(), mem_size, g.stream>>>(g);
+        } else {
+            switch (g.ki) {
+                case 56:  launch_one_grouped<L, 56> (g); break;
+                case 64:  launch_one_grouped<L, 64> (g); break;
+                case 112: launch_one_grouped<L, 112>(g); break;
+                case 128: launch_one_grouped<L, 128>(g); break;
+                case 172: launch_one_grouped<L, 172>(g); break;
+                case 224: launch_one_grouped<L, 224>(g); break;
+                case 256: launch_one_grouped<L, 256>(g); break;
+                case 296: launch_one_grouped<L, 296>(g); break;
+                case 448: launch_one_grouped<L, 448>(g); break;
+                case 462: launch_one_grouped<L, 462>(g); break;
+                case 832: launch_one_grouped<L, 832>(g); break;
+                default:  launch_one_grouped<L, 0>  (g); break;
+            }
         }
     } else {
         // Main kernel can't run (N < BLOCK_SIZE or K < K_TWO_TILE). Reset
@@ -3641,7 +3731,11 @@ void dispatch_grouped(grouped_layout_globals g) {
     const bool need_tail_run =
         (g.fast_k != g.k) ||
         (!main_covers_n && g.fast_n != g.n);
-    if (need_tail_run) {
+    // Round-3 path A: when the fused-K-tail variant of grouped_kernel is
+    // launched, the persistent kernel itself accumulates K=[fast_k, g.k)
+    // in its epilog. No standalone K-tail / N-tail / scalar-tail launch
+    // is required for the RCR + K_REM == K_STEP case.
+    if (need_tail_run && !fuse_ktail_eligible) {
         // Fast path: LDS-staged interior K-tail correction (round-9). Runs
         // when the K-tail size matches a templated specialisation AND each
         // (TAIL_BLOCK_M × TAIL_BLOCK_N) tail block sits inside a single
