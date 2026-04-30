@@ -4002,6 +4002,183 @@ __global__ void grouped_ktail_kernel_mfma32x32_M2N2(const grouped_layout_globals
 
 template __global__ void grouped_ktail_kernel_mfma32x32_M2N2<Layout::RCR, 64>(const grouped_layout_globals);
 
+// Round-61 (FP8): tried M2N4 — 64×128 K-tail block sharing the A-pack across
+// 4 N sub-tiles (per-cell HBM 7.0 → 5.5 B/cell, -21 %). Metric regressed
+// 752 → 749-750 (3-run mean) and per-shape gpt_oss-GateUP ratios dropped
+// 1.6-2.8pp. Root causes:
+//   * The 4-mfma chain per A-pack creates a long dependency chain that
+//     under-utilizes the inner-loop FMA pipeline (compute-bound regime
+//     when register pressure rises).
+//   * Per-block C RMW grows 4× (32 → 128 cells/thread), serializing on
+//     the bf16 read-add-write address dependency.
+//   * Occupancy drops from 8 to 7 waves/SIMD (VGPRs 50 → 66) — less
+//     latency hiding to absorb the longer chain.
+// M2N2 retained as the round-60 sweet spot. M2N4 kernel definition kept
+// disabled below for future revival if the C RMW chain can be split (see
+// the round-61 round-trip "load-then-store" 2-phase pattern adopted in the
+// M2 / M2N2 epilogues, which addresses the chain length).
+#if 0  // round-61 disabled: regressed metric 752 → 749 (see comment above)
+template<Layout L, int K_REM>
+__global__ void grouped_ktail_kernel_mfma32x32_M2N4(const grouped_layout_globals g) {
+    static_assert(L == Layout::RCR,
+        "grouped_ktail_kernel_mfma32x32_M2N4 (FP8): RCR only.");
+    static_assert(K_REM == 64,
+        "grouped_ktail_kernel_mfma32x32_M2N4 (FP8): K_REM must be 64 (native mfma K).");
+    constexpr int TBM_TOTAL = 64;       // 2 stacked 32×32 sub-blocks
+    constexpr int TBM_SUB   = 32;
+    constexpr int TBN       = 32;
+    constexpr int N_SUB     = 4;
+    constexpr int TBN_TOTAL = TBN * N_SUB;  // 128 cols
+    constexpr int MAX_G_PLUS_1 = 65;
+    __shared__ int s_offs[MAX_G_PLUS_1];
+
+    const int tid = threadIdx.x;            // single-wave block, 64 threads
+    if (tid <= g.G && tid < MAX_G_PLUS_1) {
+        s_offs[tid] = static_cast<int>(g.group_offs[tid]);
+    }
+    __syncthreads();
+
+    const int row_block_base = blockIdx.y * TBM_TOTAL;
+    const int col_block_base = blockIdx.x * TBN_TOTAL;
+    if (row_block_base >= g.M_total || col_block_base >= g.n) return;
+
+    int group_idx = 0;
+    #pragma unroll 1
+    for (int gi = 0; gi < g.G; ++gi) {
+        if (row_block_base < s_offs[gi + 1]) { group_idx = gi; break; }
+    }
+
+    const int K_rem_dyn = g.k - g.fast_k;
+    if (K_rem_dyn != K_REM) return;
+    const int k0 = g.fast_k;
+
+    // Cross-group fallback: same as M2N2 (64-row block straddling a group
+    // boundary). Iterate over ALL FOUR 32-col sub-tiles per row using
+    // scalar fma. Unreachable on uniform group_lens with M_g % 64 == 0.
+    const bool cross_boundary = (row_block_base + TBM_TOTAL > s_offs[group_idx + 1]);
+    if (cross_boundary) {
+        typedef __attribute__((__vector_size__(2 * sizeof(float)))) float fp32x2_v;
+        auto fp8x4_to_f32x4 = [](const fp8e4m3_4& u) -> float4 {
+            int packed;
+            __builtin_memcpy(&packed, &u, 4);
+            fp32x2_v lo = __builtin_amdgcn_cvt_pk_f32_fp8(packed, false);
+            fp32x2_v hi = __builtin_amdgcn_cvt_pk_f32_fp8(packed, true);
+            return make_float4(lo[0], lo[1], hi[0], hi[1]);
+        };
+        const float scale_s = resolve_combined_scale_grp(g);
+        for (int nt = 0; nt < N_SUB; ++nt) {
+            const int col = col_block_base + nt * TBN + (tid % 32);
+            if (col >= g.n) continue;
+            #pragma unroll 1
+            for (int rr = 0; rr < TBM_TOTAL; ++rr) {
+                if ((rr % 2) != ((tid / 32))) continue;
+                const int row = row_block_base + rr;
+                if (row >= g.M_total) break;
+                int row_group = 0;
+                #pragma unroll 1
+                for (int gi = 0; gi < g.G; ++gi) {
+                    if (row < s_offs[gi + 1]) { row_group = gi; break; }
+                }
+                float acc_s0 = 0.f, acc_s1 = 0.f, acc_s2 = 0.f, acc_s3 = 0.f;
+                const fp8e4m3* a_row = &g.a[coord<>(row, 0)];
+                const fp8e4m3* b_row = &g.b[coord<>{0, row_group, col, 0}];
+                int kk = k0;
+                if ((g.k % 8 == 0) && ((k0 & 7) == 0)) {
+                    const fp8e4m3_8* a_v8 = reinterpret_cast<const fp8e4m3_8*>(a_row);
+                    const fp8e4m3_8* b_v8 = reinterpret_cast<const fp8e4m3_8*>(b_row);
+                    const int j_start = k0 >> 3;
+                    const int j_end   = g.k >> 3;
+                    for (int j = j_start; j < j_end; ++j) {
+                        fp8e4m3_8 a8 = a_v8[j];
+                        fp8e4m3_8 b8 = b_v8[j];
+                        float4 a_lo = fp8x4_to_f32x4(a8.lo);
+                        float4 a_hi = fp8x4_to_f32x4(a8.hi);
+                        float4 b_lo = fp8x4_to_f32x4(b8.lo);
+                        float4 b_hi = fp8x4_to_f32x4(b8.hi);
+                        acc_s0 += a_lo.x * b_lo.x + a_hi.x * b_hi.x;
+                        acc_s1 += a_lo.y * b_lo.y + a_hi.y * b_hi.y;
+                        acc_s2 += a_lo.z * b_lo.z + a_hi.z * b_hi.z;
+                        acc_s3 += a_lo.w * b_lo.w + a_hi.w * b_hi.w;
+                    }
+                    kk = j_end << 3;
+                }
+                float acc_s = (acc_s0 + acc_s1) + (acc_s2 + acc_s3);
+                for (; kk < g.k; ++kk) {
+                    acc_s += load_fp8_scalar(g.a, row, kk) *
+                             load_fp8_scalar_grp(g.b, row_group, col, kk);
+                }
+                const float scaled_s = acc_s * scale_s;
+                store_bf16_scalar(g.c, row, col,
+                                  load_bf16_scalar(g.c, row, col) + scaled_s);
+            }
+        }
+        return;
+    }
+
+    // ----- Fast MFMA path: 2 M sub-blocks × 4 N sub-tiles = 8 mfmas/thread.
+    // Single A-pack per M sub-block reused across all 4 N sub-tiles.
+    typedef __attribute__((__vector_size__(8 * sizeof(int)))) int intx8_t;
+    typedef __attribute__((__vector_size__(16 * sizeof(float)))) float floatx16_t;
+
+    const int row_in_blk = tid % 32;
+    const int chunk      = tid / 32;        // 0 or 1
+    const int k_off      = k0 + chunk * 32;
+
+    intx8_t b_pack[N_SUB];
+    #pragma unroll
+    for (int nt = 0; nt < N_SUB; ++nt) {
+        const int g_col = col_block_base + nt * TBN + row_in_blk;
+        if (g_col < g.n) {
+            const fp8e4m3* b_ptr = &g.b[coord<>{0, group_idx, g_col, k_off}];
+            b_pack[nt] = *reinterpret_cast<const intx8_t*>(b_ptr);
+        } else {
+            b_pack[nt] = intx8_t{};
+        }
+    }
+
+    const float scale = resolve_combined_scale_grp(g);
+
+    #pragma unroll
+    for (int sub = 0; sub < 2; ++sub) {
+        const int sub_row_base = row_block_base + sub * TBM_SUB;
+        const int g_row = sub_row_base + row_in_blk;
+
+        intx8_t a_pack;
+        if (g_row < g.M_total) {
+            const fp8e4m3* a_ptr = &g.a[coord<>(g_row, k_off)];
+            a_pack = *reinterpret_cast<const intx8_t*>(a_ptr);
+        } else {
+            a_pack = intx8_t{};
+        }
+
+        #pragma unroll
+        for (int nt = 0; nt < N_SUB; ++nt) {
+            floatx16_t acc{};
+            acc = __builtin_amdgcn_mfma_scale_f32_32x32x64_f8f6f4(
+                a_pack, b_pack[nt], acc, /*cbsz=*/0, /*abid=*/0, /*blgp=*/0,
+                /*scale_op_a=*/0, /*scale_op_b=*/0, /*scale_op_d=*/0);
+
+            const int out_col = col_block_base + nt * TBN + row_in_blk;
+            if (out_col >= g.n) continue;
+
+            #pragma unroll
+            for (int i = 0; i < 16; ++i) {
+                const int row_group     = i >> 2;
+                const int row_in_group  = (i & 3) + chunk * 4;
+                const int local_row     = row_group * 8 + row_in_group;
+                const int r             = sub_row_base + local_row;
+                if (r >= g.M_total) continue;
+                const float existing = load_bf16_scalar(g.c, r, out_col);
+                const float new_val  = existing + acc[i] * scale;
+                store_bf16_scalar(g.c, r, out_col, new_val);
+            }
+        }
+    }
+}
+
+template __global__ void grouped_ktail_kernel_mfma32x32_M2N4<Layout::RCR, 64>(const grouped_layout_globals);
+#endif  // M2N4 disabled
+
 // Round-54 (FP8): tried M4 (TBM=128, 4 stacked 32×32 sub-blocks sharing one
 // B-pack) but metric regressed — per-shape probe showed Down-B4-{M2048,
 // M4096} each lost 25-28 TF (-3 to -4 %). Root cause: B=4 grids are small
