@@ -367,8 +367,23 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
   G::load<1, false>(Q_i_smem[tic][1],  g.Q,   {batch_idx, first_step * 2 + 1, first_q_head, 0}, swizzled_offsets_Q_dO);
   G::load<1, false>(dO_i_smem[tic][1], g.dOg, {batch_idx, first_step * 2 + 1, first_q_head, 0}, swizzled_offsets_Q_dO);
   __builtin_amdgcn_s_waitcnt(0);
-  __builtin_amdgcn_s_barrier();
+  // Canonicalize the prologue prefix: every other s_waitcnt + barrier
+  // site in this kernel (38 of them, plus the 24 in attn_fwd_causal_d64.cpp)
+  // pins `sched_barrier(0)` BETWEEN the wait and the s_barrier so the
+  // LLVM post-RA scheduler cannot slide the four prior G::load /
+  // load(L_smem, delta_smem) ops past the explicit drain.  Originally the
+  // sched_barrier sat AFTER the s_barrier here -- the lone outlier --
+  // which left the four-load prologue prefix unrestricted: the scheduler
+  // could push a Q/dO load past s_waitcnt(0), so its drain would no
+  // longer cover the full prologue and the inner loop's first
+  // ds_read(K_j) at line ~441 would begin its lgkmcnt timeline with
+  // a still-in-flight Q/dO load consuming an LDS issue slot.  Moving
+  // the sched_barrier in front of s_barrier matches the canonical
+  // pattern and tightens the prologue drain by exactly one
+  // not-yet-pinned instruction; it is a pure scheduling hint -- no
+  // numerics change, no instruction emitted at runtime.
   __builtin_amdgcn_sched_barrier(0);
+  __builtin_amdgcn_s_barrier();
 
   // Addresses
   const uint32_t K_j_addr = get_address(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}));
