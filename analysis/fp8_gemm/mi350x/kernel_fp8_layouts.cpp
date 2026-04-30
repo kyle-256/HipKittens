@@ -2547,10 +2547,21 @@ __global__ void grouped_tail_kernel(const grouped_layout_globals g) {
         }
     } else {
         // RRR: A stride-1 in K, B[group_idx, kk, col] stride-N in K — B
-        // is not vectorisable along K. Stay scalar (this kernel is the
-        // FP8 grad-X / backward dA path; performance gap to a native main
-        // kernel is intentional and tracked as a follow-up — round 1 only
-        // unblocks correctness so the bench can produce numbers).
+        // is not vectorisable along K. Round-55 added the LDS-staged
+        // ``grouped_ktail_kernel_lds_rrr<64>`` for the [0, fast_n) ×
+        // M_total interior K-tail RMW; if that kernel ran for this cell,
+        // skip here to avoid double-RMW. Mirror BF16 wiring.
+        if (interior_n && needs_k_tail) {
+            const bool lds_k_tail_safe = (g.m_per_group >= TAIL_BLOCK_M) &&
+                                         ((g.m_per_group % TAIL_BLOCK_M) == 0);
+            const bool lds_k_rem_match = ((g.k - g.fast_k) == 64);
+            const int row_block_base = (row / TAIL_BLOCK_M) * TAIL_BLOCK_M;
+            const bool block_in_group =
+                (row_block_base + TAIL_BLOCK_M <= s_offs[group_idx + 1]);
+            if (lds_k_tail_safe && lds_k_rem_match && block_in_group) {
+                return;  // LDS K-tail (RRR) already wrote the corrected value.
+            }
+        }
         for (int kk = k0; kk < g.k; ++kk) {
             acc += load_fp8_scalar(g.a, row, kk) *
                    load_fp8_scalar_grp(g.b, group_idx, kk, col);
@@ -2799,6 +2810,186 @@ __global__ void grouped_ktail_kernel_lds(const grouped_layout_globals g) {
 }
 
 template __global__ void grouped_ktail_kernel_lds<Layout::RCR, 64>(const grouped_layout_globals);
+
+// =============================================================================
+// Round-55 (FP8): LDS-staged K-tail correction kernel for **RRR** (dA path).
+//
+// Mirror of the BF16 ``grouped_ktail_kernel_lds_rrr<64>`` (analysis/bf16_gemm/
+// mi350x/kernel_bf16_dynamic.cpp). Replaces the scalar K-loop in
+// ``grouped_tail_kernel<RRR>`` for the K-tail RMW correction over
+// [0, fast_n) × M_total cells on K-misaligned grouped shapes (gpt_oss
+// K=2880 → K_REM=64).
+//
+// FP8 RRR layout: A is fp8 [M, K] row-major (stride-1 in K), B is
+// fp8 [G, K, N] row-major (stride-N in K, stride-1 in N). The HBM B
+// load reads 4 contiguous N cols at fixed K (vec4 fp8 = 4 bytes = 1
+// dword) and SCATTERS to a [TBN, K_REM_LDS] transposed LDS layout so
+// the inner-loop ds_read along K stays vec8.
+//
+// Bench (rocprof on FP8 grouped gpt_oss-Down B=32-M4096 dA):
+//   * grouped_tail_kernel<RRR> (scalar) was ~13 ms / call.
+//   * Post-LDS-staged: K-tail RMW down to ~1 ms (rest is the
+//     unchanged scalar N-tail full-K reduction over [fast_n, n)).
+// =============================================================================
+template<int K_REM>
+__global__ void grouped_ktail_kernel_lds_rrr(const grouped_layout_globals g) {
+    constexpr int TBM = TAIL_BLOCK_M;       // 16
+    constexpr int TBN = TAIL_BLOCK_N;       // 16
+    constexpr int NTHR = TBM * TBN;         // 256
+
+    // K_REM_LDS = K_REM + 8 padding (= 72 fp8 = 72 bytes = 18 banks mod 32 = 18):
+    // makes ``cib * 18 mod 32`` distribute the 16 cib lanes across 16 distinct
+    // even banks for the ds_read_b64 in the inner loop. Mirror round-17 RCR.
+    constexpr int K_REM_LDS = K_REM + 8;
+    __shared__ fp8e4m3 A_lds[TBM * K_REM_LDS];
+    __shared__ fp8e4m3 B_lds[TBN * K_REM_LDS];
+    constexpr int MAX_G_PLUS_1 = 65;
+    __shared__ int s_offs[MAX_G_PLUS_1];
+
+    const int rib = threadIdx.y;
+    const int cib = threadIdx.x;
+    const int tid = rib * blockDim.x + cib;
+
+    if (tid < MAX_G_PLUS_1) {
+        s_offs[tid] = (tid <= g.G) ? static_cast<int>(g.group_offs[tid]) : 0;
+    }
+    __syncthreads();
+
+    const int row_block_base = blockIdx.y * TBM;
+    const int col_block_base = blockIdx.x * TBN;
+    if (row_block_base >= g.M_total || col_block_base >= g.n) return;
+
+    int group_idx = 0;
+    #pragma unroll 1
+    for (int gi = 0; gi < g.G; ++gi) {
+        if (row_block_base < s_offs[gi + 1]) { group_idx = gi; break; }
+    }
+
+    const int k0 = g.fast_k;
+    const int K_rem_dyn = g.k - k0;
+    if (K_rem_dyn != K_REM) return;
+
+    const bool cross_boundary = (row_block_base + TBM > s_offs[group_idx + 1]);
+    if (cross_boundary) {
+        // Per-row scalar fallback (B is stride-N in K → no vec along K).
+        const int row = row_block_base + rib;
+        const int col = col_block_base + cib;
+        if (row < g.M_total && col < g.n) {
+            int row_group = 0;
+            #pragma unroll 1
+            for (int gi = 0; gi < g.G; ++gi) {
+                if (row < s_offs[gi + 1]) { row_group = gi; break; }
+            }
+            float acc_s = 0.0f;
+            for (int kk = k0; kk < g.k; ++kk) {
+                acc_s += load_fp8_scalar(g.a, row, kk) *
+                         load_fp8_scalar_grp(g.b, row_group, kk, col);
+            }
+            const float scaled_s = acc_s * resolve_combined_scale_grp(g);
+            store_bf16_scalar(g.c, row, col,
+                              load_bf16_scalar(g.c, row, col) + scaled_s);
+        }
+        return;
+    }
+
+    // ---- Coop load A: [TBM, K_REM] fp8 from A[r_global, k0..k0+K_REM).
+    // Same pattern as RCR round-9 (A stride-1 in K for both layouts).
+    constexpr int VEC = 4;
+    constexpr int A_VECS_PER_ROW = K_REM / VEC;       // 16
+    static_assert(NTHR == TBM * A_VECS_PER_ROW,
+        "NTHR must equal TBM * (K_REM / VEC) for vec4 coop load of A");
+    {
+        const int r_in_blk = tid / A_VECS_PER_ROW;
+        const int kk_v = tid - r_in_blk * A_VECS_PER_ROW;
+        const int kk_start = kk_v * VEC;
+        const int r_global = row_block_base + r_in_blk;
+        fp8e4m3_4 va{};
+        if (r_global < g.M_total) {
+            const fp8e4m3* ap = &g.a[coord<>(r_global, k0 + kk_start)];
+            va = *reinterpret_cast<const fp8e4m3_4*>(ap);
+        }
+        *reinterpret_cast<fp8e4m3_4*>(&A_lds[r_in_blk * K_REM_LDS + kk_start]) = va;
+    }
+
+    // ---- Coop load B (RRR): [K_REM, TBN] fp8 from B[group, k0+kk, col_base..+TBN).
+    // 4 contiguous N cols at fixed K = vec4 fp8 (4 bytes = 1 dword) HBM load.
+    // SCATTER to LDS in [TBN, K_REM_LDS] transposed layout: 4 separate scalar
+    // LDS stores per thread, but inner loop then reads vec8 along K stride-1.
+    constexpr int B_VECS_PER_K = TBN / VEC;           // 4
+    static_assert(NTHR == K_REM * B_VECS_PER_K,
+        "NTHR must equal K_REM * (TBN / VEC) for vec4 coop load of B");
+    {
+        const int kk_in_blk = tid / B_VECS_PER_K;
+        const int n_in_blk = (tid - kk_in_blk * B_VECS_PER_K) * VEC;
+        const int kk_global = k0 + kk_in_blk;
+        const int col_global = col_block_base + n_in_blk;
+        fp8e4m3_4 vb{};
+        // Zero-pad cols >= g.n. n_in_blk is 4-aligned so the 4 cols are
+        // either fully in-bounds or some are >= g.n.
+        if (col_global + VEC <= g.n) {
+            const fp8e4m3* bp = &g.b[coord<>{0, group_idx, kk_global, col_global}];
+            vb = *reinterpret_cast<const fp8e4m3_4*>(bp);
+        } else if (col_global < g.n) {
+            #pragma unroll
+            for (int i = 0; i < VEC; ++i) {
+                const int cg = col_global + i;
+                if (cg < g.n) {
+                    fp8e4m3 v = g.b[coord<>{0, group_idx, kk_global, cg}];
+                    reinterpret_cast<fp8e4m3*>(&vb)[i] = v;
+                }
+            }
+        }
+        // Scatter to B_lds in [TBN, K_REM_LDS] transposed layout.
+        const fp8e4m3* vb_arr = reinterpret_cast<const fp8e4m3*>(&vb);
+        B_lds[(n_in_blk + 0) * K_REM_LDS + kk_in_blk] = vb_arr[0];
+        B_lds[(n_in_blk + 1) * K_REM_LDS + kk_in_blk] = vb_arr[1];
+        B_lds[(n_in_blk + 2) * K_REM_LDS + kk_in_blk] = vb_arr[2];
+        B_lds[(n_in_blk + 3) * K_REM_LDS + kk_in_blk] = vb_arr[3];
+    }
+    __syncthreads();
+
+    const int row = row_block_base + rib;
+    const int col = col_block_base + cib;
+    if (row >= g.M_total || col >= g.n) return;
+
+    // Inner vec8 fma: K_REM/8 = 8 vec8 per cell. Mirror the FP8 RCR LDS
+    // K-tail (line ~2754 in this file): 2 packed cvt_pk_f32_fp8 per fp8e4m3_4
+    // operand, 4 parallel fp32 accumulators to break dependency chains.
+    constexpr int FMA_VEC = 8;
+    constexpr int K_VECS = K_REM / FMA_VEC;           // 8
+    static_assert(K_REM % FMA_VEC == 0, "K_REM must be vec8-aligned for inner fma");
+    typedef __attribute__((__vector_size__(2 * sizeof(float)))) float fp32x2_v;
+    auto fp8x4_to_f32x4 = [](const fp8e4m3_4& u) -> float4 {
+        int packed;
+        __builtin_memcpy(&packed, &u, 4);
+        fp32x2_v lo = __builtin_amdgcn_cvt_pk_f32_fp8(packed, false);
+        fp32x2_v hi = __builtin_amdgcn_cvt_pk_f32_fp8(packed, true);
+        return make_float4(lo[0], lo[1], hi[0], hi[1]);
+    };
+    float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
+    #pragma unroll
+    for (int kk_v = 0; kk_v < K_VECS; ++kk_v) {
+        fp8e4m3_8 a8 = *reinterpret_cast<const fp8e4m3_8*>(
+            &A_lds[rib * K_REM_LDS + kk_v * FMA_VEC]);
+        fp8e4m3_8 b8 = *reinterpret_cast<const fp8e4m3_8*>(
+            &B_lds[cib * K_REM_LDS + kk_v * FMA_VEC]);
+        float4 a_lo = fp8x4_to_f32x4(a8.lo);
+        float4 a_hi = fp8x4_to_f32x4(a8.hi);
+        float4 b_lo = fp8x4_to_f32x4(b8.lo);
+        float4 b_hi = fp8x4_to_f32x4(b8.hi);
+        acc0 += a_lo.x * b_lo.x + a_hi.x * b_hi.x;
+        acc1 += a_lo.y * b_lo.y + a_hi.y * b_hi.y;
+        acc2 += a_lo.z * b_lo.z + a_hi.z * b_hi.z;
+        acc3 += a_lo.w * b_lo.w + a_hi.w * b_hi.w;
+    }
+    const float acc = (acc0 + acc1) + (acc2 + acc3);
+
+    const float scaled = acc * resolve_combined_scale_grp(g);
+    store_bf16_scalar(g.c, row, col,
+                      load_bf16_scalar(g.c, row, col) + scaled);
+}
+
+template __global__ void grouped_ktail_kernel_lds_rrr<64>(const grouped_layout_globals);
 
 // =============================================================================
 // Round-18 (FP8): MFMA-based K-tail correction kernel for RCR.
@@ -3738,6 +3929,26 @@ void dispatch_grouped_rrr(grouped_layout_globals g) {
     }
 
     if (g.fast_n != g.n || g.fast_k != g.k) {
+        // Round-55: LDS-staged K-tail correction for RRR. Replaces the
+        // scalar K-loop in ``grouped_tail_kernel<RRR>`` over [0, fast_n)
+        // × M_total cells. Mirror BF16 round-55 wiring.
+        const bool lds_k_tail_safe = (g.m_per_group >= TAIL_BLOCK_M) &&
+                                     ((g.m_per_group % TAIL_BLOCK_M) == 0);
+        const int K_rem = g.k - g.fast_k;
+        if (K_rem == 64 && lds_k_tail_safe && g.fast_n > 0) {
+            dim3 lds_block(TAIL_BLOCK_N, TAIL_BLOCK_M);
+            dim3 lds_grid(
+                kittens::ceil_div(g.fast_n, TAIL_BLOCK_N),
+                kittens::ceil_div(g.M_total, TAIL_BLOCK_M)
+            );
+            grouped_ktail_kernel_lds_rrr<64>
+                <<<lds_grid, lds_block, 0, g.stream>>>(g);
+        }
+
+        // The scalar tail still has to run for the N-tail (cols
+        // [fast_n, n) full-K reduction) and any cells the LDS K-tail
+        // skipped (cross-group blocks, m_per_group misalign). For
+        // RRR the legacy scalar K-loop is unchanged below.
         dim3 tail_block(TAIL_BLOCK_N, TAIL_BLOCK_M);
         dim3 tail_grid(
             kittens::ceil_div(g.n, TAIL_BLOCK_N),
