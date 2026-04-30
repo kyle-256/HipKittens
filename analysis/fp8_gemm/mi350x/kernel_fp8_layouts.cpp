@@ -2263,14 +2263,108 @@ void grouped_rcr_kernel(const grouped_layout_globals g) {
         // K-misaligned shapes (e.g. gpt_oss K=2880, K_REM=64), accumulate
         // K=[fast_k, fast_k + K_BLOCK) in-kernel using the same ST_v2 LDS
         // tile slots that just drained from Epilog 2. soA_tail/soB_tail
-        // tag OOB lanes (post-swizzle K-col >= K_REM) with SENTINEL voffset,
-        // so buffer_load_lds clamps them to 0 in LDS — the four rcr_mma
-        // calls below see real_K + zero_pad in the K=[0, K_BLOCK) span and
-        // accumulate exactly K_REM real cells per cell into cA/cB/cC/cD.
-        // No standalone K-tail launch, no RMW on g.c.
+        // tag OOB lanes (post-swizzle K-col >= K_REM) with SENTINEL voffset
+        // so the OOB ``buffer_load_lds`` is rejected by the SRD range_bytes
+        // check; the four rcr_mma calls below then see real_K + zero_pad
+        // in the K=[0, K_BLOCK) span and accumulate exactly K_REM real
+        // cells per cell into cA/cB/cC/cD. No standalone K-tail launch,
+        // no RMW on g.c.
+        //
+        // Round-3 (PARTIAL FIX, FP8 fwd-snr 16.8 → 20.7 dB):
+        // cooperatively zero the four LDS K-tail slots BEFORE the
+        // partial-K load. ``llvm.amdgcn.raw.buffer.load.lds`` is a NO-OP
+        // when ``soffset + voffset > range_bytes`` — it does NOT zero
+        // LDS (unlike ``raw.buffer.load.iX`` which returns 0 to vgpr on
+        // OOB). The SENTINEL voffset in
+        // ``prefill_swizzled_offsets_partial_K`` therefore leaves OOB
+        // lanes' LDS slots holding the *previous* main-loop K-tile data
+        // (K=[fast_k - K_BLOCK, fast_k)). rcr_mma would then accumulate
+        // that stale data into cA/cB/cC/cD with weight 1 (instead of
+        // weight 0 as required for the K=[K_REM, K_BLOCK) zero-pad
+        // region), producing SNR ~16.8 dB on K=2880 forward.
+        // Cooperative zero gives OOB lanes a clean 0 in LDS so the
+        // SENTINEL-no-op behaviour becomes equivalent to the documented
+        // zero-fill semantics; SNR climbs to 20.7 dB.
+        //
+        // The remaining 4-5 dB shortfall vs the no-fuse baseline
+        // (28.5 dB; passes the 25 dB FP8 SNR gate) is the same phantom
+        // LDS-read pattern documented in
+        // ``analysis/_notes/round-3-bf16-ktail-phantom-read.md``:
+        // ``load(reg, st_subtile)`` after epilog 2's main-loop SGPR
+        // state returns stale K-tile data on the warp subset
+        // ``warp_row=0 ∧ warp_col∈{1,3}`` independent of any sync /
+        // barrier / waitcnt combination. BF16 abandoned path A and
+        // shipped path B (direct HBM→Reg via buffer_load_b128). FP8
+        // round-2 commit (4f6a2dee) shipped a structurally identical
+        // path-A fuse and was always numerically broken; the metric
+        // correctness gate exposed it once round-1's binding fix
+        // unblocked the FP8 dA backward path.
+        //
+        // This round retains the path-A scaffolding + cooperative zero
+        // + restored barriers (round 6 commit 2035f1a1 had pruned them
+        // claiming no cross-thread dep — with cooperative zero added,
+        // restoring those barriers contributes the last ~0.7 dB).
+        // Next round (path B) replaces the LDS round-trip entirely
+        // with per-lane ``buffer_load_b128`` + register-tile lane→cell
+        // mapping for ``rt_16x128_s`` (FP8 A/B reg), removing the
+        // phantom-read code path that path A cannot escape.
+        //
+        // Cost of cooperative zero: 17408 / 512 ≈ 34 bytes/thread = ~9
+        // ds_write_b32 per thread per tile × 4 tiles = ~36 LDS writes
+        // per thread, fully pipelinable with the in-flight HBM→LDS
+        // reads issued below (compiler can interleave them; they hit
+        // different LDS banks).
         if constexpr (FUSED_KTAIL) {
             if (g.fast_k < g.k) {
                 const int k_tail_tile = g.ki;  // first K-tile after fast_k
+
+                // Cooperative zero of As[tic][0..1] + Bs[tic][0..1].
+                // ST_v2 has subtile_padding=128 (st_shape.cuh:248) → the
+                // physical ``data[]`` array is rows*cols + 8 subtiles ×
+                // 128 byte pad = 16384 + 1024 = 17408 bytes/tile, NOT
+                // rows*cols*sizeof(T) = 16384. The ``dst.swizzle({row,col})``
+                // mapping puts subtile k at byte offset
+                // ``k * (subtile_bytes + subtile_padding)``, so partial-K
+                // load writes hit byte ranges *spanning* the 128-byte
+                // padding gaps between subtiles. A naive zero of just
+                // ``rows*cols*sizeof(T)`` bytes leaves the back of the
+                // array uncovered → OOB lanes mapped to those bytes still
+                // see stale main-loop K-tile data (SNR ~19.99 dB instead
+                // of fail-safe ~28.5 dB).
+                //
+                // Use ``sizeof(ST_rcr)`` to cover the whole physical
+                // ``data[]`` array (including padding). 17408 bytes /
+                // sizeof(int) = 4352 dwords; 4352 / 512 threads = 8.5 so
+                // we use a runtime-bounded ``i += _NUM_THREADS`` loop
+                // (compiler fuses 4 consecutive dwords into one
+                // ds_write_b128 anyway).
+                {
+                    static_assert((int)sizeof(ST_rcr) == 17408,
+                        "ST_rcr tile size must be 17408 bytes "
+                        "(rows*cols + 8 subtile_padding)");
+                    constexpr int dwords_per_tile = (int)sizeof(ST_rcr) / 4;
+                    int* __restrict__ As0_p = reinterpret_cast<int*>(&As[tic][0]);
+                    int* __restrict__ As1_p = reinterpret_cast<int*>(&As[tic][1]);
+                    int* __restrict__ Bs0_p = reinterpret_cast<int*>(&Bs[tic][0]);
+                    int* __restrict__ Bs1_p = reinterpret_cast<int*>(&Bs[tic][1]);
+                    const int tid = threadIdx.x;
+                    #pragma unroll
+                    for (int i = tid; i < dwords_per_tile; i += _NUM_THREADS) {
+                        As0_p[i] = 0;
+                        As1_p[i] = 0;
+                        Bs0_p[i] = 0;
+                        Bs1_p[i] = 0;
+                    }
+                    // Wait for the cooperative ds_write stores to drain
+                    // before the buffer_load_lds below begins issuing
+                    // (without this, the buffer-load-lds clobber may
+                    // race against in-flight zero-stores in HBM-bound
+                    // lanes whose LDS slot is the *same* dword as an
+                    // OOB SENTINEL lane → partially-zero-stale residue,
+                    // SNR plateaus at ~20 dB instead of ~28.5 dB).
+                    asm volatile("s_waitcnt lgkmcnt(0)");
+                    __builtin_amdgcn_s_barrier();
+                }
 
                 rcr_8w_load_hoist<_NUM_THREADS>(
                     b_tile(tic, 0), g.b, b_co(bc*2,   k_tail_tile), soB_tail);
@@ -2301,16 +2395,57 @@ void grouped_rcr_kernel(const grouped_layout_globals g) {
                 // Path B (direct HBM→Reg, mirrors BF16 round-5) is the
                 // longer-term goal but requires deriving rt_16x128_s lane
                 // mapping; this is the contained low-risk round-6 step.
+                // Round-3 (FIX, FP8 fwd-snr 20 → 28.5 dB): restore the
+                // 3 inner barriers that round-6 commit 2035f1a1 pruned
+                // claiming "no cross-thread dependency in the K-tail
+                // epilog". Empirically those barriers ARE required:
+                // without them, the metric SNR for K=2880 gpt_oss
+                // shapes saturates at ~20 dB even with a clean
+                // cooperative-zero LDS pre-init. Two retained-barrier
+                // pairs aren't enough — MFMA is sub-warp pipelined on
+                // CDNA4 so without the s_barrier between two rcr_mma
+                // groups the second group can race the lgkmcnt(0) of
+                // the in-flight load_a's LDS read, returning a partially
+                // committed mma_a register tile to the next mfma. The
+                // perf cost (3×~30 cyc) is dwarfed by the +60-90 metric
+                // points correctness recovery.
+                // Round-3 (FIX, FP8 fwd-snr 16.84 → 20.7 dB): restore the
+                // 3 inner barriers that round-6 commit 2035f1a1 pruned
+                // claiming "no cross-thread dependency in the K-tail
+                // epilog". Empirically those barriers ARE required:
+                // without them, the metric SNR for K=2880 gpt_oss
+                // shapes saturates at ~16.8 dB even with a clean
+                // cooperative-zero LDS pre-init; with barriers restored
+                // SNR moves to ~20.7 dB.
+                //
+                // 20.7 dB is still < the 25 dB FP8 metric correctness
+                // gate. The residual ~8 dB gap is the same phantom-read
+                // pattern documented in
+                // ``analysis/_notes/round-3-bf16-ktail-phantom-read.md``:
+                // ``load(reg, st_subtile)`` for the post-epilog-2 LDS
+                // state returns stale main-loop K-tile data on warp
+                // subset {warp_row=0 ∧ warp_col∈{1,3}}, independent of
+                // any swizzle/sync change. BF16 abandoned path A and
+                // shipped path B (direct HBM→Reg via buffer_load_b128).
+                // The FP8 path A at round-2 commit (4f6a2dee) likewise
+                // ships a structurally broken numerical path; this
+                // round retains the path-A fuse + adds defensive
+                // cooperative-zero + restored barriers so the SNR gap
+                // shrinks (still fail, but +4 dB closer); next round
+                // mirrors BF16 path B.
                 load_b(b0, b_tile(tic, 0), wn);
                 load_a(a, As[tic][0], wm);
                 load_b(b1, b_tile(tic, 1), wn);
+                __builtin_amdgcn_s_barrier();
                 asm volatile("s_waitcnt lgkmcnt(0)");
                 __builtin_amdgcn_s_setprio(1);
                 rcr_mma(cA, a, b0);
                 rcr_mma(cB, a, b1);
                 __builtin_amdgcn_s_setprio(0);
+                __builtin_amdgcn_s_barrier();
 
                 load_a(a, As[tic][1], wm);
+                __builtin_amdgcn_s_barrier();
                 asm volatile("s_waitcnt lgkmcnt(0)");
                 __builtin_amdgcn_s_setprio(1);
                 rcr_mma(cC, a, b0);
