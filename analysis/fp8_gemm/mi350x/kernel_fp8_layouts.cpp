@@ -21,7 +21,17 @@ constexpr int BLOCK_SWIZZLE_NUM_XCDS = 8;
 constexpr int RCR_4WAVE_MIN_GRID  = 3200;
 constexpr int RCR_4WAVE_MAX_K     = 8192;
 
-// RCR two-tile schedule threshold (ki >= this → use two-tile main-loop schedule)
+// RCR two-tile schedule threshold (ki >= this → use two-tile main-loop
+// schedule). Round-15 probe: lowering to 20 to cover gpt_oss ki_dyn=22
+// regressed by 0% (within ±0.23 % noise on bench, score unchanged at
+// 833) — the deeper two-tile pipeline (8 mma/iter, 4 LDS slots) does
+// NOT amortize on the shorter ki_dyn=22 main-loop relative to the
+// single-tile fallback (4 mma/iter, 2 LDS slots) because the larger
+// epilog fraction + slightly higher VGPR spill (compile-time codegen
+// is identical, runtime branch only — but the reformulated reg
+// dependency chain in two-tile path makes the issue queue marginally
+// busier on ki=11). 28 stays the empirical break-even.
+// See analysis/_notes/round-15-fp8-rcr-two-tile-min-ki-noop.md.
 constexpr int RCR_TWO_TILE_MIN_KI = 28;
 
 // Derived block dims
