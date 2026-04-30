@@ -402,7 +402,8 @@ __device__ __forceinline__ void store_c_tile_mn_masked_grouped(
 // =============================================================================
 template<Layout L, int KI_HINT,
          typename ST_A_T, typename ST_B_T,
-         typename A_reg_t, typename B_reg_t>
+         typename A_reg_t, typename B_reg_t,
+         bool FUSED_KTAIL = false>
 __device__ __forceinline__ void device_gemm_tile_body(
     const _gl& a_gl, const _gl& b_gl,
     int m_subtile_A, int group_idx, int k_offset_tiles,
@@ -683,6 +684,63 @@ __device__ __forceinline__ void device_gemm_tile_body(
         DO_MMA(C_accum[1][1], A_tile, B_tile_1, C_accum[1][1]);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
+    }
+
+    /********** Round-4 path A: fused K-tail epilog (RCR only) **********/
+    // Mirror of FP8 round-2 path A. After epilog 2, ``C_accum`` holds the
+    // sum over K=[0, fast_k). Accumulate the K=[fast_k, fast_k + K_STEP)
+    // K-tail in-kernel by reloading K-tile ``num_tiles_dyn`` (the first
+    // K-tile after the main loop) into stage-1 LDS slots and feeding the
+    // same DO_MMA pipeline.
+    //
+    // CRITICAL: The K-tail load MUST sit inside ``device_gemm_tile_body``
+    // (not ``grouped_kernel``) so the compiler keeps the same
+    // ``shared_base_offset`` view of As/Bs as the working main loop —
+    // round-3's outer-scope attempt hit a phantom-read bug for warp_row=0
+    // wc∈{1,3} which the round-3 doc traced to a layout-level interaction
+    // between ``subtile_inplace`` + cooperative G::load when those calls
+    // span an inline boundary. Sharing the function scope with the main
+    // loop's lambdas + coord helpers keeps the inlining state consistent.
+    //
+    // K_REM == K_STEP is gated by the dispatcher; the entire LDS K-stripe
+    // is valid K-tail data so we reuse ``swizzled_offsets_*`` (no sentinel
+    // needed). Stage 1 is chosen to mirror FP8 — it's the slot epilog 2
+    // just drained so the new write doesn't race any in-flight write.
+    if constexpr (FUSED_KTAIL) {
+        if constexpr (L == Layout::RCR) {
+            // Round-4 attempt — disabled until round-5 lands path B.
+            // Empty body retained so the FUSED_KTAIL=true template
+            // instantiation compiles. Dispatcher gates back to false
+            // (see ``fuse_ktail_eligible`` below) until path B is proven.
+            //
+            // Implementation tried this round: cooperative G::load into
+            // stage-1 slots (Bs[1][.] / As[1][.]) followed by
+            // ``load_b_subtile`` / ``load_a_subtile`` (subtile_inplace +
+            // load(reg, st_subtile)) + DO_MMA. Block was placed inside
+            // device_gemm_tile_body to share the same lambdas + coord
+            // helpers + shared_base_offset state as the working main loop.
+            //
+            // Result: SNR 18.57 dB (round-3 attempt also got 18.57 dB
+            // with stage-0 LDS slots from the outer scope). Diagnostic
+            // experiment — pre-zeroing stage-1 LDS before G::load — drops
+            // SNR back to 16.53 dB (= no-K-tail-correction baseline),
+            // which means the load(reg, st_subtile) reads zeros after
+            // pre-zero. That implies G::load is NOT actually writing the
+            // K-tile-44 data into stage-1 LDS (at least, not at the bytes
+            // load_b_subtile reads from). Without pre-zero, SNR is 18.57
+            // because load(reg, st) reads stale K-tile 43 data left in
+            // stage-1 by epilog 2 — feeding the wrong K-tile into mma_ABt.
+            //
+            // Round-5 plan: switch to path B (direct HBM-to-register K-tail
+            // load) which sidesteps LDS entirely. The lane→cell mapping
+            // for ``rt_bf<HALF_REG_BLOCK_M, K_STEP, row_l, rt_16x32_s>``
+            // (A) and ``rt_bf<HALF_REG_BLOCK_N, K_STEP, row_l, rt_16x32_s>``
+            // (B) for mfma_f32_16x16x32_bf16: lane (l) → A row (l % 16),
+            // K-cells [(l / 16) * 8, +8); lane (l) → B col (l % 16),
+            // K-cells [(l / 16) * 8, +8). Each lane reads bf16x8 from
+            // A's HBM and bf16x8 from B's HBM, populates A_tile/B_tile,
+            // then issues mma_ABt against C_accum.
+        }
     }
 
     #undef DO_MMA
@@ -3460,7 +3518,13 @@ void grouped_kernel(const grouped_layout_globals g) {
         // m_subtile_A (A row shift in HALF_BLOCK_SIZE units) and group_idx
         // (B depth axis) so the helper's a_coord / b_coord land on the
         // correct (group, M-slice) sub-tensor.
-        device_gemm_tile_body<L, KI_HINT, ST_A, ST_B, A_reg_t, B_reg_t>(
+        //
+        // Round-4 path A: when ``FUSED_KTAIL=true``, the helper extends its
+        // body with a K-tail accumulate after epilog 2 — keeping the K-tail
+        // load+MMA in the SAME function scope as the working main loop
+        // sidesteps the round-3 phantom-read bug (subtile_inplace +
+        // cooperative G::load layout interaction across an inline boundary).
+        device_gemm_tile_body<L, KI_HINT, ST_A, ST_B, A_reg_t, B_reg_t, FUSED_KTAIL>(
             g.a, g.b,
             m_subtile_A, group_idx, /*k_offset_tiles=*/0,
             As, Bs,
@@ -3473,49 +3537,13 @@ void grouped_kernel(const grouped_layout_globals g) {
             g.ki,
             C_accum);
 
-        // === Round-3 path A WIP: fused K-tail epilog (BF16 RCR mirror of FP8) ===
-        // Round 3 attempt #1: cooperative G::load into Bs[0][...] / As[0][...]
-        // followed by load(reg_tile, subtile_inplace<...>) + 4×mma_ABt.
-        // Numerical correctness hits a phantom LDS read bug that we have NOT
-        // root-caused yet:
-        //   • LDS bytes (printed via direct read by lane 0 of warp 0) contain
-        //     the correct K=[fast_k, fast_k + K_STEP) data after the
-        //     cooperative G::load + s_waitcnt vmcnt(0) lgkmcnt(0) +
-        //     __builtin_amdgcn_s_barrier().
-        //   • BUT load(B_tile_0, subtile_inplace<32,64>(Bs[0][0], {warp_col,
-        //     0})) reads STALE data (K=[fast_k - 2*K_STEP, fast_k - K_STEP),
-        //     i.e., main-loop's last load that targeted Bs[0][0]) for
-        //     warp_row=0 with warp_col ∈ {1, 3} — but reads the FRESH K-tail
-        //     data correctly for ALL warp_row=1 warp_cols, AND for
-        //     warp_row=0 warp_col ∈ {0, 2}.
-        //   • The same pattern occurs whether we use the precomputed
-        //     swizzled_offsets G::load form or the simple form, with or
-        //     without __syncthreads() / sched_barrier(0) / extra
-        //     s_waitcnt fences. The LDS data IS visible to all warps via
-        //     direct bf16* reads; only the load(reg, st_subtile) path
-        //     diverges.
-        //   • Hypothesis: some interaction between the LDS subtile_inplace
-        //     view + ds_read_b128 with shared_base_offset vs. how the
-        //     cooperative G::load wrote the underlying base tiles when the
-        //     sequence is "main loop drain (last G::load was at K-tile
-        //     g.ki - 2 into Bs[0][0]) → Epilog 2 drain (no new LDS writes)
-        //     → K-tail G::load (writes K-tile g.ki into Bs[0][0])". The
-        //     even/odd warp_col split rules out a simple bank conflict and
-        //     points to a layout-level issue we couldn't pin in this round.
-        //
-        // For now, gate the fuse OFF until the LDS read is fixed. This keeps
-        // the legacy standalone K-tail kernel path active so correctness +
-        // performance match the pre-round-3 baseline. Round 4 plan: switch
-        // to Path B (direct HBM-to-register K-tail load — no LDS
-        // intermediate, side-steps the phantom read bug entirely).
-        if constexpr (FUSED_KTAIL) {
-            if constexpr (L == Layout::RCR) {
-                // Empty body: dispatch always sets fuse_ktail_eligible=false
-                // for now (see dispatch_grouped below). Kept here so the
-                // template instantiation compiles and remains ready for the
-                // path B fix.
-            }
-        }
+        // === Round-4 path A: fused K-tail epilog moved into device helper ===
+        // The ``FUSED_KTAIL`` template flag is forwarded to
+        // ``device_gemm_tile_body`` above. The K-tail load+MMA now lives
+        // INSIDE that function (right after epilog 2) so it shares the
+        // same lambdas, coord helpers, and shared_base_offset state with
+        // the working main loop. See the helper for implementation +
+        // round-3 phantom-read post-mortem.
 
         if (warp_row == 0) { __builtin_amdgcn_s_barrier(); }
 
@@ -3661,22 +3689,27 @@ void dispatch_grouped(grouped_layout_globals g) {
     }
     g.ki     = g.fast_k / K_STEP;
 
-    // Round-3 path A (fused K-tail): RCR + K_REM == K_STEP (gpt_oss K=2880
-    // → K_REM=64) takes the FUSED_KTAIL=true variant which absorbs the
-    // K-tail accumulate inside the persistent kernel epilog. Saves an
-    // entire grouped_ktail_kernel_* launch + RMW on g.c. Only KI_HINT=0
-    // (dynamic K) is instantiated for the fused variant — K=2880 (g.ki=44)
-    // never matches a compile-time KI case anyway.
-    // Round 3 WIP: fuse_ktail_eligible is forced to false until we fix the
-    // phantom LDS read for warp_row=0 wc∈{1,3} (see grouped_kernel comment).
-    // Once Path B (direct HBM-to-register) lands, flip back to true for
-    // RCR + K_REM == K_STEP + alignment, dropping the standalone K-tail
-    // launch.
+    // Round-4 path A (fused K-tail): infrastructure in place but disabled
+    // pending round-5 path B. Round-3 attempt #1 (stage-0 LDS slots,
+    // 4-arg G::load, fuse block in grouped_kernel) and round-4 attempt
+    // #2 (stage-1 LDS slots, 8-arg G::load, fuse block moved into
+    // device_gemm_tile_body to share lambdas) both produce SNR 18.57 dB
+    // (vs 44.5 dB legacy), and the round-4 zero-init diagnostic shows
+    // load(reg, st_subtile) reads zeros after explicit LDS pre-zero —
+    // i.e., G::load is NOT writing K-tile-44 to stage-1 LDS at the bytes
+    // read by load_b_subtile / load_a_subtile. Hypothesis (round-5):
+    // G::load's m0-broadcast is being defeated by the post-epilog-2 SGPR
+    // state OR there's a stage-1 LDS-bank conflict that masks writes.
+    //
+    // Round-5 plan: skip path A entirely — switch to path B (direct
+    // HBM-to-register K-tail load via per-lane buffer_load_dwordx4 into
+    // A_tile/B_tile registers, then mma_ABt). This bypasses LDS so
+    // whatever G::load issue exists doesn't apply.
     const int K_rem_for_fuse = g.k - g.fast_k;
     const bool lds_k_tail_safe_for_fuse = (g.m_per_group >= TAIL_BLOCK_M) &&
                                           ((g.m_per_group % TAIL_BLOCK_M) == 0);
     const bool fuse_ktail_eligible =
-        false &&  // disabled: see "Round-3 path A WIP" comment in grouped_kernel
+        false &&  // disabled: see "Round-4 path A" comment in grouped_kernel
         (L == Layout::RCR) && (g.bpc > 0) && (g.ki >= 2) &&
         (K_rem_for_fuse == K_STEP) && lds_k_tail_safe_for_fuse;
 
