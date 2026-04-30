@@ -2284,19 +2284,33 @@ void grouped_rcr_kernel(const grouped_layout_globals g) {
                 asm volatile("s_waitcnt vmcnt(0)");
                 __builtin_amdgcn_s_barrier();
 
+                // Round-6 path A barrier prune: barriers between LDS reads
+                // (load_a/load_b) and rcr_mma are unnecessary in the K-tail
+                // epilog (no double-buffer prefetch follows; LDS reads are
+                // per-lane with no cross-thread dependency; rcr_mma is also
+                // per-lane). The ONLY needed barrier is the post-HBM→LDS
+                // cooperative-write sync above (line 2285) and the trailing
+                // barrier before the wm-conditional epilogue barrier at the
+                // bottom of the outer loop. The 3 inner s_barrier calls were
+                // mirrored from the main loop pattern (where they protect
+                // against next-iter LDS prefetch race) without re-reasoning
+                // for the K-tail epilog. Removing saves ~3 × 30 cyc = 90 cyc
+                // per K-tail per warp; at K-tail ~30% of gpt_oss FP8 K=2880
+                // wall and ~500 cyc K-tail body, this is ~5% K-tail speedup
+                // ⇒ ~1-2pp shape ratio uplift, ~+10-25 metric points.
+                // Path B (direct HBM→Reg, mirrors BF16 round-5) is the
+                // longer-term goal but requires deriving rt_16x128_s lane
+                // mapping; this is the contained low-risk round-6 step.
                 load_b(b0, b_tile(tic, 0), wn);
                 load_a(a, As[tic][0], wm);
                 load_b(b1, b_tile(tic, 1), wn);
-                __builtin_amdgcn_s_barrier();
                 asm volatile("s_waitcnt lgkmcnt(0)");
                 __builtin_amdgcn_s_setprio(1);
                 rcr_mma(cA, a, b0);
                 rcr_mma(cB, a, b1);
                 __builtin_amdgcn_s_setprio(0);
-                __builtin_amdgcn_s_barrier();
 
                 load_a(a, As[tic][1], wm);
-                __builtin_amdgcn_s_barrier();
                 asm volatile("s_waitcnt lgkmcnt(0)");
                 __builtin_amdgcn_s_setprio(1);
                 rcr_mma(cC, a, b0);
