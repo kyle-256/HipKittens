@@ -1820,6 +1820,7 @@ struct grouped_layout_globals {
     int ki;                      // fast_k / K_BLOCK
     int bpc;                     // fast_n / BLOCK_SIZE
     int group_m;                 // tile-scheduling super-block factor
+    int num_xcds;                // chiplet-swizzle XCD count (0 → default 8)
     int M_total;                 // sum of group sizes (= a.shape[0])
     // [grouped] Native non-aligned support (mirror of BF16 grouped Phase 3
     // and FP8 dense fast/tail). Main kernel only sweeps the largest aligned
@@ -1881,8 +1882,13 @@ void grouped_rcr_kernel(const grouped_layout_globals g) {
     rt_fl<RBM, RBN, col_l, rt_16x16_s> cA, cB, cC, cD;
 
     // [grouped] Persistent: chiplet-swizzle pid against full NUM_CUS grid.
+    // Round-67: ``g.num_xcds`` is a host-side knob (default 0 → fallback
+    // to ``BLOCK_SWIZZLE_NUM_XCDS=8``). Each shape can override via the
+    // Python config rule. Mirrors BF16 grouped's existing ``g.num_xcds``
+    // handling (analysis/bf16_gemm/mi350x/kernel_bf16_dynamic.cpp:3249).
+    const int xcds_eff = g.num_xcds > 0 ? g.num_xcds : BLOCK_SWIZZLE_NUM_XCDS;
     int pid = chiplet_transform_chunked(
-        blockIdx.x, NUM_CUS, BLOCK_SWIZZLE_NUM_XCDS, 64);
+        blockIdx.x, NUM_CUS, xcds_eff, 64);
 
     int wm = warpid() / WARPS_N;
     int wn = warpid() % WARPS_N;
@@ -5091,11 +5097,17 @@ static void gemm_wrapper_dscale(pybind11::object a, pybind11::object b, pybind11
 }
 
 // Host-side wrappers for grouped RCR kernel (host-scalar + dscale variants).
+// Round-67: optional ``num_xcds`` parameter (default 0 → kernel uses
+// ``BLOCK_SWIZZLE_NUM_XCDS=8``). Mirrors BF16 grouped's existing
+// per-launch num_xcds tuning so the Python-side config rule can pick a
+// per-shape optimum (e.g. DSV3-Down prefers xcds=4, DSV3-GateUP keeps
+// xcds=8 — see /tmp/sweep_fp8_xcds_round67.py).
 static void grouped_rcr_fn(pybind11::object a, pybind11::object b, pybind11::object c,
                            pybind11::object scale_a_obj, pybind11::object scale_b_obj,
                            pybind11::object group_offs_obj,
                            int group_m,
-                           int m_per_group) {
+                           int m_per_group,
+                           int num_xcds) {
     auto group_offs_ptr = group_offs_obj.attr("data_ptr")().cast<uintptr_t>();
     int G = group_offs_obj.attr("numel")().cast<int>() - 1;
     grouped_layout_globals g{
@@ -5108,8 +5120,8 @@ static void grouped_rcr_fn(pybind11::object a, pybind11::object b, pybind11::obj
         nullptr,
         reinterpret_cast<const int64_t*>(group_offs_ptr),
         {},
-        /* G,n,k,ki,bpc,group_m,M_total,fast_n,fast_k,m_per_group */
-        G, 0, 0, 0, 0, group_m, 0, 0, 0, m_per_group,
+        /* G,n,k,ki,bpc,group_m,num_xcds,M_total,fast_n,fast_k,m_per_group */
+        G, 0, 0, 0, 0, group_m, num_xcds, 0, 0, 0, m_per_group,
     };
     dispatch_grouped_rcr(g);
 }
@@ -5119,7 +5131,8 @@ static void grouped_rcr_dscale_fn(
     pybind11::object scale_a_obj, pybind11::object scale_b_obj,
     pybind11::object group_offs_obj,
     int group_m,
-    int m_per_group) {
+    int m_per_group,
+    int num_xcds) {
     auto sa_ptr = scale_a_obj.attr("data_ptr")().cast<uintptr_t>();
     auto sb_ptr = scale_b_obj.attr("data_ptr")().cast<uintptr_t>();
     auto group_offs_ptr = group_offs_obj.attr("data_ptr")().cast<uintptr_t>();
@@ -5133,8 +5146,8 @@ static void grouped_rcr_dscale_fn(
         reinterpret_cast<const float*>(sb_ptr),
         reinterpret_cast<const int64_t*>(group_offs_ptr),
         {},
-        /* G,n,k,ki,bpc,group_m,M_total,fast_n,fast_k,m_per_group */
-        G, 0, 0, 0, 0, group_m, 0, 0, 0, m_per_group,
+        /* G,n,k,ki,bpc,group_m,num_xcds,M_total,fast_n,fast_k,m_per_group */
+        G, 0, 0, 0, 0, group_m, num_xcds, 0, 0, 0, m_per_group,
     };
     dispatch_grouped_rcr(g);
 }
@@ -5160,7 +5173,8 @@ static void grouped_rrr_fn(pybind11::object a, pybind11::object b, pybind11::obj
         nullptr,
         reinterpret_cast<const int64_t*>(group_offs_ptr),
         {},
-        G, 0, 0, 0, 0, group_m, 0, 0, 0, m_per_group,
+        /* G,n,k,ki,bpc,group_m,num_xcds,M_total,fast_n,fast_k,m_per_group */
+        G, 0, 0, 0, 0, group_m, 0, 0, 0, 0, m_per_group,
     };
     dispatch_grouped_rrr(g);
 }
@@ -5184,7 +5198,8 @@ static void grouped_rrr_dscale_fn(
         reinterpret_cast<const float*>(sb_ptr),
         reinterpret_cast<const int64_t*>(group_offs_ptr),
         {},
-        G, 0, 0, 0, 0, group_m, 0, 0, 0, m_per_group,
+        /* G,n,k,ki,bpc,group_m,num_xcds,M_total,fast_n,fast_k,m_per_group */
+        G, 0, 0, 0, 0, group_m, 0, 0, 0, 0, m_per_group,
     };
     dispatch_grouped_rrr(g);
 }
@@ -5274,13 +5289,15 @@ PYBIND11_MODULE(tk_fp8_layouts, m) {
           pybind11::arg("scale_a"), pybind11::arg("scale_b"),
           pybind11::arg("group_offs"),
           pybind11::arg("group_m") = DEFAULT_GROUP_M,
-          pybind11::arg("m_per_group") = 0);
+          pybind11::arg("m_per_group") = 0,
+          pybind11::arg("num_xcds") = 0);
     m.def("grouped_rcr_dscale", &grouped_rcr_dscale_fn,
           pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("c"),
           pybind11::arg("scale_a"), pybind11::arg("scale_b"),
           pybind11::arg("group_offs"),
           pybind11::arg("group_m") = DEFAULT_GROUP_M,
-          pybind11::arg("m_per_group") = 0);
+          pybind11::arg("m_per_group") = 0,
+          pybind11::arg("num_xcds") = 0);
     // [grouped] Round-1 RRR launcher (FP8 backward dA path). Same
     // ``group_offs``-driven contract as ``grouped_rcr``; uses the scalar
     // tail kernel for the full compute (no native main kernel yet).
