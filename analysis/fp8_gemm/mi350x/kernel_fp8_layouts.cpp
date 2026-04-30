@@ -2454,8 +2454,11 @@ void grouped_rrr_kernel(const grouped_layout_globals g) {
     B_col_reg b0, b1;
     rt_fl<RBM, RBN, col_l, rt_16x16_s> cA, cB, cC, cD;
 
+    // Round-2 (FP8 backward unblock): mirror RCR — read host-side
+    // ``g.num_xcds`` knob, fall back to the default 8 when unset.
+    const int xcds_eff = g.num_xcds > 0 ? g.num_xcds : BLOCK_SWIZZLE_NUM_XCDS;
     int pid = chiplet_transform_chunked(
-        blockIdx.x, NUM_CUS, BLOCK_SWIZZLE_NUM_XCDS, 64);
+        blockIdx.x, NUM_CUS, xcds_eff, 64);
 
     int wm = warpid() / WARPS_N;
     int wn = warpid() % WARPS_N;
@@ -4886,6 +4889,7 @@ struct grouped_var_k_layout_globals_fp8 {
     int bpr;                       // ceil_div(n, BLOCK_SIZE)
     int bpc;                       // ceil_div(k, BLOCK_SIZE)
     int fast_n, fast_k;
+    int num_xcds;                  // chiplet-swizzle XCD count (0 → default 8)
     dim3 block() { return dim3(_NUM_THREADS); }
     size_t dynamic_shared_memory() { return 0; }
 };
@@ -4914,8 +4918,11 @@ void grouped_var_k_kernel_fp8(const grouped_var_k_layout_globals_fp8 g) {
     B_col_reg b0, b1;
     rt_fl<RBM, RBN, col_l, rt_16x16_s> cA, cB, cC, cD;
 
+    // Round-2 (FP8 backward unblock): mirror RCR line ~2020 — host-side
+    // ``g.num_xcds`` knob with fallback to the default 8 when unset.
+    const int xcds_eff = g.num_xcds > 0 ? g.num_xcds : BLOCK_SWIZZLE_NUM_XCDS;
     int pid = chiplet_transform_chunked(
-        blockIdx.x, NUM_CUS, BLOCK_SWIZZLE_NUM_XCDS, 64);
+        blockIdx.x, NUM_CUS, xcds_eff, 64);
 
     int wm = warpid() / WARPS_N;
     int wn = warpid() % WARPS_N;
@@ -5403,11 +5410,20 @@ static void grouped_rcr_dscale_fn(
 // Same global struct as RCR (identical scale + group_offs plumbing); the
 // dispatcher pins ``fast_n = fast_k = 0`` so the entire compute happens
 // in ``grouped_tail_kernel<Layout::RRR>``.
+//
+// Round-2 (FP8 backward unblock): ``num_xcds`` parameter added to mirror
+// the RCR binding (round-67). Was previously absent, so the Primus-side
+// dispatch in ``grouped_gemm_fp8_impl.py`` raised TypeError when the
+// shared dispatch path passed ``num_xcds=xcds_arg`` for the RRR layout
+// (FP8 backward dA), killing all 16 FP8 grouped cases with bwd-exception.
+// Default 0 → kernel reads ``g.num_xcds == 0`` and falls back to the
+// built-in ``BLOCK_SWIZZLE_NUM_XCDS=8`` (no perf regression).
 static void grouped_rrr_fn(pybind11::object a, pybind11::object b, pybind11::object c,
                            pybind11::object scale_a_obj, pybind11::object scale_b_obj,
                            pybind11::object group_offs_obj,
                            int group_m,
-                           int m_per_group) {
+                           int m_per_group,
+                           int num_xcds) {
     auto group_offs_ptr = group_offs_obj.attr("data_ptr")().cast<uintptr_t>();
     int G = group_offs_obj.attr("numel")().cast<int>() - 1;
     grouped_layout_globals g{
@@ -5421,7 +5437,7 @@ static void grouped_rrr_fn(pybind11::object a, pybind11::object b, pybind11::obj
         reinterpret_cast<const int64_t*>(group_offs_ptr),
         {},
         /* G,n,k,ki,bpc,group_m,num_xcds,M_total,fast_n,fast_k,m_per_group */
-        G, 0, 0, 0, 0, group_m, 0, 0, 0, 0, m_per_group,
+        G, 0, 0, 0, 0, group_m, num_xcds, 0, 0, 0, m_per_group,
     };
     dispatch_grouped_rrr(g);
 }
@@ -5431,7 +5447,8 @@ static void grouped_rrr_dscale_fn(
     pybind11::object scale_a_obj, pybind11::object scale_b_obj,
     pybind11::object group_offs_obj,
     int group_m,
-    int m_per_group) {
+    int m_per_group,
+    int num_xcds) {
     auto sa_ptr = scale_a_obj.attr("data_ptr")().cast<uintptr_t>();
     auto sb_ptr = scale_b_obj.attr("data_ptr")().cast<uintptr_t>();
     auto group_offs_ptr = group_offs_obj.attr("data_ptr")().cast<uintptr_t>();
@@ -5446,18 +5463,28 @@ static void grouped_rrr_dscale_fn(
         reinterpret_cast<const int64_t*>(group_offs_ptr),
         {},
         /* G,n,k,ki,bpc,group_m,num_xcds,M_total,fast_n,fast_k,m_per_group */
-        G, 0, 0, 0, 0, group_m, 0, 0, 0, 0, m_per_group,
+        G, 0, 0, 0, 0, group_m, num_xcds, 0, 0, 0, m_per_group,
     };
     dispatch_grouped_rrr(g);
 }
 
 // Host wrappers for grouped variable-K (CRR / dB) FP8 kernel
 // (host-scalar + dscale variants).
+//
+// Round-2 (FP8 backward unblock): ``num_xcds`` parameter added to keep
+// the var-K binding signature in sync with the RCR / RRR launchers
+// (round-67). Without it, future Primus dispatch could raise TypeError
+// the same way the RRR path did. Wires through to the kernel via the
+// new ``num_xcds`` field on ``grouped_var_k_layout_globals_fp8``;
+// ``num_xcds == 0`` falls back to ``BLOCK_SWIZZLE_NUM_XCDS=8`` so this
+// is back-compat (Primus var-K dispatch currently does not pass
+// ``num_xcds`` — that's a follow-up perf knob).
 static void grouped_variable_k_crr_fp8_fn(
     pybind11::object a, pybind11::object b, pybind11::object c,
     pybind11::object scale_a_obj, pybind11::object scale_b_obj,
     pybind11::object group_offs_obj,
-    int group_m) {
+    int group_m,
+    int num_xcds) {
     auto group_offs_ptr = group_offs_obj.attr("data_ptr")().cast<uintptr_t>();
     int G = group_offs_obj.attr("numel")().cast<int>() - 1;
     grouped_var_k_layout_globals_fp8 g{
@@ -5470,8 +5497,8 @@ static void grouped_variable_k_crr_fp8_fn(
         nullptr,
         reinterpret_cast<const int64_t*>(group_offs_ptr),
         {},
-        /* G, M_total, n, k, group_m, bpr, bpc, fast_n, fast_k */
-        G, 0, 0, 0, group_m, 0, 0, 0, 0,
+        /* G, M_total, n, k, group_m, bpr, bpc, fast_n, fast_k, num_xcds */
+        G, 0, 0, 0, group_m, 0, 0, 0, 0, num_xcds,
     };
     dispatch_grouped_var_k_fp8(g);
 }
@@ -5480,7 +5507,8 @@ static void grouped_variable_k_crr_dscale_fp8_fn(
     pybind11::object a, pybind11::object b, pybind11::object c,
     pybind11::object scale_a_obj, pybind11::object scale_b_obj,
     pybind11::object group_offs_obj,
-    int group_m) {
+    int group_m,
+    int num_xcds) {
     auto sa_ptr = scale_a_obj.attr("data_ptr")().cast<uintptr_t>();
     auto sb_ptr = scale_b_obj.attr("data_ptr")().cast<uintptr_t>();
     auto group_offs_ptr = group_offs_obj.attr("data_ptr")().cast<uintptr_t>();
@@ -5494,7 +5522,8 @@ static void grouped_variable_k_crr_dscale_fp8_fn(
         reinterpret_cast<const float*>(sb_ptr),
         reinterpret_cast<const int64_t*>(group_offs_ptr),
         {},
-        G, 0, 0, 0, group_m, 0, 0, 0, 0,
+        /* G, M_total, n, k, group_m, bpr, bpc, fast_n, fast_k, num_xcds */
+        G, 0, 0, 0, group_m, 0, 0, 0, 0, num_xcds,
     };
     dispatch_grouped_var_k_fp8(g);
 }
@@ -5548,33 +5577,43 @@ PYBIND11_MODULE(tk_fp8_layouts, m) {
     // [grouped] Round-1 RRR launcher (FP8 backward dA path). Same
     // ``group_offs``-driven contract as ``grouped_rcr``; uses the scalar
     // tail kernel for the full compute (no native main kernel yet).
+    // Round-2 (FP8 backward unblock): added ``num_xcds`` to mirror
+    // ``grouped_rcr`` (round-67) and unblock the Primus shared dispatch
+    // path which passes ``num_xcds=xcds_arg`` for every layout.
     m.def("grouped_rrr", &grouped_rrr_fn,
           pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("c"),
           pybind11::arg("scale_a"), pybind11::arg("scale_b"),
           pybind11::arg("group_offs"),
           pybind11::arg("group_m") = DEFAULT_GROUP_M,
-          pybind11::arg("m_per_group") = 0);
+          pybind11::arg("m_per_group") = 0,
+          pybind11::arg("num_xcds") = 0);
     m.def("grouped_rrr_dscale", &grouped_rrr_dscale_fn,
           pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("c"),
           pybind11::arg("scale_a"), pybind11::arg("scale_b"),
           pybind11::arg("group_offs"),
           pybind11::arg("group_m") = DEFAULT_GROUP_M,
-          pybind11::arg("m_per_group") = 0);
+          pybind11::arg("m_per_group") = 0,
+          pybind11::arg("num_xcds") = 0);
     // [grouped variable-K dB] Persistent + CPU-sync-free FP8 CRR launcher
     // for the backward dB path. Inputs are 2D contiguous (grad_out, x);
     // output is 3D-grouped grad_b [G, n, k] bf16. ``group_offs`` is the
     // [G+1] int64 device prefix-sum; the kernel scans it on-GPU.
+    // Round-2 (FP8 backward unblock): ``num_xcds`` added for signature
+    // parity with the RCR / RRR launchers; default 0 falls back to the
+    // built-in ``BLOCK_SWIZZLE_NUM_XCDS=8``.
     m.def("grouped_variable_k_crr", &grouped_variable_k_crr_fp8_fn,
           pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("c"),
           pybind11::arg("scale_a"), pybind11::arg("scale_b"),
           pybind11::arg("group_offs"),
-          pybind11::arg("group_m") = DEFAULT_GROUP_M);
+          pybind11::arg("group_m") = DEFAULT_GROUP_M,
+          pybind11::arg("num_xcds") = 0);
     m.def("grouped_variable_k_crr_dscale",
           &grouped_variable_k_crr_dscale_fp8_fn,
           pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("c"),
           pybind11::arg("scale_a"), pybind11::arg("scale_b"),
           pybind11::arg("group_offs"),
-          pybind11::arg("group_m") = DEFAULT_GROUP_M);
+          pybind11::arg("group_m") = DEFAULT_GROUP_M,
+          pybind11::arg("num_xcds") = 0);
     m.attr("DEFAULT_GROUP_M") = DEFAULT_GROUP_M;
     m.attr("BLOCK_SIZE") = BLK;
     m.attr("K_BLOCK") = BK;
