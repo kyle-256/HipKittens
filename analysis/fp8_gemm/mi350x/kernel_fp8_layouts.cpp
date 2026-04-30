@@ -2549,18 +2549,22 @@ __global__ void grouped_tail_kernel(const grouped_layout_globals g) {
         // RRR: A stride-1 in K, B[group_idx, kk, col] stride-N in K — B
         // is not vectorisable along K. Round-55 added the LDS-staged
         // ``grouped_ktail_kernel_lds_rrr<64>`` for the [0, fast_n) ×
-        // M_total interior K-tail RMW; if that kernel ran for this cell,
-        // skip here to avoid double-RMW. Mirror BF16 wiring.
+        // M_total interior K-tail RMW; round-56 added the paired
+        // ``grouped_ntail_kernel_lds_rrr<64>`` for the [fast_n, n) ×
+        // M_total full-K OVERWRITE store. Skip cells covered by either.
+        const bool lds_k_tail_safe = (g.m_per_group >= TAIL_BLOCK_M) &&
+                                     ((g.m_per_group % TAIL_BLOCK_M) == 0);
+        const int row_block_base = (row / TAIL_BLOCK_M) * TAIL_BLOCK_M;
+        const bool block_in_group =
+            (row_block_base + TAIL_BLOCK_M <= s_offs[group_idx + 1]);
         if (interior_n && needs_k_tail) {
-            const bool lds_k_tail_safe = (g.m_per_group >= TAIL_BLOCK_M) &&
-                                         ((g.m_per_group % TAIL_BLOCK_M) == 0);
             const bool lds_k_rem_match = ((g.k - g.fast_k) == 64);
-            const int row_block_base = (row / TAIL_BLOCK_M) * TAIL_BLOCK_M;
-            const bool block_in_group =
-                (row_block_base + TAIL_BLOCK_M <= s_offs[group_idx + 1]);
             if (lds_k_tail_safe && lds_k_rem_match && block_in_group) {
                 return;  // LDS K-tail (RRR) already wrote the corrected value.
             }
+        }
+        if (col >= g.fast_n && lds_k_tail_safe && block_in_group) {
+            return;  // LDS N-tail (RRR) already wrote the absolute value.
         }
         for (int kk = k0; kk < g.k; ++kk) {
             acc += load_fp8_scalar(g.a, row, kk) *
@@ -2990,6 +2994,195 @@ __global__ void grouped_ktail_kernel_lds_rrr(const grouped_layout_globals g) {
 }
 
 template __global__ void grouped_ktail_kernel_lds_rrr<64>(const grouped_layout_globals);
+
+// =============================================================================
+// Round-56 (FP8): LDS-staged N-tail full-K reduction kernel for **RRR**.
+//
+// Mirror of the BF16 round-56 ``grouped_ntail_kernel_lds_rrr<64>``. Replaces
+// the per-cell scalar full-K loop in ``grouped_tail_kernel<RRR>`` for
+// the [fast_n, n) × M_total cells (the cells where RRR main kernel
+// did NOT write because ``bpc = fast_n / BLOCK_SIZE``).
+//
+// Layout: A is fp8 [M, K] row-major (stride-1 in K), B is fp8 [G, K, N]
+// row-major (stride-N in K, stride-1 in N). Coop-load pattern mirrors
+// round-55 K-tail variant: vec4 along stride-1 axis (K for A, N for B);
+// B is SCATTERED into a [TBN, K_CHUNK_LDS] transposed LDS layout so the
+// inner-loop ds_read along K stays vec8 (mirrors round-15/17 FP8 RCR
+// LDS K-tail).
+//
+// Bench (rocprof on FP8 grouped gpt_oss-GateUP-B32-M4096 dA before
+// round-56): grouped_tail_kernel<RRR> at ~37 ms / call (~209 TF aggregate
+// for the [fast_n=2816, n=2880] partial col-tile). The N-tail full-K
+// reduction over 64 cols × 131072 rows × 5760 K = 96 GFMAs at scalar
+// rate dominates. Post-round-56: LDS-staged inner FMA + vec4 HBM loads
+// drop the same work to ~10 ms / call.
+// =============================================================================
+template<int K_CHUNK>
+__global__ void grouped_ntail_kernel_lds_rrr(const grouped_layout_globals g) {
+    constexpr int TBM = TAIL_BLOCK_M;            // 16
+    constexpr int TBN = TAIL_BLOCK_N;            // 16
+    constexpr int NTHR = TBM * TBN;              // 256
+    // Pad LDS row to break (cib * stride) bank-conflict pattern. K_CHUNK
+    // = 64 fp8 = 64 bytes = 16 banks, so cib lanes hit only 2 banks
+    // (8-way conflict). K_CHUNK_LDS = 72 fp8 = 72 bytes = 18 banks
+    // (mod 32 = 18) → cib * 18 mod 32 distributes 16 cib lanes across
+    // 16 distinct even banks. Same as round-17 FP8 RCR / round-55
+    // FP8 RRR K-tail.
+    constexpr int K_CHUNK_LDS = K_CHUNK + 8;
+    __shared__ fp8e4m3 A_lds[TBM * K_CHUNK_LDS];
+    __shared__ fp8e4m3 B_lds[TBN * K_CHUNK_LDS];
+    constexpr int MAX_G_PLUS_1 = 65;
+    __shared__ int s_offs[MAX_G_PLUS_1];
+
+    const int rib = threadIdx.y;
+    const int cib = threadIdx.x;
+    const int tid = rib * blockDim.x + cib;
+
+    if (tid < MAX_G_PLUS_1) {
+        s_offs[tid] = (tid <= g.G) ? static_cast<int>(g.group_offs[tid]) : 0;
+    }
+    __syncthreads();
+
+    const int row_block_base = blockIdx.y * TBM;
+    const int col_block_base = g.fast_n + blockIdx.x * TBN;
+    if (row_block_base >= g.M_total || col_block_base >= g.n) return;
+
+    int group_idx = 0;
+    #pragma unroll 1
+    for (int gi = 0; gi < g.G; ++gi) {
+        if (row_block_base < s_offs[gi + 1]) { group_idx = gi; break; }
+    }
+
+    const bool cross_boundary = (row_block_base + TBM > s_offs[group_idx + 1]);
+    if (cross_boundary) {
+        const int row_s = row_block_base + rib;
+        const int col_s = col_block_base + cib;
+        if (row_s < g.M_total && col_s < g.n) {
+            int row_group = 0;
+            #pragma unroll 1
+            for (int gi = 0; gi < g.G; ++gi) {
+                if (row_s < s_offs[gi + 1]) { row_group = gi; break; }
+            }
+            float acc_s = 0.0f;
+            for (int kk = 0; kk < g.k; ++kk) {
+                acc_s += load_fp8_scalar(g.a, row_s, kk) *
+                         load_fp8_scalar_grp(g.b, row_group, kk, col_s);
+            }
+            const float scaled_s = acc_s * resolve_combined_scale_grp(g);
+            store_bf16_scalar(g.c, row_s, col_s, scaled_s);
+        }
+        return;
+    }
+
+    const int row = row_block_base + rib;
+    const int col = col_block_base + cib;
+    const bool active_cell = (row < g.M_total) && (col < g.n);
+
+    constexpr int VEC = 4;
+
+    // ---- A coop-load layout: vec4 along K, NTHR = TBM × (K_CHUNK / VEC).
+    constexpr int A_VECS_PER_ROW = K_CHUNK / VEC;        // 16
+    static_assert(K_CHUNK % VEC == 0, "K_CHUNK must be vec4-aligned");
+    static_assert(NTHR == TBM * A_VECS_PER_ROW,
+        "NTHR must equal TBM * (K_CHUNK / VEC) for A coop load");
+    const int r_in_blk_a = tid / A_VECS_PER_ROW;
+    const int kk_v_a = tid - r_in_blk_a * A_VECS_PER_ROW;
+    const int kk_start_a = kk_v_a * VEC;
+
+    // ---- B coop-load layout: vec4 along N at fixed K, scatter to
+    // transposed [TBN, K_CHUNK_LDS] LDS. NTHR = K_CHUNK × (TBN / VEC).
+    constexpr int B_VECS_PER_K = TBN / VEC;              // 4
+    static_assert(NTHR == K_CHUNK * B_VECS_PER_K,
+        "NTHR must equal K_CHUNK * (TBN / VEC) for B coop load");
+    const int kk_in_blk_b = tid / B_VECS_PER_K;
+    const int n_in_blk_b = (tid - kk_in_blk_b * B_VECS_PER_K) * VEC;
+
+    // 4 parallel fp32 accumulators to break the inner-fma dependency
+    // chain (mirror round-15 FP8 RCR LDS K-tail).
+    float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
+
+    typedef __attribute__((__vector_size__(2 * sizeof(float)))) float fp32x2_v;
+    auto fp8x4_to_f32x4 = [](const fp8e4m3_4& u) -> float4 {
+        int packed;
+        __builtin_memcpy(&packed, &u, 4);
+        fp32x2_v lo = __builtin_amdgcn_cvt_pk_f32_fp8(packed, false);
+        fp32x2_v hi = __builtin_amdgcn_cvt_pk_f32_fp8(packed, true);
+        return make_float4(lo[0], lo[1], hi[0], hi[1]);
+    };
+
+    for (int k_chunk_start = 0; k_chunk_start < g.k; k_chunk_start += K_CHUNK) {
+        // Coop-load A (vec4 fp8 = 4 bytes / thread).
+        {
+            const int r_global = row_block_base + r_in_blk_a;
+            const int k_global = k_chunk_start + kk_start_a;
+            fp8e4m3_4 va{};
+            if (r_global < g.M_total && k_global + VEC <= g.k) {
+                const fp8e4m3* ap = &g.a[coord<>(r_global, k_global)];
+                va = *reinterpret_cast<const fp8e4m3_4*>(ap);
+            }
+            *reinterpret_cast<fp8e4m3_4*>(&A_lds[r_in_blk_a * K_CHUNK_LDS + kk_start_a]) = va;
+        }
+        // Coop-load B (vec4 fp8 along N; scatter to transposed LDS).
+        {
+            const int kk_global = k_chunk_start + kk_in_blk_b;
+            const int col_global = col_block_base + n_in_blk_b;
+            fp8e4m3_4 vb{};
+            if (kk_global < g.k && col_global + VEC <= g.n) {
+                const fp8e4m3* bp = &g.b[coord<>{0, group_idx, kk_global, col_global}];
+                vb = *reinterpret_cast<const fp8e4m3_4*>(bp);
+            } else if (kk_global < g.k && col_global < g.n) {
+                #pragma unroll
+                for (int i = 0; i < VEC; ++i) {
+                    const int cg = col_global + i;
+                    if (cg < g.n) {
+                        fp8e4m3 v = g.b[coord<>{0, group_idx, kk_global, cg}];
+                        reinterpret_cast<fp8e4m3*>(&vb)[i] = v;
+                    }
+                }
+            }
+            const fp8e4m3* vb_arr = reinterpret_cast<const fp8e4m3*>(&vb);
+            B_lds[(n_in_blk_b + 0) * K_CHUNK_LDS + kk_in_blk_b] = vb_arr[0];
+            B_lds[(n_in_blk_b + 1) * K_CHUNK_LDS + kk_in_blk_b] = vb_arr[1];
+            B_lds[(n_in_blk_b + 2) * K_CHUNK_LDS + kk_in_blk_b] = vb_arr[2];
+            B_lds[(n_in_blk_b + 3) * K_CHUNK_LDS + kk_in_blk_b] = vb_arr[3];
+        }
+        __syncthreads();
+
+        if (active_cell) {
+            constexpr int FMA_VEC = 8;
+            constexpr int K_CHUNK_VECS = K_CHUNK / FMA_VEC;
+            static_assert(K_CHUNK % FMA_VEC == 0, "K_CHUNK must be vec8-aligned for inner fma");
+            const int k_left = g.k - k_chunk_start;
+            const int k_iters_v = (k_left < K_CHUNK)
+                ? (k_left + FMA_VEC - 1) / FMA_VEC : K_CHUNK_VECS;
+            #pragma unroll
+            for (int kk_v = 0; kk_v < K_CHUNK_VECS; ++kk_v) {
+                if (kk_v >= k_iters_v) break;
+                fp8e4m3_8 a8 = *reinterpret_cast<const fp8e4m3_8*>(
+                    &A_lds[rib * K_CHUNK_LDS + kk_v * FMA_VEC]);
+                fp8e4m3_8 b8 = *reinterpret_cast<const fp8e4m3_8*>(
+                    &B_lds[cib * K_CHUNK_LDS + kk_v * FMA_VEC]);
+                float4 a_lo = fp8x4_to_f32x4(a8.lo);
+                float4 a_hi = fp8x4_to_f32x4(a8.hi);
+                float4 b_lo = fp8x4_to_f32x4(b8.lo);
+                float4 b_hi = fp8x4_to_f32x4(b8.hi);
+                acc0 += a_lo.x * b_lo.x + a_hi.x * b_hi.x;
+                acc1 += a_lo.y * b_lo.y + a_hi.y * b_hi.y;
+                acc2 += a_lo.z * b_lo.z + a_hi.z * b_hi.z;
+                acc3 += a_lo.w * b_lo.w + a_hi.w * b_hi.w;
+            }
+        }
+        __syncthreads();
+    }
+
+    if (active_cell) {
+        const float acc = (acc0 + acc1) + (acc2 + acc3);
+        const float scaled = acc * resolve_combined_scale_grp(g);
+        store_bf16_scalar(g.c, row, col, scaled);
+    }
+}
+
+template __global__ void grouped_ntail_kernel_lds_rrr<64>(const grouped_layout_globals);
 
 // =============================================================================
 // Round-18 (FP8): MFMA-based K-tail correction kernel for RCR.
@@ -3929,9 +4122,9 @@ void dispatch_grouped_rrr(grouped_layout_globals g) {
     }
 
     if (g.fast_n != g.n || g.fast_k != g.k) {
-        // Round-55: LDS-staged K-tail correction for RRR. Replaces the
-        // scalar K-loop in ``grouped_tail_kernel<RRR>`` over [0, fast_n)
-        // × M_total cells. Mirror BF16 round-55 wiring.
+        // Round-55: LDS-staged K-tail correction (RMW) for RRR.
+        // Round-56: paired LDS-staged N-tail full-K reduction for RRR.
+        // Mirror BF16 wiring.
         const bool lds_k_tail_safe = (g.m_per_group >= TAIL_BLOCK_M) &&
                                      ((g.m_per_group % TAIL_BLOCK_M) == 0);
         const int K_rem = g.k - g.fast_k;
@@ -3944,11 +4137,21 @@ void dispatch_grouped_rrr(grouped_layout_globals g) {
             grouped_ktail_kernel_lds_rrr<64>
                 <<<lds_grid, lds_block, 0, g.stream>>>(g);
         }
+        if (lds_k_tail_safe && g.fast_n < g.n) {
+            dim3 lds_block(TAIL_BLOCK_N, TAIL_BLOCK_M);
+            dim3 lds_grid(
+                kittens::ceil_div(g.n - g.fast_n, TAIL_BLOCK_N),
+                kittens::ceil_div(g.M_total, TAIL_BLOCK_M)
+            );
+            grouped_ntail_kernel_lds_rrr<64>
+                <<<lds_grid, lds_block, 0, g.stream>>>(g);
+        }
 
-        // The scalar tail still has to run for the N-tail (cols
-        // [fast_n, n) full-K reduction) and any cells the LDS K-tail
-        // skipped (cross-group blocks, m_per_group misalign). For
-        // RRR the legacy scalar K-loop is unchanged below.
+        // Scalar tail still needed for cross-group blocks, m_per_group
+        // misalign, and any K-tail size other than 64. The skip
+        // predicates inside ``grouped_tail_kernel<RRR>`` mirror the
+        // launch gates above so cells already written by the LDS
+        // kernels are not re-computed.
         dim3 tail_block(TAIL_BLOCK_N, TAIL_BLOCK_M);
         dim3 tail_grid(
             kittens::ceil_div(g.n, TAIL_BLOCK_N),
