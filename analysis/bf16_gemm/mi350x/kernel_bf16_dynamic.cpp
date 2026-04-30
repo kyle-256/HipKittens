@@ -2194,6 +2194,209 @@ __global__ void grouped_ktail_kernel_mfma32x32_M2(const grouped_layout_globals g
 template __global__ void grouped_ktail_kernel_mfma32x32_M2<Layout::RCR, 64>(const grouped_layout_globals);
 
 // =============================================================================
+// Round-54 (BF16): 128×32 MFMA-based K-tail correction kernel for RCR — four
+// stacked 32×32 sub-blocks sharing the B-pack load.
+//
+// Background: round-53 probe (K=2880 → K_REM=64) showed the K-tail kernel
+// consumed ~27 % of total wall time on BF16 gpt_oss grouped (and ~38 % on
+// FP8). M2 reduced bytes/cell from 12 → 10 B/cell (16 %) but only delivered
+// +1 metric point because the K-tail's launch grid is dense (~370k blocks
+// / 256 CUs = ~1500 blocks/CU with very small per-block work) and so most
+// of the savings were re-eaten by the per-block dispatch / sync overhead.
+//
+// Stacking 4 sub-blocks per launch block:
+//   * Per-block A read: 4 × (32 rows × 64 K × 2 bf16) = 16 KB
+//   * Per-block B read: 1 × (32 cols × 64 K × 2 bf16) =  4 KB (shared 4×)
+//   * Per-block C RMW : 4 × (32 rows × 32 cols × 2 bf16 R+W) = 16 KB
+//   * Per-cell cells = 128 × 32 = 4096
+//   * Per-cell HBM = 36 KB / 4096 = 9 B/cell  (round-21: 12, round-53 M2: 10)
+//
+// 25 % byte reduction vs M2, 25 % byte reduction vs M1 (round-21), AND
+// the launch grid shrinks 4× — each persistent CU does ~370 blocks/CU
+// instead of ~1500 → far less scheduling overhead.
+//
+// MFMA layout / lane mapping is identical to round-21 / round-53 for each
+// sub-block; we shift the row base by +sub*TBM_SUB on each sub-block and
+// re-issue 4× mfma_f32_32x32x16_bf16 with a fresh accumulator. Register
+// pressure: 4 separate `floatx16_t` accumulators × 16 floats = 64 VGPRs
+// across the sub-loop (inside-loop only), well within the 256 VGPR budget.
+//
+// Host hint requirements (gate the dispatch):
+//   * ``g.m_per_group >= 128 && g.m_per_group % 128 == 0`` (TBM_TOTAL=128).
+//     gpt_oss M_per ∈ {2048, 4096} both satisfy (2048 % 128 = 0 ✓,
+//     4096 % 128 = 0 ✓). DSV3 M_per ∈ {2048, 4096} also satisfy but DSV3
+//     K is 128-aligned so K-tail isn't taken in the metric.
+//   * Per-block ``row_block_base + 128 <= s_offs[group_idx + 1]`` runtime
+//     check still fires; non-uniform group_lens whose avg=128-aligned but
+//     individual per-group M is not, fall back to the per-row scalar
+//     fdot2_f32_bf16 loop covering all FOUR sub-blocks.
+// =============================================================================
+template<Layout L, int K_REM>
+__global__ void grouped_ktail_kernel_mfma32x32_M4(const grouped_layout_globals g) {
+    static_assert(L == Layout::RCR,
+        "grouped_ktail_kernel_mfma32x32_M4 (BF16): RCR only.");
+    static_assert(K_REM == 64,
+        "grouped_ktail_kernel_mfma32x32_M4 (BF16): K_REM must be 64 (= 4 × mfma_32x32x16_bf16).");
+    constexpr int TBM_TOTAL = 128;      // 4 stacked 32×32 sub-blocks
+    constexpr int TBM_SUB   = 32;
+    constexpr int N_SUB     = 4;
+    constexpr int TBN       = 32;
+    constexpr int K_PER_MFMA       = 16;                  // mfma_32x32x16_bf16 K dim
+    constexpr int N_MFMA           = K_REM / K_PER_MFMA;  // 4 calls per sub-block
+    constexpr int K_PER_LANE_CHUNK = 8;                   // 8 bf16/lane per mfma call
+    constexpr int MAX_G_PLUS_1 = 65;
+    __shared__ int s_offs[MAX_G_PLUS_1];
+
+    const int tid = threadIdx.x;            // single-wave block, 64 threads
+    if (tid <= g.G && tid < MAX_G_PLUS_1) {
+        s_offs[tid] = static_cast<int>(g.group_offs[tid]);
+    }
+    __syncthreads();
+
+    const int row_block_base = blockIdx.y * TBM_TOTAL;
+    const int col_block_base = blockIdx.x * TBN;
+    if (row_block_base >= g.M_total || col_block_base >= g.n) return;
+
+    int group_idx = 0;
+    #pragma unroll 1
+    for (int gi = 0; gi < g.G; ++gi) {
+        if (row_block_base < s_offs[gi + 1]) { group_idx = gi; break; }
+    }
+
+    const int K_rem_dyn = g.k - g.fast_k;
+    if (K_rem_dyn != K_REM) return;
+    const int k0 = g.fast_k;
+
+    // Cross-group fallback: if the 128-row block straddles a group boundary
+    // (or the M_total tail), fall back to per-row scalar fdot2_f32_bf16
+    // over ALL FOUR sub-blocks. Unreachable on uniform group_lens with M_g
+    // % 128 == 0 (gpt_oss M_per ∈ {2048, 4096} both satisfy).
+    const bool cross_boundary = (row_block_base + TBM_TOTAL > s_offs[group_idx + 1]);
+    if (cross_boundary) {
+        typedef __attribute__((__vector_size__(2 * sizeof(__bf16)))) __bf16 bf16x2_v;
+        const int col = col_block_base + (tid % 32);
+        if (col < g.n) {
+            #pragma unroll 1
+            for (int rr = 0; rr < TBM_TOTAL; ++rr) {
+                if ((rr % 2) != (tid / 32)) continue;
+                const int row = row_block_base + rr;
+                if (row >= g.M_total) break;
+                int row_group = 0;
+                #pragma unroll 1
+                for (int gi = 0; gi < g.G; ++gi) {
+                    if (row < s_offs[gi + 1]) { row_group = gi; break; }
+                }
+                float acc_s_lo = 0.f, acc_s_hi = 0.f;
+                const bf16* a_row = &g.a[coord<>(row, 0)];
+                const bf16* b_row = &g.b[coord<>{0, row_group, col, 0}];
+                int kk = k0;
+                if ((g.k % 4 == 0) && ((k0 & 3) == 0)) {
+                    const bf16x4* a_v4 = reinterpret_cast<const bf16x4*>(a_row);
+                    const bf16x4* b_v4 = reinterpret_cast<const bf16x4*>(b_row);
+                    const int j_start = k0 >> 2;
+                    const int j_end   = g.k >> 2;
+                    for (int j = j_start; j < j_end; ++j) {
+                        bf16x4 a4 = a_v4[j];
+                        bf16x4 b4 = b_v4[j];
+                        acc_s_lo = __builtin_amdgcn_fdot2_f32_bf16(
+                            *reinterpret_cast<const bf16x2_v*>(&a4.lo),
+                            *reinterpret_cast<const bf16x2_v*>(&b4.lo),
+                            acc_s_lo, false);
+                        acc_s_hi = __builtin_amdgcn_fdot2_f32_bf16(
+                            *reinterpret_cast<const bf16x2_v*>(&a4.hi),
+                            *reinterpret_cast<const bf16x2_v*>(&b4.hi),
+                            acc_s_hi, false);
+                    }
+                    kk = j_end << 2;
+                }
+                float acc_s = acc_s_lo + acc_s_hi;
+                for (; kk < g.k; ++kk) {
+                    acc_s += load_bf16_scalar(g.a, row, kk) *
+                             load_bf16_scalar_grp(g.b, row_group, col, kk);
+                }
+                store_bf16_scalar(g.c, row, col,
+                                  load_bf16_scalar(g.c, row, col) + acc_s);
+            }
+        }
+        return;
+    }
+
+    // ----- Fast MFMA path: shared B-pack across FOUR stacked 32×32 sub-blocks
+    typedef __attribute__((__vector_size__(8 * sizeof(__bf16)))) __bf16 bf16x8_t;
+    typedef __attribute__((__vector_size__(16 * sizeof(float)))) float floatx16_t;
+
+    const int row_in_blk = tid % 32;
+    const int chunk      = tid / 32;        // 0 or 1
+    const int k_lane_offset = chunk * K_PER_LANE_CHUNK;  // 0 or 8
+
+    const int g_col = col_block_base + row_in_blk;
+
+    // Single set of B packs shared across all four sub-blocks. B is [G, N, K]
+    // and the K-tail slice [k0, k0+K_REM) is identical for sub-blocks 0..3
+    // (only the A row range differs across sub-blocks). 4×reuse of the
+    // B-side HBM bandwidth vs running 4 independent 32×32 M1 blocks; 2×
+    // reuse vs M2.
+    bf16x8_t b_pack[N_MFMA];
+    if (g_col < g.n) {
+        #pragma unroll
+        for (int j = 0; j < N_MFMA; ++j) {
+            const int k_off = k0 + j * K_PER_MFMA + k_lane_offset;
+            const bf16* b_ptr = &g.b[coord<>{0, group_idx, g_col, k_off}];
+            b_pack[j] = *reinterpret_cast<const bf16x8_t*>(b_ptr);
+        }
+    } else {
+        #pragma unroll
+        for (int j = 0; j < N_MFMA; ++j) b_pack[j] = bf16x8_t{};
+    }
+
+    const int out_col = col_block_base + row_in_blk;
+    if (out_col >= g.n) return;
+
+    // Four stacked 32×32 sub-blocks. Same MFMA / lane layout as round-21
+    // M1 / round-53 M2; we shift the row base by +sub*TBM_SUB and re-issue
+    // 4× mfma_f32_32x32x16_bf16 with a fresh accumulator each sub.
+    #pragma unroll
+    for (int sub = 0; sub < N_SUB; ++sub) {
+        const int sub_row_base = row_block_base + sub * TBM_SUB;
+        const int g_row = sub_row_base + row_in_blk;
+
+        bf16x8_t a_pack[N_MFMA];
+        if (g_row < g.M_total) {
+            #pragma unroll
+            for (int j = 0; j < N_MFMA; ++j) {
+                const int k_off = k0 + j * K_PER_MFMA + k_lane_offset;
+                const bf16* a_ptr = &g.a[coord<>(g_row, k_off)];
+                a_pack[j] = *reinterpret_cast<const bf16x8_t*>(a_ptr);
+            }
+        } else {
+            #pragma unroll
+            for (int j = 0; j < N_MFMA; ++j) a_pack[j] = bf16x8_t{};
+        }
+
+        floatx16_t acc{};
+        #pragma unroll
+        for (int j = 0; j < N_MFMA; ++j) {
+            acc = __builtin_amdgcn_mfma_f32_32x32x16_bf16(
+                a_pack[j], b_pack[j], acc, 0, 0, 0);
+        }
+
+        #pragma unroll
+        for (int i = 0; i < 16; ++i) {
+            const int row_group     = i >> 2;
+            const int row_in_group  = (i & 3) + chunk * 4;
+            const int local_row     = row_group * 8 + row_in_group;
+            const int r             = sub_row_base + local_row;
+            if (r >= g.M_total) continue;
+            const float existing = load_bf16_scalar(g.c, r, out_col);
+            const float new_val  = existing + acc[i];
+            store_bf16_scalar(g.c, r, out_col, new_val);
+        }
+    }
+}
+
+template __global__ void grouped_ktail_kernel_mfma32x32_M4<Layout::RCR, 64>(const grouped_layout_globals);
+
+// =============================================================================
 // LDS-staged N-tail full-K reduction kernel for the partial last col-tile
 // region [fast_n, n) (RCR only).
 //
@@ -2862,13 +3065,28 @@ void dispatch_grouped(grouped_layout_globals g) {
                 // Round-21: 32x32x16 mfma kernel for 32-aligned but not
                 // 64-aligned m_per_group. Round-19 16x16x32 still falls
                 // through for 16-aligned but not 32-aligned (rare).
+                constexpr int TBM_M4    = 128;
                 constexpr int TBM_M2    = 64;
                 constexpr int TBM_32x32 = 32;
+                const bool mfma32_m4_safe = (g.m_per_group >= TBM_M4) &&
+                                            ((g.m_per_group % TBM_M4) == 0);
                 const bool mfma32_m2_safe = (g.m_per_group >= TBM_M2) &&
                                             ((g.m_per_group % TBM_M2) == 0);
                 const bool mfma32_safe = (g.m_per_group >= TBM_32x32) &&
                                          ((g.m_per_group % TBM_32x32) == 0);
-                if (mfma32_m2_safe) {
+                if (mfma32_m4_safe) {
+                    // Round-54: 4 stacked 32×32 sub-blocks per launch block,
+                    // sharing one B-pack across all four. ~25 % per-cell HBM
+                    // byte reduction over round-53 M2 and 4× smaller launch
+                    // grid. m_per_group ∈ {2048, 4096} both 128-aligned.
+                    dim3 mfma_block(64);
+                    dim3 mfma_grid(
+                        kittens::ceil_div(g.n, TBM_32x32),
+                        kittens::ceil_div(g.M_total, TBM_M4)
+                    );
+                    grouped_ktail_kernel_mfma32x32_M4<Layout::RCR, 64>
+                        <<<mfma_grid, mfma_block, 0, g.stream>>>(g);
+                } else if (mfma32_m2_safe) {
                     dim3 mfma_block(64);
                     dim3 mfma_grid(
                         kittens::ceil_div(g.n, TBM_32x32),
