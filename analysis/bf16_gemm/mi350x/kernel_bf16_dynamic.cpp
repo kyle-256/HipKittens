@@ -708,38 +708,122 @@ __device__ __forceinline__ void device_gemm_tile_body(
     // just drained so the new write doesn't race any in-flight write.
     if constexpr (FUSED_KTAIL) {
         if constexpr (L == Layout::RCR) {
-            // Round-4 attempt — disabled until round-5 lands path B.
-            // Empty body retained so the FUSED_KTAIL=true template
-            // instantiation compiles. Dispatcher gates back to false
-            // (see ``fuse_ktail_eligible`` below) until path B is proven.
+            // Round-5 path B — direct HBM-to-register K-tail load.
             //
-            // Implementation tried this round: cooperative G::load into
-            // stage-1 slots (Bs[1][.] / As[1][.]) followed by
-            // ``load_b_subtile`` / ``load_a_subtile`` (subtile_inplace +
-            // load(reg, st_subtile)) + DO_MMA. Block was placed inside
-            // device_gemm_tile_body to share the same lambdas + coord
-            // helpers + shared_base_offset state as the working main loop.
+            // Round-3/4 path A (cooperative G::load into LDS scratch +
+            // load(reg, st_subtile) + DO_MMA) saturated at SNR 18.57 dB
+            // across stage-0 vs stage-1, 4-arg vs 8-arg G::load, outer
+            // vs inner fuse-block scope. Round-4 zero-init diagnostic
+            // showed load(reg, st_subtile) reads zeros after explicit
+            // LDS pre-zero — G::load did NOT actually write the
+            // K-tile-44 data into LDS at the bytes the subtile read
+            // touches in the post-epilog-2 SGPR state.
             //
-            // Result: SNR 18.57 dB (round-3 attempt also got 18.57 dB
-            // with stage-0 LDS slots from the outer scope). Diagnostic
-            // experiment — pre-zeroing stage-1 LDS before G::load — drops
-            // SNR back to 16.53 dB (= no-K-tail-correction baseline),
-            // which means the load(reg, st_subtile) reads zeros after
-            // pre-zero. That implies G::load is NOT actually writing the
-            // K-tile-44 data into stage-1 LDS (at least, not at the bytes
-            // load_b_subtile reads from). Without pre-zero, SNR is 18.57
-            // because load(reg, st) reads stale K-tile 43 data left in
-            // stage-1 by epilog 2 — feeding the wrong K-tile into mma_ABt.
+            // Path B sidesteps LDS entirely. Each lane issues a
+            // ``buffer_load_b128`` (= 8 bf16) from HBM directly into
+            // the corresponding A_tile / B_tile sub-tile data slot.
+            // We reuse the SAME SRDs the main loop already constructed
+            // (a_srsrc_base for A's whole-tensor bound, b_srsrc_base
+            // for B's per-group bound `(group_idx+1) * N * K * 2`),
+            // which is critical for partial last-col-tile correctness:
+            // path B can't use kittens::load(RT, GL, coord) because
+            // its per-call SRD is built relative to ``&src[coord]`` —
+            // for OOB coords the resulting src_ptr lands past the
+            // allocation and the SRD bound check still fires loads
+            // through an unmapped base address (= GPU memfault). The
+            // per-group B SRD here treats OOB N rows correctly: their
+            // flat byte offset exceeds (group_idx+1)*N*K*2 → SRD
+            // clamps to zero → DO_MMA(C, A, 0, C) is a no-op (the
+            // column-masked C store drops those cells anyway).
             //
-            // Round-5 plan: switch to path B (direct HBM-to-register K-tail
-            // load) which sidesteps LDS entirely. The lane→cell mapping
-            // for ``rt_bf<HALF_REG_BLOCK_M, K_STEP, row_l, rt_16x32_s>``
-            // (A) and ``rt_bf<HALF_REG_BLOCK_N, K_STEP, row_l, rt_16x32_s>``
-            // (B) for mfma_f32_16x16x32_bf16: lane (l) → A row (l % 16),
-            // K-cells [(l / 16) * 8, +8); lane (l) → B col (l % 16),
-            // K-cells [(l / 16) * 8, +8). Each lane reads bf16x8 from
-            // A's HBM and bf16x8 from B's HBM, populates A_tile/B_tile,
-            // then issues mma_ABt against C_accum.
+            // Register pressure: A_tile / B_tile_0 / B_tile_1 are dead
+            // at this point (epilog 2 finished its DO_MMAs). VGPRs are
+            // reused, so path B's increment is bounded by the existing
+            // main-loop allocation. K_REM == K_STEP gate (in dispatcher)
+            // ensures every K-cell is in-bounds for every row, so no
+            // per-lane K-mask is needed.
+            //
+            // Lane → element mapping for ``rt_16x32_s`` (matches the
+            // LDS load(reg, st) lane layout in shared_to_register.cuh
+            // line 251-252):
+            //   row_lane = laneid % 16
+            //   k_lane   = (laneid / 16) * 8   // bf16 cell offset
+            // Each lane reads bf16x8 (= 16 bytes = 4 dwords) into
+            // ``data[0..3]`` (4 bf16_2 packed). A_tile.tiles[h][w] /
+            // B_tile.tiles[h_b][w] cover (h*16 + row_lane, w*32 + k_lane)
+            // within their respective register tiles.
+            const int k_tail_tile =
+                (KI_HINT > 0) ? KI_HINT : num_tiles_dyn;
+            const int laneid = ::kittens::laneid();
+            const int row_lane = laneid % 16;
+            const int k_lane_bytes =
+                (laneid / 16) * 8 * (int)sizeof(bf16);
+            const int K_tail_base_bytes =
+                (k_offset_tiles + k_tail_tile) * K_STEP *
+                (int)sizeof(bf16);
+
+            // Row strides in BYTES (matches a_srsrc_base /
+            // b_srsrc_base construction in the caller).
+            const int a_row_stride_bytes =
+                a_gl.template stride<2>() * (int)sizeof(bf16);
+            const int b_row_stride_bytes =
+                b_gl.template stride<2>() * (int)sizeof(bf16);
+            const int b_inner_rows = b_gl.rows();  // N for RCR
+
+            auto load_a_kt = [&](int m_slab) __attribute__((always_inline)) {
+                const int M_warp_base =
+                    ((m_subtile_A + row*2 + m_slab) * 2 + warp_row) *
+                    HALF_REG_BLOCK_M;
+                #pragma unroll
+                for (int h = 0; h < A_reg_t::height; ++h) {
+                    #pragma unroll
+                    for (int w = 0; w < A_reg_t::width; ++w) {
+                        const int A_row_idx = M_warp_base + h * 16 + row_lane;
+                        const uint32_t v_offset = static_cast<uint32_t>(
+                            A_row_idx * a_row_stride_bytes +
+                            w * 32 * (int)sizeof(bf16) +
+                            K_tail_base_bytes + k_lane_bytes);
+                        __uint128_t v = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
+                            a_srsrc_base, v_offset, 0, 0);
+                        *reinterpret_cast<__uint128_t*>(
+                            &A_tile.tiles[h][w].data[0]) = v;
+                    }
+                }
+            };
+            auto load_b_kt = [&](B_reg_t& B_tile, int n_strip) __attribute__((always_inline)) {
+                const int N_warp_base =
+                    (col * 8 + n_strip * 4 + warp_col) *
+                    HALF_REG_BLOCK_N;
+                #pragma unroll
+                for (int h_b = 0; h_b < B_reg_t::height; ++h_b) {
+                    #pragma unroll
+                    for (int w = 0; w < B_reg_t::width; ++w) {
+                        const int B_row_idx = N_warp_base + h_b * 16 + row_lane;
+                        const uint32_t v_offset = static_cast<uint32_t>(
+                            (group_idx * b_inner_rows + B_row_idx) *
+                                b_row_stride_bytes +
+                            w * 32 * (int)sizeof(bf16) +
+                            K_tail_base_bytes + k_lane_bytes);
+                        __uint128_t v = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
+                            b_srsrc_base, v_offset, 0, 0);
+                        *reinterpret_cast<__uint128_t*>(
+                            &B_tile.tiles[h_b][w].data[0]) = v;
+                    }
+                }
+            };
+
+            // M slab 0
+            load_a_kt(0);
+            load_b_kt(B_tile_0, 0);
+            load_b_kt(B_tile_1, 1);
+            asm volatile("s_waitcnt vmcnt(0)");
+            DO_MMA(C_accum[0][0], A_tile, B_tile_0, C_accum[0][0]);
+            DO_MMA(C_accum[0][1], A_tile, B_tile_1, C_accum[0][1]);
+            // M slab 1 (B tiles unchanged — share K-tail across slabs)
+            load_a_kt(1);
+            asm volatile("s_waitcnt vmcnt(0)");
+            DO_MMA(C_accum[1][0], A_tile, B_tile_0, C_accum[1][0]);
+            DO_MMA(C_accum[1][1], A_tile, B_tile_1, C_accum[1][1]);
         }
     }
 
@@ -3706,10 +3790,20 @@ void dispatch_grouped(grouped_layout_globals g) {
     // A_tile/B_tile registers, then mma_ABt). This bypasses LDS so
     // whatever G::load issue exists doesn't apply.
     const int K_rem_for_fuse = g.k - g.fast_k;
+    // Round-5 path B: tail M_g >= TAIL_BLOCK_M is no longer a
+    // correctness gate (path B reads from HBM with full-tensor SRD,
+    // OOB-clamping to zero), but we keep the M-multiple gate to align
+    // with how the legacy LDS K-tail kernel partitions tail blocks for
+    // the non-fused path.
     const bool lds_k_tail_safe_for_fuse = (g.m_per_group >= TAIL_BLOCK_M) &&
                                           ((g.m_per_group % TAIL_BLOCK_M) == 0);
+    // Round-5: enable the fused K-tail (path B) for RCR + K_REM ==
+    // K_STEP. Path B issues per-lane buffer_load_b128 directly into the
+    // already-live A_tile / B_tile registers (no LDS intermediate, no
+    // G::load), so the round-4 phantom-LDS-write bug doesn't apply.
+    // K_REM == K_STEP keeps every K-cell in-bounds for every row, so
+    // no per-lane K-mask is needed.
     const bool fuse_ktail_eligible =
-        false &&  // disabled: see "Round-4 path A" comment in grouped_kernel
         (L == Layout::RCR) && (g.bpc > 0) && (g.ki >= 2) &&
         (K_rem_for_fuse == K_STEP) && lds_k_tail_safe_for_fuse;
 
