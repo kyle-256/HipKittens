@@ -2124,15 +2124,47 @@ void grouped_rcr_kernel(const grouped_layout_globals g) {
         // being written. ``N_MASKED_STORE`` is a compile-time template
         // parameter so the N-aligned dispatch path emits the raw store
         // (no spill from the masked variant's row/col reconstruction).
+        //
+        // Round-59: hoist per-block N-tail branch from the helper into
+        // the kernel epilogue. The helper's top-of-body
+        // ``if (n1 <= n_limit) store(...)`` fast-path forwards interior
+        // tiles to the same bare ``store(...)`` as the unmasked kernel,
+        // but having the masked-helper body in scope on every block
+        // (even when the runtime branch falls through to the bare store)
+        // inflates VGPR pressure and serialises the epilogue: the
+        // unmasked ``<0,false>`` template runs N=5888 in 2.19 ms while
+        // the ``<0,true>`` template with helper-internal branching runs
+        // the same 23 col-tile work in 3.05 ms (+39 % wall time, gpt_oss
+        // GateUP B32-M4096 K=2816, /tmp/profile_fp8_n_alignment.py).
+        // Hoisting the branch — interior takes the bare ``store(...)``
+        // path identical to the unmasked template; only ``bc == bpc-1``
+        // on a misaligned N hits the masked helper — lets the compiler
+        // fully specialise both arms and recovers the unmasked-kernel
+        // throughput on the 22/23 interior col-tiles. Numerical safety:
+        // ``(bc + 1) * BLOCK_SIZE <= g.n`` is the necessary and
+        // sufficient condition for the four C sub-tiles cA/cB/cC/cD to
+        // fit entirely in [bc*BLOCK_SIZE, g.n) (combined col span of all
+        // 4 stores = [bc*BLOCK_SIZE, (bc+1)*BLOCK_SIZE)); when true, the
+        // bare ``store`` writes the same cells as the masked helper's
+        // ``n1 <= n_limit`` fast-path. ``bc`` is uniform across the wave
+        // so this is a single wave-uniform branch, not divergent control
+        // flow.
         const int r0 = m_subtile_C + br*WARPS_M*2+wm;
         const int r1 = m_subtile_C + br*WARPS_M*2+WARPS_M+wm;
         const int c0 = bc*WARPS_N*2+wn;
         const int c1 = bc*WARPS_N*2+WARPS_N+wn;
         if constexpr (N_MASKED_STORE) {
-            store_c_tile_n_masked(g.c, cA, r0, c0, g.n);
-            store_c_tile_n_masked(g.c, cB, r0, c1, g.n);
-            store_c_tile_n_masked(g.c, cC, r1, c0, g.n);
-            store_c_tile_n_masked(g.c, cD, r1, c1, g.n);
+            if ((bc + 1) * BLOCK_SIZE <= g.n) {
+                store(g.c, cA, {0, 0, r0, c0});
+                store(g.c, cB, {0, 0, r0, c1});
+                store(g.c, cC, {0, 0, r1, c0});
+                store(g.c, cD, {0, 0, r1, c1});
+            } else {
+                store_c_tile_n_masked(g.c, cA, r0, c0, g.n);
+                store_c_tile_n_masked(g.c, cB, r0, c1, g.n);
+                store_c_tile_n_masked(g.c, cC, r1, c0, g.n);
+                store_c_tile_n_masked(g.c, cD, r1, c1, g.n);
+            }
         } else {
             store(g.c, cA, {0, 0, r0, c0});
             store(g.c, cB, {0, 0, r0, c1});
