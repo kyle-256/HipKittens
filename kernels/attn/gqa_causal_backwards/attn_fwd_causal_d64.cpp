@@ -148,6 +148,28 @@ __device__ inline void mask_kv_tile(RT &dst, int q_abs, int k_abs, uint32_t neg_
 
 /**********************************************************/
 
+// Actual LDS allocations performed by attend_ker for D=64 (matches the
+// al.allocate<>() sequence in the kernel body):
+//   k_smem[2]  st_bf<64, 64, st_32x32_s> *2 = 2*64*64*2 = 16384 B
+//   v_smem[2]  st_bf<64, 64, st_8x32_s>  *2 = 2*64*64*2 = 16384 B
+// Total = 32768 B (~32 KiB).  Round up to 40000 B for shared_allocator's
+// 16-byte alignment headroom (≤16 B padding per allocate() call * 2 calls
+// is negligible; 7 KiB headroom keeps us safely above any future small
+// additive smem need).  Reserving 40000 B per CTA -- not the full
+// MAX_SHARED_MEMORY (160000 B) -- mirrors the bwd combined kernel's
+// occupancy unlock from commit 203cb163 (80000 there for ~73 KiB actual).
+//
+// Note: at the current 156-VGPR fwd register footprint, the kernel is
+// register-bound at 1 CTA/CU even with smaller LDS (3 waves/SIMD * 4 SIMDs
+// = 12 waves/CU; each CTA = 8 waves => 1.5 -> 1 CTA/CU).  So this trim
+// alone does not unlock additional CTAs/CU.  The trim is committed
+// nonetheless for code consistency with the bwd / prep / dq_shuffle
+// kernels (which all reserve only the actual LDS need) and because the
+// reservation no longer occupies the runtime's full LDS budget -- this
+// removes the artificial cap that any FUTURE register-reduction work
+// would otherwise need to revisit before scaling occupancy.
+constexpr size_t FWD_D64_DYN_SMEM = 40000;
+
 template<int D> struct attn_globals { 
     _gl_QKVO Qg, Kg, Vg, Og; 
     gl<float, -1, -1, -1, -1> L_vec;
@@ -165,7 +187,7 @@ template<int D> struct attn_globals {
                     b_runtime);
     }
     dim3 block() { return dim3(NUM_THREADS); }
-    size_t dynamic_shared_memory() { return MAX_SHARED_MEMORY; }
+    size_t dynamic_shared_memory() { return FWD_D64_DYN_SMEM; }
 };
 
 template<int D> __launch_bounds__(NUM_THREADS, 2)
@@ -657,12 +679,21 @@ void dispatch_fwd(attn_globals<D> g) {
     // because their dynamic_shared_memory()==0).
     static bool attr_set = false;
     if (!attr_set) {
+        // Set the per-kernel cap to FWD_D64_DYN_SMEM (40 KiB), not the
+        // global MAX_SHARED_MEMORY (160 KiB) cap.  Setting the cap to
+        // exactly what the kernel needs lets the runtime stop pinning the
+        // full LDS budget per CTA (4*40000 = 160000 = LDS/CU, so the LDS
+        // budget itself no longer caps occupancy below the register limit).
+        // The kernel's al.allocate() sequence sums to 32768 B (~32 KiB);
+        // 40000 leaves ~7 KiB of allocator-alignment headroom.  Mirrors
+        // the same "stale 160 KiB reservation" optimization applied to
+        // the bwd combined kernel in commit 203cb163.
         hipFuncSetAttribute((void*)attend_ker<D>,
                             hipFuncAttributeMaxDynamicSharedMemorySize,
-                            MAX_SHARED_MEMORY);
+                            FWD_D64_DYN_SMEM);
         attr_set = true;
     }
-    attend_ker<D><<<g.grid(), g.block(), MAX_SHARED_MEMORY, g.stream>>>(g);
+    attend_ker<D><<<g.grid(), g.block(), FWD_D64_DYN_SMEM, g.stream>>>(g);
     // No internal hipDeviceSynchronize:  the PyTorch default-stream model
     // already serialises the next call (prep / bwd) behind this one, and the
     // benchmark harness does its own torch.cuda.synchronize() at trial
