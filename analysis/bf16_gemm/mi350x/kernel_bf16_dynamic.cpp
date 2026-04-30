@@ -3885,6 +3885,16 @@ void grouped_kernel(const grouped_layout_globals g) {
         // loop) — DeepSeek-V3 N=4096/7168 hit this and pay no masked-store
         // cost. Misaligned shapes (gpt_oss N=2880/5760) take the
         // column-masked branch.
+        //
+        // Round-11 probe (rejected): adding a hoisted ``(col+1)*BLOCK_SIZE
+        // <= g.n`` interior-tile fast-path that mirrors FP8 round-59
+        // regressed BF16 metric -7..-10 (DSV3 -3.9% wall, gpt_oss flat).
+        // The FP8 round-59 win came from N_MASKED_STORE template specialising
+        // the entire kernel; BF16's per-block runtime branch on ``g.n %
+        // BLOCK_SIZE`` already keeps the helper body out of the aligned path,
+        // and adding a third epilog branch perturbed the compiler's
+        // store/branch reordering for the dominant DSV3 path. See
+        // analysis/_notes/round-11-bf16-rcr-store-hoist-regress.md.
         const int r0 = m_subtile_C + (row * 2) * WARPS_M + warp_row;
         const int r1 = m_subtile_C + (row * 2) * WARPS_M + WARPS_M + warp_row;
         const int c0 = col * 2 * WARPS_N + warp_col;
