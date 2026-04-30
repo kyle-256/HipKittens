@@ -472,7 +472,23 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         sub_row<0, 0, L_i>(P_ij, P_ij);
         asm volatile("s_waitcnt lgkmcnt(6)");
         mul<0, 1>(P_ij, P_ij, P_SCALE_FACTOR);
-        asm volatile("s_waitcnt lgkmcnt(6)");
+        // The previously-emitted "asm volatile s_waitcnt lgkmcnt(6)" between
+        // this `mul` and the next `mma_ABt` is provably a no-op: the prior
+        // s_waitcnt above already drained lgkmcnt to <=6, and `mul<>` is
+        // pure VALU (`v_pk_mul_f32` -- no ds_read/s_load), so lgkmcnt is
+        // monotonically still <=6 at the point of the second wait.  Each
+        // `asm volatile` is opaque to LLVM's post-RA scheduler and is
+        // emitted as one scalar `s_waitcnt` instruction; removing the
+        // redundant wait saves one scalar issue slot per occurrence
+        // without changing observable wait condition.  Mirrors the same
+        // class of optimization the fwd kernel got in commit b60efff2
+        // (different mechanic: that one folded paired single-counter waits
+        // into one multi-counter wait; this one drops a wholly redundant
+        // wait that follows a VALU-only gap).  12 more identical sites are
+        // dropped throughout this file (8 with 8-space indent, 4 with
+        // 6-space indent for the unrolled non-causal-edge slices) plus one
+        // sibling site with `mul<0, 0>` instead of `mul<0, 1>`.  Pure
+        // refactor; numerics and lgkmcnt semantics unchanged.
         mma_ABt<0, 3, 0>(P_ij, Q_i, K_j);
         // Load dO_i_col from shared memory to registers
         // load(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}));
@@ -693,7 +709,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         sub_row<0, 0, L_i>(P_ij, P_ij);
         asm volatile("s_waitcnt lgkmcnt(6)");
         mul<0, 1>(P_ij, P_ij, P_SCALE_FACTOR);
-        asm volatile("s_waitcnt lgkmcnt(6)");
+        // (redundant lgkmcnt(6) wait dropped; see comment near first occurrence above.)
         mma_ABt<0, 3, 0>(P_ij, Q_i, K_j);
         // Load dO_i_col from shared memory to registers
         // load(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}));
@@ -913,7 +929,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         sub_row<0, 0, L_i>(P_ij, P_ij);
         asm volatile("s_waitcnt lgkmcnt(6)");
         mul<0, 1>(P_ij, P_ij, P_SCALE_FACTOR);
-        asm volatile("s_waitcnt lgkmcnt(6)");
+        // (redundant lgkmcnt(6) wait dropped; see comment near first occurrence above.)
         mma_ABt<0, 3, 0>(P_ij, Q_i, K_j);
         // Load dO_i_col from shared memory to registers
         // load(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}));
@@ -1132,7 +1148,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         sub_row<0, 0, L_i>(P_ij, P_ij);
         asm volatile("s_waitcnt lgkmcnt(6)");
         mul<0, 1>(P_ij, P_ij, P_SCALE_FACTOR);
-        asm volatile("s_waitcnt lgkmcnt(6)");
+        // (redundant lgkmcnt(6) wait dropped; see comment near first occurrence above.)
         mma_ABt<0, 3, 0>(P_ij, Q_i, K_j);
         // Load dO_i_col from shared memory to registers
         // load(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}));
@@ -1365,7 +1381,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         sub_row<0, 0, L_i>(P_ij, P_ij);
         asm volatile("s_waitcnt lgkmcnt(6)");
         mul<0, 1>(P_ij, P_ij, P_SCALE_FACTOR);
-        asm volatile("s_waitcnt lgkmcnt(6)");
+        // (redundant lgkmcnt(6) wait dropped; see comment near first occurrence above.)
         mma_ABt<0, 3, 0>(P_ij, Q_i, K_j);
         // Load dO_i_col from shared memory to registers
         // load(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}));
@@ -1578,7 +1594,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         mul_vgpr<1, 0, 3>(dQ_i_T, dQ_i_T, dq_scale_active);
         asm volatile("s_waitcnt lgkmcnt(6)");
         mul<0, 0>(P_ij, P_ij, P_SCALE_FACTOR);
-        asm volatile("s_waitcnt lgkmcnt(6)");
+        // (redundant lgkmcnt(6) wait dropped; see comment near first occurrence above.)
         mma_ABt<0, 2, 0>(P_ij, Q_i, K_j);
         // Load dO_i from shared memory to registers
         // load(dO_i, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}));
@@ -1589,7 +1605,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         sub_row<0, 0, L_i>(P_ij, P_ij);
         asm volatile("s_waitcnt lgkmcnt(6)");
         mul<0, 1>(P_ij, P_ij, P_SCALE_FACTOR);
-        asm volatile("s_waitcnt lgkmcnt(6)");
+        // (redundant lgkmcnt(6) wait dropped; see comment near first occurrence above.)
         mma_ABt<0, 3, 0>(P_ij, Q_i, K_j);
         // Load dO_i_col from shared memory to registers
         // load(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}));
@@ -1809,7 +1825,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         sub_row<0, 0, L_i>(P_ij, P_ij);
         asm volatile("s_waitcnt lgkmcnt(6)");
         mul<0, 1>(P_ij, P_ij, P_SCALE_FACTOR);
-        asm volatile("s_waitcnt lgkmcnt(6)");
+        // (redundant lgkmcnt(6) wait dropped; see comment near first occurrence above.)
         mma_ABt<0, 3, 0>(P_ij, Q_i, K_j);
         // Load dO_i_col from shared memory to registers
         // load(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}));
@@ -2028,7 +2044,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
         sub_row<0, 0, L_i>(P_ij, P_ij);
         asm volatile("s_waitcnt lgkmcnt(6)");
         mul<0, 1>(P_ij, P_ij, P_SCALE_FACTOR);
-        asm volatile("s_waitcnt lgkmcnt(6)");
+        // (redundant lgkmcnt(6) wait dropped; see comment near first occurrence above.)
         mma_ABt<0, 3, 0>(P_ij, Q_i, K_j);
         // Load dO_i_col from shared memory to registers
         // load(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}));
@@ -2256,7 +2272,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       sub_row<0, 0, L_i>(P_ij, P_ij);
       asm volatile("s_waitcnt lgkmcnt(6)");
       mul<0, 1>(P_ij, P_ij, P_SCALE_FACTOR);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      // (redundant lgkmcnt(6) wait dropped; see comment near first occurrence above.)
       mma_ABt<0, 3, 0>(P_ij, Q_i, K_j);
       // Load dO_i_col from shared memory to registers
       // load(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}));
@@ -2480,7 +2496,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       sub_row<0, 0, L_i>(P_ij, P_ij);
       asm volatile("s_waitcnt lgkmcnt(6)");
       mul<0, 1>(P_ij, P_ij, P_SCALE_FACTOR);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      // (redundant lgkmcnt(6) wait dropped; see comment near first occurrence above.)
       mma_ABt<0, 3, 0>(P_ij, Q_i, K_j);
       // Load dO_i_col from shared memory to registers
       // load(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}));
@@ -2699,7 +2715,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       sub_row<0, 0, L_i>(P_ij, P_ij);
       asm volatile("s_waitcnt lgkmcnt(6)");
       mul<0, 1>(P_ij, P_ij, P_SCALE_FACTOR);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      // (redundant lgkmcnt(6) wait dropped; see comment near first occurrence above.)
       mma_ABt<0, 3, 0>(P_ij, Q_i, K_j);
       // Load dO_i_col from shared memory to registers
       // load(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}));
@@ -2918,7 +2934,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       sub_row<0, 0, L_i>(P_ij, P_ij);
       asm volatile("s_waitcnt lgkmcnt(6)");
       mul<0, 1>(P_ij, P_ij, P_SCALE_FACTOR);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      // (redundant lgkmcnt(6) wait dropped; see comment near first occurrence above.)
       mma_ABt<0, 3, 0>(P_ij, Q_i, K_j);
       // Load dO_i_col from shared memory to registers
       // load(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}));
