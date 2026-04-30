@@ -2451,6 +2451,24 @@ template __global__ void grouped_rcr_kernel<0, true , true >(const grouped_layou
 // the K-tail correction in [fast_k, k) for interior cells are handled by
 // ``grouped_tail_kernel<Layout::RRR>`` (scalar fp32, mirror BF16 RRR).
 // =============================================================================
+//
+// Round 27 — FP8 RRR fuse path A empirical numerical probe. Default 0 keeps
+// production path identical to round-26 (external grouped_ktail_kernel_lds_rrr
+// + grouped_ntail_kernel_lds_rrr + grouped_tail_kernel<RRR>). Set to 1 +
+// recompile to enable in-kernel cooperative LDS-staged K-tail accumulation:
+//   1. cooperative pre-zero As[tic][0/1] + Bs[tic][0/1] post-Epilog 2
+//   2. G::load on K-tail iter (k = ki_dyn) with full-tensor SRD (OOB voffsets
+//      no-op leaves pre-zeroed bytes intact = effective zero-pad)
+//   3. load_a / load_b helpers (FP8 RRR uses manual ds_read_b64_tr_b8 via
+//      load_col_from_st, NOT subtile_inplace — sidesteps BF16 round-7's SGPR
+//      aliasing bug)
+//   4. rrr_mma 4 times to accumulate K-tail into cA/cB/cC/cD pre-scale
+// The probe + #if !FP8_RRR_FUSE_PROBE gate in dispatch_grouped_rrr ensure
+// no double-accumulation with external launches. See
+// analysis/_notes/round-26-fp8-rrr-path-a-probe-plan.md for protocol.
+#ifndef FP8_RRR_FUSE_PROBE
+#define FP8_RRR_FUSE_PROBE 0
+#endif
 template<int KI_HINT = 0>
 __global__ __launch_bounds__(_NUM_THREADS, 1)
 void grouped_rrr_kernel(const grouped_layout_globals g) {
@@ -2676,6 +2694,161 @@ void grouped_rrr_kernel(const grouped_layout_globals g) {
             __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
         }
+
+#if FP8_RRR_FUSE_PROBE
+        // === Round 27 — Path A K-tail fuse probe (HYBRID A-path-B + B-path-A) ===
+        // Round 27 first attempt cooperative G::load for BOTH A and B failed
+        // (SNR 16.61 dB ≈ no-K-tail floor 16.75 dB). Diagnosis: A is 2D
+        // [M_total, K] with K-stride = K bytes, so the K-tail iter k=ki_dyn
+        // covering K=[fast_k, fast_k+K_BLOCK) reads row M's bytes
+        // [fast_k, K_global) (valid) AND row M's bytes [K_global, fast_k+K_BLOCK)
+        // (OOB) — but the OOB byte addresses LITERALLY EQUAL row M+1's bytes
+        // [0, K_REM) (since row stride = K bytes). SRD bound check at
+        // M_total * K bytes does NOT reject row M+1's data, so A's K-tail
+        // accumulator contaminates with row M+1's [0, K_REM) values — wrong.
+        //
+        // FIX (round-17 docs): A uses path B (per-lane raw_buffer_load_b128
+        // with per-lane SENTINEL on b128_lo_valid / b128_hi_valid — no load
+        // issued for OOB K-bytes, so VGPR returns 0 from the SRD bound check
+        // on the b128 with SENTINEL voffset). B side keeps path A
+        // (cooperative G::load + pre-zero LDS) because B's K is N-strided
+        // (RRR layout: B is [G, K, N]) so the OOB K-bytes for k_row >= K_global
+        // are physically out of the tensor (no row+1 spillover concern).
+        if (g.fast_k < g.k) {
+            // ---- Cooperative pre-zero of Bs[tic][0/1] ----
+            // ST_v2 has swizzle padding (= 17408 bytes); strip to 16-byte
+            // alignment so we can b128-store the entire region incl. padding.
+            constexpr int ST_V2_B128 = (sizeof(ST_v2) / 16);
+            const int tid = threadIdx.x;
+            __uint128_t* Bs0_ptr = reinterpret_cast<__uint128_t*>(&Bs[tic][0].data[0]);
+            __uint128_t* Bs1_ptr = reinterpret_cast<__uint128_t*>(&Bs[tic][1].data[0]);
+            #pragma unroll
+            for (int idx = tid; idx < ST_V2_B128; idx += _NUM_THREADS) {
+                Bs0_ptr[idx] = 0;
+                Bs1_ptr[idx] = 0;
+            }
+            __syncthreads();
+
+            // ---- B side: cooperative G::load on K-tail iter ----
+            // OOB voffsets (k_row >= K_global) no-op on raw_buffer_load_lds →
+            // pre-zeroed bytes preserved → effective zero-pad for K=[K_global,
+            // fast_k + K_BLOCK). Cross-group contamination is OK for the G=1
+            // probe shape (full-tensor SRD == per-group SRD); production hybrid
+            // would need per-group SRD construction.
+            G::load(Bs[tic][0], g.b, b_co(bc*2,   ki_dyn), soB);
+            G::load(Bs[tic][1], g.b, b_co(bc*2+1, ki_dyn), soB);
+
+            // ---- A side: per-lane path B (direct HBM → register) ----
+            // Mirror RCR fuse path B (line ~2300+) but for RRR's a register tile.
+            // FP8 A_row_reg is rt_fp8e4m3<RBM=64, BK=128, row_l, rt_16x128_s>:
+            //   * 32 fp8 cells / lane (= 32 bytes = 2 b128 loads)
+            //   * row_lane = laneid % 16  (16 rows / base tile)
+            //   * k_lane_byte = (laneid / 16) * 32  (K stride between lanes)
+            //   * data[0..3] = K=[k_lane_byte,    k_lane_byte+16) → b128 #1
+            //   * data[4..7] = K=[k_lane_byte+16, k_lane_byte+32) → b128 #2
+            // For K_REM=64 (gpt_oss K=2880): lanes 0..31 valid, lanes 32..63 OOB.
+            // OOB lanes get SENTINEL voffset → SRD range_bytes check rejects load
+            // → VGPR returns 0. NO row-M+1 contamination because we never issue
+            // the load for those lanes.
+            const int laneid = kittens::laneid();
+            const int row_lane = laneid % 16;
+            const int k_lane_byte = (laneid / 16) * 32;
+            const int K_REM = g.k - g.fast_k;
+            const bool b128_lo_valid = (k_lane_byte + 16) <= K_REM;
+            const bool b128_hi_valid = (k_lane_byte + 32) <= K_REM;
+            constexpr uint32_t SENTINEL = 0xFFFF0000u;
+            const fp8e4m3* a_base_ptr = (const fp8e4m3*)&g.a[{0, 0, 0, 0}];
+            const int a_row_stride_bytes = g.a.template stride<2>();
+            const uint32_t a_total_bytes =
+                static_cast<uint32_t>(g.M_total) *
+                static_cast<uint32_t>(a_row_stride_bytes);
+            i32x4 a_srsrc_kt = make_srsrc((const void*)a_base_ptr, a_total_bytes);
+            const uint32_t K_tail_base_bytes =
+                static_cast<uint32_t>(g.fast_k);
+
+            auto load_a_kt = [&](int slab) __attribute__((always_inline)) {
+                const int M_warp_base =
+                    (m_subtile_A + br * 2 + slab) * HB + wm * RBM;
+                #pragma unroll
+                for (int h = 0; h < A_row_reg::height; ++h) {
+                    const int A_row_idx = M_warp_base + h * 16 + row_lane;
+                    const uint32_t v_base = static_cast<uint32_t>(
+                        A_row_idx * a_row_stride_bytes +
+                        K_tail_base_bytes + k_lane_byte);
+                    const uint32_t v_lo = b128_lo_valid ? v_base : SENTINEL;
+                    const uint32_t v_hi = b128_hi_valid ? (v_base + 16) : SENTINEL;
+                    __uint128_t v0 = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
+                        a_srsrc_kt, v_lo, 0, 0);
+                    __uint128_t v1 = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
+                        a_srsrc_kt, v_hi, 0, 0);
+                    *reinterpret_cast<__uint128_t*>(&a.tiles[h][0].data[0]) = v0;
+                    *reinterpret_cast<__uint128_t*>(&a.tiles[h][0].data[4]) = v1;
+                }
+            };
+
+            // Wait B G::load + LDS visibility before B reads.
+            asm volatile("s_waitcnt vmcnt(0) lgkmcnt(0)" ::: "memory");
+            __syncthreads();
+
+            // K-tail accumulation. b0/b1 from LDS via load_col_from_st
+            // (manual ds_read_b64_tr_b8 — sidesteps BF16 round-7's
+            // subtile_inplace SGPR aliasing). a from path B direct HBM
+            // load with SENTINEL. Mirrors Epilog 2's 4-mma pattern.
+            //
+            // ROUND 27 RESULT — FAILURE (root cause: a register VGPR aliased
+            // to c register by compiler post-Epilog 2). Probe sequence:
+            //   * SKIP_MMA (load_a_kt + load_b but no rrr_mma): SNR = -inf
+            //     dB, c corruption with NaN/Inf — catastrophic. Means
+            //     load_a_kt's writes to a.tiles[].data[] DIRECTLY OVERWRITE
+            //     c register VGPR slots. Compiler treats a as dead post-
+            //     Epilog 2's last `rrr_mma(cD, a, b1)` and rebinds a's
+            //     VGPRs into the c register pressure pool.
+            //   * SKIP_A_LOAD (cooperative pre-zero + G::load Bs + load_b
+            //     but NO load_a_kt / no MMA): SNR = 16.56 dB ≈ no-K-tail
+            //     floor (16.75 dB from round-7 docs). B-side cooperative
+            //     path A is NOT corrupting c — only A-side path B is.
+            //   * Full hybrid (path B for A + path A for B + 4 rrr_mma):
+            //     SNR = 15.05 dB (worse than floor) — confirms A-side
+            //     corruption + a@b@c chained-error.
+            //
+            // CONTRAST WITH RCR FUSE (which works): RCR's K-tail epilog
+            // also writes a.tiles[].data[] via load_a_kt and gets SNR ≥25
+            // dB. The difference: RCR's K-tail block has NO cooperative
+            // ops (no pre-zero + G::load) before the load_a_kt — it goes
+            // directly from Epilog 2 to per-lane raw_buffer_load_b128 for
+            // both A and B. Compiler keeps a/b0/b1 live across Epilog 2 →
+            // K-tail boundary because the next use is immediate. Inserting
+            // any cooperative op (pre-zero loop / G::load / __syncthreads)
+            // creates a long no-A-use gap → compiler releases a's VGPR.
+            //
+            // FIX OPTIONS (next round):
+            //   1. Mirror RCR fully: drop cooperative ops, use per-lane
+            //      raw_buffer_load_b128 for B too (need to derive lane→cell
+            //      mapping for B_col_reg = rt_fp8e4m3<BK=128, RBN=32,
+            //      col_l, rt_128x16_s>; ds_read_b64_tr_b8 lane mapping in
+            //      load_col_from_st_half line 113-145 is the starting point).
+            //   2. Introduce fresh K-tail register tile a_kt (+32 VGPR)
+            //      and write into a_kt instead of a, then rrr_mma(c..., a_kt, b...).
+            //      Risk: spill (currently +4 dwords; +32 VGPR likely spills
+            //      to occupancy=1). RCR option 1 is preferred because it's
+            //      0-VGPR-delta.
+#if !FP8_RRR_FUSE_PROBE_SKIP_A_LOAD
+            load_b(b0, Bs[tic][0], wn);
+            load_a_kt(0);
+            asm volatile("s_waitcnt lgkmcnt(0) vmcnt(0)" ::: "memory");
+            rrr_mma(cA, a, b0);
+
+            load_b(b1, Bs[tic][1], wn);
+            rrr_mma(cB, a, b1);
+
+            load_a_kt(1);
+            asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
+            rrr_mma(cC, a, b0);
+            rrr_mma(cD, a, b1);
+#endif
+            __builtin_amdgcn_s_barrier();
+        }
+#endif
 
         const float combined_scale = resolve_combined_scale_grp(g);
         mul(cA, cA, combined_scale);
@@ -4820,6 +4993,15 @@ void dispatch_grouped_rrr(grouped_layout_globals g) {
     }
 
     if (g.fast_n != g.n || g.fast_k != g.k) {
+#if FP8_RRR_FUSE_PROBE
+        // Round 27 PROBE — main grouped_rrr_kernel accumulates K-tail
+        // in-epilog (path A); skip external launches to avoid double-add.
+        // Probe shape spec (G=1, M=2048, N=2880, K=2880): K-tail handled
+        // by in-kernel epilog; N-tail (g.fast_n < g.n) is NOT covered by
+        // the probe (probe shape has N-tail too — separate test). For
+        // pure K-tail probe, use N=BLOCK_SIZE-aligned shape (N=2816 etc).
+        (void)0;
+#else
         // Round-55: LDS-staged K-tail correction (RMW) for RRR.
         // Round-56: paired LDS-staged N-tail full-K reduction for RRR.
         // Mirror BF16 wiring.
@@ -4857,6 +5039,7 @@ void dispatch_grouped_rrr(grouped_layout_globals g) {
         );
         grouped_tail_kernel<Layout::RRR>
             <<<tail_grid, tail_block, 0, g.stream>>>(g);
+#endif
     }
 }
 
