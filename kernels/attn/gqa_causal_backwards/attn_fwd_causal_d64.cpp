@@ -628,6 +628,18 @@ __global__ void attend_ker(const attn_globals<D> g) {
 
     __builtin_amdgcn_sched_barrier(0);
     mul_col(o_reg, o_reg, scale_vec);
+    // Pin `mul_col` before the s_barrier so the LLVM post-RA scheduler
+    // cannot push it past the wave-collective barrier into cluster 11
+    // (which only does `load(v_reg, v_smem[1])` -- a ds_read whose VALU
+    // dispatch slot we don't want competing with `mul_col`).  Mirrors
+    // the same prefix-sched_barrier pattern already applied at every
+    // other s_barrier in this kernel (18 sites: lines 250, 274, 300,
+    // 312, 330, 340, 360, 370, 389, 417, 437, 447, 467, 483, 503, 513,
+    // 530, 544, 563, 573, 590, 604, 639, 647); cluster 10's site was
+    // the lone exception and is now consistent.  Pure additive LLVM
+    // hint -- no instruction emitted at runtime, no numerics change,
+    // no observable wait-condition shift.
+    __builtin_amdgcn_sched_barrier(0);
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
 
