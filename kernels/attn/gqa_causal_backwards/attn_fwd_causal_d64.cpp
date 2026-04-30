@@ -261,8 +261,15 @@ __global__ void attend_ker(const attn_globals<D> g) {
     G::load<1, false>(v_smem[0], g.Vg, {batch_idx, 0, head_idx_kv, 0}, swizzled_offsets_V);
     load(k_reg, k_smem[0]);
     __builtin_amdgcn_sched_barrier(0);
-    asm volatile("s_waitcnt lgkmcnt(0)");
-    asm volatile("s_waitcnt vmcnt(2)");
+    // Fold the two single-counter waits (lgkmcnt(0) then vmcnt(2)) into one
+    // multi-counter s_waitcnt -- each `asm volatile` is opaque to the LLVM
+    // post-RA scheduler so they were emitted as 2 separate s_waitcnt insts;
+    // combining into one yields the identical wait condition (HW counters
+    // are independent so waiting on both at once is equivalent to sequential
+    // single-counter waits) but issues only one scalar instruction.  Pure
+    // additive simplification, no numerics change.  Mirrors the same fold
+    // applied 10 more times throughout this kernel below.
+    asm volatile("s_waitcnt lgkmcnt(0) vmcnt(2)");
     __builtin_amdgcn_sched_barrier(0);
     __builtin_amdgcn_s_barrier();
 
@@ -300,8 +307,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
     G::load<1, false>(k_smem[0], g.Kg, {batch_idx, 2, head_idx_kv, 0}, swizzled_offsets_K);
     // All warps then collaboratively load in the second slice of V (V1) into shared memory 
     G::load<1, false>(v_smem[1], g.Vg, {batch_idx, 1, head_idx_kv, 0}, swizzled_offsets_V);
-    asm volatile("s_waitcnt lgkmcnt(0)");
-    asm volatile("s_waitcnt vmcnt(4)");
+    asm volatile("s_waitcnt lgkmcnt(0) vmcnt(4)");
     __builtin_amdgcn_sched_barrier(0);
     __builtin_amdgcn_s_barrier();
 
@@ -329,8 +335,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
         G::load<1, false>(k_smem[1], g.Kg, {batch_idx, j, head_idx_kv, 0}, swizzled_offsets_K);
         //      Load V0 into registers
         load(v_reg, v_smem[0]);
-        asm volatile("s_waitcnt lgkmcnt(0)");
-        asm volatile("s_waitcnt vmcnt(4)");
+        asm volatile("s_waitcnt lgkmcnt(0) vmcnt(4)");
         __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
@@ -360,8 +365,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
         G::load<1, false>(v_smem[0], g.Vg, {batch_idx, j - 1, head_idx_kv, 0}, swizzled_offsets_V);
         //      Load K2 into registers
         load(k_reg, k_smem[0]);
-        asm volatile("s_waitcnt lgkmcnt(0)");
-        asm volatile("s_waitcnt vmcnt(4)");
+        asm volatile("s_waitcnt lgkmcnt(0) vmcnt(4)");
         __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
@@ -408,8 +412,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
                 mask_kv_tile(att_block[0], tile_idx, j - 1, neg_inf_v, lane);
             }
         }
-        asm volatile("s_waitcnt lgkmcnt(0)");
-        asm volatile("s_waitcnt vmcnt(4)");
+        asm volatile("s_waitcnt lgkmcnt(0) vmcnt(4)");
         __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
@@ -439,8 +442,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
         G::load<1, false>(v_smem[1], g.Vg, {batch_idx, j, head_idx_kv, 0}, swizzled_offsets_V);
         //      Load K3 into registers
         load(k_reg, k_smem[1]);
-        asm volatile("s_waitcnt lgkmcnt(0)");
-        asm volatile("s_waitcnt vmcnt(4)");
+        asm volatile("s_waitcnt lgkmcnt(0) vmcnt(4)");
         __builtin_amdgcn_sched_barrier(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
@@ -476,8 +478,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
             mask_kv_tile(att_block[1], tile_idx, max_num_tiles - 3, neg_inf_v, lane);
         }
     }
-    asm volatile("s_waitcnt lgkmcnt(0)");
-    asm volatile("s_waitcnt vmcnt(4)");
+    asm volatile("s_waitcnt lgkmcnt(0) vmcnt(4)");
     __builtin_amdgcn_sched_barrier(0);
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
@@ -507,8 +508,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
     G::load<1, false>(v_smem[0], g.Vg, {batch_idx, max_num_tiles - 2, head_idx_kv, 0}, swizzled_offsets_V);
     //      Load K4 into registers
     load(k_reg, k_smem[0]);
-    asm volatile("s_waitcnt lgkmcnt(0)");
-    asm volatile("s_waitcnt vmcnt(4)");
+    asm volatile("s_waitcnt lgkmcnt(0) vmcnt(4)");
     __builtin_amdgcn_sched_barrier(0);
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
@@ -539,8 +539,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
             mask_kv_tile(att_block[0], tile_idx, max_num_tiles - 2, neg_inf_v, lane);
         }
     }
-    asm volatile("s_waitcnt lgkmcnt(0)");
-    asm volatile("s_waitcnt vmcnt(2)");
+    asm volatile("s_waitcnt lgkmcnt(0) vmcnt(2)");
     __builtin_amdgcn_sched_barrier(0);
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
@@ -569,8 +568,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
     G::load<1, false>(v_smem[1], g.Vg, {batch_idx, max_num_tiles - 1, head_idx_kv, 0}, swizzled_offsets_V);
     //      Load K5 into registers
     load(k_reg, k_smem[1]);
-    asm volatile("s_waitcnt lgkmcnt(0)");
-    asm volatile("s_waitcnt vmcnt(2)");
+    asm volatile("s_waitcnt lgkmcnt(0) vmcnt(2)");
     __builtin_amdgcn_sched_barrier(0);
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
@@ -601,8 +599,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
             mask_kv_tile(att_block[1], tile_idx, max_num_tiles - 1, neg_inf_v, lane);
         }
     }
-    asm volatile("s_waitcnt lgkmcnt(0)");
-    asm volatile("s_waitcnt vmcnt(0)");
+    asm volatile("s_waitcnt lgkmcnt(0) vmcnt(0)");
     __builtin_amdgcn_sched_barrier(0);
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
