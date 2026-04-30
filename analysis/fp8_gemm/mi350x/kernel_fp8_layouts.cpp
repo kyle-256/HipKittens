@@ -2715,6 +2715,45 @@ void grouped_rrr_kernel(const grouped_layout_globals g) {
         // (RRR layout: B is [G, K, N]) so the OOB K-bytes for k_row >= K_global
         // are physically out of the tensor (no row+1 spillover concern).
         if (g.fast_k < g.k) {
+            // ROUND 28 — All 5 attempts to escape A-register aliasing FAILED.
+            // Detailed in analysis/_notes/round-28-fp8-rrr-path-a-aliasing-fixes-fail.md.
+            // Summary:
+            //   * Attempt 1 (fresh `A_row_reg a_kt` declaration): SNR 15.05 dB.
+            //     Compiler aliased `a_kt` to same VGPR pool as round-27 `a`
+            //     (after Epilog 2 release of `a`, compiler reuses for next
+            //     "needs register" var = a_kt → still aliased to c).
+            //   * Attempt 2 (fresh a_kt + b0_kt + b1_kt): SNR 15.04 dB.
+            //     Same root cause; even adding b0_kt/b1_kt fresh did not help.
+            //   * Attempt 3 (a + asm "+v" pin BEFORE cooperative ops): SNR
+            //     15.06 dB. The pin forces VGPR alloc at asm time, but
+            //     compiler released VGPR after asm (no further use until
+            //     load_a_kt) and re-aliased to c during cooperative ops.
+            //   * Attempt 4 (a + asm "+v" pin BEFORE AND AFTER cooperative
+            //     ops, sandwich): SNR 15.07 dB. Same — post-cooperative
+            //     pin is the asm-relevant point, but compiler still maps
+            //     `a`'s VGPR to whatever physical register is "free" at
+            //     that moment, which after cooperative ops may overlap c.
+            //   * Attempt 5 (pin all cA/cB/cC/cD dwords before load_a_kt):
+            //     SNR 15.07 dB, spill +6 dwords. c-pin forces compiler
+            //     to keep c in fixed VGPR slots, but `a` lands on some
+            //     other live register or spilled scratch — same SNR.
+            // ROOT CAUSE: cooperative ops (pre-zero loop + G::load + sync)
+            // create a long no-A-use gap. Compiler retires `a` (and any
+            // post-Epilog 2 fresh `a_kt` in the same scope) during this
+            // gap, then aliases the freed VGPR to live c registers. There
+            // is no per-instruction asm trick to override this — register
+            // allocation is a global pass that sees the gap and optimizes.
+            //
+            // ONLY KNOWN FIX: introduce a FRESH fp32 acc tile `c_kt` (32
+            // dwords/lane) BEFORE cooperative ops, accumulate K-tail mma
+            // into c_kt instead of `a → c`, then add `c[ABCD] += c_kt`.
+            // Cost: +32 dwords spill (~+30% spill increase from baseline 94).
+            // Risk: spill may push occupancy from 2 → 1, regressing perf.
+            // Estimated probe time: 1 round to derive + test.
+            //
+            // Defer to round 29. PROBE remains gated #if 0; production
+            // unchanged.
+
             // ---- Cooperative pre-zero of Bs[tic][0/1] ----
             // ST_v2 has swizzle padding (= 17408 bytes); strip to 16-byte
             // alignment so we can b128-store the entire region incl. padding.
@@ -2766,6 +2805,12 @@ void grouped_rrr_kernel(const grouped_layout_globals g) {
             const uint32_t K_tail_base_bytes =
                 static_cast<uint32_t>(g.fast_k);
 
+            // ROUND 28 ATTEMPT 3 (continued): Write back to the SAME `a`
+            // register tile that the live-pin asm above keeps allocated.
+            // No more `a_kt` (round-28 attempt 1) — compiler aliased it
+            // to c despite freshness because c was the next live var.
+            // Pinning `a` directly with "+v" forces the VGPR allocation
+            // to survive across cooperative ops.
             auto load_a_kt = [&](int slab) __attribute__((always_inline)) {
                 const int M_warp_base =
                     (m_subtile_A + br * 2 + slab) * HB + wm * RBM;
