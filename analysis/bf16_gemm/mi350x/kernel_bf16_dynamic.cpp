@@ -53,6 +53,33 @@ enum class Layout { RCR, RRR, CRR };
 #define BF16_HOIST_M0 0
 #endif
 
+// Round 5 (BF16 RRR K-tail fuse path A repair): expose
+// ``bf16_dev_d::load_hoist`` even when ``BF16_HOIST_M0=0``.
+//
+// Background: round-3/4 path A (cooperative G::load + LDS-staged + load(reg,
+// st_subtile) + DO_MMA) saturated at SNR 18.6 dB across stage-0 vs stage-1,
+// 4-arg vs 8-arg G::load, outer vs inner fuse-block scope (see
+// analysis/_notes/round-3-bf16-ktail-phantom-read.md and round-4-bf16-ktail-
+// fuse-attempt.md). Round-4 zero-init diagnostic showed
+// ``buffer_load_lds`` (the LLVM-intrinsic backing G::load) does NOT
+// reliably write K-tile-44 to the LDS bytes ``load(reg, st_subtile)``
+// reads from in the post-epilog-2 SGPR state. The smoking gun is the
+// FP8 path A working first try because FP8 uses ``rcr_8w_load_hoist``
+// (inline-asm ``s_mov_b32 m0`` + ``buffer_load_dwordx4 ... offen lds``)
+// which forecloses LLVM's tendency to CSE the m0 plumbing back into
+// vector ops — the precise bug the ``__builtin_amdgcn_raw_buffer_load_lds``
+// path hits in BF16 grouped post-epilog-2.
+//
+// ``bf16_dev_d::load_hoist`` is a structurally identical inline-asm DTL
+// helper with a 7-arg signature matching the 7-arg ``G::load(dst, gl, idx,
+// swizzled_offsets, SRD, base_ptr, lds_addr)`` form used inside the BF16
+// main loop. Round-5's RRR FUSED_KTAIL block swaps the 4 ``G::load``
+// calls for ``bf16_dev_d::load_hoist`` to dodge the m0 corruption that
+// caused phantom-read at SNR 18.6 dB.
+#ifndef BF16_LOAD_HOIST_AVAILABLE
+#define BF16_LOAD_HOIST_AVAILABLE 1
+#endif
+
 // P23 Session 2 Dev C — RCR Route 1 padded-b128 wiring (PREP).
 //
 // When `RCR_PADDED_B128_MODE` is 1, the RCR branch swaps ST_A/ST_B from
@@ -91,7 +118,7 @@ enum class Layout { RCR, RRR, CRR };
 using rcr_padded_st_shape = kittens::st_64x32_padded_b128_s;
 #endif
 
-#if BF16_HOIST_M0
+#if BF16_HOIST_M0 || BF16_LOAD_HOIST_AVAILABLE
 namespace bf16_dev_d {
 using as3_uint32_ptr = __attribute__((address_space(3))) unsigned int*;
 
@@ -168,7 +195,7 @@ __device__ __forceinline__ void load_hoist(
     }
 }
 } // namespace bf16_dev_d
-#endif // BF16_HOIST_M0
+#endif // BF16_HOIST_M0 || BF16_LOAD_HOIST_AVAILABLE
 
 struct layout_globals {
     _gl a, b, c;
@@ -824,6 +851,33 @@ __device__ __forceinline__ void device_gemm_tile_body(
             asm volatile("s_waitcnt vmcnt(0)");
             DO_MMA(C_accum[1][0], A_tile, B_tile_0, C_accum[1][0]);
             DO_MMA(C_accum[1][1], A_tile, B_tile_1, C_accum[1][1]);
+        } else if constexpr (L == Layout::RRR) {
+            // Round-5: empty FUSED_KTAIL body for RRR. The dispatcher
+            // gates ``fuse_ktail_eligible`` to RCR only (path B works
+            // there via direct HBM→register buffer_load_b128); RRR
+            // K-tail is handled by the legacy ``grouped_ktail_kernel_lds_rrr``
+            // RMW kernel until path B (or another fp32-fuse-capable
+            // approach) is wired for col_l rt_32x16_s.
+            //
+            // Round-3/4 path A (cooperative G::load + LDS-staged + load(reg,
+            // st_subtile) + DO_MMA) saturated at SNR 18.6 dB on RCR
+            // (see ``analysis/_notes/round-3-bf16-ktail-phantom-read.md``).
+            // Round 5 attempted to fix RRR path A by mirroring FP8's
+            // ``rcr_8w_load_hoist`` via ``bf16_dev_d::load_hoist`` (inline-asm
+            // s_mov_b32 m0 + buffer_load_dwordx4 ... offen lds, sidesteps
+            // the m0-CSE hypothesis). RRR path A SNR was unchanged at
+            // 18.68 dB → m0-corruption was the WRONG hypothesis. The
+            // real bug is on the LDS read side: ``load(reg, st_subtile)``
+            // computes stale LDS source addresses for warp_col∈{1,3}
+            // (pattern from round-3 lane probe). See
+            // ``analysis/_notes/round-5-bf16-rrr-path-a-m0-hoist-failure.md``.
+            //
+            // ``bf16_dev_d::load_hoist`` is now exposed unconditionally
+            // (BF16_LOAD_HOIST_AVAILABLE) so the next-round attempt at
+            // RRR fuse can compose it with a non-``subtile_inplace``
+            // LDS read path (e.g., manual ds_read_b64 inline-asm with
+            // hand-derived lane → cell mapping for col_l rt_32x16_s,
+            // mirroring FP8's ``load_col_from_st_half``).
         }
     }
 
@@ -3672,6 +3726,8 @@ template __global__ void grouped_kernel<Layout::CRR, 0>(const grouped_layout_glo
 // K=2880 / 2944 / 3008 etc. fall through to KI_HINT=0 because K_TWO_TILE
 // alignment + odd K_TWO_TILE count don't hit any compile-time KI case).
 template __global__ void grouped_kernel<Layout::RCR, 0, true>(const grouped_layout_globals);
+// Round-4 path A: fused-K-tail RRR variant (BF16 dA backward path).
+template __global__ void grouped_kernel<Layout::RRR, 0, true>(const grouped_layout_globals);
 #define INSTANTIATE_K_GRP(KI) \
     template __global__ void grouped_kernel<Layout::RCR, KI>(const grouped_layout_globals); \
     template __global__ void grouped_kernel<Layout::RRR, KI>(const grouped_layout_globals); \
@@ -3698,6 +3754,17 @@ static inline void launch_one_grouped(grouped_layout_globals& g) {
         attr_set = true;
     }
     grouped_kernel<L, KI><<<dim3(NUM_CUS), g.block(), mem_size, g.stream>>>(g);
+}
+
+template<Layout L>
+static inline void launch_one_grouped_fuse(grouped_layout_globals& g) {
+    unsigned long mem_size = g.dynamic_shared_memory();
+    static bool attr_set = false;
+    if (!attr_set) {
+        hipFuncSetAttribute((void*)grouped_kernel<L, 0, true>, hipFuncAttributeMaxDynamicSharedMemorySize, mem_size);
+        attr_set = true;
+    }
+    grouped_kernel<L, 0, true><<<dim3(NUM_CUS), g.block(), mem_size, g.stream>>>(g);
 }
 
 template<Layout L>
@@ -3803,21 +3870,24 @@ void dispatch_grouped(grouped_layout_globals g) {
     // G::load), so the round-4 phantom-LDS-write bug doesn't apply.
     // K_REM == K_STEP keeps every K-cell in-bounds for every row, so
     // no per-lane K-mask is needed.
+    // Round-5: gate fuse to RCR only. RRR path-A attempt (cooperative
+    // G::load + LDS + load(reg, st_subtile) + DO_MMA) failed at SNR
+    // 18.68 dB even after swapping G::load → bf16_dev_d::load_hoist
+    // (which dodges the m0-CSE hypothesis); root cause is a stale
+    // subtile_inplace capture on the LDS read side, not the write
+    // side. See analysis/_notes/round-5-bf16-rrr-path-a-m0-hoist-failure.md.
+    // Legacy grouped_ktail_kernel_lds_rrr (RMW) keeps RRR dA running
+    // until a future round wires path B with manual lane mapping.
     const bool fuse_ktail_eligible =
-        (L == Layout::RCR) && (g.bpc > 0) && (g.ki >= 2) &&
+        (L == Layout::RCR) &&
+        (g.bpc > 0) && (g.ki >= 2) &&
         (K_rem_for_fuse == K_STEP) && lds_k_tail_safe_for_fuse;
 
     if (g.bpc > 0 && g.ki >= 2) {
         if (fuse_ktail_eligible) {
-            unsigned long mem_size = g.dynamic_shared_memory();
-            static bool fuse_attr_set = false;
-            if (!fuse_attr_set) {
-                hipFuncSetAttribute((void*)grouped_kernel<Layout::RCR, 0, true>,
-                                    hipFuncAttributeMaxDynamicSharedMemorySize, mem_size);
-                fuse_attr_set = true;
+            if constexpr (L == Layout::RCR || L == Layout::RRR) {
+                launch_one_grouped_fuse<L>(g);
             }
-            grouped_kernel<Layout::RCR, 0, true>
-                <<<dim3(NUM_CUS), g.block(), mem_size, g.stream>>>(g);
         } else {
             switch (g.ki) {
                 case 56:  launch_one_grouped<L, 56> (g); break;
@@ -3862,7 +3932,18 @@ void dispatch_grouped(grouped_layout_globals g) {
     // launched, the persistent kernel itself accumulates K=[fast_k, g.k)
     // in its epilog. No standalone K-tail / N-tail / scalar-tail launch
     // is required for the RCR + K_REM == K_STEP case.
-    if (need_tail_run && !fuse_ktail_eligible) {
+    // Round-4 path A: for RRR + fuse, the main+fuse kernel covers
+    // [0, fast_n) cols natively (no double-rounding); but cols
+    // [fast_n, n) still need the LDS N-tail kernel for the partial
+    // last col-tile. Only RCR fuse covers the entire output (since
+    // RCR uses ``bpc = ceil_div(g.n, BLOCK_SIZE)`` + column-masked
+    // C store + per-group bounded B SRD). Without this carve-out, the
+    // outer ``!fuse_ktail_eligible`` gate would skip the N-tail kernel
+    // for RRR fuse → cells [fast_n, n) stay uninitialized (= 0) →
+    // dA correctness FAIL on gpt_oss-Down (N=2880, K=2880).
+    const bool fuse_handles_all_cells =
+        fuse_ktail_eligible && (L == Layout::RCR);
+    if (need_tail_run && !fuse_handles_all_cells) {
         // Fast path: LDS-staged interior K-tail correction (round-9). Runs
         // when the K-tail size matches a templated specialisation AND each
         // (TAIL_BLOCK_M × TAIL_BLOCK_N) tail block sits inside a single
@@ -3966,7 +4047,14 @@ void dispatch_grouped(grouped_layout_globals g) {
         // K-misaligned (gpt_oss-Down) and N-misaligned (gpt_oss-GateUP)
         // dA paths.
         if constexpr (L == Layout::RRR) {
-            if (K_rem == 64 && lds_k_tail_safe && g.fast_n > 0) {
+            // Round-4 path A: when the RRR fuse variant runs the main
+            // kernel writes K=[0, fast_k + K_STEP) natively in its
+            // epilog (no BF16 round-trip → no double-rounding). Skip
+            // the legacy ``grouped_ktail_kernel_lds_rrr`` RMW pass —
+            // running it would double-count the K-tail contribution
+            // for cols [0, fast_n).
+            if (K_rem == 64 && lds_k_tail_safe && g.fast_n > 0
+                && !fuse_ktail_eligible) {
                 dim3 lds_block(TAIL_BLOCK_N, TAIL_BLOCK_M);
                 dim3 lds_grid(
                     kittens::ceil_div(g.fast_n, TAIL_BLOCK_N),
