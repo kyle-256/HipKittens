@@ -262,18 +262,115 @@ __device__ __forceinline__ void rcr_mma_32(
     mma_ABt(acc, a, b, acc);
 }
 
+// Round-26-dm (auto-optimize R34 / Lever D Round-B step 4):
+// K-tail loaders for the rt_32x64 fp8 layout. Each lane reads
+// 2 × buffer_load_b128 from HBM into rt_base.data[]. Lane mapping
+// per AMD CDNA4 mfma_323264 (verified by mma_ABt_base dispatch in
+// mma.cuh:234-238):
+//   row_lane    = laneid % 32      (rows 0..31 within 32-row cell)
+//   k_lane_byte = (laneid / 32) * 32 (chunk 0 = K[0..31], 1 = K[32..63])
+//   data[0..3]  = K=[k_lane_byte,        k_lane_byte + 16) → b128 #1
+//   data[4..7]  = K=[k_lane_byte + 16,   k_lane_byte + 32) → b128 #2
+//
+// For K_REM=64 (gpt_oss K=2880 = 22*128 + 64): ALL LANES VALID, both
+// b128 reads in-bounds. No SENTINEL lanes (vs rt_16x128 K-tail loader
+// which had lanes 32..63 SENTINEL because K=64..127 K-OOB).
+//
+// Currently no callers — the K-tail block port (R35+) will wire these.
+// Force-instantiated below to validate types at HK build time.
+template<typename A_RT_32x64>
+__device__ __forceinline__ void load_a_kt_32x64(
+    A_RT_32x64& A_tile,
+    i32x4 a_srsrc_kt,
+    int M_warp_base,
+    int row_lane,
+    int k_lane_byte,
+    int a_row_stride_bytes,
+    uint32_t K_tail_base_bytes,
+    bool b128_lo_valid,
+    bool b128_hi_valid)
+{
+    constexpr uint32_t SENTINEL = 0xFFFF0000u;
+
+    #pragma unroll
+    for (int h = 0; h < A_RT_32x64::height; ++h) {
+        const int A_row_idx = M_warp_base + h * 32 + row_lane;
+        const uint32_t v_base = static_cast<uint32_t>(
+            A_row_idx * a_row_stride_bytes +
+            K_tail_base_bytes + k_lane_byte);
+        const uint32_t v_lo = b128_lo_valid ? v_base : SENTINEL;
+        const uint32_t v_hi = b128_hi_valid ? (v_base + 16) : SENTINEL;
+        __uint128_t v0 = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
+            a_srsrc_kt, v_lo, 0, 0);
+        __uint128_t v1 = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
+            a_srsrc_kt, v_hi, 0, 0);
+        *reinterpret_cast<__uint128_t*>(&A_tile.tiles[h][0].data[0]) = v0;
+        *reinterpret_cast<__uint128_t*>(&A_tile.tiles[h][0].data[4]) = v1;
+    }
+}
+
+template<typename B_RT_32x64>
+__device__ __forceinline__ void load_b_kt_32x64(
+    B_RT_32x64& B_tile,
+    i32x4 b_srsrc_kt,
+    int N_warp_base,
+    int row_lane,
+    int k_lane_byte,
+    int b_row_stride_bytes,
+    uint32_t b_group_byte_base,
+    uint32_t K_tail_base_bytes,
+    bool b128_lo_valid,
+    bool b128_hi_valid)
+{
+    constexpr uint32_t SENTINEL = 0xFFFF0000u;
+
+    #pragma unroll
+    for (int h_b = 0; h_b < B_RT_32x64::height; ++h_b) {
+        const int B_row_idx_in_group = N_warp_base + h_b * 32 + row_lane;
+        const uint32_t v_base = b_group_byte_base + static_cast<uint32_t>(
+            B_row_idx_in_group * b_row_stride_bytes +
+            K_tail_base_bytes + k_lane_byte);
+        const uint32_t v_lo = b128_lo_valid ? v_base : SENTINEL;
+        const uint32_t v_hi = b128_hi_valid ? (v_base + 16) : SENTINEL;
+        __uint128_t v0 = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
+            b_srsrc_kt, v_lo, 0, 0);
+        __uint128_t v1 = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
+            b_srsrc_kt, v_hi, 0, 0);
+        *reinterpret_cast<__uint128_t*>(&B_tile.tiles[h_b][0].data[0]) = v0;
+        *reinterpret_cast<__uint128_t*>(&B_tile.tiles[h_b][0].data[4]) = v1;
+    }
+}
+
 // Force compile-time instantiation / type-check of the rcr_mma_32
-// dispatch. ``__attribute__((used))`` keeps the symbol around so
-// the build will fully type-check the ``mma_ABt`` call inside.
-// ``[[maybe_unused]]`` silences the no-callers warning. The function
-// itself is never called at runtime — its sole purpose is to surface
-// type errors at HK build time, before R32+ wires up the K-tail port.
+// dispatch and the K-tail rt_32x64 loaders. ``__attribute__((used))``
+// keeps the symbol around so the build will fully type-check all
+// callees — surfacing layout / shape / intrinsic-arg mismatches at
+// HK build time, before R35+ wires up the K-tail port.
 __attribute__((used)) [[maybe_unused]] static __device__ void
 __lever_d_round_b_force_instantiate_rcr_mma_32() {
     rt_fl<RBM, RBN, col_l, rt_32x32_s> dummy_acc{};
     rt_fp8e4m3<RBM, 64, row_l, rt_32x64_s> dummy_a{};
     rt_fp8e4m3<RBN, 64, row_l, rt_32x64_s> dummy_b{};
     rcr_mma_32(dummy_acc, dummy_a, dummy_b);
+
+    i32x4 dummy_srsrc{};
+    load_a_kt_32x64(dummy_a, dummy_srsrc,
+                    /*M_warp_base=*/0,
+                    /*row_lane=*/0,
+                    /*k_lane_byte=*/0,
+                    /*a_row_stride_bytes=*/0,
+                    /*K_tail_base_bytes=*/0u,
+                    /*b128_lo_valid=*/true,
+                    /*b128_hi_valid=*/true);
+    load_b_kt_32x64(dummy_b, dummy_srsrc,
+                    /*N_warp_base=*/0,
+                    /*row_lane=*/0,
+                    /*k_lane_byte=*/0,
+                    /*b_row_stride_bytes=*/0,
+                    /*b_group_byte_base=*/0u,
+                    /*K_tail_base_bytes=*/0u,
+                    /*b128_lo_valid=*/true,
+                    /*b128_hi_valid=*/true);
 }
 
 __device__ __forceinline__ void crr_mma(
