@@ -216,19 +216,56 @@ struct layout_globals {
 // in analysis/fp8_gemm/mi350x/kernel_fp8_layouts.cpp:168-174). One element
 // per call; intentionally NOT vectorised because the tail region is small
 // (<=2*BLOCK_SIZE rows/cols + K_TWO_TILE-1 K-tail) and the launch is rare.
+//
+// Round-20 — route the per-cell scalar load/store through
+// ``llvm.amdgcn.raw.buffer.load/store.i16`` (BUFFER class) instead of the
+// generic-pointer ``raw_ptr[idx] = ...`` expression, which the compiler
+// lowers to ``global_load_short`` / ``global_store_short`` (FLAT class).
+// SRD construction is loop-invariant on ``src`` / ``dst``; the compiler's
+// LICM hoists it out of the K-tail kernels' unrolled per-cell loops, so
+// each cell only pays the buffer_load/store cost.
+//
+// Round-19 ported the same FLAT->BUFFER reroute for the col-layout
+// ``kittens::store`` overload (gpt_oss focus score 794 -> 880, +85pp);
+// this round does the same for the K-tail / N-tail kernels which
+// ``store_c_tile_n_masked``/``store_c_tile_mn_masked_grouped`` doesn't
+// reach (they use these scalar helpers for the RMW K-tail accumulate
+// path). gpt_oss K=2880 always hits K-tail.
 __device__ __forceinline__ float load_bf16_scalar(const _gl& src, int row, int col) {
-    return base_types::convertor<float, bf16>::convert(src[coord<>(row, col)]);
+    const uint32_t buffer_size = src.batch() * src.depth() * src.rows() * src.cols() * sizeof(bf16);
+    const std::uintptr_t as_int = reinterpret_cast<std::uintptr_t>(src.raw_ptr);
+    const std::uint64_t  as_u64 = static_cast<std::uint64_t>(as_int);
+    const buffer_resource br = make_buffer_resource(as_u64, buffer_size, 0x00020000);
+    const i32x4 srsrc = std::bit_cast<i32x4>(br);
+    const uint32_t voffset = (row * src.cols() + col) * sizeof(bf16);
+    const uint16_t bits = llvm_amdgcn_raw_buffer_load_b16(srsrc, voffset, 0, 0);
+    return base_types::convertor<float, bf16>::convert(std::bit_cast<bf16>(bits));
 }
 
 __device__ __forceinline__ void store_bf16_scalar(const _gl& dst, int row, int col, float value) {
-    dst[coord<>(row, col)] = base_types::convertor<bf16, float>::convert(value);
+    const uint32_t buffer_size = dst.batch() * dst.depth() * dst.rows() * dst.cols() * sizeof(bf16);
+    const std::uintptr_t as_int = reinterpret_cast<std::uintptr_t>(dst.raw_ptr);
+    const std::uint64_t  as_u64 = static_cast<std::uint64_t>(as_int);
+    const buffer_resource br = make_buffer_resource(as_u64, buffer_size, 0x00020000);
+    const i32x4 srsrc = std::bit_cast<i32x4>(br);
+    const uint32_t voffset = (row * dst.cols() + col) * sizeof(bf16);
+    const bf16 v = base_types::convertor<bf16, float>::convert(value);
+    llvm_amdgcn_raw_buffer_store_b16(std::bit_cast<uint16_t>(v), srsrc, voffset, 0, 0);
 }
 
 // Scalar bf16 load for a 3D-grouped tensor (B in grouped GEMM is laid out
 // as `[1, G, *, *]`, where the 2nd axis indexes the group). Used by
 // `grouped_tail_kernel` to read B at `(group_idx, row, col)`.
 __device__ __forceinline__ float load_bf16_scalar_grp(const _gl& src, int g_idx, int row, int col) {
-    return base_types::convertor<float, bf16>::convert(src[coord<>{0, g_idx, row, col}]);
+    const uint32_t buffer_size = src.batch() * src.depth() * src.rows() * src.cols() * sizeof(bf16);
+    const std::uintptr_t as_int = reinterpret_cast<std::uintptr_t>(src.raw_ptr);
+    const std::uint64_t  as_u64 = static_cast<std::uint64_t>(as_int);
+    const buffer_resource br = make_buffer_resource(as_u64, buffer_size, 0x00020000);
+    const i32x4 srsrc = std::bit_cast<i32x4>(br);
+    const uint32_t idx = ((0 * src.depth() + g_idx) * src.rows() + row) * src.cols() + col;
+    const uint32_t voffset = idx * sizeof(bf16);
+    const uint16_t bits = llvm_amdgcn_raw_buffer_load_b16(srsrc, voffset, 0, 0);
+    return base_types::convertor<float, bf16>::convert(std::bit_cast<bf16>(bits));
 }
 
 // Packed 4 × bf16 = 8 bytes for vectorised tail-kernel K-loop. The HIP
@@ -279,6 +316,12 @@ __device__ __forceinline__ void store_c_tile_n_masked(
         return;
     }
 
+    // Round-19 — partial-N path: route per-lane writes through
+    // ``llvm.amdgcn.raw.buffer.store.i16`` (BUFFER class) instead of the
+    // ``dst_ptr[...] = ...`` expression (which the compiler emits as
+    // ``global_store_short`` / FLAT). Address arithmetic is bit-identical
+    // to the previous version. See the BF16 grouped FLAT-instruction
+    // breakdown (round-18) for the rationale.
     constexpr int axis = 2;
     U* dst_ptr = (U*)&g_c[(coord<C_rt_accum_t>{0, 0, r_tile, c_tile}
                             .template unit_coord<axis, 3>())];
@@ -286,6 +329,12 @@ __device__ __forceinline__ void store_c_tile_n_masked(
     const int laneid = kittens::laneid();
     const int row_offset = src.base_tile_stride * (laneid / src.base_tile_cols);
     const int col_offset = laneid % src.base_tile_cols;
+
+    uint32_t buffer_size = g_c.batch() * g_c.depth() * g_c.rows() * g_c.cols() * sizeof(U);
+    std::uintptr_t as_int = reinterpret_cast<std::uintptr_t>(dst_ptr);
+    std::uint64_t  as_u64 = static_cast<std::uint64_t>(as_int);
+    buffer_resource br = make_buffer_resource(as_u64, buffer_size, 0x00020000);
+    i32x4 srsrc = std::bit_cast<i32x4>(br);
 
     #pragma unroll
     for (int i = 0; i < src.height; i++) {
@@ -300,12 +349,14 @@ __device__ __forceinline__ void store_c_tile_n_masked(
                 #pragma unroll
                 for (int l = 0; l < src.base_tile_stride / packing; l++) {
                     int idx = l + k * src.base_tile_stride / packing;
-                    dst_ptr[(row + l * 2) * row_stride + col] =
-                        base_types::convertor<U, T>::convert(
+                    U v0 = base_types::convertor<U, T>::convert(
                             src.tiles[i][j].data[idx].x);
-                    dst_ptr[(row + l * 2 + 1) * row_stride + col] =
-                        base_types::convertor<U, T>::convert(
+                    U v1 = base_types::convertor<U, T>::convert(
                             src.tiles[i][j].data[idx].y);
+                    const uint32_t off0 = ((row + l * 2)     * row_stride + col) * sizeof(U);
+                    const uint32_t off1 = ((row + l * 2 + 1) * row_stride + col) * sizeof(U);
+                    llvm_amdgcn_raw_buffer_store_b16(std::bit_cast<uint16_t>(v0), srsrc, off0, 0, 0);
+                    llvm_amdgcn_raw_buffer_store_b16(std::bit_cast<uint16_t>(v1), srsrc, off1, 0, 0);
                 }
             }
         }
@@ -357,6 +408,10 @@ __device__ __forceinline__ void store_c_tile_mn_masked_grouped(
         return;
     }
 
+    // Round-19 — partial-MN path: same FLAT->BUFFER reroute as
+    // ``store_c_tile_n_masked``. Per-row M-mask preserved; only the
+    // active per-lane scalar write is changed from ``global_store_short``
+    // to ``buffer_store_short``.
     constexpr int axis = 2;
     U* dst_ptr = (U*)&g_c[(coord<C_rt_accum_t>{0, group_idx, r_tile, c_tile}
                             .template unit_coord<axis, 3>())];
@@ -364,6 +419,12 @@ __device__ __forceinline__ void store_c_tile_mn_masked_grouped(
     const int laneid = kittens::laneid();
     const int row_offset = src.base_tile_stride * (laneid / src.base_tile_cols);
     const int col_offset = laneid % src.base_tile_cols;
+
+    uint32_t buffer_size = g_c.batch() * g_c.depth() * g_c.rows() * g_c.cols() * sizeof(U);
+    std::uintptr_t as_int = reinterpret_cast<std::uintptr_t>(dst_ptr);
+    std::uint64_t  as_u64 = static_cast<std::uint64_t>(as_int);
+    buffer_resource br = make_buffer_resource(as_u64, buffer_size, 0x00020000);
+    i32x4 srsrc = std::bit_cast<i32x4>(br);
 
     #pragma unroll
     for (int i = 0; i < src.height; i++) {
@@ -381,14 +442,16 @@ __device__ __forceinline__ void store_c_tile_mn_masked_grouped(
                     int row_a = row + l * 2;
                     int row_b = row + l * 2 + 1;
                     if (m0 + row_a < m_limit) {
-                        dst_ptr[row_a * row_stride + col] =
-                            base_types::convertor<U, T>::convert(
+                        U v0 = base_types::convertor<U, T>::convert(
                                 src.tiles[i][j].data[idx].x);
+                        const uint32_t off0 = (row_a * row_stride + col) * sizeof(U);
+                        llvm_amdgcn_raw_buffer_store_b16(std::bit_cast<uint16_t>(v0), srsrc, off0, 0, 0);
                     }
                     if (m0 + row_b < m_limit) {
-                        dst_ptr[row_b * row_stride + col] =
-                            base_types::convertor<U, T>::convert(
+                        U v1 = base_types::convertor<U, T>::convert(
                                 src.tiles[i][j].data[idx].y);
+                        const uint32_t off1 = (row_b * row_stride + col) * sizeof(U);
+                        llvm_amdgcn_raw_buffer_store_b16(std::bit_cast<uint16_t>(v1), srsrc, off1, 0, 0);
                     }
                 }
             }
