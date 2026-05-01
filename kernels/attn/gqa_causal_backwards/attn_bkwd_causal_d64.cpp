@@ -3196,9 +3196,45 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
   mul(dV_j_T, dV_j_T, dP_SCALE_FACTOR);
   store<1>(g.dKg, dV_j, {batch_idx, 0, kv_head_idx, 0}, {0, j, 0, 0});
 
-  // Write out final dQ_i slice
-  mul_vgpr(dQ_i_T, dQ_i_T, dq_scale_active);
-  dq_atomic_add<2>(g.dQg, dQ_i, {batch_idx, q_head_idx, q_seq_idx * 4 + 3, 0}, warpid_dq, warpid < 2);
+  // Write out final dQ_i slice (warps 0/1 only).
+  //
+  // Background.  For D=64 with NUM_WARPS=4 the dQ register-tile is only
+  // 32 cols wide per warp, so warps 0/2 produce identical dQ slices for
+  // D[0:32] and warps 1/3 for D[32:64].  The kernel keeps all 4 warps
+  // running through the dQ pipeline (mma_AtB into dQ_i_T) for MFMA
+  // pipeline parity with the dK/dV pipeline that genuinely needs all 4
+  // warps; warp 2/3's redundant atomic_add is suppressed at the
+  // buffer_atomic_pk_add_bf16 level via the OOB-drop helper
+  // (`dq_atomic_add(..., warpid_active=warpid<2)` -- see line 58/105
+  // helper definitions).  That keeps the schedule wave-uniform and the
+  // `br` descriptor in SGPRs, avoiding the LLVM AMDGPU
+  // SGPR-to-VGPR-demotion footgun called out in the helper comment.
+  //
+  // This site is the *post-loop* final dQ write at the very end of
+  // `attend_bwd_combined_ker`.  After it the kernel exits, so dQ_i_T
+  // is observably unused for warps 2/3.  Wrapping the
+  // mul_vgpr + dq_atomic_add pair in `if (warpid < 2)` saves warps 2/3
+  // a wave-uniform, end-of-kernel scale + 2*v_cvt_pk_bf16_f32 + 2*
+  // buffer_atomic_pk_add_bf16 (with OOB-drop) sequence that has no
+  // observable effect on dQ correctness and adds only wasted issue
+  // slots.  At 2 CTAs/CU that frees up VALU dispatch for the
+  // co-scheduled CTA's accvgpr_read/mul/store-dKg trio above.
+  //
+  // Critically, this is *only* the post-loop final site.  The 16
+  // in-loop `dq_atomic_add` calls inside the inner-loop body remain
+  // unwrapped: in those positions dQ_i_T's first registers ARE
+  // overwritten by the next mma_AtB, so the v_cvt corruption is
+  // harmless and predicating the in-loop helper would change the
+  // wave-uniform schedule the LLVM scheduler relies on for the dQ
+  // accumulation pipeline.  Pure additive optimization -- BSHD
+  // numerics unchanged (warps 0/1 path is byte identical), no
+  // register-allocation change (the if is wave-uniform on
+  // `warpid<2`, so `br`'s SGPR root is preserved inside the
+  // branch), no sched_barrier or wait_count semantics shift.
+  if (warpid < 2) {
+    mul_vgpr(dQ_i_T, dQ_i_T, dq_scale_active);
+    dq_atomic_add<2>(g.dQg, dQ_i, {batch_idx, q_head_idx, q_seq_idx * 4 + 3, 0}, warpid_dq, true);
+  }
 }
 
 // =====================================================================
@@ -6162,9 +6198,20 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker_sbh
   mul(dV_j_T, dV_j_T, dP_SCALE_FACTOR);
   store<0>(g.dKg, dV_j, {0, batch_idx, kv_head_idx, 0}, {j, 0, 0, 0});
 
-  // Write out final dQ_i slice
-  mul_vgpr(dQ_i_T, dQ_i_T, dq_scale_active);
-  dq_atomic_add<2>(g.dQg, dQ_i, {batch_idx, q_head_idx, q_seq_idx * 4 + 3, 0}, warpid_dq, warpid < 2);
+  // Write out final dQ_i slice (warps 0/1 only).  Mirror BSHD's
+  // post-loop final-dQ-write predication: this kernel is a layout-only
+  // mirror of `attend_bwd_combined_ker` per SKILL §0.3, so the same
+  // warps-2/3-skip-the-final-write rationale applies.  See the BSHD-
+  // side comment above for the full reasoning (dQ_i_T unused after
+  // kernel exit for all warps; warps 2/3's atomic was already OOB-
+  // dropped, so skipping the helper call is observably equivalent
+  // while saving a scale + 2*v_cvt + 2*buffer_atomic per warp 2/3
+  // per CTA).  In-loop dq_atomic_add sites remain unwrapped, same
+  // as BSHD.
+  if (warpid < 2) {
+    mul_vgpr(dQ_i_T, dQ_i_T, dq_scale_active);
+    dq_atomic_add<2>(g.dQg, dQ_i, {batch_idx, q_head_idx, q_seq_idx * 4 + 3, 0}, warpid_dq, true);
+  }
 }
 
 template<int D>
