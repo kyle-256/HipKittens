@@ -4960,9 +4960,19 @@ void dispatch_grouped_rcr(grouped_layout_globals g) {
     const bool lds_k_tail_safe_for_fuse =
         (g.m_per_group >= TAIL_BLOCK_M) &&
         ((g.m_per_group % TAIL_BLOCK_M) == 0);
+    // Round-34-dm: extend FUSED_KTAIL=true selection to K_REM=0 shapes (DSV3,
+    // all K-aligned cases). The in-kernel K-tail branch `if (g.fast_k < g.k)`
+    // is runtime-gated; for K_REM=0 it NEVER executes. But the code's presence
+    // changes LLVM's register allocation: ISA inspection (R34-dm) shows the
+    // FUSED_KTAIL=true template specs have HALF to a THIRD the number of
+    // interleaved scratch_store/mfma pairs in epilog 1 (28 vs 62 for
+    // GateUP spec, 22 vs 44 for Down spec). The difference is a codegen
+    // artifact from the extra `A_row_reg a_kt1;` declaration giving LLVM a
+    // different liveness graph to work with. Numerical output is identical
+    // because the K-tail branch is dead at runtime for K_REM=0.
     const bool fuse_ktail_eligible =
         (g.bpc > 0) && (g.ki > 0) &&
-        (K_rem_for_fuse == 64) &&
+        ((K_rem_for_fuse == 64) || (K_rem_for_fuse == 0)) &&
         lds_k_tail_safe_for_fuse;
 
     if (g.bpc > 0 && g.ki > 0) {
