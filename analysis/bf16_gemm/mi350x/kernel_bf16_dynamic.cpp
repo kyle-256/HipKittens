@@ -4110,8 +4110,30 @@ void dispatch_grouped(grouped_layout_globals g) {
     // be wired. RRR dA falls back to legacy ``grouped_ktail_kernel_lds_rrr``
     // (44 dB SNR; allclose FAIL on outliers but ~12× tighter than path A).
     // See analysis/_notes/round-7-bf16-rrr-path-a-manual-partial-fix.md.
+    // BF16_RRR_FUSE_PROBE — opt-in build flag that adds RRR to
+    // ``fuse_ktail_eligible`` so future rounds can rerun the path-A
+    // numerical probe (`/tmp/probe_bf16_rrr_round29.py`) without
+    // re-flipping the dispatch eligibility. Default 0 keeps production
+    // RCR-only fuse.
+    //
+    // Round 29 used this gate to disprove round-7 H1: the per-warp
+    // offset ``warp_col * 2048`` + per-h_b stride ``h_b * 8`` is
+    // mathematically correct (matches kittens' ``load(reg, st_subtile)``
+    // — verified empirically by USE_KITTENS=0 and USE_KITTENS=1 builds
+    // both giving SNR 19.59 dB on the M=2048 N=2880 K=2880 RRR probe).
+    // The address derivation is NOT the bug; the residual phantom-read
+    // is in cross-warp G::load LDS visibility OR the col_l 4-lane
+    // transpose lane→cell mapping. See
+    // ``analysis/_notes/round-29-bf16-rrr-path-a-address-derivation-confirmed.md``.
+#ifndef BF16_RRR_FUSE_PROBE
+#define BF16_RRR_FUSE_PROBE 0
+#endif
     const bool fuse_ktail_eligible =
-        (L == Layout::RCR) &&
+        ((L == Layout::RCR)
+#if BF16_RRR_FUSE_PROBE
+         || (L == Layout::RRR)
+#endif
+         ) &&
         (g.bpc > 0) && (g.ki >= 2) &&
         (K_rem_for_fuse == K_STEP) && lds_k_tail_safe_for_fuse;
 
