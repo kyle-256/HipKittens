@@ -210,6 +210,87 @@ void dispatch_prep(attn_prep_globals<D> g) {
     attend_prep_ker<D><<<g.grid(), g.block(), 0, g.stream>>>(g);
 }
 
+// =====================================================================
+// SBHD-layout sibling globals + kernel + dispatcher for the prep stage.
+// O / dO are (S, B, H, D) instead of (B, S, H, D); the underlying
+// gl<bf16, -1, -1, -1, -1> has no stride field (see include/types/global/
+// gl.cuh, line 72: raw_ptr[((b*depth() + d)*rows() + r)*cols() + c]),
+// so we re-interpret the same contiguous storage by treating gl dim 0 as
+// S (the sequence axis) and gl dim 1 as B.  delta is unchanged across
+// layouts: the harness allocates it as BHND-style (B, H, 1, N) and the
+// bwd combined kernel always indexes delta by (b, h, 1, q) regardless
+// of input layout, so the prep store coord stays {batch, head, 0, q}.
+//
+// The kernel body for SBHD is a mechanical mirror of `attend_prep_ker`:
+//   (a) the load template-arg axis goes 1 -> 0 for dO/O (sequence axis
+//       moves from gl dim 1 to gl dim 0);
+//   (b) the dO/O coord swaps its first two slots
+//       ({batch, n_tile, head, 0} -> {n_tile, batch, head, 0}).
+// The compute (mul + row_sum) and the delta store are identical.  Same
+// LDS allocation (none) and same launch_bounds(NUM_THREADS, 2) so the
+// SBHD kernel inherits the same per-call attribute setup as BSHD.
+//
+// Round B (commit only adds the new symbols; the metric is not yet
+// routed through them) per .claude/skills/d64-attn-optimization/
+// SKILL.md §0.3 / §0.5 -- BSHD codegen for attn_prep_globals<D> /
+// attend_prep_ker<D> / dispatch_prep<D> is bitwise unchanged.
+// =====================================================================
+template<int D> struct attn_prep_globals_sbhd {
+    gl<bf16, -1, -1, -1, -1> Og;
+    gl<bf16, -1, -1, -1, -1> dOg;
+    gl<float, -1, -1, -1, -1> delta;
+    hipStream_t stream;
+    // For SBHD inputs Og is (N, B, H, D), so .batch()=N (gl dim 0,
+    // outer-most stride) and .depth()=B (gl dim 1).  The grid is
+    // logically the same as BSHD: (B, H, N-warp-blocks).
+    dim3 grid() {
+        const int n_runtime = Og.batch();
+        const int b_runtime = Og.depth();
+        return dim3(b_runtime, ATTN_H, n_runtime / (DOT_SLICE_QO * NUM_WARPS));
+    }
+    dim3 block() { return dim3(NUM_THREADS); }
+    // Same rationale as attn_prep_globals -- prep is HBM->register->HBM
+    // and never touches LDS.  Setting smem=0 lets CDNA4 schedule
+    // 2 CTAs/CU.
+    size_t dynamic_shared_memory() { return 0; }
+};
+
+template<int D> __launch_bounds__(NUM_THREADS, 2)
+__global__ void attend_prep_ker_sbhd(const attn_prep_globals_sbhd<D> g) {
+
+    const int batch_idx = blockIdx.x;
+    const int head_idx = blockIdx.y;
+    const int seq_idx = blockIdx.z;
+
+    const int warpid = kittens::warpid();
+
+    qo_tile<D, bf16, row_l, rt_16x32_s> dO, O;
+    qo_tile<D, float, row_l, rt_16x32_s> dO_float, O_float;
+    typename qo_tile<D, float, row_l, rt_16x32_s>::col_vec delta_vec;
+
+    // SBHD: sequence axis is gl dim 0 (load axis 1 -> 0); coord's
+    // first two slots swap (n_tile <-> batch).
+    load<0>(dO, g.dOg, {seq_idx * NUM_WARPS + warpid, batch_idx, head_idx, 0});
+    load<0>(O,  g.Og,  {seq_idx * NUM_WARPS + warpid, batch_idx, head_idx, 0});
+    copy(O_float, O);
+    copy(dO_float, dO);
+
+    // Δ_i = row_sum(dO ⊙ O) -- identical compute to BSHD.
+    mul(dO_float, dO_float, O_float);
+    row_sum(delta_vec, dO_float);
+    // delta is BHND-style (B, H, 1, N) for both layouts -- coord
+    // unchanged from BSHD.
+    store(g.delta, delta_vec, {batch_idx, head_idx, 0, seq_idx * NUM_WARPS + warpid});
+}
+
+template<int D>
+void dispatch_prep_sbhd(attn_prep_globals_sbhd<D> g) {
+    // Mirrors `dispatch_prep<D>`: no hipFuncSetAttribute (smem=0), no
+    // internal hipDeviceSynchronize -- the next dispatch (bwd combined
+    // SBHD, Round C) will serialise on the same default stream.
+    attend_prep_ker_sbhd<D><<<g.grid(), g.block(), 0, g.stream>>>(g);
+}
+
 template<int D> struct attn_dq_shuffle_globals { 
     gl<bf16, -1, -1, -1, -1> dQg_in, dQg_out;
     hipStream_t stream;
@@ -250,6 +331,74 @@ void dispatch_dq_shuffle(attn_dq_shuffle_globals<D> g) {
     attend_dq_shuffle_ker<D><<<g.grid(), g.block(), 0, g.stream>>>(g);
 }
 
+// =====================================================================
+// SBHD-layout sibling globals + kernel + dispatcher for the dq_shuffle
+// post-pass.  The bwd combined kernel (BSHD or SBHD) writes its dQ
+// output into a BHND staging buffer dQ_in = (B, H, N, D) -- this layout
+// keeps neighbouring q_seq rows tight in HBM (row_stride = D), giving
+// the per-CTA buffer_atomic_pk_add_bf16 sequence good cache locality.
+// We deliberately keep dQ_in BHND-shaped under SBHD too (instead of an
+// HSBD analogue) so the bwd combined SBHD kernel inherits the same dQ
+// atomic-add pattern as BSHD without any change to dq_atomic_add /
+// utils.cpp.
+//
+// What changes for SBHD is the OUTPUT shape: dQ_out is (S, B, H, D).
+// The kernel body is a one-coord-swap mirror of `attend_dq_shuffle_ker`:
+//   (a) the dQg_in read is unchanged (load_shuffled<2> on BHND);
+//   (b) the dQg_out store axis goes 1 -> 0 (sequence is gl dim 0 in
+//       SBHD), and the coord's first two slots swap
+//       ({batch, n_tile, head, 0} -> {n_tile, batch, head, 0}).
+//
+// Round B (commit only adds the new symbols; the metric is not yet
+// routed through them) per .claude/skills/d64-attn-optimization/
+// SKILL.md §0.3 / §0.5 -- BSHD codegen for attn_dq_shuffle_globals<D>
+// / attend_dq_shuffle_ker<D> / dispatch_dq_shuffle<D> is bitwise
+// unchanged.
+// =====================================================================
+template<int D> struct attn_dq_shuffle_globals_sbhd {
+    gl<bf16, -1, -1, -1, -1> dQg_in;   // BHND = (B, H, N, D), unchanged
+    gl<bf16, -1, -1, -1, -1> dQg_out;  // SBHD = (S, B, H, D)
+    hipStream_t stream;
+    // dQg_in is BHND, so .batch()=B and .rows()=N; we drive the grid
+    // off it directly and the resulting (B, H, N-warp-blocks) layout
+    // is identical to BSHD.  This avoids reading dQg_out's batch
+    // (which under SBHD is N, gl dim 0) for grid sizing.
+    dim3 grid() {
+        const int b_runtime = dQg_in.batch();
+        const int n_runtime = dQg_in.rows();
+        return dim3(b_runtime, ATTN_H, n_runtime / (DOT_SLICE_QO * NUM_WARPS));
+    }
+    dim3 block() { return dim3(NUM_THREADS); }
+    // Same rationale as attn_dq_shuffle_globals -- pure HBM transpose,
+    // no LDS.
+    size_t dynamic_shared_memory() { return 0; }
+};
+
+template<int D> __launch_bounds__(NUM_THREADS, 2)
+__global__ void attend_dq_shuffle_ker_sbhd(const attn_dq_shuffle_globals_sbhd<D> g) {
+
+    const int batch_idx = blockIdx.x;
+    const int q_head_idx = blockIdx.y;
+    const int seq_idx = blockIdx.z;
+
+    const int warpid = kittens::warpid();
+
+    qo_tile<D, bf16, row_l, rt_16x32_s> dQg;
+
+    // Read from BHND staging buffer -- identical to BSHD (axis=2 is N).
+    load_shuffled<2>(dQg, g.dQg_in, {batch_idx, q_head_idx, seq_idx * NUM_WARPS + warpid, 0});
+    // Write to SBHD output: sequence is gl dim 0 (axis=0); coord's
+    // first two slots swap (n_tile <-> batch); head stays at gl dim 2.
+    store_shuffled<0>(g.dQg_out, dQg, {seq_idx * NUM_WARPS + warpid, batch_idx, q_head_idx, 0});
+}
+
+template<int D>
+void dispatch_dq_shuffle_sbhd(attn_dq_shuffle_globals_sbhd<D> g) {
+    // Mirrors `dispatch_dq_shuffle<D>`: smem=0 so no per-call
+    // hipFuncSetAttribute and no internal hipDeviceSynchronize.
+    attend_dq_shuffle_ker_sbhd<D><<<g.grid(), g.block(), 0, g.stream>>>(g);
+}
+
 PYBIND11_MODULE(tk_kernel_bkwd_prep_d64, m) {
     m.doc() = "tk_kernel python module";
 
@@ -262,5 +411,22 @@ PYBIND11_MODULE(tk_kernel_bkwd_prep_d64, m) {
     py::bind_function<dispatch_dq_shuffle<ATTN_D>>(m, "dispatch_dq_shuffle", 
         &attn_dq_shuffle_globals<ATTN_D>::dQg_in,
         &attn_dq_shuffle_globals<ATTN_D>::dQg_out
+    );
+
+    // SBHD sibling entries.  Same Og/dOg/delta and dQg_in/dQg_out
+    // surface as BSHD; the kernels internally interpret gl dim 0 as
+    // the sequence axis (S) and gl dim 1 as the batch axis (B).
+    // delta and dQg_in stay BHND in both layouts.  Not yet wired into
+    // the metric; will be routed in Round D once the bwd combined
+    // SBHD entry (Round C) also exists.
+    py::bind_function<dispatch_prep_sbhd<ATTN_D>>(m, "dispatch_prep_sbhd",
+        &attn_prep_globals_sbhd<ATTN_D>::Og,
+        &attn_prep_globals_sbhd<ATTN_D>::dOg,
+        &attn_prep_globals_sbhd<ATTN_D>::delta
+    );
+
+    py::bind_function<dispatch_dq_shuffle_sbhd<ATTN_D>>(m, "dispatch_dq_shuffle_sbhd",
+        &attn_dq_shuffle_globals_sbhd<ATTN_D>::dQg_in,
+        &attn_dq_shuffle_globals_sbhd<ATTN_D>::dQg_out
     );
 }
