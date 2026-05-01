@@ -2551,9 +2551,22 @@ void grouped_rcr_kernel(const grouped_layout_globals g) {
             store(g.c, cD, {0, 0, r1, c1});
         }
 
-        // [grouped] Drain in-flight ops before the next persistent iteration
-        // so the next tile's prologue starts from a clean state.
-        asm volatile("s_waitcnt vmcnt(0) lgkmcnt(0)");
+        // Round-50-dm probe: drain only LDS (lgkmcnt) at end of tile;
+        // skip vmcnt(0). C-store HBM writes (~32 buffer_store_b16 pending)
+        // do NOT alias with next tile's HBM loads (g.a / g.b reads of a
+        // different (br, bc) cell), so the next tile's prologue can issue
+        // its 16 buffer_loads in parallel with C-store drain. The
+        // prologue's own ``TK_WAIT_VMCNT(RCR_INIT0_VMCNT=4)`` enforces the
+        // sync it needs (prologue waits for ≤4 outstanding before mfma);
+        // since vmcnt is shared across loads + stores, that wait will
+        // also drain the C-store stragglers if they outlive the load
+        // issue path. Keep lgkmcnt(0) to ensure main-loop LDS writes
+        // retire before next tile's prologue overwrites the same slab.
+        // Estimated: ~150 cy/tile saved (overlap of ~30 cy search +
+        // prologue issue with ~150 cy store drain). On gpt_oss-GateUP-
+        // B32-M4096 with ~368 tiles/CU, that's ~55K cy = ~27 us = ~1 %
+        // wall-time saving, expected ~+1-2 pp on grp_FP8 ratio.
+        asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
     }
 }
