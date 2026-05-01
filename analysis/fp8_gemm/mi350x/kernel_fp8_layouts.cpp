@@ -2470,11 +2470,16 @@ void grouped_rcr_kernel(const grouped_layout_globals g) {
         }
 
         // Apply scale + store with m_subtile_C row shift.
+        // Round-44-dm-probe-A: interleave mul + store per accumulator
+        // (was: 4× mul, then 4× store). rocprof showed gpt_oss spec
+        // <0,true,true> uses 228 B/thread scratch vs 148 B/thread for
+        // dsv3_g spec <0,false,true> — the +80 B is N_MASKED helper's
+        // live state. Hypothesis: serialising mul→store→next-mul lets
+        // LLVM free cA/cB/cC/cD's accumulator VGPR slots progressively,
+        // giving the masked-store helper room to spill into vacated
+        // slots instead of HBM scratch. Targets the actual bottleneck
+        // (scratch I/O REQUEST rate, not allocation count).
         const float combined_scale = resolve_combined_scale_grp(g);
-        mul(cA, cA, combined_scale);
-        mul(cB, cB, combined_scale);
-        mul(cC, cC, combined_scale);
-        mul(cD, cD, combined_scale);
 
         if (wm == 0) __builtin_amdgcn_s_barrier();
         // Round-12: mirror BF16 grouped's column-masked C store. With
@@ -2517,20 +2522,32 @@ void grouped_rcr_kernel(const grouped_layout_globals g) {
         const int c1 = bc*WARPS_N*2+WARPS_N+wn;
         if constexpr (N_MASKED_STORE) {
             if ((bc + 1) * BLOCK_SIZE <= g.n) {
+                mul(cA, cA, combined_scale);
                 store(g.c, cA, {0, 0, r0, c0});
+                mul(cB, cB, combined_scale);
                 store(g.c, cB, {0, 0, r0, c1});
+                mul(cC, cC, combined_scale);
                 store(g.c, cC, {0, 0, r1, c0});
+                mul(cD, cD, combined_scale);
                 store(g.c, cD, {0, 0, r1, c1});
             } else {
+                mul(cA, cA, combined_scale);
                 store_c_tile_n_masked(g.c, cA, r0, c0, g.n);
+                mul(cB, cB, combined_scale);
                 store_c_tile_n_masked(g.c, cB, r0, c1, g.n);
+                mul(cC, cC, combined_scale);
                 store_c_tile_n_masked(g.c, cC, r1, c0, g.n);
+                mul(cD, cD, combined_scale);
                 store_c_tile_n_masked(g.c, cD, r1, c1, g.n);
             }
         } else {
+            mul(cA, cA, combined_scale);
             store(g.c, cA, {0, 0, r0, c0});
+            mul(cB, cB, combined_scale);
             store(g.c, cB, {0, 0, r0, c1});
+            mul(cC, cC, combined_scale);
             store(g.c, cC, {0, 0, r1, c0});
+            mul(cD, cD, combined_scale);
             store(g.c, cD, {0, 0, r1, c1});
         }
 
