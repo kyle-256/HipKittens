@@ -93,12 +93,23 @@ __device__ inline static void dq_atomic_add(const GL &dst, const RT &src, const 
     // byte_offset. byte_offset is a VGPR ("v" constraint), so this never
     // demotes the SGPR descriptor `br`. HW drops the buffer_atomic when
     // byte_offset >= buffer_size.
+    //
+    // The two buffer_atomics target the same per-lane base byte address
+    // (`byte_offset`); only the destination GPR and the +128 bf16-element
+    // (= +256-byte) HBM offset differ.  Routing the +256 through the
+    // 12-bit immediate `offset:%4` field of buffer_atomic_pk_add_bf16
+    // (rather than materializing `byte_offset_1 = byte_offset_0 + 256`
+    // in a separate VGPR via `v_add_u32`) saves one VALU slot per
+    // dq_atomic_add call -- the i_offset is added at issue time by
+    // the addressing path and is free.  OOB semantics for inactive
+    // warps are unchanged: i_offset+v_offset+s_offset still exceeds
+    // buffer_size when `oob_offset` includes 0x80000000.  Pure
+    // additive simplification, no numerics change.
     const uint32_t oob_offset = warpid_active ? 0u : 0x80000000u;
-    const uint32_t byte_offset_0 = static_cast<uint32_t>((tile_offset + lane_offset) * sizeof(U)) + oob_offset;
-    const uint32_t byte_offset_1 = static_cast<uint32_t>((tile_offset + lane_offset + 128) * sizeof(U)) + oob_offset;
+    const uint32_t byte_offset = static_cast<uint32_t>((tile_offset + lane_offset) * sizeof(U)) + oob_offset;
 
-    macros::buffer_atomic_pk_add_bf16<GPR_0_BF16>(br, byte_offset_0);
-    macros::buffer_atomic_pk_add_bf16<GPR_1_BF16>(br, byte_offset_1);
+    macros::buffer_atomic_pk_add_bf16<GPR_0_BF16>(br, byte_offset, 0, 0);
+    macros::buffer_atomic_pk_add_bf16<GPR_1_BF16>(br, byte_offset, 0, 256);
 }
 
 template<int axis, ducks::art::all RT, ducks::gl::all GL, ducks::coord::tile COORD=coord<RT>>
@@ -134,11 +145,15 @@ __device__ inline static void dq_atomic_add(const GL &dst, const RT &src, const 
         macros::v_cvt_pk_bf16_f32<GPR_0_BF16, range_type::lo, range_type::lo + 1>();
         macros::v_cvt_pk_bf16_f32<GPR_1_BF16, range_type::lo + 2, range_type::lo + 3>();
 
-        const uint32_t byte_offset_0 = static_cast<uint32_t>((tile_offset + lane_offset) * sizeof(U)) + oob_offset;
-        const uint32_t byte_offset_1 = static_cast<uint32_t>((tile_offset + lane_offset + 128) * sizeof(U)) + oob_offset;
-
-        macros::buffer_atomic_pk_add_bf16<GPR_0_BF16>(br, byte_offset_0);
-        macros::buffer_atomic_pk_add_bf16<GPR_1_BF16>(br, byte_offset_1);
+        // Same i_offset trick as the 3-template-arg sibling above: the
+        // +256 delta between the two atomics goes through the 12-bit
+        // immediate `offset:%4` instead of a v_add_u32.  This variadic
+        // helper is only called from the post-loop final dQ writeback
+        // (warpid<2 wrapped) so cycle savings here are tiny -- mainly
+        // kept in lock-step semantically with the in-loop sibling above.
+        const uint32_t byte_offset = static_cast<uint32_t>((tile_offset + lane_offset) * sizeof(U)) + oob_offset;
+        macros::buffer_atomic_pk_add_bf16<GPR_0_BF16>(br, byte_offset, 0, 0);
+        macros::buffer_atomic_pk_add_bf16<GPR_1_BF16>(br, byte_offset, 0, 256);
     };
 
     [&]<std::size_t... Ns>(std::index_sequence<Ns...>) {
