@@ -696,16 +696,30 @@ __global__ void attend_ker(const attn_globals<D> g) {
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
 
-    // Cluster 11:
-    //      Load V5 into registers
+    // Cluster 11+12 fused:
+    //      Load V5 into registers, drain ds_read with lgkmcnt(0), then
+    //      run cluster 12's A5V5 mma + final divide.  The cluster 11
+    //      `s_barrier` previously here was wave-collective sync of the
+    //      single ds_read at line `load(v_reg, v_smem[1])`, but the
+    //      `s_waitcnt lgkmcnt(0)` already enforces per-wave register
+    //      readiness for v_reg, and the next `s_barrier` (at the end of
+    //      cluster 12) re-syncs all waves before the conclusion's
+    //      stagger phase.  So the cluster 11 boundary `s_barrier` was
+    //      one redundant wave-collective sync per kernel exit -- pure
+    //      one-instruction-saving cleanup.  All other fwd s_barriers
+    //      remain unchanged; the staggered s_barrier counts on each
+    //      stagger-group path still match (one s_barrier dropped
+    //      symmetrically from both stagger=0 and stagger=1 paths
+    //      because the dropped s_barrier sat outside the stagger-
+    //      conditional branches).  The two `sched_barrier(0)` hints
+    //      are kept so LLVM still cannot speculate cluster 12 mma
+    //      ahead of the wait or interleave the conclusion's transpose
+    //      ahead of the cluster 12 s_barrier.  Mirrored to the SBHD
+    //      sibling kernel below.  Pure additive simplification --
+    //      no numerics change, no observable wait-condition shift.
     load(v_reg, v_smem[1]);
     asm volatile("s_waitcnt lgkmcnt(0)");
     __builtin_amdgcn_sched_barrier(0);
-    __builtin_amdgcn_s_barrier();
-    __builtin_amdgcn_sched_barrier(0);
-
-    // Cluster 12:
-    //      A5V5
     mma_AtB(o_reg, v_reg, att_block_bf16_in, o_reg);
     div_col(o_reg, o_reg, norm_vec);
     __builtin_amdgcn_sched_barrier(0);
@@ -1121,14 +1135,13 @@ __global__ void attend_ker_sbhd(const attn_globals_sbhd<D> g) {
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
 
-    // Cluster 11:  V[max_num_tiles-1] into registers
+    // Cluster 11+12 fused:  V[max_num_tiles-1] load + A5V5 + divide.
+    // Mirror of the BSHD sibling above; same cluster 11 -> 12 fusion.
+    // See `attend_ker`'s comment for the full rationale.  Pure
+    // additive simplification -- no numerics change.
     load(v_reg, v_smem[1]);
     asm volatile("s_waitcnt lgkmcnt(0)");
     __builtin_amdgcn_sched_barrier(0);
-    __builtin_amdgcn_s_barrier();
-    __builtin_amdgcn_sched_barrier(0);
-
-    // Cluster 12:  A5V5 + final divide
     mma_AtB(o_reg, v_reg, att_block_bf16_in, o_reg);
     div_col(o_reg, o_reg, norm_vec);
     __builtin_amdgcn_sched_barrier(0);
