@@ -98,6 +98,16 @@ using st_16x128_v2_s = ducks::st_shape::st_16x128_v2;
 using st_16x128_v2a_s = ducks::st_shape::st_16x128_v2a;
 using st_16x128_v3_s = ducks::st_shape::st_16x128_v3;
 using st_64x32_padded_b128_s = ducks::st_shape::st_64x32_padded_b128;
+// Lever D Round-B step 1 (auto-optimize R37 / dm-R64):
+// Public alias for the 32x64 FP8 shared-memory tile layout used by the
+// prospective 32x32x64 MFMA cell-shape migration. The underlying
+// ``st_32x64`` struct is defined in ``st_shape.cuh`` with identity
+// swizzle for infrastructure validation; R38+ will either refine the
+// swizzle in place or spawn peer variants (``st_32x64_v2`` etc.)
+// once the bank-conflict-free layout is derived from the mfma_323264
+// input lane map. Pairs with ``rt_32x64_s`` / ``rt_64x32_s`` register
+// tile aliases above.
+using st_32x64_s = ducks::st_shape::st_32x64;
 using st_128x16_s = ducks::st_shape::st_128x16;
 
 }

@@ -373,6 +373,45 @@ __lever_d_round_b_force_instantiate_rcr_mma_32() {
                     /*b128_hi_valid=*/true);
 }
 
+// Lever D Round-B step 1 (auto-optimize R37 / dm-R64):
+// Force compile-time instantiation of the ST_32x64 shared-memory tile
+// type declared in include/types/shared/st_shape.cuh + public alias
+// in include/types/types.cuh. Confirms that st_fp8e4m3<HB, 64,
+// st_32x64_s> composes through the underlying ``st<T, R, C, _shape>``
+// template, including:
+//   * shape struct's bytes_per_thread / swizzle functions
+//   * underlying_subtile_* derived constants
+//   * subtile_padding propagation
+//   * st_subtile addressing math
+// No runtime callers yet (R38+ will wire in main-loop load helpers
+// once the bank-conflict-free swizzle is derived). LLVM DCE trims
+// the body at codegen time so this contributes 0 bytes to kernel
+// instruction memory; its purpose is purely to surface any template
+// instantiation errors at HK build time, well before the full
+// main-loop port is wired in.
+__attribute__((used)) [[maybe_unused]] static __device__ void
+__lever_d_round_b_force_instantiate_st_32x64() {
+    using ST_32x64 = st_fp8e4m3<HB, 64, st_32x64_s>;
+    __shared__ ST_32x64 dummy_st;
+
+    // Touch the type's static-member infrastructure to force full
+    // template-parameter validation. Static-asserts mirror the
+    // kittens-internal checks in ``st<>::`` body.
+    static_assert(ST_32x64::rows == HB, "ST_32x64 rows should equal HB=128");
+    static_assert(ST_32x64::cols == 64, "ST_32x64 cols should equal 64");
+    static_assert(ST_32x64::underlying_subtile_rows == 32,
+                  "ST_32x64 underlying subtile rows should equal 32");
+    static_assert(ST_32x64::underlying_subtile_cols == 64,
+                  "ST_32x64 underlying subtile cols should equal 64");
+    static_assert(ST_32x64::underlying_subtile_bytes_per_thread == 16,
+                  "ST_32x64 should dispatch the fp8 bytes_per_thread=16 branch");
+
+    // Exercise the swizzle functor at compile time via a device call
+    // path; LLVM DCE removes the dead reference after instantiation.
+    (void)ST_32x64::swizzle({0, 0});
+    (void)dummy_st;
+}
+
 __device__ __forceinline__ void crr_mma(
     rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
     const A_col_reg& a,

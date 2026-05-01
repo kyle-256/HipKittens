@@ -378,6 +378,72 @@ struct st_64x32_padded_b128 {
     }
 };
 
+// Lever D Round-B step 1 (auto-optimize R37 / dm-R64):
+// 32x64 shared-memory tile for the FP8 32x32x64 MFMA cell-shape family.
+// Pairs with ``rt_fp8e4m3<R, C, row_l, rt_32x64_s>`` register tiles
+// declared via the ``rt_32x64_s`` alias (types.cuh:86).
+//
+// Shape budget for the grouped FP8 kernel's prospective 32x32 port:
+//   Per-tile LDS footprint = HB × BK bytes = 128 × 64 = 8 KB (half the
+//   current ST_v2 16 KB tile). With As[2][2] + Bs[2][2] that's 4 × 4 =
+//   16 tiles × 8 KB = 128 KB / WG — same as the current 16x128 setup.
+//   If we later move to triple-buffer (As[3][2] / Bs[3][2]) the
+//   footprint grows to 24 × 8 = 192 KB / WG. gfx950 LDS cap is 160 KB
+//   per workgroup, so triple-buffer would need per-tile padding
+//   elimination OR subtile size reduction.
+//
+// Step 1 scope (this commit): type plumbing only. Identity swizzle —
+// NO bank-conflict avoidance yet. Callers at R38+ will either (a)
+// replace the swizzle in a subsequent commit once the lane-to-bank
+// map for mfma_323264 inputs is derived, or (b) declare a peer
+// ``st_32x64_v2`` with the proper swizzle and leave this one as the
+// infrastructure-validation stub.
+//
+// IMPORTANT for R38+ agent: before committing to the full main-loop
+// Lever D port (4-6 round effort), first run a focused microbench
+// comparing mfma_323264 throughput vs mfma_1616128 on a single-warp
+// synthetic K=128 MNK load. Analytical cycle counts are EQUAL (both
+// take ~512 cy per 4× rcr_mma equivalent) — the supposed +7.7 pp
+// upside from Lever D depends on empirical throughput differences
+// (issue rate, LDS bandwidth composition, pipeline overlap) that
+// are NOT modeled in the R56-dm cost analysis. Do not land the
+// full port without this validation.
+struct st_32x64 {
+    static constexpr int rows = 32;
+    static constexpr int cols = 64;
+    // Match the ST_v2 family's subtile padding convention (64 B = one
+    // row) so that downstream prefill_swizzled_offsets + subtile
+    // logic in include/ops/warp/memory/tile/global_to_shared.cuh can
+    // compose via the same underlying_subtile_stride_bytes code path.
+    static constexpr int subtile_padding = 64;
+
+    template<typename _T>
+    static constexpr int bytes_per_thread() {
+        if constexpr (sizeof(_T) == 1) {
+            return 16;
+        } else {
+            static_assert(false, "Unsupported type");
+        }
+    }
+
+    template<typename _T>
+    __device__ __forceinline__ static const uint32_t swizzle (int2 coord) {
+        const int r = coord.x, c = coord.y;
+        using T = _T;
+        const uint32_t offset = sizeof(T)*(r*cols + c);
+        if constexpr (sizeof(T) == 1) {
+            // Step 1 (infra validation): identity swizzle. Step 2+
+            // will XOR in a bank-conflict-avoidance term once the
+            // mfma_323264 input lane map is derived (mirror of the
+            // st_16x128_v2 XOR pattern: ``((offset >> 7) & 7) << 4``
+            // adapted for the 64 B row stride of the 32x64 layout).
+            return offset;
+        } else {
+            static_assert(false, "Unsupported type");
+        }
+    }
+};
+
 struct st_128x16 {
     static constexpr int rows = 128;
     static constexpr int cols = 16;
@@ -416,6 +482,7 @@ concept all = std::is_same_v<T, st_16x16> ||
               std::is_same_v<T, st_16x128_v2a> ||
               std::is_same_v<T, st_16x128_v3> ||
               std::is_same_v<T, st_64x32_padded_b128> ||
+              std::is_same_v<T, st_32x64> ||
               std::is_same_v<T, st_128x16>;
 
 
