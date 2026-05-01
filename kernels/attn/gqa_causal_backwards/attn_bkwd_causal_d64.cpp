@@ -3185,24 +3185,31 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
   }
 
   store<1>(g.dVg, dV_j, {batch_idx, 0, kv_head_idx, 0}, {0, j, 0, 0});
-  __builtin_amdgcn_s_waitcnt(0);
-  // Mirror the prologue canonicalization from commit 1ea76fc5: pin
-  // `sched_barrier(0)` BETWEEN s_waitcnt(0) and s_barrier() so the
-  // LLVM post-RA scheduler cannot slide the epilogue's
-  // `accvgpr_read(dV_j_T, dK_j_T) / mul / store dKg / mul_vgpr /
-  // dq_atomic_add` past the explicit drain.  Before this hint, the
-  // post-loop epilogue was the lone remaining outlier (matching the
-  // prologue's pre-fix layout) where the wait + barrier pair had no
-  // sched_barrier pin between them — every other one of the kernel's
-  // 38 wait/barrier sites already follows the canonical
-  // `wait; sched_barrier(0); s_barrier;` ordering.  Keeps the
-  // wave-collective drain semantically tight to the trailing `store
-  // dVg` HBM commit and stops LLVM from hoisting the
-  // accvgpr_read/mul/store-dKg trio across the drain (which would
-  // overlap them with the dVg HBM commit's vmcnt timeline that the
-  // wait(0) is meant to bound).  Pure scheduling hint — no
-  // instruction emitted, no numerics change, lgkmcnt/vmcnt semantics
-  // unchanged.
+  // Drop lgkmcnt(0) from the previously-full `s_waitcnt(0)` -- only
+  // vmcnt needs to be drained here.  The drain's job is to bound the
+  // dVg HBM commit's vmcnt timeline so the immediately-following
+  // `accvgpr_read(dV_j_T, dK_j_T)` (line ~3210) can safely overwrite
+  // v[128:191] (the dV_j vgpr range that the dVg store reads as its
+  // source); only vmcnt(0) is required for that source-register
+  // capture / register-reuse semantics.  lgkmcnt is ALREADY <=2 by
+  // the inner-loop tail wait at line 3183 (`s_waitcnt lgkmcnt(2)`),
+  // and nothing in the post-loop epilogue touches LDS:
+  //   * accvgpr_read reads AGPRs (HW scoreboard, no waitcnt),
+  //   * `mul(dV_j_T, dV_j_T, dP_SCALE_FACTOR)` is pure VALU
+  //     (`v_pk_mul_f32`, no ds_read/s_load),
+  //   * `store<1>(g.dKg, dV_j, ...)` is HBM (vmcnt only),
+  //   * `mul_vgpr(dQ_i_T, ..., dq_scale_active)` is pure VALU,
+  //   * `dq_atomic_add<2>(g.dQg, dQ_i, ...)` is HBM (vmcnt only).
+  // Any pending lgkmcnt operations from the inner loop's tail (at
+  // most 2) therefore complete in the background -- the kernel exits
+  // before they can affect anything observable, and CDNA4 drains all
+  // counters at kernel exit.  Switching from wait(0) to vmcnt(0)
+  // also keeps the sched_barrier(0)/s_barrier ordering hint from
+  // commit ba60437a intact (the barrier still pins the post-loop
+  // trio behind the explicit drain) -- the relaxation only affects
+  // which counter the drain bounds, not whether the schedule respects
+  // the boundary.  Mirrored to the SBHD sibling at line ~6190.
+  asm volatile("s_waitcnt vmcnt(0)");
   __builtin_amdgcn_sched_barrier(0);
   __builtin_amdgcn_s_barrier();
 
@@ -6187,24 +6194,18 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker_sbh
   }
 
   store<0>(g.dVg, dV_j, {0, batch_idx, kv_head_idx, 0}, {j, 0, 0, 0});
-  __builtin_amdgcn_s_waitcnt(0);
-  // Mirror the prologue canonicalization from commit 1ea76fc5: pin
-  // `sched_barrier(0)` BETWEEN s_waitcnt(0) and s_barrier() so the
-  // LLVM post-RA scheduler cannot slide the epilogue's
-  // `accvgpr_read(dV_j_T, dK_j_T) / mul / store dKg / mul_vgpr /
-  // dq_atomic_add` past the explicit drain.  Before this hint, the
-  // post-loop epilogue was the lone remaining outlier (matching the
-  // prologue's pre-fix layout) where the wait + barrier pair had no
-  // sched_barrier pin between them — every other one of the kernel's
-  // 38 wait/barrier sites already follows the canonical
-  // `wait; sched_barrier(0); s_barrier;` ordering.  Keeps the
-  // wave-collective drain semantically tight to the trailing `store
-  // dVg` HBM commit and stops LLVM from hoisting the
-  // accvgpr_read/mul/store-dKg trio across the drain (which would
-  // overlap them with the dVg HBM commit's vmcnt timeline that the
-  // wait(0) is meant to bound).  Pure scheduling hint — no
-  // instruction emitted, no numerics change, lgkmcnt/vmcnt semantics
-  // unchanged.
+  // Drop lgkmcnt(0) from the previously-full `s_waitcnt(0)`.  Mirrors
+  // the BSHD-side relaxation -- this kernel is a layout-only mirror
+  // of `attend_bwd_combined_ker` per SKILL §0.3 so the same analysis
+  // applies: only vmcnt(0) is required for the
+  // `accvgpr_read(dV_j_T, dK_j_T)` register-reuse semantics, and
+  // nothing in the post-loop epilogue (accvgpr_read / mul / store
+  // dKg / mul_vgpr / dq_atomic_add) touches LDS.  lgkmcnt is already
+  // <=2 from the inner-loop tail wait at line 6185
+  // (`s_waitcnt lgkmcnt(2)`) and pending LDS ops complete in the
+  // background; CDNA4 drains all counters at kernel exit.  See the
+  // BSHD-side comment near line 3188 for the full detailed reasoning.
+  asm volatile("s_waitcnt vmcnt(0)");
   __builtin_amdgcn_sched_barrier(0);
   __builtin_amdgcn_s_barrier();
 
