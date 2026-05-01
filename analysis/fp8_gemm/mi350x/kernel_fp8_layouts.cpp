@@ -240,6 +240,42 @@ __device__ __forceinline__ void rcr_mma(
     mma_ABt(acc, a, b, acc);
 }
 
+// Round-26-dm (auto-optimize R31 / Lever D Round-B step 2):
+// Lever D 32x32x64 K-tail rcr_mma wrapper. Calls ``mma_ABt`` →
+// dispatches to ``mma_ABt_base`` 32x32x64 fp8 branch (mma.cuh:234-238)
+// → ``mfma323264`` intrinsic. The dispatch is selected at compile time
+// by the (D::shape, A::shape, B::shape) tuple = (rt_32x32, rt_32x64,
+// rt_32x64). No callers yet — wired in R32+ when the K-tail block
+// migrates from 16x16x128 to 32x32x64 cell shape.
+//
+// Why ``rt_32x64`` for B and not ``rt_64x32_s`` (added in HK c2abba21):
+// in the RCR layout (A row × B row → mfma_ABt computing A·Bᵀ), the B
+// operand is the SAME shape as A from the mfma's perspective — both
+// 32×64 — because mfma_323264 takes B as 32-row × 64-K and the
+// transpose is implicit in the ABt accumulation pattern. The
+// ``rt_64x32_s`` alias is for CRR/CCR layouts (B col-major), not RCR.
+__device__ __forceinline__ void rcr_mma_32(
+    rt_fl<RBM, RBN, col_l, rt_32x32_s>& acc,
+    const rt_fp8e4m3<RBM, 64, row_l, rt_32x64_s>& a,
+    const rt_fp8e4m3<RBN, 64, row_l, rt_32x64_s>& b)
+{
+    mma_ABt(acc, a, b, acc);
+}
+
+// Force compile-time instantiation / type-check of the rcr_mma_32
+// dispatch. ``__attribute__((used))`` keeps the symbol around so
+// the build will fully type-check the ``mma_ABt`` call inside.
+// ``[[maybe_unused]]`` silences the no-callers warning. The function
+// itself is never called at runtime — its sole purpose is to surface
+// type errors at HK build time, before R32+ wires up the K-tail port.
+__attribute__((used)) [[maybe_unused]] static __device__ void
+__lever_d_round_b_force_instantiate_rcr_mma_32() {
+    rt_fl<RBM, RBN, col_l, rt_32x32_s> dummy_acc{};
+    rt_fp8e4m3<RBM, 64, row_l, rt_32x64_s> dummy_a{};
+    rt_fp8e4m3<RBN, 64, row_l, rt_32x64_s> dummy_b{};
+    rcr_mma_32(dummy_acc, dummy_a, dummy_b);
+}
+
 __device__ __forceinline__ void crr_mma(
     rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
     const A_col_reg& a,
