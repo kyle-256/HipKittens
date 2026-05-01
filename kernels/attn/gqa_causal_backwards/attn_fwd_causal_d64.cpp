@@ -190,6 +190,38 @@ template<int D> struct attn_globals {
     size_t dynamic_shared_memory() { return FWD_D64_DYN_SMEM; }
 };
 
+// SBHD-layout sibling globals.  Q/K/V/O are (S, B, H, D) instead of
+// (B, S, H, D); the underlying storage is still a contiguous 4-D tensor
+// (no stride field on `gl`), so we re-interpret the tensor by treating
+// gl dim 0 as S (the sequence/tile axis) and gl dim 1 as B.  The kernel
+// body for SBHD (`attend_ker_sbhd` below) is a mechanical mirror of
+// `attend_ker`: every access to Q/K/V/O swaps its first two coord
+// components (`{b, t, h, 0}` -> `{t, b, h, 0}`) and every load/store/
+// prefill_swizzled_offsets axis goes from 1 (BSHD's S dim) to 0
+// (SBHD's S dim).  The L_vec accesses stay unchanged because L is
+// allocated by the harness as BHND-style (B, H, 1, N) regardless of
+// the user input layout.  Round A (commit only adds the new symbols;
+// no caller yet) per .claude/skills/d64-attn-optimization/SKILL.md
+// §0.3 / §0.5: the existing BSHD codegen for `attn_globals<D>` /
+// `attend_ker<D>` / `dispatch_fwd<D>` is bitwise unchanged.
+template<int D> struct attn_globals_sbhd {
+    _gl_QKVO Qg, Kg, Vg, Og;
+    gl<float, -1, -1, -1, -1> L_vec;
+    hipStream_t stream;
+    // For SBHD inputs Q is (N, B, H, D), so Qg.batch()==N (gl dim 0,
+    // the outer-most stride) and Qg.depth()==B (gl dim 1).  The grid
+    // is logically the same as BSHD: (heads, N-warp-blocks, batches).
+    dim3 grid() {
+        const int n_runtime = Qg.batch();
+        const int b_runtime = Qg.depth();
+        return dim3(ATTN_H,
+                    ((n_runtime / Q_BLOCK_SIZE + NUM_WARPS - 1) / NUM_WARPS),
+                    b_runtime);
+    }
+    dim3 block() { return dim3(NUM_THREADS); }
+    size_t dynamic_shared_memory() { return FWD_D64_DYN_SMEM; }
+};
+
 template<int D> __launch_bounds__(NUM_THREADS, 2)
 __global__ void attend_ker(const attn_globals<D> g) {
 
@@ -675,6 +707,424 @@ __global__ void attend_ker(const attn_globals<D> g) {
     store(g.L_vec, norm_vec, {batch_idx, head_idx, 0, tile_idx});
 }
 
+// =====================================================================
+// SBHD-layout sibling fwd kernel.  Mechanical mirror of `attend_ker<D>`
+// above with two consistent edits:
+//   (a) every gl-tile coord that was {batch_idx, n_tile, head, 0} for
+//       Q/K/V/O becomes {n_tile, batch_idx, head, 0};
+//   (b) every <axis, ...> template-arg of `prefill_swizzled_offsets` /
+//       `G::load` / `load` / `store` for Q/K/V/O goes 1 -> 0.
+// L_vec accesses are unchanged because the harness allocates L as
+// BHND-style (B, H, 1, N) for both layouts.  No new compute, same LDS
+// allocations, same swizzles, same sched_barrier / wait_vmcnt pattern.
+// Added 2026-05-01 (round 1) per SKILL §0.3.  Not yet wired into the
+// metric; that flip will land in a later round once the matching
+// prep / dq_shuffle / bwd_combined SBHD entries also exist.
+// =====================================================================
+template<int D> __launch_bounds__(NUM_THREADS, 2)
+__global__ void attend_ker_sbhd(const attn_globals_sbhd<D> g) {
+
+    extern __shared__ alignment_dummy __shm[];
+    shared_allocator al((int*)&__shm[0]);
+    st_bf<KV_BLOCK_SIZE, ATTN_D, st_32x32_s> (&k_smem)[2] = al.allocate<st_bf<KV_BLOCK_SIZE, ATTN_D, st_32x32_s>, 2>();
+    st_bf<KV_BLOCK_SIZE, ATTN_D, st_8x32_s> (&v_smem)[2] = al.allocate<st_bf<KV_BLOCK_SIZE, ATTN_D, st_8x32_s>, 2>();
+
+    const int head_idx = (blockIdx.x % ATTN_H_KV) * GROUP_SIZE + (blockIdx.x / ATTN_H_KV);
+    const int batch_idx = blockIdx.z;
+    const int head_idx_kv = head_idx / GROUP_SIZE;
+    const int block_tile_idx = blockIdx.y;
+    const int tile_idx = block_tile_idx * NUM_WARPS + warpid();
+    const int stagger = warpid() / 4;
+    const int lane = laneid();
+
+    const int num_tiles = ATTN_N / KV_BLOCK_SIZE;
+    const int max_tile_idx = block_tile_idx * NUM_WARPS + NUM_WARPS - 1;
+    const int max_q_end_pos = (max_tile_idx + 1) * Q_BLOCK_SIZE;
+    int max_num_tiles = (max_q_end_pos + KV_BLOCK_SIZE - 1) / KV_BLOCK_SIZE;
+    if constexpr (causal) max_num_tiles = min(max_num_tiles, num_tiles);
+    else max_num_tiles = num_tiles;
+    const int q_start_pos = tile_idx * Q_BLOCK_SIZE;
+
+    constexpr float TEMPERATURE_SCALE = (D == 128) ? 0.08838834764f*1.44269504089f : 0.125f*1.44269504089f;
+    uint32_t neg_inf_v = 0xff800000;
+
+    qo_tile<D, bf16> q_reg;
+    qo_tile_transposed<D, bf16> q_reg_transposed;
+    kv_tile<D, bf16> k_reg;
+    kv_tile_transposed<D, bf16> k_reg_transposed;
+
+    kv_tile<D, bf16, col_l, rt_16x32_4_s> v_reg;
+    qo_tile_transposed<D, float, col_l, rt_32x32_s> o_reg;
+    attn_tile<D, float, col_l, rt_32x32_s> att_block[2];
+    attn_tile<D, bf16, col_l, rt_32x32_s> att_block_bf16;
+    attn_tile<D, bf16, col_l, rt_16x32_4_s> att_block_bf16_in;
+    typename attn_tile<D, float, col_l, rt_32x32_s>::row_vec max_vec, norm_vec, max_vec_prev, scale_vec;
+
+    zero(o_reg);
+    zero(norm_vec);
+    zero(scale_vec);
+
+    using T = typename st_bf<KV_BLOCK_SIZE, ATTN_D, st_32x32_s>::dtype;
+    constexpr int bytes_per_thread = st_32x32_s::template bytes_per_thread<T>();
+    constexpr int bytes_per_memcpy = bytes_per_thread * NUM_THREADS;
+    constexpr int memcpy_per_tile = KV_BLOCK_SIZE * ATTN_D * sizeof(T) / bytes_per_memcpy;
+
+    uint32_t swizzled_offsets_V[memcpy_per_tile];
+    uint32_t swizzled_offsets_K[memcpy_per_tile];
+    G::prefill_swizzled_offsets<0, false>(k_smem[0], g.Kg, swizzled_offsets_K);
+    G::prefill_swizzled_offsets<0, false>(v_smem[0], g.Vg, swizzled_offsets_V);
+
+    G::load<0, false>(k_smem[0], g.Kg, {0, batch_idx, head_idx_kv, 0}, swizzled_offsets_K);
+    __builtin_amdgcn_s_waitcnt(0);
+    __builtin_amdgcn_sched_barrier(0);
+    __builtin_amdgcn_s_barrier();
+
+    qo_tile<D, float> q_reg_fl;
+    load<0, qo_tile<D, float>, _gl_QKVO>(q_reg_fl, g.Qg, {tile_idx, batch_idx, head_idx, 0});
+    mul(q_reg_fl, q_reg_fl, TEMPERATURE_SCALE);
+    copy(q_reg, q_reg_fl);
+    transpose(q_reg_transposed, q_reg);
+
+    G::load<0, false>(k_smem[1], g.Kg, {1, batch_idx, head_idx_kv, 0}, swizzled_offsets_K);
+    G::load<0, false>(v_smem[0], g.Vg, {0, batch_idx, head_idx_kv, 0}, swizzled_offsets_V);
+    load(k_reg, k_smem[0]);
+    __builtin_amdgcn_sched_barrier(0);
+    asm volatile("s_waitcnt lgkmcnt(0) vmcnt(2)");
+    __builtin_amdgcn_sched_barrier(0);
+    __builtin_amdgcn_s_barrier();
+
+    zero(att_block[0]);
+    transpose(k_reg_transposed, k_reg);
+    mma_AtB(att_block[0], k_reg_transposed, q_reg_transposed, att_block[0]);
+    __builtin_amdgcn_sched_barrier(0);
+    if constexpr (causal) {
+        const int kv_end_pos = (1) * KV_BLOCK_SIZE;
+        if (__builtin_expect(q_start_pos < kv_end_pos, 0)) {
+            mask_kv_tile(att_block[0], tile_idx, 0, neg_inf_v, lane);
+        }
+    }
+    col_max(max_vec, att_block[0]);
+
+    copy(max_vec_prev, max_vec);
+    exp2(scale_vec, scale_vec);
+
+    sub_col(att_block[0], att_block[0], max_vec);
+    exp2(att_block[0].tiles[0][0], att_block[0].tiles[0][0]);
+    __builtin_amdgcn_sched_barrier(0);
+    mul_col(o_reg, o_reg, scale_vec);
+
+    if (stagger) {
+        __builtin_amdgcn_sched_barrier(0);
+        __builtin_amdgcn_s_barrier();
+    }
+
+    load(k_reg, k_smem[1]);
+    G::load<0, false>(k_smem[0], g.Kg, {2, batch_idx, head_idx_kv, 0}, swizzled_offsets_K);
+    G::load<0, false>(v_smem[1], g.Vg, {1, batch_idx, head_idx_kv, 0}, swizzled_offsets_V);
+    asm volatile("s_waitcnt lgkmcnt(0) vmcnt(4)");
+    __builtin_amdgcn_sched_barrier(0);
+    __builtin_amdgcn_s_barrier();
+
+    for (int j = 3; j < max_num_tiles - 1; j += 2) {
+        // Cluster 0:  QK1 + finish softmax for QK0
+        zero(att_block[1]);
+        transpose(k_reg_transposed, k_reg);
+        mma_AtB(att_block[1], k_reg_transposed, q_reg_transposed, att_block[1]);
+        exp2(att_block[0].tiles[1][0], att_block[0].tiles[1][0]);
+        mul(norm_vec, norm_vec, scale_vec);
+        col_sum(norm_vec, att_block[0], norm_vec);
+        copy(att_block_bf16, att_block[0]);
+        att_block_bf16_in = *reinterpret_cast<attn_tile<D, bf16, col_l, rt_16x32_4_s>*>(&att_block_bf16);
+        sched_barrier_exp_pairs<6, 3, 1>();
+        sched_barrier_pairs<10, 5, 1>();
+        __builtin_amdgcn_sched_barrier(0);
+        __builtin_amdgcn_s_barrier();
+        __builtin_amdgcn_sched_barrier(0);
+
+        // Cluster 1:  Load K[j] into shared, V[j-2] into registers
+        G::load<0, false>(k_smem[1], g.Kg, {j, batch_idx, head_idx_kv, 0}, swizzled_offsets_K);
+        load(v_reg, v_smem[0]);
+        asm volatile("s_waitcnt lgkmcnt(0) vmcnt(4)");
+        __builtin_amdgcn_sched_barrier(0);
+        __builtin_amdgcn_s_barrier();
+        __builtin_amdgcn_sched_barrier(0);
+
+        // Cluster 2:  A0V0 + partial softmax for QK1
+        __builtin_amdgcn_s_setprio(1);
+        mma_AtB(o_reg, v_reg, att_block_bf16_in, o_reg);
+        col_max(max_vec, att_block[1], max_vec_prev);
+        sub(scale_vec, max_vec_prev, max_vec);
+        copy(max_vec_prev, max_vec);
+        exp2(scale_vec, scale_vec);
+        sub_col(att_block[1], att_block[1], max_vec);
+        exp2(att_block[1].tiles[0][0], att_block[1].tiles[0][0]);
+        sched_barrier_pairs<10, 5, 2>();
+        sched_barrier_exp_pairs<6, 3, 2>();
+        __builtin_amdgcn_sched_barrier(0);
+        mul_col(o_reg, o_reg, scale_vec);
+        __builtin_amdgcn_s_setprio(0);
+        __builtin_amdgcn_sched_barrier(0);
+        __builtin_amdgcn_s_barrier();
+        __builtin_amdgcn_sched_barrier(0);
+
+        // Cluster 3:  Load V[j-1] into shared, K[j-1] into registers
+        G::load<0, false>(v_smem[0], g.Vg, {j - 1, batch_idx, head_idx_kv, 0}, swizzled_offsets_V);
+        load(k_reg, k_smem[0]);
+        asm volatile("s_waitcnt lgkmcnt(0) vmcnt(4)");
+        __builtin_amdgcn_sched_barrier(0);
+        __builtin_amdgcn_s_barrier();
+        __builtin_amdgcn_sched_barrier(0);
+
+        // Cluster 4:  QK2 + finish softmax for QK1
+        __builtin_amdgcn_s_setprio(1);
+        zero(att_block[0]);
+        transpose(k_reg_transposed, k_reg);
+        mma_AtB(att_block[0], k_reg_transposed, q_reg_transposed, att_block[0]);
+        exp2(att_block[1].tiles[1][0], att_block[1].tiles[1][0]);
+        mul(norm_vec, norm_vec, scale_vec);
+        col_sum(norm_vec, att_block[1], norm_vec);
+        copy(att_block_bf16, att_block[1]);
+        att_block_bf16_in = *reinterpret_cast<attn_tile<D, bf16, col_l, rt_16x32_4_s>*>(&att_block_bf16);
+        sched_barrier_exp_pairs<6, 3, 3>();
+        sched_barrier_pairs<10, 5, 3>();
+        __builtin_amdgcn_s_setprio(0);
+        __builtin_amdgcn_sched_barrier(0);
+        __builtin_amdgcn_s_barrier();
+        __builtin_amdgcn_sched_barrier(0);
+
+        // Cluster 5:  Load K[j+1] into shared, V[j-1] into registers
+        G::load<0, false>(k_smem[0], g.Kg, {j + 1, batch_idx, head_idx_kv, 0}, swizzled_offsets_K);
+        load(v_reg, v_smem[1]);
+        if constexpr (causal) {
+            const int kv_end_pos = (j) * KV_BLOCK_SIZE;
+            if (__builtin_expect((q_start_pos < kv_end_pos), 0)) {
+                mask_kv_tile(att_block[0], tile_idx, j - 1, neg_inf_v, lane);
+            }
+        }
+        asm volatile("s_waitcnt lgkmcnt(0) vmcnt(4)");
+        __builtin_amdgcn_sched_barrier(0);
+        __builtin_amdgcn_s_barrier();
+        __builtin_amdgcn_sched_barrier(0);
+
+        // Cluster 6:  A1V1 + partial softmax for QK2
+        __builtin_amdgcn_s_setprio(1);
+        mma_AtB(o_reg, v_reg, att_block_bf16_in, o_reg);
+        col_max(max_vec, att_block[0], max_vec_prev);
+        sub(scale_vec, max_vec_prev, max_vec);
+        copy(max_vec_prev, max_vec);
+        exp2(scale_vec, scale_vec);
+        sub_col(att_block[0], att_block[0], max_vec);
+        exp2(att_block[0].tiles[0][0], att_block[0].tiles[0][0]);
+        sched_barrier_pairs<10, 5, 4>();
+        sched_barrier_exp_pairs<6, 3, 4>();
+        __builtin_amdgcn_sched_barrier(0);
+        mul_col(o_reg, o_reg, scale_vec);
+        __builtin_amdgcn_s_setprio(0);
+        __builtin_amdgcn_sched_barrier(0);
+        __builtin_amdgcn_s_barrier();
+        __builtin_amdgcn_sched_barrier(0);
+
+        // Cluster 7:  Load V[j] into shared, K[j+1] into registers
+        G::load<0, false>(v_smem[1], g.Vg, {j, batch_idx, head_idx_kv, 0}, swizzled_offsets_V);
+        load(k_reg, k_smem[1]);
+        asm volatile("s_waitcnt lgkmcnt(0) vmcnt(4)");
+        __builtin_amdgcn_sched_barrier(0);
+        __builtin_amdgcn_s_barrier();
+        __builtin_amdgcn_sched_barrier(0);
+    }
+
+    // Epilogue Cluster 0:  QK3 + finish softmax for QK2
+    zero(att_block[1]);
+    transpose(k_reg_transposed, k_reg);
+    mma_AtB(att_block[1], k_reg_transposed, q_reg_transposed, att_block[1]);
+    exp2(att_block[0].tiles[1][0], att_block[0].tiles[1][0]);
+    mul(norm_vec, norm_vec, scale_vec);
+
+    col_sum(norm_vec, att_block[0], norm_vec);
+    copy(att_block_bf16, att_block[0]);
+    att_block_bf16_in = *reinterpret_cast<attn_tile<D, bf16, col_l, rt_16x32_4_s>*>(&att_block_bf16);
+    sched_barrier_exp_pairs<6, 3, 5>();
+    sched_barrier_pairs<10, 5, 5>();
+    __builtin_amdgcn_sched_barrier(0);
+    __builtin_amdgcn_s_barrier();
+    __builtin_amdgcn_sched_barrier(0);
+
+    // Cluster 1:  Load K[max_num_tiles-1] into shared, V[max_num_tiles-3] into registers
+    G::load<0, false>(k_smem[1], g.Kg, {max_num_tiles - 1, batch_idx, head_idx_kv, 0}, swizzled_offsets_K);
+    load(v_reg, v_smem[0]);
+    if constexpr (causal) {
+        const int kv_end_pos = (max_num_tiles - 2) * KV_BLOCK_SIZE;
+        if (__builtin_expect(q_start_pos < kv_end_pos, 0)) {
+            mask_kv_tile(att_block[1], tile_idx, max_num_tiles - 3, neg_inf_v, lane);
+        }
+    }
+    asm volatile("s_waitcnt lgkmcnt(0) vmcnt(4)");
+    __builtin_amdgcn_sched_barrier(0);
+    __builtin_amdgcn_s_barrier();
+    __builtin_amdgcn_sched_barrier(0);
+
+    // Cluster 2:  A2V2 + partial softmax for QK3
+    __builtin_amdgcn_s_setprio(1);
+    mma_AtB(o_reg, v_reg, att_block_bf16_in, o_reg);
+    col_max(max_vec, att_block[1], max_vec_prev);
+    sub(scale_vec, max_vec_prev, max_vec);
+    copy(max_vec_prev, max_vec);
+    exp2(scale_vec, scale_vec);
+    sub_col(att_block[1], att_block[1], max_vec);
+    exp2(att_block[1].tiles[0][0], att_block[1].tiles[0][0]);
+    sched_barrier_pairs<10, 5, 6>();
+    sched_barrier_exp_pairs<6, 3, 6>();
+    __builtin_amdgcn_sched_barrier(0);
+    mul_col(o_reg, o_reg, scale_vec);
+    __builtin_amdgcn_s_setprio(0);
+    __builtin_amdgcn_sched_barrier(0);
+    __builtin_amdgcn_s_barrier();
+    __builtin_amdgcn_sched_barrier(0);
+
+    // Cluster 3:  Load V[max_num_tiles-2] into shared, K[max_num_tiles-2] into registers
+    G::load<0, false>(v_smem[0], g.Vg, {max_num_tiles - 2, batch_idx, head_idx_kv, 0}, swizzled_offsets_V);
+    load(k_reg, k_smem[0]);
+    asm volatile("s_waitcnt lgkmcnt(0) vmcnt(4)");
+    __builtin_amdgcn_sched_barrier(0);
+    __builtin_amdgcn_s_barrier();
+    __builtin_amdgcn_sched_barrier(0);
+
+    // Cluster 4:  QK4 + finish softmax for QK3
+    zero(att_block[0]);
+    transpose(k_reg_transposed, k_reg);
+    mma_AtB(att_block[0], k_reg_transposed, q_reg_transposed, att_block[0]);
+    exp2(att_block[1].tiles[1][0], att_block[1].tiles[1][0]);
+    mul(norm_vec, norm_vec, scale_vec);
+    col_sum(norm_vec, att_block[1], norm_vec);
+    copy(att_block_bf16, att_block[1]);
+    att_block_bf16_in = *reinterpret_cast<attn_tile<D, bf16, col_l, rt_16x32_4_s>*>(&att_block_bf16);
+    sched_barrier_exp_pairs<6, 3, 7>();
+    sched_barrier_pairs<10, 5, 7>();
+    __builtin_amdgcn_sched_barrier(0);
+    __builtin_amdgcn_s_barrier();
+    __builtin_amdgcn_sched_barrier(0);
+
+    // Cluster 5:  V[max_num_tiles-1] into registers
+    load(v_reg, v_smem[1]);
+    if constexpr (causal) {
+        const int kv_end_pos = (max_num_tiles - 1) * KV_BLOCK_SIZE;
+        if (__builtin_expect(q_start_pos < kv_end_pos, 1)) {
+            mask_kv_tile(att_block[0], tile_idx, max_num_tiles - 2, neg_inf_v, lane);
+        }
+    }
+    asm volatile("s_waitcnt lgkmcnt(0) vmcnt(2)");
+    __builtin_amdgcn_sched_barrier(0);
+    __builtin_amdgcn_s_barrier();
+    __builtin_amdgcn_sched_barrier(0);
+
+    // Cluster 6:  A3V3 + partial softmax for QK4
+    __builtin_amdgcn_s_setprio(1);
+    mma_AtB(o_reg, v_reg, att_block_bf16_in, o_reg);
+    col_max(max_vec, att_block[0], max_vec_prev);
+    sub(scale_vec, max_vec_prev, max_vec);
+    copy(max_vec_prev, max_vec);
+    exp2(scale_vec, scale_vec);
+    sub_col(att_block[0], att_block[0], max_vec);
+    exp2(att_block[0].tiles[0][0], att_block[0].tiles[0][0]);
+    sched_barrier_pairs<10, 5, 8>();
+    sched_barrier_exp_pairs<6, 3, 8>();
+    __builtin_amdgcn_sched_barrier(0);
+    mul_col(o_reg, o_reg, scale_vec);
+    __builtin_amdgcn_sched_barrier(0);
+    __builtin_amdgcn_s_barrier();
+    __builtin_amdgcn_sched_barrier(0);
+
+    // Cluster 7:  Load V[max_num_tiles-1] into shared, K[max_num_tiles-1] into registers
+    G::load<0, false>(v_smem[1], g.Vg, {max_num_tiles - 1, batch_idx, head_idx_kv, 0}, swizzled_offsets_V);
+    load(k_reg, k_smem[1]);
+    asm volatile("s_waitcnt lgkmcnt(0) vmcnt(2)");
+    __builtin_amdgcn_sched_barrier(0);
+    __builtin_amdgcn_s_barrier();
+    __builtin_amdgcn_sched_barrier(0);
+
+    // Cluster 8:  QK5 + finish softmax for QK4
+    zero(att_block[1]);
+    transpose(k_reg_transposed, k_reg);
+    mma_AtB(att_block[1], k_reg_transposed, q_reg_transposed, att_block[1]);
+    exp2(att_block[0].tiles[1][0], att_block[0].tiles[1][0]);
+    mul(norm_vec, norm_vec, scale_vec);
+    col_sum(norm_vec, att_block[0], norm_vec);
+    copy(att_block_bf16, att_block[0]);
+    att_block_bf16_in = *reinterpret_cast<attn_tile<D, bf16, col_l, rt_16x32_4_s>*>(&att_block_bf16);
+    sched_barrier_exp_pairs<6, 3, 9>();
+    sched_barrier_pairs<10, 5, 9>();
+    __builtin_amdgcn_sched_barrier(0);
+    __builtin_amdgcn_s_barrier();
+    __builtin_amdgcn_sched_barrier(0);
+
+    // Cluster 9:  Load V[max_num_tiles-2] into registers
+    load(v_reg, v_smem[0]);
+    if constexpr (causal) {
+        const int kv_end_pos = (max_num_tiles) * KV_BLOCK_SIZE;
+        if (__builtin_expect(q_start_pos < kv_end_pos, 1)) {
+            mask_kv_tile(att_block[1], tile_idx, max_num_tiles - 1, neg_inf_v, lane);
+        }
+    }
+    asm volatile("s_waitcnt lgkmcnt(0) vmcnt(0)");
+    __builtin_amdgcn_sched_barrier(0);
+    __builtin_amdgcn_s_barrier();
+    __builtin_amdgcn_sched_barrier(0);
+
+    // Cluster 10:  A4V4 + full softmax for QK5
+    mma_AtB(o_reg, v_reg, att_block_bf16_in, o_reg);
+    col_max(max_vec, att_block[1], max_vec_prev);
+    sub(scale_vec, max_vec_prev, max_vec);
+    copy(max_vec_prev, max_vec);
+    exp2(scale_vec, scale_vec);
+
+    sub_col(att_block[1], att_block[1], max_vec);
+    exp2(att_block[1].tiles[0][0], att_block[1].tiles[0][0]);
+    sched_barrier_pairs<10, 5, 10>();
+    sched_barrier_exp_pairs<6, 3, 10>();
+    __builtin_amdgcn_sched_barrier(0);
+
+    exp2(att_block[1].tiles[1][0], att_block[1].tiles[1][0]);
+    mul(norm_vec, norm_vec, scale_vec);
+
+    col_sum(norm_vec, att_block[1], norm_vec);
+    copy(att_block_bf16, att_block[1]);
+    att_block_bf16_in = *reinterpret_cast<attn_tile<D, bf16, col_l, rt_16x32_4_s>*>(&att_block_bf16);
+
+    __builtin_amdgcn_sched_barrier(0);
+    mul_col(o_reg, o_reg, scale_vec);
+    __builtin_amdgcn_sched_barrier(0);
+    __builtin_amdgcn_s_barrier();
+    __builtin_amdgcn_sched_barrier(0);
+
+    // Cluster 11:  V[max_num_tiles-1] into registers
+    load(v_reg, v_smem[1]);
+    asm volatile("s_waitcnt lgkmcnt(0)");
+    __builtin_amdgcn_sched_barrier(0);
+    __builtin_amdgcn_s_barrier();
+    __builtin_amdgcn_sched_barrier(0);
+
+    // Cluster 12:  A5V5 + final divide
+    mma_AtB(o_reg, v_reg, att_block_bf16_in, o_reg);
+    div_col(o_reg, o_reg, norm_vec);
+    __builtin_amdgcn_sched_barrier(0);
+    __builtin_amdgcn_s_barrier();
+    __builtin_amdgcn_sched_barrier(0);
+
+    if (!stagger) {
+        __builtin_amdgcn_s_barrier();
+    }
+
+    qo_tile<D, float, row_l, rt_32x32_s> o_reg_transposed;
+    transpose(o_reg_transposed, o_reg);
+    store<0>(g.Og, o_reg_transposed, {tile_idx, batch_idx, head_idx, 0});
+
+    mul(max_vec, max_vec, 0.69314718056f);
+    log(norm_vec, norm_vec);
+    add(norm_vec, norm_vec, max_vec);
+    // L_vec is BHND-style (B, H, 1, N) for both layouts -- coord unchanged.
+    store(g.L_vec, norm_vec, {batch_idx, head_idx, 0, tile_idx});
+}
+
 template<int D>
 void dispatch_fwd(attn_globals<D> g) {
     // Cache hipFuncSetAttribute so the (per-kernel) attribute is set only
@@ -711,6 +1161,25 @@ void dispatch_fwd(attn_globals<D> g) {
     // (N=1024) wall-clock and contributes a few % at the larger shapes.
 }
 
+// SBHD-layout sibling dispatcher.  Mirrors `dispatch_fwd<D>`: same
+// per-kernel SMEM cap (FWD_D64_DYN_SMEM), same one-shot
+// hipFuncSetAttribute, same default-stream launch.  Different kernel
+// (`attend_ker_sbhd<D>`) and different globals struct
+// (`attn_globals_sbhd<D>` -- N is gl dim 0, B is gl dim 1).  The
+// `attr_set` flag is per-(translation-unit, function) so this has its
+// own once-only flag separate from `dispatch_fwd`'s.
+template<int D>
+void dispatch_fwd_sbhd(attn_globals_sbhd<D> g) {
+    static bool attr_set = false;
+    if (!attr_set) {
+        hipFuncSetAttribute((void*)attend_ker_sbhd<D>,
+                            hipFuncAttributeMaxDynamicSharedMemorySize,
+                            FWD_D64_DYN_SMEM);
+        attr_set = true;
+    }
+    attend_ker_sbhd<D><<<g.grid(), g.block(), FWD_D64_DYN_SMEM, g.stream>>>(g);
+}
+
 PYBIND11_MODULE(tk_kernel_fwd_d64, m) {
     m.doc() = "tk_kernel_fwd python module";
     py::bind_function<dispatch_fwd<ATTN_D>>(m, "dispatch_fwd", 
@@ -719,5 +1188,18 @@ PYBIND11_MODULE(tk_kernel_fwd_d64, m) {
         &attn_globals<ATTN_D>::Vg, 
         &attn_globals<ATTN_D>::Og,
         &attn_globals<ATTN_D>::L_vec
+    );
+
+    // SBHD sibling entry.  Same Q/K/V/O/L_vec field surface as
+    // dispatch_fwd; the kernel internally interprets gl dim 0 as the
+    // sequence axis and gl dim 1 as the batch axis (i.e. the storage
+    // is the contiguous SBHD = (S, B, H, D) tensor as produced by
+    // torch.randn(N, B, H, D)).  Not yet wired into the metric.
+    py::bind_function<dispatch_fwd_sbhd<ATTN_D>>(m, "dispatch_fwd_sbhd",
+        &attn_globals_sbhd<ATTN_D>::Qg,
+        &attn_globals_sbhd<ATTN_D>::Kg,
+        &attn_globals_sbhd<ATTN_D>::Vg,
+        &attn_globals_sbhd<ATTN_D>::Og,
+        &attn_globals_sbhd<ATTN_D>::L_vec
     );
 }
