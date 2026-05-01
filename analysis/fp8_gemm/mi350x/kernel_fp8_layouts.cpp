@@ -104,6 +104,84 @@ static_assert(alignof(A_row_reg) == alignof(A_col_reg));
 static_assert(sizeof(B_row_reg) == sizeof(B_col_reg));
 static_assert(alignof(B_row_reg) == alignof(B_col_reg));
 
+// Round-26-dm (auto-optimize R30 / Lever D Round-B step 1):
+// Compile-time validation that ``rt_fp8e4m3`` instantiates correctly
+// with the new ``rt_32x64_s`` / ``rt_64x32_s`` cell shapes (added in
+// HK SHA c2abba21). Confirms the kittens type system is fully
+// functional for the 32x32x64 mfma cell-shape family — prerequisite
+// for any future Lever D K-tail or main-loop port. No callers yet,
+// no codegen impact (static_asserts have zero runtime footprint).
+//
+// Sanity expectations (from rt_shape::rt_32x64 = rt_shape<32, 64, 16>
+// and rt_shape::rt_64x32 = rt_shape<64, 32, 16>):
+//   * elements_per_thread = 32x64 / 64 = 32 (= 8 fp8e4m3_4 packed)
+//   * num_strides = 32 / stride(16) = 2
+//   * height for rt_fp8e4m3<RBM=64, BK=64, row_l, rt_32x64_s>:
+//       = 64 / 32 = 2
+//   * width for the same: 64 / 64 = 1
+//   * sizeof = num_packed=4 * elements_per_thread=32 * sizeof(fp8e4m3)
+//       = 32 fp8 = 32 bytes per lane per cell × height(2)*width(1) = 64 B/lane
+namespace lever_d_round_b_step1_compile_test {
+    using A_row_reg_32x64 = rt_fp8e4m3<RBM, 64, row_l, rt_32x64_s>;     // 64 rows × 64 K-cols
+    using B_row_reg_32x64 = rt_fp8e4m3<RBN, 64, row_l, rt_32x64_s>;     // 32 rows × 64 K-cols
+    using B_col_reg_64x32 = rt_fp8e4m3<64, RBN, col_l, rt_64x32_s>;     // 64 K-rows × 32 cols
+    using cAB_32_acc      = rt_fl<RBM, RBN, col_l, rt_32x32_s>;         // 64×32 accumulator in 32x32 cells
+
+    // Geometric assertions — matches the ``rt_32x64`` / ``rt_64x32``
+    // shape struct values defined in rt_shape.cuh (R14-dm).
+    static_assert(A_row_reg_32x64::height == 2,
+        "rt_fp8e4m3<64, 64, row_l, rt_32x64_s>::height must be 64/32 = 2");
+    static_assert(A_row_reg_32x64::width == 1,
+        "rt_fp8e4m3<64, 64, row_l, rt_32x64_s>::width must be 64/64 = 1");
+    static_assert(A_row_reg_32x64::base_tile_rows == 32,
+        "rt_32x64 cell rows must be 32");
+    static_assert(A_row_reg_32x64::base_tile_cols == 64,
+        "rt_32x64 cell cols must be 64");
+    static_assert(B_row_reg_32x64::height == 1,
+        "rt_fp8e4m3<32, 64, row_l, rt_32x64_s>::height must be 32/32 = 1");
+    static_assert(B_col_reg_64x32::height == 1,
+        "rt_fp8e4m3<64, 32, col_l, rt_64x32_s>::height must be 64/64 = 1");
+    static_assert(cAB_32_acc::height == 2,
+        "rt_fl<64, 32, col_l, rt_32x32_s>::height must be 64/32 = 2");
+    static_assert(cAB_32_acc::width == 1,
+        "rt_fl<64, 32, col_l, rt_32x32_s>::width must be 32/32 = 1");
+
+    // Per-lane register footprint sanity:
+    //   rt_base<fp8e4m3, row_l, rt_32x64>:
+    //     elements_per_thread = 32*64/64 = 32 fp8 / lane
+    //     num_packed (fp8e4m3_4)  = 4
+    //     packed_per_thread        = 32 / 4 = 8 fp8e4m3_4 / lane
+    //     sizeof(rt_base)         = 8 * sizeof(fp8e4m3_4) = 8 * 4 = 32 B / cell / lane
+    //   rt size = 32 B/cell × height(2) × width(1) = 64 B / lane.
+    //
+    //   Compare to the live A_row_reg above (rt_16x128_s):
+    //     elements_per_thread = 16*128/64 = 32 fp8 / lane (same per cell)
+    //     packed_per_thread    = 32 / 4 = 8 / lane
+    //     sizeof(rt_base)     = 32 B / cell / lane (same)
+    //     rt size = 32 B/cell × height(8 = 128/16) × width(1) = 256 B / lane.
+    //
+    //   The 32x64 instance is 4× SMALLER per-lane than the rt_16x128_s
+    //   instance — explained by ``height`` differing (2 vs 8 = 4× ratio)
+    //   while per-cell register footprint is identical. For K-tail
+    //   (K_REM=64 = 1 K-iter at K=64), the A_row_reg_32x64 type holds
+    //   exactly the data needed for ``height(2)`` mfma_323264 inputs and
+    //   contains no SENTINEL waste — vs the current rt_16x128_s path which
+    //   loads K=64..127 as SENTINEL and discards half the buffer_load
+    //   instruction issue cycles.
+    static_assert(sizeof(A_row_reg_32x64) == 32 * 2 * 1,
+        "A_row_reg_32x64 should be 64 bytes per lane (32 B/cell × height(2) × width(1))");
+    static_assert(sizeof(cAB_32_acc) == 16 * 4 * 2 * 1,
+        "cAB_32_acc should be 128 bytes per lane (16 fp32 × 4 B × height(2) × width(1))");
+
+    // Cross-layout dword equivalence — confirms cAB_32 covers the same
+    // 64×32 region as cA-cB (currently rt_fl<64, 32, col_l, rt_16x16>):
+    using cA_layout_16x16 = rt_fl<RBM, RBN, col_l, rt_16x16_s>;
+    static_assert(sizeof(cA_layout_16x16) == sizeof(cAB_32_acc),
+        "cAB_32 and cA must occupy same total per-lane VGPR footprint "
+        "(both 32 dwords/lane = 128 B/lane covering 64×32 region) — "
+        "differ only in cell-internal lane partition (32x32 vs 16x16).");
+} // namespace lever_d_round_b_step1_compile_test
+
 // Cooperative col-major load from a v2/v2a-swizzled FP8 LDS tile.
 // Two `ds_read_b64_tr_b8` per lane per K_HALF (offset:0 + offset:1024).
 template<typename RT, int K_HALF, typename ST>
