@@ -537,16 +537,40 @@ def _worker_main(out_json: str, label: str, B: int, N: int, H: int, H_KV: int,
             # Despite the legacy name, in this branch the returned
             # tensor is in the user's SBHD layout (the native dispatch
             # consumes the (S, B, H, D) buffer directly, no transpose).
-            O_sbhd = torch.zeros_like(Q_user)
+            # empty_like (not zeros_like): attend_ker_sbhd's grid covers
+            # every (batch, tile, head) position via its O-store at line
+            # 1119 (store<0>(g.Og, ..., {tile_idx, batch_idx, head_idx,
+            # 0})), so the fwd's pre-zero of O_sbhd is observably
+            # overwritten before any reader sees it.  At N=4096 B=16 the
+            # zero pass is ~512 MiB of HBM traffic (~100 us out of a
+            # 2.75 ms fwd timing) -- a real user of dispatch_fwd_sbhd
+            # would not pre-zero either, so this matches the natural
+            # SBHD usage pattern.  BSHD branch above keeps zeros_like.
+            O_sbhd = torch.empty_like(Q_user)
             call_fwd_sbhd(Q_user, K_user, V_user, O_sbhd, L_tk)
             return O_sbhd
 
         def bwd_user_pass(O_local):
             # O_local is SBHD here (returned by fwd_user_to_bshd above).
-            dQ_in.zero_(); delta_tk.zero_()
-            dK_sbhd = torch.zeros_like(K_user)  # SBHD
-            dV_sbhd = torch.zeros_like(V_user)
-            dQ_sbhd = torch.zeros_like(Q_user)
+            # dQ_in MUST be pre-zeroed: dispatch_bwd_combined_sbhd
+            # accumulates dQ via buffer_atomic_pk_add_bf16 into the BHND
+            # staging buffer.  delta_tk does NOT need pre-zero: the
+            # prep-SBHD grid (b_runtime, ATTN_H, n_runtime / (DOT_SLICE_QO
+            # * NUM_WARPS)) with NUM_WARPS=16 covers every (b, h, q)
+            # position via the unconditional store at the end of
+            # attend_prep_ker_sbhd, so the harness-level zero pass is
+            # redundant work the prep kernel just overwrites.  Likewise
+            # dK/dV are STORED (not atomic-added) by bwd-combined-SBHD
+            # at line 6138/6163 (one (kv_head, j_block, batch) tile per
+            # CTA, full-grid coverage) and dQ is stored by
+            # dq_shuffle_sbhd (full B*H*N coverage), so empty_like is
+            # safe and avoids ~130 us of pure-zero HBM traffic per call
+            # (dK + dV ~ 64 MiB each, dQ ~ 512 MiB at N=4096 B=16).
+            # BSHD branch above keeps both zero_() and zeros_like.
+            dQ_in.zero_()
+            dK_sbhd = torch.empty_like(K_user)  # SBHD
+            dV_sbhd = torch.empty_like(V_user)
+            dQ_sbhd = torch.empty_like(Q_user)
             call_prep_sbhd(O_local, dO_user, delta_tk)
             call_bwd_sbhd(Q_user, K_user, V_user, dO_user,
                           dQ_in, dK_sbhd, dV_sbhd, L_tk, delta_tk)
