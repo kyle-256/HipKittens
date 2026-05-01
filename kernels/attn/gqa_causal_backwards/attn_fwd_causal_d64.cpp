@@ -591,6 +591,27 @@ __global__ void attend_ker(const attn_globals<D> g) {
     sched_barrier_exp_pairs<6, 3, 8>();
     __builtin_amdgcn_sched_barrier(0);
     mul_col(o_reg, o_reg, scale_vec);
+    // Drop wave priority back to default after the cluster's `mma_AtB` +
+    // softmax + `mul_col` MFMA-heavy block.  Mirrors the same closing
+    // `s_setprio(0)` already present in every other priority-bracketed
+    // cluster -- hot-loop clusters 2/4/6 (lines 390, 419, 467) and
+    // epilogue cluster 2 (line 533) all follow the canonical pattern
+    // `s_setprio(1) ... mma_AtB ... mul_col; s_setprio(0)`.  Epilogue
+    // cluster 6 was the lone outlier: its matching `s_setprio(0)` was
+    // missing, so the wave stayed at high priority through clusters
+    // 7/8/9/10/11/12 until kernel exit.  At 1 CTA/CU this is
+    // observationally a no-op (only one wave-set on the CU), but the
+    // FWD_D64_DYN_SMEM trim from commit 22bcc34e brought the kernel's
+    // LDS reservation (40 KiB) below the 80 KiB-per-CTA cap that would
+    // otherwise pin 1 CTA/CU even when registers permit -- a future
+    // register-footprint reduction would unlock 2 CTAs/CU at runtime,
+    // and at 2 CTAs/CU the lingering high priority demoted the
+    // co-scheduled CTA's ability to issue ds_read / s_load
+    // instructions through clusters 7/9/11.  Restoring the canonical
+    // bracket is a pure additive scheduling hint -- no instruction
+    // count change in steady state, no numerics shift, no observable
+    // wait-condition change.
+    __builtin_amdgcn_s_setprio(0);
     __builtin_amdgcn_sched_barrier(0);
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
@@ -1030,6 +1051,10 @@ __global__ void attend_ker_sbhd(const attn_globals_sbhd<D> g) {
     sched_barrier_exp_pairs<6, 3, 8>();
     __builtin_amdgcn_sched_barrier(0);
     mul_col(o_reg, o_reg, scale_vec);
+    // Drop wave priority back to default to mirror BSHD's epilogue
+    // cluster 6 fix above (this kernel is a layout-only mirror of
+    // attend_ker, so the same setprio bracket parity applies).
+    __builtin_amdgcn_s_setprio(0);
     __builtin_amdgcn_sched_barrier(0);
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
