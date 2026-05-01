@@ -2443,9 +2443,22 @@ void grouped_rcr_kernel(const grouped_layout_globals g) {
                 // already drained. Estimated saving: 1-2 mfma latencies
                 // (~32-64 cyc) per K-tail output tile, K-misaligned
                 // (gpt_oss K=2880 K_REM=64) shapes only.
-                load_a_kt(a,     0);   // 8 buffer_load → a (M slab 0)
-                load_b_kt(b0,    0);   // 4 buffer_load → b0
+                // Round-37-dm: reorder K-tail issues from
+                //   [a(8), b0(4), b1(4), a_kt1(8)]  →  [b0(4), b1(4), a(8), a_kt1(8)]
+                // Rationale: issue the smaller B tiles FIRST so they saturate
+                // HBM controller request-queue slots with finer-grained fetches,
+                // then issue the larger A tiles. Under in-issue-order VMEM
+                // retirement (per R12-dm comment + main-loop RCR_STEADY_VMCNT=8
+                // invariant), the first 16 retired are now b0+b1+a — all three
+                // needed for mfma cA/cB. vmcnt(8) fires after first 16 retire
+                // (same semantics as original), mfma cA/cB runs overlapping
+                // with a_kt1 drain. Zero correctness impact. Potential win: if
+                // HBM scheduler prioritises smaller requests first, the 8
+                // b128-load B-batch drains slightly earlier than if A-batch
+                // came first, cascading to mfma cA starting sooner.
+                load_b_kt(b0,    0);   // 4 buffer_load → b0 (issued FIRST)
                 load_b_kt(b1,    1);   // 4 buffer_load → b1
+                load_a_kt(a,     0);   // 8 buffer_load → a (M slab 0)
                 load_a_kt(a_kt1, 1);   // 8 buffer_load → a_kt1 (M slab 1, LAST)
                 asm volatile("s_waitcnt vmcnt(8)");
                 rcr_mma(cA, a,     b0);
