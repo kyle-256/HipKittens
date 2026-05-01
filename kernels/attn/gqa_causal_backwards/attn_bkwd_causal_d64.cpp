@@ -3204,14 +3204,38 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
   // most 2) therefore complete in the background -- the kernel exits
   // before they can affect anything observable, and CDNA4 drains all
   // counters at kernel exit.  Switching from wait(0) to vmcnt(0)
-  // also keeps the sched_barrier(0)/s_barrier ordering hint from
-  // commit ba60437a intact (the barrier still pins the post-loop
-  // trio behind the explicit drain) -- the relaxation only affects
-  // which counter the drain bounds, not whether the schedule respects
-  // the boundary.  Mirrored to the SBHD sibling at line ~6190.
+  // also keeps the sched_barrier(0) ordering hint from commit
+  // ba60437a intact -- the relaxation only affects which counter
+  // the drain bounds, not whether the schedule respects the boundary.
+  // Mirrored to the SBHD sibling at line ~6190.
+  //
+  // The wave-collective `s_barrier` previously here was redundant in
+  // the same sense as the cluster-11 boundary s_barrier dropped in the
+  // fwd kernel (commit dcdcca64): the vmcnt(0) drain per-wave is the
+  // only thing needed to let the dVg HBM commit release v[128:191]
+  // (the dV_j source register range that `accvgpr_read(dV_j_T,
+  // dK_j_T)` is about to overwrite), and the whole post-loop
+  // sequence that follows (accvgpr_read, mul, store dKg,
+  // mul_vgpr + dq_atomic_add under `warpid<2`) is strictly per-wave
+  // with no cross-wave data dependency:
+  //   * accvgpr_read: AGPR -> VGPR, per-wave register file;
+  //   * mul: per-wave VALU;
+  //   * store dKg: buffer_store to a per-wave HBM region
+  //     ({batch, 0, kv_head, 0}, {0, j=seq_idx*NUM_WARPS+warpid, 0, 0})
+  //     so each wave's store targets disjoint bytes;
+  //   * mul_vgpr + dq_atomic_add under `warpid<2`: per-wave VALU +
+  //     buffer_atomic; no smem access, OOB offset for inactive lanes
+  //     still gated per-wave.
+  // Wave-IP synchronization has no semantic consumer downstream --
+  // the kernel exits immediately after the per-wave work, and CDNA4
+  // waits for all waves to reach RETURN independently anyway, so
+  // removing one wave-collective sync at the tail only helps fast
+  // waves begin accvgpr_read + dKg store without waiting for the
+  // slowest wave's vmcnt drain.  Pure additive optimization, no
+  // numerics change; the sched_barrier(0) stays to pin the wait in
+  // place for LLVM's post-RA scheduler.
   asm volatile("s_waitcnt vmcnt(0)");
   __builtin_amdgcn_sched_barrier(0);
-  __builtin_amdgcn_s_barrier();
 
   // We first copy dV_j_T from accumulator GPRs to vector GPRs and then perform the store
   accvgpr_read(dV_j_T, dK_j_T);
@@ -6205,9 +6229,14 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker_sbh
   // (`s_waitcnt lgkmcnt(2)`) and pending LDS ops complete in the
   // background; CDNA4 drains all counters at kernel exit.  See the
   // BSHD-side comment near line 3188 for the full detailed reasoning.
+  //
+  // Also mirror the post-vmcnt `s_barrier` drop: the wave-collective
+  // sync point here was redundant (vmcnt(0) already per-wave drains
+  // the dVg commit before accvgpr_read overwrites v[128:191]; every
+  // post-vmcnt op is per-wave with no cross-wave dependency).  See
+  // BSHD-side comment block above line 3212 for the full reasoning.
   asm volatile("s_waitcnt vmcnt(0)");
   __builtin_amdgcn_sched_barrier(0);
-  __builtin_amdgcn_s_barrier();
 
   // We first copy dV_j_T from accumulator GPRs to vector GPRs and then perform the store
   accvgpr_read(dV_j_T, dK_j_T);
