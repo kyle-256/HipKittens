@@ -294,6 +294,17 @@ __device__ inline static void store(const GL &dst, const RT &src, const COORD &i
  * @param[out] dst The destination array in global memory to store data into.
  * @param[in] src The source register tile to store data from.
  * @param row_stride[in] The stride in elements between rows in the destination array.
+ *
+ * For 2 / 4-byte ``U`` (bf16 / half / float) the per-lane scalar writes are
+ * routed through ``llvm.amdgcn.raw.buffer.store.{i16,i32}``. The original
+ * ``dst_ptr[...] = ...`` expression compiled to ``global_store_short`` /
+ * ``global_store_dword`` (FLAT-class) instructions; those go through generic
+ * address-translation and account for 5-34x more ``SQ_INSTS_FLAT`` than
+ * Triton on the gpt_oss FP8 grouped sweep (round-18 PMC breakdown). Routing
+ * the same scalar through the buffer-resource intrinsic emits BUFFER-class
+ * ``buffer_store_{short,dword}`` whose voffset is computed in V-pipe and
+ * does not trip the FLAT translator. Address arithmetic is bit-identical to
+ * the previous version (same row/col formulas, same write order).
  */
 template<int axis, ducks::rt::col_layout RT, ducks::gl::all GL, ducks::coord::tile COORD=coord<RT>>
 __device__ inline static void store(const GL &dst, const RT &src, const COORD &idx) {
@@ -310,19 +321,58 @@ __device__ inline static void store(const GL &dst, const RT &src, const COORD &i
     const int row_offset = src.base_tile_stride*(laneid/src.base_tile_cols);
     const int col_offset = laneid%src.base_tile_cols;
 
-    #pragma unroll
-    for(int i = 0; i < src.height; i++) {
+    constexpr bool use_buffer_b16 =
+        (sizeof(U) == 2) && (std::is_same_v<U, bf16> || std::is_same_v<U, half>);
+    constexpr bool use_buffer_b32 = (sizeof(U) == 4) && std::is_same_v<U, float>;
+
+    if constexpr (use_buffer_b16 || use_buffer_b32) {
+        uint32_t buffer_size = dst.batch() * dst.depth() * dst.rows() * dst.cols() * sizeof(U);
+        std::uintptr_t as_int = reinterpret_cast<std::uintptr_t>(dst_ptr);
+        std::uint64_t  as_u64 = static_cast<std::uint64_t>(as_int);
+        buffer_resource br = make_buffer_resource(as_u64, buffer_size, 0x00020000);
+        i32x4 srsrc = std::bit_cast<i32x4>(br);
+
         #pragma unroll
-        for(int j = 0; j < src.width; j++) {
-            const int col = j*src.base_tile_cols + col_offset;
+        for(int i = 0; i < src.height; i++) {
             #pragma unroll
-            for(int k = 0; k < src.base_tile_num_strides; k++) {
-                int row = i*src.base_tile_rows + row_offset + k*src.base_tile_elements_per_stride_group;
+            for(int j = 0; j < src.width; j++) {
+                const int col = j*src.base_tile_cols + col_offset;
                 #pragma unroll
-                for(int l = 0; l < src.base_tile_stride / packing; l++) {
-                    int idx = l + k * src.base_tile_stride / packing;
-                    dst_ptr[(row+l*2)*row_stride + col] = base_types::convertor<U, T>::convert(src.tiles[i][j].data[idx].x);
-                    dst_ptr[(row+l*2+1)*row_stride + col] = base_types::convertor<U, T>::convert(src.tiles[i][j].data[idx].y);
+                for(int k = 0; k < src.base_tile_num_strides; k++) {
+                    int row = i*src.base_tile_rows + row_offset + k*src.base_tile_elements_per_stride_group;
+                    #pragma unroll
+                    for(int l = 0; l < src.base_tile_stride / packing; l++) {
+                        int idx_l = l + k * src.base_tile_stride / packing;
+                        U v0 = base_types::convertor<U, T>::convert(src.tiles[i][j].data[idx_l].x);
+                        U v1 = base_types::convertor<U, T>::convert(src.tiles[i][j].data[idx_l].y);
+                        const uint32_t off0 = ((row + l*2)     * row_stride + col) * sizeof(U);
+                        const uint32_t off1 = ((row + l*2 + 1) * row_stride + col) * sizeof(U);
+                        if constexpr (use_buffer_b16) {
+                            llvm_amdgcn_raw_buffer_store_b16(std::bit_cast<uint16_t>(v0), srsrc, off0, 0, 0);
+                            llvm_amdgcn_raw_buffer_store_b16(std::bit_cast<uint16_t>(v1), srsrc, off1, 0, 0);
+                        } else {
+                            llvm_amdgcn_raw_buffer_store_b32(std::bit_cast<uint32_t>(v0), srsrc, off0, 0, 0);
+                            llvm_amdgcn_raw_buffer_store_b32(std::bit_cast<uint32_t>(v1), srsrc, off1, 0, 0);
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        #pragma unroll
+        for(int i = 0; i < src.height; i++) {
+            #pragma unroll
+            for(int j = 0; j < src.width; j++) {
+                const int col = j*src.base_tile_cols + col_offset;
+                #pragma unroll
+                for(int k = 0; k < src.base_tile_num_strides; k++) {
+                    int row = i*src.base_tile_rows + row_offset + k*src.base_tile_elements_per_stride_group;
+                    #pragma unroll
+                    for(int l = 0; l < src.base_tile_stride / packing; l++) {
+                        int idx = l + k * src.base_tile_stride / packing;
+                        dst_ptr[(row+l*2)*row_stride + col] = base_types::convertor<U, T>::convert(src.tiles[i][j].data[idx].x);
+                        dst_ptr[(row+l*2+1)*row_stride + col] = base_types::convertor<U, T>::convert(src.tiles[i][j].data[idx].y);
+                    }
                 }
             }
         }

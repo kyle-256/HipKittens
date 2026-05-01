@@ -169,6 +169,20 @@ __device__ static inline void mma_AB_base(rt_base<float, ducks::rt_layout::col, 
                   B_rows == 128 && B_cols == 16 &&
                   std::is_same_v<C_shape, typename ducks::rt_shape::rt_16x16>) {
         mfma1616128(d.data, a.data, b.data, c.data);
+    } else if constexpr (std::is_same_v<MM_Operand_T, fp8e4m3> &&
+                  std::is_same_v<D_shape, typename ducks::rt_shape::rt_32x32> &&
+                  A_rows == 32 && A_cols == 64 &&
+                  B_rows == 64 && B_cols == 32 &&
+                  std::is_same_v<C_shape, typename ducks::rt_shape::rt_32x32>) {
+        // Round-14-dm scaffold: FP8 32x32x64 MFMA dispatch for AB
+        // (A row-major × B col-major). Mirrors the existing ABt
+        // branch in mma_ABt_base (which was reachable but unused
+        // until rt_32x64 / rt_64x32 were added to concept all). No
+        // current caller; the FP8 grouped main-loop migration in
+        // round 15+ will exercise this dispatch via crr_mma /
+        // rrr_mma when the var-K dB kernel switches accumulator
+        // shape from rt_16x16 to rt_32x32.
+        mfma323264(d.data, a.data, b.data, c.data);
     } else {
         static_assert(false, "Unsupported shape combination");
     }
