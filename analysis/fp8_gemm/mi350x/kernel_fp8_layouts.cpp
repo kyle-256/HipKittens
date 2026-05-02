@@ -6155,6 +6155,14 @@ void dispatch_grouped_rcr(grouped_layout_globals g) {
         // gpt_oss N=2880/5760 hits the masked-store instance.
         const bool n_aligned = (g.bpc * BLOCK_SIZE == g.n);
         if (fuse_ktail_eligible) {
+            // R63 Lever F (KI_HINT short-K specialization) FALSIFIED:
+            // ki={12,32} compile-time loop bounds INCREASED VGPR spill
+            // 34 → 49 and Qwen FP8 ratios crashed from 1.13-1.22 to
+            // 0.68-0.77 (HK SLOWER than Triton). Score 978 → 906 (-72).
+            // The compile-time unroll exposed too many parallel live
+            // ranges; LLVM couldn't fold them. REVERTED to KI_HINT=0
+            // (runtime loop) which lets LLVM reuse registers across
+            // iterations more aggressively.
             if (n_aligned) {
                 grouped_rcr_kernel<0, false, true><<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
             } else {
