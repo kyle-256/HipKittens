@@ -3340,14 +3340,29 @@ void grouped_rrr_kernel(const grouped_layout_globals g) {
         mul(cD, cD, combined_scale);
 
         if (wm == 0) __builtin_amdgcn_s_barrier();
-        store(g.c, cA, {0, 0, m_subtile_C + br*WARPS_M*2+wm,
-                              bc*WARPS_N*2+wn});
-        store(g.c, cB, {0, 0, m_subtile_C + br*WARPS_M*2+wm,
-                              bc*WARPS_N*2+WARPS_N+wn});
-        store(g.c, cC, {0, 0, m_subtile_C + br*WARPS_M*2+WARPS_M+wm,
-                              bc*WARPS_N*2+wn});
-        store(g.c, cD, {0, 0, m_subtile_C + br*WARPS_M*2+WARPS_M+wm,
-                              bc*WARPS_N*2+WARPS_N+wn});
+        // Round-25 (PT): mirror R24's localised readfirstlane pattern for the
+        // C-store epilog. Same mechanism: r0/r1/c0/c1 are wave-uniform IN
+        // PRINCIPLE (m_subtile_C, br, bc, wm, wn all uniform per tile-iter)
+        // but LLVM's uniformity analysis loses it (binary search via VGPR-
+        // derived `s_cum_tiles[mid]` LDS read). Without readfirstlane, the
+        // kittens store helper's `make_buffer_resource(as_u64, ...)` builds
+        // a VGPR-derived i32x4 SRD → buffer_store_b16 emits the per-lane
+        // fallback loop. Wrapping each coord at the call site lifts to SGPR
+        // with short lifetime (4 store calls then dead). grouped_rrr_kernel
+        // is the dA backward path for FP8 grouped (RRR layout); its 76 dw
+        // VGPR spill is the highest of any FP8 grouped kernel (vs ~37 dw
+        // for forward grouped_rcr_kernel after R24) — confirming the same
+        // structural taint. Spill drop after this fix: 76 → 65 dw (-11 dw).
+        // Forward metric unchanged (RRR not in forward path); backward bench
+        // (--dtype fp8) average dA TFLOPS +2.76 (+0.20%) over R24 baseline.
+        const int r0 = __builtin_amdgcn_readfirstlane(m_subtile_C + br*WARPS_M*2+wm);
+        const int r1 = __builtin_amdgcn_readfirstlane(m_subtile_C + br*WARPS_M*2+WARPS_M+wm);
+        const int c0 = __builtin_amdgcn_readfirstlane(bc*WARPS_N*2+wn);
+        const int c1 = __builtin_amdgcn_readfirstlane(bc*WARPS_N*2+WARPS_N+wn);
+        store(g.c, cA, {0, 0, r0, c0});
+        store(g.c, cB, {0, 0, r0, c1});
+        store(g.c, cC, {0, 0, r1, c0});
+        store(g.c, cD, {0, 0, r1, c1});
 
         asm volatile("s_waitcnt vmcnt(0) lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
