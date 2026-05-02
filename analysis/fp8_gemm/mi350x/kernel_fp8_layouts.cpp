@@ -3147,6 +3147,143 @@ template __global__ void
 lever_c2_round_57_step2a_compile_test::test_grouped_rcr_kernel_4w_compile_test<4>(grouped_layout_globals);
 
 // =============================================================================
+// Round-58-dm (auto-optimize R58): Lever C-2 round-2 step 2B-1 — replace
+// the R57 step-2A kernel's PLACEHOLDER ``G::load`` (8-warp cooperative
+// load called from a 4-warp launch — wrong distribution, but
+// syntactically intact for codegen purposes) with the **real** 4-warp
+// cooperative load path:
+//
+//   * ``kittens::group<_NUM_WARPS=4>::prefill_swizzled_offsets`` runs
+//     once per launch to fill an 8-entry swizzled-offset SGPR-uniform
+//     vector (twice the per-warp pass count of the 8-warp version since
+//     each warp now does 4 passes instead of 2 for the same 16 KB
+//     ST_v2 slab);
+//   * ``rcr_8w_load_hoist<_NUM_THREADS=256>`` issues the
+//     ``buffer_load_dwordx4 ... offen lds`` direct-to-LDS hoist with
+//     ``num_warps = 256/64 = 4`` (the helper is already generic over
+//     N_THREADS — the "8w" in the name is a legacy from when the
+//     production grouped kernel was the only caller).
+//
+// Both helpers are template-parameterized (``group<N>::prefill_*`` via
+// the ``GROUP_THREADS = N * WARP_THREADS`` typedef in
+// ``include/ops/group/memory/tile/global_to_shared.cuh`` line ~22-27;
+// ``rcr_8w_load_hoist`` via ``int N_THREADS`` template parameter in
+// kernel_fp8_layouts.cpp line ~806). No new helper code is needed —
+// step-2B-1 reduces to a wiring-only test of the existing primitives
+// at NUM_THREADS=256 / NUM_WARPS=4.
+//
+// Acceptance gate (per round-57-dm note R58+ roadmap)
+// ---------------------------------------------------
+//   * **PASS**: AGPR retained (≥ 200 AGPR, matches step-2A baseline of
+//     256). 0 spill or ≤ 5 spill (small uptick acceptable due to soA /
+//     soB SGPR-resident vectors). R59 proceed with real coords +
+//     correctness probe on a single-shape (M=256, N=256, K=128).
+//   * **PARTIAL FAIL**: AGPR drops to 0 OR ScratchSize > 32 B/lane.
+//     R48-style cascade — the prefill + hoist machinery's non-acc live
+//     state is too large; LLVM picks VGPR over AGPR for the
+//     accumulators because the rest of the live set already drains
+//     VGPR budget below the AGPR-trigger threshold. R59 must either
+//     reduce non-acc state or pivot to Lever D 32x32x64 cell shape.
+//   * **FALSIFY**: AGPR=0 AND ScratchSize > 100 B/lane (worse than the
+//     placeholder baseline of step-2A despite using the same acc
+//     footprint). Hypothesis "256 fp32/lane → AGPR" requires more than
+//     just acc footprint — possibly the ``__launch_bounds__(_, 1)`` on
+//     rcr_4w::kernel; revisit this after step-2 is dead.
+namespace lever_c2_round_58_step2b1_real_load {
+    using ::ST_v2;
+    using kittens::WARP_THREADS;
+
+    using lever_c2_round_54_step1_scaffold::WARPS_M;
+    using lever_c2_round_54_step1_scaffold::WARPS_N;
+    using lever_c2_round_54_step1_scaffold::_NUM_WARPS;
+    using lever_c2_round_54_step1_scaffold::_NUM_THREADS;
+    using lever_c2_round_54_step1_scaffold::RBM_4w;
+    using lever_c2_round_54_step1_scaffold::RBN_4w;
+    using lever_c2_round_54_step1_scaffold::A_row_reg_4w;
+    using lever_c2_round_54_step1_scaffold::B_row_reg_4w;
+    using lever_c2_round_54_step1_scaffold::C_acc_4w;
+
+    // 4-warp cooperative group typedef. Drives ``GROUP_THREADS =
+    // 4 * WARP_THREADS = 256`` inside kittens::prefill_swizzled_offsets,
+    // which selects the per-thread byte stride and pass count for the
+    // 4-warp distribution natively (no hand-unroll needed).
+    using G_4w = kittens::group<_NUM_WARPS>;
+
+    template<int KI_HINT = 4>
+    __global__ __launch_bounds__(_NUM_THREADS, 1)
+    void test_grouped_rcr_kernel_4w_real_load(grouped_layout_globals g) {
+        __shared__ ST_v2 As[2];
+        __shared__ ST_v2 Bs[2];
+
+        A_row_reg_4w a_reg[2];
+        B_row_reg_4w b_reg[2];
+        C_acc_4w cAB[2][2];
+        zero(cAB[0][0]); zero(cAB[0][1]);
+        zero(cAB[1][0]); zero(cAB[1][1]);
+
+        const int wm = warpid() / WARPS_N;
+        const int wn = warpid() % WARPS_N;
+        const int ki = (KI_HINT > 0) ? KI_HINT : g.ki;
+
+        // Prefill the per-pass byte offsets ONCE per launch, mirroring
+        // grouped_rcr_kernel line ~2394-2399. The ``mpt_4w`` count is
+        // 16 KB / (16 B × 256 thr) = 4 passes per warp, so soA/soB are
+        // 4-element uint32 SGPR-uniform arrays.
+        constexpr int bpt    = ST_v2::underlying_subtile_bytes_per_thread;
+        constexpr int bpm_4w = bpt * _NUM_THREADS;
+        constexpr int mpt_4w =
+            ST_v2::rows * ST_v2::cols * sizeof(fp8e4m3) / bpm_4w;
+        static_assert(mpt_4w == 4,
+            "ST_v2 (16 KB) at NUM_THREADS=256 / bpt=16 → 4 passes per "
+            "warp (vs 2 for the 8-warp / NUM_THREADS=512 path).");
+        uint32_t soA[mpt_4w], soB[mpt_4w];
+        G_4w::prefill_swizzled_offsets(As[0], g.a, soA);
+        G_4w::prefill_swizzled_offsets(Bs[0], g.b, soB);
+
+        const int total_tiles = (g.M_total / BLOCK_SIZE) * g.bpc;
+        for (int gt = blockIdx.x; gt < total_tiles; gt += gridDim.x) {
+            int tic = 0;
+
+            // Real 4-warp cooperative load via buffer_load_dwordx4
+            // ... offen lds (raw direct-to-LDS, bypasses any register
+            // staging). Coords still placeholder ({0,0,0,0}) — we only
+            // care that LLVM sees the full hoist machinery (SRD setup,
+            // 4-pass per-warp byte ramp, ds_addr SGPR hoist, asm
+            // intrinsic) for codegen pressure analysis.
+            rcr_8w_load_hoist<_NUM_THREADS>(As[tic], g.a, {0, 0, 0, 0}, soA);
+            rcr_8w_load_hoist<_NUM_THREADS>(Bs[tic], g.b, {0, 0, 0, 0}, soB);
+            __syncthreads();
+
+            #pragma unroll 1
+            for (int k = 0; k < ki; k++) {
+                auto a_sub = subtile_inplace<RBM_4w, BK>(As[tic], {wm, 0});
+                auto b_sub = subtile_inplace<RBN_4w, BK>(Bs[tic], {wn, 0});
+                load(a_reg[0], a_sub);
+                load(b_reg[0], b_sub);
+                load(a_reg[1], a_sub);
+                load(b_reg[1], b_sub);
+                __syncthreads();
+
+                mma_ABt(cAB[0][0], a_reg[0], b_reg[0], cAB[0][0]);
+                mma_ABt(cAB[0][1], a_reg[0], b_reg[1], cAB[0][1]);
+                mma_ABt(cAB[1][0], a_reg[1], b_reg[0], cAB[1][0]);
+                mma_ABt(cAB[1][1], a_reg[1], b_reg[1], cAB[1][1]);
+            }
+
+            store(g.c, cAB[0][0], {0, 0, gt * 4 + 0, 0});
+            store(g.c, cAB[0][1], {0, 0, gt * 4 + 1, 0});
+            store(g.c, cAB[1][0], {0, 0, gt * 4 + 2, 0});
+            store(g.c, cAB[1][1], {0, 0, gt * 4 + 3, 0});
+        }
+    }
+} // namespace lever_c2_round_58_step2b1_real_load
+
+// Force-instantiate. Compare resource report against the R57 step-2A
+// baseline (V256 / A256 / Spill 0 / Scratch 0 — placeholder G::load).
+template __global__ void
+lever_c2_round_58_step2b1_real_load::test_grouped_rcr_kernel_4w_real_load<4>(grouped_layout_globals);
+
+// =============================================================================
 // Persistent RRR grouped kernel — round-1 mirror of grouped_rcr_kernel.
 //
 // Identical persistent + CPU-sync-free skeleton (LDS group_offs cache, 6-step
