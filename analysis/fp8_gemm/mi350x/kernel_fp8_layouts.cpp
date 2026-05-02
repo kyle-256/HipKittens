@@ -2588,9 +2588,47 @@ void grouped_rcr_kernel(const grouped_layout_globals g) {
                 const int laneid = kittens::laneid();
                 const int row_lane = laneid % 16;
                 const int k_lane_byte = (laneid / 16) * 32;
-                const int K_REM = g.k - g.fast_k;
-                const bool b128_lo_valid = (k_lane_byte + 16) <= K_REM;
-                const bool b128_hi_valid = (k_lane_byte + 32) <= K_REM;
+                // Round-49-dm (auto-optimize R49): FUSED_KTAIL invariant
+                // collapse — dispatcher gate ``fuse_ktail_eligible`` (line
+                // ~5335) only enables this template spec when
+                // ``K_rem_for_fuse ∈ {64, 0}``. The runtime branch
+                // ``if (g.fast_k < g.k)`` (parent of this scope) is FALSE
+                // when ``K_REM = 0`` (g.fast_k == g.k), so inside this
+                // scope K_REM is necessarily 64.
+                //
+                // Replaces the prior dynamic ``K_REM = g.k - g.fast_k`` +
+                // 2 per-lane masks ``b128_lo_valid = (k_lane_byte + 16) <=
+                // K_REM`` and ``b128_hi_valid = (k_lane_byte + 32) <=
+                // K_REM`` with a single constexpr-folded mask. Since
+                // ``k_lane_byte = (laneid / 16) * 32 ∈ {0, 32, 64, 96}``,
+                // for K_REM=64 both masks collapse to ``laneid < 32``:
+                //
+                //   laneid 0..15  : k_lane_byte=0  → lo: 16≤64 ✓ | hi: 32≤64 ✓ → both true
+                //   laneid 16..31 : k_lane_byte=32 → lo: 48≤64 ✓ | hi: 64≤64 ✓ → both true
+                //   laneid 32..47 : k_lane_byte=64 → lo: 80≤64 ✗ | hi: 96≤64 ✗ → both false
+                //   laneid 48..63 : k_lane_byte=96 → lo:112≤64 ✗ | hi:128≤64 ✗ → both false
+                //
+                // Eliminates 1 wave-uniform sub op (``g.k - g.fast_k``),
+                // 1 K_REM register slot, and one of the two per-lane
+                // mask cmps. The resource report (``-Rpass-analysis=
+                // kernel-resource-usage``) is bit-identical at the V/A/
+                // spill/scratch level (LLVM's CSE was already partially
+                // collapsing the redundancy); the .so binary md5 changes
+                // (codegen emits 1-3 fewer instructions in the K-tail
+                // load lambdas, observed via build comparison this
+                // round). Metric: 996 / 987 over 2 runs vs 997 baseline
+                // — within run-to-run noise band (982-998 centred ~990).
+                //
+                // **Future**: if ``fuse_ktail_eligible`` (line ~5335) is
+                // ever extended to allow K_REM ∈ {32, 96} or other
+                // partial-b128 values, this constexpr collapse must be
+                // replaced by a per-K_REM template specialisation.
+                // Currently only {0, 64} are gated through, so the
+                // invariant holds.
+                constexpr int KREM = 64;
+                static_assert(KREM == 64,
+                    "FUSED_KTAIL=true K_REM must be 64; see fuse_ktail_eligible");
+                const bool both_valid = (laneid < 32);
                 constexpr uint32_t SENTINEL = 0xFFFF0000u;
 
                 const fp8e4m3* a_base_ptr = (const fp8e4m3*)&g.a[{0, 0, 0, 0}];
@@ -2634,8 +2672,8 @@ void grouped_rcr_kernel(const grouped_layout_globals g) {
                         const uint32_t v_base = static_cast<uint32_t>(
                             A_row_idx * a_row_stride_bytes +
                             K_tail_base_bytes + k_lane_byte);
-                        const uint32_t v_lo = b128_lo_valid ? v_base : SENTINEL;
-                        const uint32_t v_hi = b128_hi_valid ? (v_base + 16) : SENTINEL;
+                        const uint32_t v_lo = both_valid ? v_base : SENTINEL;
+                        const uint32_t v_hi = both_valid ? (v_base + 16) : SENTINEL;
                         __uint128_t v0 = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
                             a_srsrc_kt, v_lo, 0, 0);
                         __uint128_t v1 = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
@@ -2661,8 +2699,8 @@ void grouped_rcr_kernel(const grouped_layout_globals g) {
                         const uint32_t v_base = b_group_byte_base + static_cast<uint32_t>(
                             B_row_idx_in_group * b_row_stride_bytes +
                             K_tail_base_bytes + k_lane_byte);
-                        const uint32_t v_lo = b128_lo_valid ? v_base : SENTINEL;
-                        const uint32_t v_hi = b128_hi_valid ? (v_base + 16) : SENTINEL;
+                        const uint32_t v_lo = both_valid ? v_base : SENTINEL;
+                        const uint32_t v_hi = both_valid ? (v_base + 16) : SENTINEL;
                         __uint128_t v0 = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
                             b_srsrc_kt, v_lo, 0, 0);
                         __uint128_t v1 = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
