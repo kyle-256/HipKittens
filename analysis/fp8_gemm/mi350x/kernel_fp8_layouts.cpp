@@ -5630,25 +5630,40 @@ void grouped_var_k_kernel_fp8(const grouped_var_k_layout_globals_fp8 g) {
     int wn = warpid() % WARPS_N;
     const int num_pid_n = g.bpc;
 
+    // Round-38 (Lever L, var_k cleanup): parallel init of the LDS
+    // group-metadata caches, mirroring the R9-dm pattern shipped in
+    // forward ``grouped_rcr_kernel`` (line ~2273 of this file). var_k
+    // was the odd one out — its init ran single-threaded on lane 0 with
+    // an O(G) serial HBM-read chain (G+1 loads @ ~80 cy cold-HBM each
+    // = 2.5 μs / launch for G=32) before __syncthreads gate-kept the
+    // whole CTA.
+    //
+    // Key observation specific to var_k: ``tiles_per_group`` is the
+    // SAME constant for all groups (all groups of a var-K dispatch
+    // produce the same-sized dB output `[bpr, bpc]` tile-grid), so the
+    // prefix-sum collapses to ``s_cum_tiles[k] = k * tiles_per_group``
+    // — an O(1) closed form per slot. No scan is needed at all.
+    //
+    // Correctness: bit-identical to the old serial path for all legal
+    // inputs (G ≤ MAX_G_PLUS_1 - 1 = 64). Pad slots [G+1 .. MAX_G_PLUS_1)
+    // receive the same INT_MAX sentinel the downstream binary search
+    // depends on. ``s_offs[0..G]`` reads are now warp-coalesced instead
+    // of serialized.
+    //
+    // Bench (gpt_oss-Down B=4 M=2048 — worst-bwd baseline 241 TFLOPS)
+    // is the most-sensitive shape because its dB kernel runs at sub-
+    // millisecond wall so per-launch init overhead is a larger fraction.
+    const int tiles_per_group = g.bpr * g.bpc;
+    if (threadIdx.x <= g.G && threadIdx.x < MAX_G_PLUS_1) {
+        s_offs[threadIdx.x] = static_cast<int>(g.group_offs[threadIdx.x]);
+        s_cum_tiles[threadIdx.x] =
+            static_cast<int>(threadIdx.x) * tiles_per_group;
+    }
+    if (threadIdx.x > g.G && threadIdx.x < MAX_G_PLUS_1) {
+        s_cum_tiles[threadIdx.x] = 0x7FFFFFFF;
+    }
     if (threadIdx.x == 0) {
-        int prev = static_cast<int>(g.group_offs[0]);
-        s_offs[0] = prev;
-        s_cum_tiles[0] = 0;
-        int t = 0;
-        const int tiles_per_group = g.bpr * g.bpc;
-        #pragma unroll 1
-        for (int gi = 0; gi < g.G; ++gi) {
-            const int next = static_cast<int>(g.group_offs[gi + 1]);
-            s_offs[gi + 1] = next;
-            t += tiles_per_group;
-            s_cum_tiles[gi + 1] = t;
-            prev = next;
-        }
-        s_total_tiles = t;
-        #pragma unroll 1
-        for (int gi = g.G + 1; gi < MAX_G_PLUS_1; ++gi) {
-            s_cum_tiles[gi] = 0x7FFFFFFF;
-        }
+        s_total_tiles = g.G * tiles_per_group;
     }
     __syncthreads();
     const int total_tiles = s_total_tiles;
