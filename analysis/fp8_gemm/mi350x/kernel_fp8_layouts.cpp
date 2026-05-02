@@ -2981,6 +2981,172 @@ template __global__ void grouped_rcr_kernel<0, false, true >(const grouped_layou
 template __global__ void grouped_rcr_kernel<0, true , true >(const grouped_layout_globals);
 
 // =============================================================================
+// Round-57-dm (auto-optimize R57): Lever C-2 round-2 step 2A — minimal
+// 4w-style ISA-validation kernel.
+//
+// Background
+// ----------
+// R47/R48 established that ``rcr_4w::kernel`` (dense 4w-style) emits
+// VGPR=198 / AGPR=256 / Spill=0, while every ``grouped_rcr_kernel<*,*>``
+// spec emits VGPR=256 / AGPR=0 / Spill=34-54. R47-dm hypothesised that
+// the **256 fp32/lane per-warp accumulator footprint** (4 acc × 64
+// fp32/lane = 256) is what triggers LLVM to pick AGPR allocation; the
+// grouped kernel sits at 128 fp32/lane (4 acc × 32) so LLVM keeps acc
+// in VGPR and spills the 250+ VGPRs of non-acc live state to scratch.
+//
+// R54 step-1 staged the 4w-style geometry constants and register-tile
+// **types** (``A_row_reg_4w`` / ``B_row_reg_4w`` / ``C_acc_4w``) in
+// ``namespace lever_c2_round_54_step1_scaffold`` (line ~211) and
+// validated them via ``static_assert`` only — no codegen exercise yet.
+//
+// What this round (step-2A) does
+// ------------------------------
+// Force-instantiate a minimal kernel that:
+//   * declares ``cAB[2][2]`` of ``C_acc_4w`` (4 acc × 64 fp32/lane =
+//     256 fp32/lane per warp — matches ``rcr_4w::kernel`` per-warp
+//     accumulator footprint of 256 fp32/lane / 256 AGPR)
+//   * loads ``a_reg[2]`` of ``A_row_reg_4w`` and ``b_reg[2]`` of
+//     ``B_row_reg_4w`` from LDS (forces all 4w-style register tiles
+//     into the live set simultaneously)
+//   * issues ``mma_ABt`` × 4 per K-iter (covers all 4 cAB acc)
+//   * stores cAB[*][*] back to ``g.c`` to anchor the output
+//
+// This is **NOT a working kernel** — the load/store coords are
+// placeholder (would not produce correct GEMM output even if launched
+// at the appropriate geometry); the goal is purely to make LLVM
+// allocate registers for the full 4w-style live set so the resource
+// report (-Rpass-analysis=kernel-resource-usage) shows whether AGPR
+// gets picked or not.
+//
+// Acceptance criteria
+// -------------------
+//   * **HYPOTHESIS CONFIRMED**: AGPR > 0 AND Spill < 30 (≪
+//     grouped_rcr_kernel<T,T> baseline 37 spill). R58+ proceed with
+//     full step-2B port (real load lambdas + dispatch wire).
+//   * **HYPOTHESIS PARTIALLY FALSIFIED**: AGPR > 0 BUT Spill ≥ 30
+//     (acc moves to AGPR but other state cascades to scratch like
+//     R48's ``+a`` hint experiment). step-2 path may still net-out
+//     positive but risks R48-style cascade; R58 inspect ScratchSize
+//     to decide whether to proceed.
+//   * **HYPOTHESIS FULLY FALSIFIED**: AGPR == 0 (256 fp32/lane
+//     threshold not sufficient by itself; rcr_4w must trigger AGPR
+//     for some other reason — possibly the non-persistent launch
+//     pattern or the ``__launch_bounds__(NT, 2)`` occupancy hint).
+//     step-2 path is dead; R58+ pivot to Lever D R-B 5+ or accept
+//     plateau.
+//
+// The kernel is force-instantiated below to make the compiler emit
+// codegen even though no caller exists. Following the precedent
+// established by ``lever_d_round_b_step1_compile_test`` (line ~124)
+// and ``lever_c2_round_54_step1_scaffold`` (line ~211), it lives in a
+// dedicated namespace, is never invoked from the runtime dispatcher,
+// and has no impact on .so binary behaviour beyond the additional
+// symbol's resource-usage line in the build log.
+namespace lever_c2_round_57_step2a_compile_test {
+    using ::ST_v2;
+
+    using lever_c2_round_54_step1_scaffold::WARPS_M;
+    using lever_c2_round_54_step1_scaffold::WARPS_N;
+    using lever_c2_round_54_step1_scaffold::_NUM_WARPS;
+    using lever_c2_round_54_step1_scaffold::_NUM_THREADS;
+    using lever_c2_round_54_step1_scaffold::RBM_4w;
+    using lever_c2_round_54_step1_scaffold::RBN_4w;
+    using lever_c2_round_54_step1_scaffold::A_row_reg_4w;
+    using lever_c2_round_54_step1_scaffold::B_row_reg_4w;
+    using lever_c2_round_54_step1_scaffold::C_acc_4w;
+
+    template<int KI_HINT = 4>
+    __global__ __launch_bounds__(_NUM_THREADS, 1)
+    void test_grouped_rcr_kernel_4w_compile_test(grouped_layout_globals g) {
+        // Two LDS slabs per A/B so the K-loop has somewhere to read
+        // from. Total LDS = 2 × 2 × sizeof(ST_v2) = 64 KB per slab
+        // pair, well within gfx950's 64 KB per-block budget when run
+        // with NUM_THREADS=256 (4 warps).
+        __shared__ ST_v2 As[2];
+        __shared__ ST_v2 Bs[2];
+
+        // 4w-style register tiles: 4 cAB × 64 fp32/lane = 256 fp32/lane
+        // per warp (matches rcr_4w::kernel per-warp accumulator
+        // footprint of 256 fp32/lane / 256 AGPR baseline).
+        A_row_reg_4w a_reg[2];
+        B_row_reg_4w b_reg[2];
+        C_acc_4w cAB[2][2];
+        zero(cAB[0][0]); zero(cAB[0][1]);
+        zero(cAB[1][0]); zero(cAB[1][1]);
+
+        const int wm = warpid() / WARPS_N;  // wm ∈ {0, 1}
+        const int wn = warpid() % WARPS_N;  // wn ∈ {0, 1}
+        const int ki = (KI_HINT > 0) ? KI_HINT : g.ki;
+
+        // Persistent outer loop: matches grouped_rcr_kernel structure.
+        // We don't read group_offs here (no native group binary search)
+        // — purpose is acc + a/b register allocation pressure, not
+        // group correctness. ``M_total / BLOCK_SIZE * bpc`` is the
+        // total tile count proxy (sum across groups), which keeps the
+        // outer loop syntactically present so LLVM doesn't DCE the
+        // inner work.
+        const int total_tiles = (g.M_total / BLOCK_SIZE) * g.bpc;
+        for (int gt = blockIdx.x; gt < total_tiles; gt += gridDim.x) {
+            int tic = 0;
+
+            // Cooperative LDS load. We use the outer ``G`` group<NW=8>
+            // here because the grouped_rcr_kernel's existing helpers
+            // assume that distribution; the resulting load is "wrong"
+            // for a 4-warp launch (overshoots LDS slot stride) but
+            // syntactically present so LLVM sees use-def chains. The
+            // real step-2B will introduce a 4-warp G_4w cooperative
+            // load helper.
+            G::load(As[tic], g.a, {0, 0, 0, 0});
+            G::load(Bs[tic], g.b, {0, 0, 0, 0});
+            __syncthreads();
+
+            // K-loop body: 4 mma per K-iter (matches 4 cAB acc cells).
+            // Each mma_ABt expands to height(4) × width(4) × A.width(1)
+            // = 16 mma_ABt_base calls = 16 mfma_16x16x128 instructions
+            // per cAB acc per K-iter. 4 cAB × 16 = 64 mfma per warp
+            // per K-iter (vs grouped_rcr_kernel's 32 mfma per warp
+            // per K-iter — 2× compute density).
+            #pragma unroll 1
+            for (int k = 0; k < ki; k++) {
+                // Read from LDS into 4w-style register tiles via the
+                // existing ``load(rt_fp8, st)`` ds_read_b128 helper
+                // (kernel_fp8_layouts.cpp line ~1336 ``load_full_rt``).
+                auto a_sub = subtile_inplace<RBM_4w, BK>(As[tic], {wm, 0});
+                auto b_sub = subtile_inplace<RBN_4w, BK>(Bs[tic], {wn, 0});
+                load(a_reg[0], a_sub);
+                load(b_reg[0], b_sub);
+                load(a_reg[1], a_sub);  // placeholder; 2nd M-slab
+                load(b_reg[1], b_sub);  // placeholder; 2nd N-slab
+                __syncthreads();
+
+                mma_ABt(cAB[0][0], a_reg[0], b_reg[0], cAB[0][0]);
+                mma_ABt(cAB[0][1], a_reg[0], b_reg[1], cAB[0][1]);
+                mma_ABt(cAB[1][0], a_reg[1], b_reg[0], cAB[1][0]);
+                mma_ABt(cAB[1][1], a_reg[1], b_reg[1], cAB[1][1]);
+            }
+
+            // Store cAB to keep all 4 acc live through the K-loop
+            // (otherwise LLVM DCE's unused cells and shrinks the
+            // measured acc footprint). Coords are placeholder; we
+            // only care that all 4 cAB are sunk to a memory write.
+            store(g.c, cAB[0][0], {0, 0, gt * 4 + 0, 0});
+            store(g.c, cAB[0][1], {0, 0, gt * 4 + 1, 0});
+            store(g.c, cAB[1][0], {0, 0, gt * 4 + 2, 0});
+            store(g.c, cAB[1][1], {0, 0, gt * 4 + 3, 0});
+        }
+    }
+} // namespace lever_c2_round_57_step2a_compile_test
+
+// Force-instantiate so LLVM emits codegen and the
+// -Rpass-analysis=kernel-resource-usage line is printed at build time.
+// Read the resource report for symbol
+// ``lever_c2_round_57_step2a_compile_test::test_grouped_rcr_kernel_4w_compile_test<4>``
+// in the build log — compare AGPR / Spill against
+// ``grouped_rcr_kernel<0,true,true>`` baseline (256 V / 0 A / 37 Spill).
+template __global__ void
+lever_c2_round_57_step2a_compile_test::test_grouped_rcr_kernel_4w_compile_test<4>(grouped_layout_globals);
+
+// =============================================================================
 // Persistent RRR grouped kernel — round-1 mirror of grouped_rcr_kernel.
 //
 // Identical persistent + CPU-sync-free skeleton (LDS group_offs cache, 6-step
