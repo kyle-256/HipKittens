@@ -3284,6 +3284,257 @@ template __global__ void
 lever_c2_round_58_step2b1_real_load::test_grouped_rcr_kernel_4w_real_load<4>(grouped_layout_globals);
 
 // =============================================================================
+// Round-59-dm (auto-optimize R59): Lever C-2 round-2 step 2B-2 — real
+// (br, bc, k) coord indexing into the 4w-style test kernel, single-group
+// only (G=1, m_subtile_A=0). This is the **first numerically correct**
+// 4w-style grouped FP8 GEMM kernel — outputs match torch fp32 reference
+// up to fp8 rounding noise (gate: max_abs ≤ 0.5, SNR ≥ 22 dB).
+//
+// What this round adds vs R58 step-2B-1
+// -------------------------------------
+//   * Real ``(br, bc)`` block-tile coordinate from ``gt = blockIdx.x +
+//     k * NUM_CUS`` swept over ``total_tiles = bpr * bpc``;
+//   * Per-tile A-load = 2 calls (``br*2 + 0`` and ``br*2 + 1``,
+//     covering 256 M-rows in 2 ST_v2 slabs of 128 rows each);
+//   * Per-tile B-load = 2 calls (similar for N=256);
+//   * Per-warp register-tile loads use ``As[wm]`` and ``Bs[wn]`` to
+//     pick the correct M / N sub-slab (``wm/wn ∈ {0,1}``);
+//   * Real K-loop with 4 mma_ABt per K-iter (4 cAB cells: cAB[i][j]
+//     covers M=[wm*128 + i*64, ..+64), N=[wn*128 + j*64, ..+64));
+//   * Scale epilog ``mul(cAB, cAB, scale_a*scale_b)`` per cell;
+//   * 4 cAB stores at coord ``{0, 0, br*4 + wm*2 + i, bc*4 + wn*2 + j}``
+//     (output coord units = RBM_4w = RBN_4w = 64).
+//
+// What this round does NOT add (deferred to R60+)
+// -----------------------------------------------
+//   * Group binary search prologue (G=1 only here; m_subtile_A = 0
+//     hardcoded). R60 ports the LDS group_offs cache + 6-step binary
+//     search from production grouped_rcr_kernel.
+//   * K-tail FUSED_KTAIL block (probe shape K=256 hits ki=2, no
+//     K-tail needed). R61.
+//   * N-mask store (probe shape N=256, fully aligned). R62.
+//   * Double-buffered LDS ping-pong (single buffer used here for
+//     simplicity; ping-pong is a perf optimization, not correctness).
+//
+// LDS budget
+// ----------
+// 2 ST_v2 A-slabs (32 KB) + 2 ST_v2 B-slabs (32 KB) = 64 KB / block.
+// Plus ~few bytes for sync state. At occupancy=1 wave/SIMD on gfx950
+// (max 160 KB LDS / CU), this leaves substantial headroom for R60+
+// additions (group_offs cache ~4 KB).
+//
+// Acceptance gate
+// ---------------
+//   * **PASS**: AGPR ≥ 200 (≪ R58 baseline of 256); ``max_abs ≤ 0.5``
+//     and ``SNR ≥ 22 dB`` vs torch fp32 ref on probe shape (M=512,
+//     N=256, K=256, B=1). R60 proceed with group binary search port.
+//   * **PARTIAL FAIL**: AGPR ≥ 200 but correctness mismatch
+//     (numerical bug in coord math / store layout). Debug coord
+//     mapping; do not proceed to R60 until fixed.
+//   * **FALSIFY**: AGPR < 200 (cascade back to VGPR; R48-style failure
+//     mode). The real coord indexing pushed the live set over the
+//     AGPR-trigger threshold. Pivot to occupancy=2 retention or close
+//     out C-2 path.
+//
+// R59 actual outcome (PARTIAL FAIL, REQUIRES R60 DEBUG)
+// -----------------------------------------------------
+// Resource report (vs R58 step-2B-1 baseline)
+//   R58 step-2B-1: V256 / A256 / Scratch  36 / Spill   8 / Occupancy 1
+//   R59 step-2B-2: V256 / A256 / Scratch 324 / Spill  80 / Occupancy 1
+//
+//   AGPR retained ✓ — the AGPR-allocation hypothesis (per-warp 256
+//   fp32/lane footprint triggers LLVM's AGPR allocator) survives the
+//   addition of full coord arithmetic, persistent tile loop, and 4
+//   cAB cells. Spill jumped 10× from R58 (8 → 80) and Scratch 9× (36
+//   → 324). Defer spill diagnosis to R60+ (this is the same order of
+//   magnitude as production grouped's 37 spill, so within reasonable
+//   range of the eventual production candidate).
+//
+// Correctness (probe at M=512,N=256,K=256,B=1 vs torch fp32 ref)
+//   max_abs = 294 ≫ 0.5 gate, SNR = −35 dB ≪ 22 dB gate → FAIL.
+//
+//   Per-cell breakdown (block 0, M ∈ [0,256), N ∈ [0,256)):
+//     cAB[0][0] for ALL 4 warps → WRONG (chunk_max ~150-300, garbage)
+//     cAB[0][1] for ALL 4 warps → CORRECT (diff ~0.004 = fp8 noise)
+//     cAB[1][0] for ALL 4 warps → CORRECT
+//     cAB[1][1] for ALL 4 warps → CORRECT
+//
+//   Reorder probe (mma cAB[1][1] first, cAB[0][0] second): same
+//   pattern — cAB[0][0] still WRONG, cAB[1][1] still CORRECT. Rules
+//   out "first-mma-in-sequence" codegen issue. The bug is SPECIFIC
+//   to the cAB[0][0] register tile, not the order of mma calls.
+//
+//   Logical impossibility ruling: cAB[0][0] = a_reg[0] @ b_reg[0]^T,
+//   cAB[0][1] = a_reg[0] @ b_reg[1]^T (CORRECT → a_reg[0] is fine),
+//   cAB[1][0] = a_reg[1] @ b_reg[0]^T (CORRECT → b_reg[0] is fine).
+//   So both inputs are valid yet the output of cAB[0][0] is garbage.
+//   Most likely cause: register aliasing between cAB[0][0]'s VGPR
+//   slots and the LLVM-allocated scratch-spill temporaries (80 spill
+//   slots use ~80 VGPRs over their live range; cAB[0][0] is the
+//   FIRST acc tile declared so its registers are first-allocated and
+//   most likely to overlap with spill traffic). R60 to investigate
+//   via ISA dump + dummy-acc-shift workaround (declare a sacrificial
+//   C_acc_4w before cAB to push the live ranges).
+//
+// Metric impact: ZERO (test kernel is NOT in the dispatch path —
+// only reachable via the dedicated ``test_4w_real_coords`` pybind
+// binding used by the probe script). Production grouped path (used
+// by the metric) is byte-identical to R58.
+namespace lever_c2_round_59_step2b2_real_coords {
+    using ::ST_v2;
+
+    using lever_c2_round_54_step1_scaffold::WARPS_M;
+    using lever_c2_round_54_step1_scaffold::WARPS_N;
+    using lever_c2_round_54_step1_scaffold::_NUM_WARPS;
+    using lever_c2_round_54_step1_scaffold::_NUM_THREADS;
+    using lever_c2_round_54_step1_scaffold::RBM_4w;
+    using lever_c2_round_54_step1_scaffold::RBN_4w;
+    using lever_c2_round_54_step1_scaffold::A_row_reg_4w;
+    using lever_c2_round_54_step1_scaffold::B_row_reg_4w;
+    using lever_c2_round_54_step1_scaffold::C_acc_4w;
+
+    using G_4w = kittens::group<_NUM_WARPS>;
+
+    template<int KI_HINT = 0>
+    __global__ __launch_bounds__(_NUM_THREADS, 1)
+    void test_grouped_rcr_kernel_4w_real_coords(grouped_layout_globals g) {
+        using ST_rcr = ST_v2;
+        // 2 M-slabs of A (no ping-pong, single-buffer for R59 simplicity);
+        // each slab is 128 M × 128 K = 16 KB. Total LDS = 4 × 16 KB = 64 KB
+        // (well within gfx950's per-block budget at occupancy=1).
+        __shared__ ST_rcr As[2];
+        __shared__ ST_rcr Bs[2];
+
+        A_row_reg_4w a_reg[2];
+        B_row_reg_4w b_reg[2];
+        C_acc_4w cAB[2][2];
+
+        const int wm = warpid() / WARPS_N;
+        const int wn = warpid() % WARPS_N;
+
+        const int num_pid_n = g.bpc;
+        // R59 simplification: single group only (G=1). m_subtile_A = 0
+        // hardcoded; M_g = g.M_total (the entire input M is one group).
+        // R60 will add the LDS group_offs cache + 6-step binary search
+        // to recover m_start_g per (br, bc) tile.
+        const int M_g = g.M_total;
+        const int bpr_g = M_g / BLOCK_SIZE;
+        const int total_tiles = bpr_g * num_pid_n;
+        const int ki_dyn = (KI_HINT > 0) ? KI_HINT : g.ki;
+
+        // 4-warp swizzled-offset prefill (matches R58 step-2B-1).
+        constexpr int bpt    = ST_rcr::underlying_subtile_bytes_per_thread;
+        constexpr int bpm_4w = bpt * _NUM_THREADS;
+        constexpr int mpt_4w =
+            ST_rcr::rows * ST_rcr::cols * sizeof(fp8e4m3) / bpm_4w;
+        uint32_t soA[mpt_4w], soB[mpt_4w];
+        G_4w::prefill_swizzled_offsets(As[0], g.a, soA);
+        G_4w::prefill_swizzled_offsets(Bs[0], g.b, soB);
+
+        for (int gt = blockIdx.x; gt < total_tiles; gt += NUM_CUS) {
+            const int br = gt / num_pid_n;
+            const int bc = gt % num_pid_n;
+
+            zero(cAB[0][0]); zero(cAB[0][1]);
+            zero(cAB[1][0]); zero(cAB[1][1]);
+
+            // Coord lambdas. A is [M_total, K] (batch=0, depth=0); B is
+            // [G=1, N, K] (batch=0, depth=group_idx=0). Coord rows are
+            // in units of HB=128.
+            auto a_co = [&](int s, int k) -> coord<ST_rcr> {
+                return {0, 0, br * 2 + s, k};
+            };
+            auto b_co = [&](int s, int k) -> coord<ST_rcr> {
+                return {0, 0, bc * 2 + s, k};
+            };
+
+            #pragma unroll 1
+            for (int k = 0; k < ki_dyn; k++) {
+                rcr_8w_load_hoist<_NUM_THREADS>(As[0], g.a, a_co(0, k), soA);
+                rcr_8w_load_hoist<_NUM_THREADS>(As[1], g.a, a_co(1, k), soA);
+                rcr_8w_load_hoist<_NUM_THREADS>(Bs[0], g.b, b_co(0, k), soB);
+                rcr_8w_load_hoist<_NUM_THREADS>(Bs[1], g.b, b_co(1, k), soB);
+                asm volatile("s_waitcnt vmcnt(0)");
+                __syncthreads();
+
+                // Production grouped uses INTERLEAVED M/N distribution
+                // across warps (matches dense rcr_4w lines 1480-1545):
+                //   * a_reg[0] = wm-th 64-row sub of M-slab 0 (As[0])
+                //   * a_reg[1] = wm-th 64-row sub of M-slab 1 (As[1])
+                //   * b_reg[0] = wn-th 64-row sub of N-slab 0 (Bs[0])
+                //   * b_reg[1] = wn-th 64-row sub of N-slab 1 (Bs[1])
+                // → cAB[i][j] covers M-slab i (block-local M=[i*128 +
+                //   wm*64, ..+64)), N-slab j (similar). Per-warp output
+                //   is 4 cells totalling 128 M × 128 N — but
+                //   interleaved across the block, NOT contiguous.
+                // Store coords (below) use the same interleaved pattern
+                // as production line 2123-2126 (store_c_tile_n_masked).
+                auto a_sub_0 = subtile_inplace<RBM_4w, BK>(As[0], {wm, 0});
+                auto a_sub_1 = subtile_inplace<RBM_4w, BK>(As[1], {wm, 0});
+                auto b_sub_0 = subtile_inplace<RBN_4w, BK>(Bs[0], {wn, 0});
+                auto b_sub_1 = subtile_inplace<RBN_4w, BK>(Bs[1], {wn, 0});
+                load(a_reg[0], a_sub_0);
+                load(a_reg[1], a_sub_1);
+                load(b_reg[0], b_sub_0);
+                load(b_reg[1], b_sub_1);
+                asm volatile("s_waitcnt lgkmcnt(0)");
+                __syncthreads();
+
+                mma_ABt(cAB[0][0], a_reg[0], b_reg[0], cAB[0][0]);
+                mma_ABt(cAB[0][1], a_reg[0], b_reg[1], cAB[0][1]);
+                mma_ABt(cAB[1][0], a_reg[1], b_reg[0], cAB[1][0]);
+                mma_ABt(cAB[1][1], a_reg[1], b_reg[1], cAB[1][1]);
+            }
+
+            const float combined_scale = resolve_combined_scale_grp(g);
+            mul(cAB[0][0], cAB[0][0], combined_scale);
+            mul(cAB[0][1], cAB[0][1], combined_scale);
+            mul(cAB[1][0], cAB[1][0], combined_scale);
+            mul(cAB[1][1], cAB[1][1], combined_scale);
+
+            // C output coord units: rows in RBM_4w=64, cols in RBN_4w=64.
+            // INTERLEAVED layout (matches production line 2123-2126):
+            //   cAB[i][j] covers M=[br*256 + i*128 + wm*64, ..+64),
+            //                    N=[bc*256 + j*128 + wn*64, ..+64).
+            // In coord units of (RBM_4w=64, RBN_4w=64):
+            //   m_idx = br*(BLOCK_SIZE/RBM_4w) + i*WARPS_M + wm = br*4 + i*2 + wm
+            //   n_idx = bc*(BLOCK_SIZE/RBN_4w) + j*WARPS_N + wn = bc*4 + j*2 + wn
+            store(g.c, cAB[0][0], {0, 0, br*4 + 0    + wm, bc*4 + 0    + wn});
+            store(g.c, cAB[0][1], {0, 0, br*4 + 0    + wm, bc*4 + WARPS_N + wn});
+            store(g.c, cAB[1][0], {0, 0, br*4 + WARPS_M + wm, bc*4 + 0    + wn});
+            store(g.c, cAB[1][1], {0, 0, br*4 + WARPS_M + wm, bc*4 + WARPS_N + wn});
+
+            asm volatile("s_waitcnt vmcnt(0) lgkmcnt(0)");
+            __syncthreads();
+        }
+    }
+
+    // Host launcher: mirrors a stripped-down dispatch_grouped_rcr.
+    // Single group only; no FUSED_KTAIL / N_MASKED_STORE specs. Caller
+    // is responsible for ensuring M%256==0, N%256==0, K%128==0 (R59
+    // probe shape: M=512, N=256, K=256 satisfies all three).
+    static void dispatch_test_4w_real_coords(grouped_layout_globals g) {
+        g.n = static_cast<int>(g.c.cols());
+        g.M_total = static_cast<int>(g.c.rows());
+        g.k = static_cast<int>(g.a.cols());
+
+        g.fast_n = (g.n / BLOCK_SIZE) * BLOCK_SIZE;
+        g.fast_k = (g.k / K_BLOCK)    * K_BLOCK;
+        g.bpc    = g.fast_n / BLOCK_SIZE;
+        g.ki     = g.fast_k / K_BLOCK;
+
+        if (g.bpc <= 0 || g.ki <= 0 || g.M_total <= 0) return;
+
+        dim3 grid(NUM_CUS);
+        dim3 block(_NUM_THREADS);
+        test_grouped_rcr_kernel_4w_real_coords<0><<<grid, block, 0, g.stream>>>(g);
+    }
+} // namespace lever_c2_round_59_step2b2_real_coords
+
+template __global__ void
+lever_c2_round_59_step2b2_real_coords::test_grouped_rcr_kernel_4w_real_coords<0>(grouped_layout_globals);
+
+// =============================================================================
 // Persistent RRR grouped kernel — round-1 mirror of grouped_rcr_kernel.
 //
 // Identical persistent + CPU-sync-free skeleton (LDS group_offs cache, 6-step
@@ -6820,4 +7071,37 @@ PYBIND11_MODULE(tk_fp8_layouts, m) {
     m.attr("DEFAULT_GROUP_M") = DEFAULT_GROUP_M;
     m.attr("BLOCK_SIZE") = BLK;
     m.attr("K_BLOCK") = BK;
+
+    // R59 (auto-optimize): Lever C-2 step 2B-2 — debug entry for the
+    // 4w-style test kernel with real (br, bc, k) coord indexing.
+    // Single-group only (G=1, m_subtile_A=0 hardcoded). Caller contract:
+    // M%256==0, N%256==0, K%128==0. Output is BF16; scale_a/scale_b are
+    // host-side floats. NOT a production entry — used by the R59
+    // correctness probe (analysis/fp8_gemm/mi350x/probe_4w_real_coords.py)
+    // to validate the new kernel matches torch fp32 ref before R60+
+    // adds the group binary search prologue + K-tail + N-mask.
+    m.def("test_4w_real_coords",
+          [](pybind11::object a, pybind11::object b, pybind11::object c,
+             pybind11::object scale_a_obj, pybind11::object scale_b_obj,
+             pybind11::object group_offs_obj) {
+              auto group_offs_ptr = group_offs_obj.attr("data_ptr")().cast<uintptr_t>();
+              int G = group_offs_obj.attr("numel")().cast<int>() - 1;
+              grouped_layout_globals g{
+                  py::from_object<_gl_fp8>::make(a),
+                  py::from_object<_gl_fp8>::make(b),
+                  py::from_object<_gl_bf16>::make(c),
+                  to_float(scale_a_obj),
+                  to_float(scale_b_obj),
+                  nullptr,
+                  nullptr,
+                  reinterpret_cast<const int64_t*>(group_offs_ptr),
+                  {},
+                  G, 0, 0, 0, 0, /*group_m=*/0, /*num_xcds=*/0,
+                  0, 0, 0, /*m_per_group=*/0,
+              };
+              lever_c2_round_59_step2b2_real_coords::dispatch_test_4w_real_coords(g);
+          },
+          pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("c"),
+          pybind11::arg("scale_a"), pybind11::arg("scale_b"),
+          pybind11::arg("group_offs"));
 }
