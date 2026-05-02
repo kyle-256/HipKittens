@@ -2932,24 +2932,56 @@ void grouped_rrr_kernel(const grouped_layout_globals g) {
     const int num_pid_n = g.bpc;
     const int ki_dyn   = (KI_HINT > 0) ? KI_HINT : g.ki;
 
+    // Round-41 (Lever L extension): 2-phase parallel init, mirroring the
+    // R9-dm pattern in forward ``grouped_rcr_kernel`` (line ~2273) and
+    // the R38 port in ``grouped_var_k_kernel_fp8`` (HK ad501f0a).
+    //
+    // Phase 1: all threads parallel-load ``g.group_offs[0..G]`` from HBM
+    // into ``s_offs[]`` (collapse G+1 serialized HBM loads → one warp-
+    // coalesced transfer) AND pad ``s_cum_tiles[G+1..MAX_G_PLUS_1)``
+    // with the ``INT_MAX`` sentinel the downstream branch-free binary
+    // search relies on. __syncthreads gate.
+    //
+    // Phase 2: thread 0 does the O(G) variable prefix-scan reading from
+    // LDS (fast, no HBM stalls; the HBM reads all retired during the
+    // sync above). Unlike var_k (R38) which had a CONSTANT
+    // ``tiles_per_group = g.bpr * g.bpc`` and collapsed the scan to
+    // an O(1) closed form, ``grouped_rrr`` has a VARIABLE per-group
+    // count ``tiles_g = (M_g / BLOCK_SIZE) * num_pid_n`` (each group
+    // has its own M_g = s_offs[gi+1] - s_offs[gi]) so the serial scan
+    // is still necessary — only the HBM load is parallelized.
+    //
+    // ``grouped_rrr`` is the FP8 dA backward kernel used whenever
+    // K_RRR is BLOCK_SIZE-aligned (DSV3 Down K=2048 / GateUP K=7168;
+    // gpt_oss K=2880 is unaligned and reroutes via Triton transpose +
+    // forward grouped_rcr instead). This closes the last remaining
+    // init divergence among the 3 grouped FP8 kernels (rcr fwd, rrr
+    // bwd, var_k bwd all now use the same 2-phase pattern).
+    //
+    // Correctness: bit-identical to the old serial path for all legal
+    // inputs (G ≤ MAX_G_PLUS_1 - 1 = 64). Same values land in
+    // ``s_offs[0..G]`` (HBM content unchanged) and ``s_cum_tiles[0..G]``
+    // (same scan formula, same start-prev-next chain). Sentinel pad
+    // unchanged. ``s_total_tiles`` unchanged.
+    if (threadIdx.x <= g.G && threadIdx.x < MAX_G_PLUS_1) {
+        s_offs[threadIdx.x] = static_cast<int>(g.group_offs[threadIdx.x]);
+    }
+    if (threadIdx.x > g.G && threadIdx.x < MAX_G_PLUS_1) {
+        s_cum_tiles[threadIdx.x] = 0x7FFFFFFF;
+    }
+    __syncthreads();
     if (threadIdx.x == 0) {
-        int prev = static_cast<int>(g.group_offs[0]);
-        s_offs[0] = prev;
+        int prev = s_offs[0];
         s_cum_tiles[0] = 0;
         int t = 0;
         #pragma unroll 1
         for (int gi = 0; gi < g.G; ++gi) {
-            const int next = static_cast<int>(g.group_offs[gi + 1]);
-            s_offs[gi + 1] = next;
+            const int next = s_offs[gi + 1];
             t += ((next - prev) / BLOCK_SIZE) * num_pid_n;
             s_cum_tiles[gi + 1] = t;
             prev = next;
         }
         s_total_tiles = t;
-        #pragma unroll 1
-        for (int gi = g.G + 1; gi < MAX_G_PLUS_1; ++gi) {
-            s_cum_tiles[gi] = 0x7FFFFFFF;
-        }
     }
     __syncthreads();
     const int total_tiles = s_total_tiles;
