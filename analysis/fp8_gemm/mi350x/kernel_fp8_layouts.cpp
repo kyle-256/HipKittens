@@ -3437,6 +3437,41 @@ lever_c2_round_58_step2b1_real_load::test_grouped_rcr_kernel_4w_real_load<4>(gro
 //     reducing per-warp accumulator footprint to ≤128 fp32/lane). This
 //     loses the AGPR allocation (= R57's confirmed mechanism) but gives
 //     a known-good correctness baseline.
+//
+// R61 step-1 result: temp-copy + store-from-temp probe
+// ----------------------------------------------------
+// **Codegen radically changed but correctness pattern UNCHANGED**:
+//   * VGPR Spill: 80 → 12 (87.5% reduction!)
+//   * ScratchSize: 324 → 12 bytes/lane
+//   * Same broken base tiles: cAB[0][0].tiles[{0,1}][1] still wrong
+//
+// The temp-copy dramatically improved compiler register allocation
+// (spill 80 → 12) but did NOT fix the broken base tiles. This proves:
+//   1. The bug is NOT at store time (store-from-temp gives same wrong
+//      output as direct AGPR store).
+//   2. The bug is in the mma_ABt(cAB[0][0], ...) computation itself —
+//      specifically cAB[0][0]'s tiles[{0,1}][1] are computed wrong.
+//   3. The bug is DETERMINISTIC across 4 mitigation attempts
+//      (sacrificial dummy, explicit unroll, no-mul, temp-copy). Each
+//      gives wildly different codegen yet same broken output region.
+//
+// **C-2 path closure**: After 7 rounds (R54-R60) of effort, the
+// 4w-style 4-cell × 64×64 accumulator approach is BLOCKED by what
+// appears to be a deterministic LLVM AGPR allocation defect specific
+// to this kernel shape. Workarounds either (a) lose AGPR allocation
+// (defeats the purpose) or (b) preserve the broken base tiles.
+//
+// **Decision (R62+)**: Pivot to Lever A (async global→LDS + MFMA
+// pipelining). Lever A:
+//   * doesn't require AGPR (works with normal VGPR allocation)
+//   * reduces register pressure by eliminating VGPR staging of
+//     A_row_reg / B_row_reg between buffer_load and ds_read
+//   * uses gfx950 global_load_lds_dwordx4 ASM intrinsic directly
+//
+// The R60 test kernel + this docstring will remain in tree as
+// reference material for a possible future C-2 retry (e.g. after
+// LLVM upgrade or different cell shape that doesn't trigger the
+// AGPR bug).
 namespace lever_c2_round_59_step2b2_real_coords {
     using ::ST_v2;
 
@@ -3562,6 +3597,16 @@ namespace lever_c2_round_59_step2b2_real_coords {
             // mul(cAB[1][0], cAB[1][0], combined_scale);
             // mul(cAB[1][1], cAB[1][1], combined_scale);
 
+            // R61 step-1: copy cAB[0][0] (the broken cell) to a fresh
+            // temp tile and store FROM THE TEMP. This forces an
+            // AGPR→VGPR transfer via copy() before store reads from
+            // the tile. If this fixes the broken base tiles
+            // [{0,1}][1] of cAB[0][0], the bug is in store reading
+            // directly from AGPR for cAB[0][0]'s specific slot map.
+            C_acc_4w c00_tmp;
+            zero(c00_tmp);
+            copy(c00_tmp, cAB[0][0]);
+
             // C output coord units: rows in RBM_4w=64, cols in RBN_4w=64.
             // INTERLEAVED layout (matches production line 2123-2126):
             //   cAB[i][j] covers M=[br*256 + i*128 + wm*64, ..+64),
@@ -3569,10 +3614,10 @@ namespace lever_c2_round_59_step2b2_real_coords {
             // In coord units of (RBM_4w=64, RBN_4w=64):
             //   m_idx = br*(BLOCK_SIZE/RBM_4w) + i*WARPS_M + wm = br*4 + i*2 + wm
             //   n_idx = bc*(BLOCK_SIZE/RBN_4w) + j*WARPS_N + wn = bc*4 + j*2 + wn
-            store(g.c, cAB[0][0], {0, 0, br*4 + 0    + wm, bc*4 + 0    + wn});
-            store(g.c, cAB[0][1], {0, 0, br*4 + 0    + wm, bc*4 + WARPS_N + wn});
-            store(g.c, cAB[1][0], {0, 0, br*4 + WARPS_M + wm, bc*4 + 0    + wn});
-            store(g.c, cAB[1][1], {0, 0, br*4 + WARPS_M + wm, bc*4 + WARPS_N + wn});
+            store(g.c, c00_tmp,    {0, 0, br*4 + 0       + wm, bc*4 + 0       + wn});
+            store(g.c, cAB[0][1],  {0, 0, br*4 + 0       + wm, bc*4 + WARPS_N + wn});
+            store(g.c, cAB[1][0],  {0, 0, br*4 + WARPS_M + wm, bc*4 + 0       + wn});
+            store(g.c, cAB[1][1],  {0, 0, br*4 + WARPS_M + wm, bc*4 + WARPS_N + wn});
 
             asm volatile("s_waitcnt vmcnt(0) lgkmcnt(0)");
             __syncthreads();
