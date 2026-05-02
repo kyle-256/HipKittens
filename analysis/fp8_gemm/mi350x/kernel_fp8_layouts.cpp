@@ -182,6 +182,102 @@ namespace lever_d_round_b_step1_compile_test {
         "differ only in cell-internal lane partition (32x32 vs 16x16).");
 } // namespace lever_d_round_b_step1_compile_test
 
+// Round-54-dm (auto-optimize R54): Lever C-2 round-1 scaffold.
+//
+// The R53 baseline kernel-resource-usage capture (analysis/_notes/
+// round-53-fp8-grouped-resource-baseline-FUSED-KTAIL-not-spill-bound.md)
+// established that ``grouped_rcr_kernel<FUSED_KTAIL=true>`` (gpt_oss
+// K=2880) sits at VGPR=256 / AGPR=0 / Spill=34 — LOWER spill than the
+// FUSED_KTAIL=false instances (38-54), yet achieves SLOWER ratios
+// (1.07-1.11 vs 1.18-1.31). The bottleneck is therefore NOT register
+// spill but **MFMA compute density**:
+//   * current grouped (WARPS_M=2, WARPS_N=4, RBM=64, RBN=32):
+//       8 mfma_16x16x128 per warp per K-step
+//   * 4w-style (WARPS_M=2, WARPS_N=2, RBM=64, RBN=64):
+//       16 mfma_16x16x128 per warp per K-step (2× compute density)
+//
+// This namespace stages the 4w-style **constants and type aliases**
+// only — *no kernel definition yet*. Its only job in R54 is to verify
+// that the LLVM type system accepts the larger RBN=64 register-tile
+// instantiations and that the ratio invariants for warp-tile geometry
+// hold at compile time. The R55 round will copy ``grouped_rcr_kernel``
+// (lines ~2221-2885) into this namespace and re-target uses of the
+// outer-scope constants to the local ones.
+//
+// Mirrors the precedent set by ``lever_d_round_b_step1_compile_test``
+// above (round-26-dm) — same pattern: scaffold types, run static
+// checks, leave actual kernel code to the next round once the type
+// validation lands clean.
+namespace lever_c2_round_54_step1_scaffold {
+    constexpr int WARPS_M       = 2;
+    constexpr int WARPS_N       = 2;                          // was 4 in outer scope
+    constexpr int _NUM_WARPS    = WARPS_M * WARPS_N;          // 4
+    constexpr int _NUM_THREADS  = _NUM_WARPS * WARP_THREADS;  // 256 (was 512)
+    constexpr int RBM_4w        = BLK / WARPS_M / 2;          // 64 (unchanged)
+    constexpr int RBN_4w        = BLK / WARPS_N / 2;          // 64 (was 32)
+
+    // Per-warp output footprint:
+    //   current grouped: RBM*RBN = 64*32 =  2048 fp32 across 64 lanes
+    //                                   =   32 fp32/lane
+    //   4w-style:        RBM*RBN = 64*64 =  4096 fp32 across 64 lanes
+    //                                   =   64 fp32/lane (per-warp accum)
+    // With 16 fragments of 4 fp32/lane each = 64 fp32/lane * 4 warps =
+    // 256 fp32/lane total accumulator across the block — matching
+    // ``rcr_4w::kernel`` (line 1284) which the R53 report shows at
+    // AGPR=256 + Spill=0. This footprint is the **direct trigger** for
+    // LLVM's AGPR allocator (per R47 hypothesis: accumulators ≥ 256
+    // fp32/lane → LLVM picks AGPR).
+    static_assert(_NUM_THREADS == 256,
+        "4w-style block must launch with 256 threads (4 warps); "
+        "halves block-occupancy vs current 8-warp/512-thread layout.");
+    static_assert(WARPS_M * WARPS_N == 4,
+        "4w-style uses 4 warps total (2x2 grid).");
+    static_assert(RBM_4w * RBN_4w == 4096,
+        "4w-style per-warp output region: 64x64 = 4096 fp32 per warp = "
+        "64 fp32/lane * 64 lanes/warp.");
+
+    // 4w-style register-tile types. ``A_row_reg_4w`` keeps the same
+    // RBM=64 row count as the outer ``A_row_reg`` (line 92), so the
+    // A-side load pattern can be reused verbatim. ``B_row_reg_4w``
+    // doubles the RBN dim to 64, requiring RBN=64 on the B-side
+    // load lambdas (the R55 wiring step will re-target the lambda
+    // parameter ``int RBN = ...`` references inside ``grouped_rcr_kernel``).
+    using A_row_reg_4w = rt_fp8e4m3<RBM_4w, BK, row_l, rt_16x128_s>;
+    using B_row_reg_4w = rt_fp8e4m3<RBN_4w, BK, row_l, rt_16x128_s>;
+    using C_acc_4w     = rt_fl    <RBM_4w, RBN_4w, col_l, rt_16x16_s>;
+
+    // Per-lane VGPR footprint sanity (compile-time, must match the R53
+    // resource report's "256 VGPR + 256 AGPR" target for rcr_4w):
+    //   rt_fl<64, 64, col_l, rt_16x16_s>:
+    //     height = 64 / 16 = 4
+    //     width  = 64 / 16 = 4
+    //     elements_per_thread per cell = 16*16/64 = 4 fp32/lane/cell
+    //     total per-lane fp32 = 4 * 4 * 4 = 64 fp32/lane (per-warp)
+    //     across 4 warps the block holds 64 * 4 = 256 fp32/lane.
+    static_assert(C_acc_4w::height == 4,
+        "C_acc_4w height = RBM_4w / cell_rows = 64/16 = 4");
+    static_assert(C_acc_4w::width == 4,
+        "C_acc_4w width  = RBN_4w / cell_cols = 64/16 = 4");
+    // sizeof(rt_fl<...>) per-lane = packed_per_thread * elements_per_thread
+    // * sizeof(fp32) * height * width — for rt_16x16 this is
+    // 1 * 4 * 4 B * 4 * 4 = 256 B / lane / warp = 64 fp32/lane/warp.
+    static_assert(sizeof(C_acc_4w) == 4 * 4 * 4 * 4,
+        "C_acc_4w must be 256 bytes/lane = 64 fp32/lane (per-warp). "
+        "Across 4 warps the per-block accumulator footprint is 256 "
+        "fp32/lane — large enough for LLVM to pick AGPR allocation "
+        "(matches rcr_4w::kernel R53 baseline: AGPR=256, Spill=0).");
+
+    // A_row_reg_4w / B_row_reg_4w cross-checks (must be SAME size
+    // as outer A_row_reg / B_row_reg respectively, since RBM
+    // unchanged on A; B doubles to RBN=64 i.e. 2× the outer
+    // B_row_reg footprint).
+    static_assert(sizeof(A_row_reg_4w) == sizeof(::A_row_reg),
+        "A_row_reg_4w must match outer A_row_reg footprint (RBM=64 "
+        "unchanged on A side).");
+    static_assert(sizeof(B_row_reg_4w) == 2 * sizeof(::B_row_reg),
+        "B_row_reg_4w must be 2× outer B_row_reg (RBN doubled 32→64).");
+} // namespace lever_c2_round_54_step1_scaffold
+
 // Cooperative col-major load from a v2/v2a-swizzled FP8 LDS tile.
 // Two `ds_read_b64_tr_b8` per lane per K_HALF (offset:0 + offset:1024).
 template<typename RT, int K_HALF, typename ST>
