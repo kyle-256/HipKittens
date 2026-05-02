@@ -5771,24 +5771,37 @@ void grouped_var_k_kernel_fp8(const grouped_var_k_layout_globals_fp8 g) {
         }
 
         // Epilog 1: second-to-last K-tile.
+        //
+        // Round-14 (Lever K): removed redundant ``const auto b0_keep = b0``
+        // and ``const auto b1_keep = b1`` 32-dw register-tile copies. Live
+        // range analysis (see ``analysis/_notes/round-14-fp8-grouped-Lever-K-
+        // var_k-epilog-spill-trim.md``):
+        //   - b0 is loaded at the top, used by cA + cC mmas, and only
+        //     overwritten by ``load_b(b0, Bs[toc][0], wn)`` AFTER cC is
+        //     issued. b0 is therefore valid wherever ``b0_keep`` was used.
+        //   - b1 is loaded mid-epilog and never overwritten before epilog
+        //     end. b1_keep was always a dead copy.
+        // Forward ``grouped_rcr_kernel`` uses the same schedule without
+        // these copies (line ~2454-2506 of this file). Removing 2 × 32-dw
+        // copies cuts the epilog live range by 64 VGPRs (= 64 dw), which
+        // is the bulk of the var_k spill anomaly (R12 measured 52 dw spill
+        // / 161 loop S+R vs forward grouped_rcr 39 dw / 72 loop S+R).
         {
             load_b(b0, Bs[tic][0], wn);
-            const auto b0_keep = b0;
             load_a(a, As[tic][0], wm);
             global_load_a(As[toc][1], br*2+1, ki_g-1);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             CRR_MMA_BEGIN();
-            crr_mma(cA, a, b0_keep);
+            crr_mma(cA, a, b0);
             CRR_MMA_END();
             __builtin_amdgcn_s_barrier();
 
             load_b(b1, Bs[tic][1], wn);
-            const auto b1_keep = b1;
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             CRR_MMA_BEGIN();
-            crr_mma(cB, a, b1_keep);
+            crr_mma(cB, a, b1);
             CRR_MMA_END();
             __builtin_amdgcn_s_barrier();
 
@@ -5796,7 +5809,7 @@ void grouped_var_k_kernel_fp8(const grouped_var_k_layout_globals_fp8 g) {
             TK_WAIT_VMCNT(CRR_EPILOGUE_VMCNT); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             CRR_MMA_BEGIN();
-            crr_mma(cC, a, b0_keep);
+            crr_mma(cC, a, b0);
             CRR_MMA_END();
             __builtin_amdgcn_s_barrier();
 
@@ -5804,29 +5817,33 @@ void grouped_var_k_kernel_fp8(const grouped_var_k_layout_globals_fp8 g) {
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             CRR_MMA_BEGIN();
-            crr_mma(cD, a, b1_keep);
+            crr_mma(cD, a, b1);
             CRR_MMA_END();
             __builtin_amdgcn_s_barrier();
             tic ^= 1; toc ^= 1;
         }
 
         // Epilog 2: last K-tile.
+        //
+        // Round-14 (Lever K): same redundant-copy removal as epilog 1.
+        // b0 enters from epilog 1's last ``load_b(b0, Bs[toc][0], wn)``
+        // and is never overwritten in this block; b1 is loaded mid-block
+        // and never overwritten. All 4 mmas (cA/cB/cC/cD) can read b0/b1
+        // directly.
         {
-            const auto b0_keep = b0;
             load_a(a, As[tic][0], wm);
             asm volatile("s_waitcnt vmcnt(0)"); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             CRR_MMA_BEGIN();
-            crr_mma(cA, a, b0_keep);
+            crr_mma(cA, a, b0);
             CRR_MMA_END();
             __builtin_amdgcn_s_barrier();
 
             load_b(b1, Bs[tic][1], wn);
-            const auto b1_keep = b1;
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             CRR_MMA_BEGIN();
-            crr_mma(cB, a, b1_keep);
+            crr_mma(cB, a, b1);
             CRR_MMA_END();
             __builtin_amdgcn_s_barrier();
 
@@ -5834,8 +5851,8 @@ void grouped_var_k_kernel_fp8(const grouped_var_k_layout_globals_fp8 g) {
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             CRR_MMA_BEGIN();
-            crr_mma(cC, a, b0_keep);
-            crr_mma(cD, a, b1_keep);
+            crr_mma(cC, a, b0);
+            crr_mma(cD, a, b1);
             CRR_MMA_END();
             __builtin_amdgcn_s_barrier();
         }
