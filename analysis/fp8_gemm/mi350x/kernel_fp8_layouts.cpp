@@ -3380,6 +3380,63 @@ lever_c2_round_58_step2b1_real_load::test_grouped_rcr_kernel_4w_real_load<4>(gro
 // only reachable via the dedicated ``test_4w_real_coords`` pybind
 // binding used by the probe script). Production grouped path (used
 // by the metric) is byte-identical to R58.
+//
+// R60 debug findings (PARTIAL, REQUIRES R61+ DEEPER ROOT-CAUSE)
+// -------------------------------------------------------------
+// Three workarounds were tried in R60. None gave full PASS but they
+// substantially narrow the diagnosis:
+//
+// 1. **Sacrificial dummy** (`C_acc_4w cAB_sacrificial; zero(cAB_sacrificial);`
+//    declared BEFORE cAB[2][2]): NO EFFECT. Resource report
+//    byte-identical (V256/A256/Scratch 324/Spill 80) — LLVM either
+//    DCE'd the dummy or its first-allocated VGPRs do not overlap with
+//    the bug zone. Falsifies the "first-allocated VGPR ↔ spill traffic
+//    overlap" hypothesis from R59.
+//
+// 2. **Explicit per-base-tile mma** (16 mma_ABt_base loop instead of
+//    one mma_ABt(d, ..., d) call per cAB cell): cAB[0][0] PARTIALLY
+//    fixed (max diff dropped 294 → 86) but cAB[1][0] and cAB[1][1]
+//    became SLIGHTLY off (~0.3 diff, was ~0.004). Net regression.
+//    Suggests interleaved per-base-tile codegen exposes / masks
+//    different register conflicts than the bulk for-loop.
+//
+// 3. **Skip ``mul()`` scale epilog** (probe uses scale=1.0 anyway,
+//    so mul should be identity): cAB[0][0] **FIRST 4 ROWS NOW
+//    CORRECT** vs torch ref (~0.001 diff = pure fp8 noise). But
+//    rows 8-31 and cols 16-31 still broken. The mul() call was
+//    PROPAGATING / AMPLIFYING the bug; underlying mma load/compute
+//    has a real defect.
+//
+// Per-base-tile breakdown (probe 512×256×256, no-mul):
+//   cAB[0][0].tiles[n][m] rows×cols (in cell coords):
+//     [n=0..1, m=1] ← BROKEN (rows 0-31, cols 16-31, max diff ~138-216)
+//     [n=0..1, m=0,2,3], [n=2..3, m=0..3] ← CORRECT (~0.004 fp8 noise)
+//   = exactly 2 specific 16×16 base tiles broken in cAB[0][0],
+//     out of 16 total base tiles. cAB[0][1], cAB[1][0], cAB[1][1]
+//     all 16 base tiles each → CORRECT.
+//
+// Logical impossibility check (still holds): cAB[0][1].tiles[0][1]
+//   uses a_reg[0].tiles[0][0] @ b_reg[1].tiles[1][0]^T → CORRECT, so
+//   a_reg[0].tiles[0][0] is fine. cAB[1][0].tiles[0][1] uses
+//   a_reg[1].tiles[0][0] @ b_reg[0].tiles[1][0]^T → CORRECT, so
+//   b_reg[0].tiles[1][0] is fine. Yet
+//   cAB[0][0].tiles[0][1] = a_reg[0].tiles[0][0] @ b_reg[0].tiles[1][0]^T
+//   is BROKEN. Both inputs valid, output broken — possibly LLVM
+//   register allocator places cAB[0][0].tiles[{0,1}][1]'s data in
+//   AGPR slots that are clobbered by something between mma write and
+//   store read. R61 plan:
+//
+//   * Dump ISA for `test_grouped_rcr_kernel_4w_real_coords<0>`,
+//     trace AGPR slots holding cAB[0][0].tiles[0][1] and tiles[1][1].
+//   * Try `volatile` on cAB[0][0] declaration to force separate VGPR
+//     allocation (no AGPR — confirms AGPR-specific bug if probe passes).
+//   * Try copying cAB[0][0] to a temp before store: `add(temp, cAB[0][0],
+//     0.0); store(g.c, temp, ...)`. If temp store works, the AGPR-to-VGPR
+//     transfer at store-time is the bug.
+//   * If above fails, drop to occupancy=2 (force VGPR-only allocation by
+//     reducing per-warp accumulator footprint to ≤128 fp32/lane). This
+//     loses the AGPR allocation (= R57's confirmed mechanism) but gives
+//     a known-good correctness baseline.
 namespace lever_c2_round_59_step2b2_real_coords {
     using ::ST_v2;
 
@@ -3404,6 +3461,14 @@ namespace lever_c2_round_59_step2b2_real_coords {
         // (well within gfx950's per-block budget at occupancy=1).
         __shared__ ST_rcr As[2];
         __shared__ ST_rcr Bs[2];
+
+        // R60 step-1: sacrificial dummy declared BEFORE cAB to test
+        // the register-aliasing hypothesis. If the bug is "first-allocated
+        // VGPRs of cAB[0][0] overlap with spill traffic", declaring a
+        // throwaway acc tile first should absorb those bad slots and let
+        // cAB[0][0] land in clean register space.
+        C_acc_4w cAB_sacrificial;
+        zero(cAB_sacrificial);
 
         A_row_reg_4w a_reg[2];
         B_row_reg_4w b_reg[2];
@@ -3486,11 +3551,16 @@ namespace lever_c2_round_59_step2b2_real_coords {
                 mma_ABt(cAB[1][1], a_reg[1], b_reg[1], cAB[1][1]);
             }
 
-            const float combined_scale = resolve_combined_scale_grp(g);
-            mul(cAB[0][0], cAB[0][0], combined_scale);
-            mul(cAB[0][1], cAB[0][1], combined_scale);
-            mul(cAB[1][0], cAB[1][0], combined_scale);
-            mul(cAB[1][1], cAB[1][1], combined_scale);
+            // R60 step-3: skip the scale epilog entirely (probe sets
+            // scale_a=scale_b=1.0, so `mul(c, c, 1.0)` should be
+            // identity. If skipping fixes cAB[0][0], the bug is in
+            // `mul()` for the first acc cell. If still wrong, the
+            // bug is in load/mma not mul.
+            // const float combined_scale = resolve_combined_scale_grp(g);
+            // mul(cAB[0][0], cAB[0][0], combined_scale);
+            // mul(cAB[0][1], cAB[0][1], combined_scale);
+            // mul(cAB[1][0], cAB[1][0], combined_scale);
+            // mul(cAB[1][1], cAB[1][1], combined_scale);
 
             // C output coord units: rows in RBM_4w=64, cols in RBN_4w=64.
             // INTERLEAVED layout (matches production line 2123-2126):
@@ -3506,6 +3576,16 @@ namespace lever_c2_round_59_step2b2_real_coords {
 
             asm volatile("s_waitcnt vmcnt(0) lgkmcnt(0)");
             __syncthreads();
+        }
+
+        // R60 step-1: keep cAB_sacrificial alive past the kernel body
+        // so LLVM doesn't dead-code-eliminate the declaration. Write
+        // its first lane to a SENTINEL output (never matters because
+        // the binding doesn't read this address back).
+        if (cAB_sacrificial.tiles[0][0].data[0].x != 0.0f) {
+            // Unreachable in practice (zero() set it to 0.0); this branch
+            // exists only to keep the compiler from eliminating the dummy.
+            __builtin_amdgcn_s_barrier();
         }
     }
 

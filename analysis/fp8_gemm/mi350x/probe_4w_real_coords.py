@@ -86,9 +86,18 @@ def probe_one(M_total, N, K, scale_a=1.0, scale_b=1.0, dump=False):
                 if r < M_total and col < N:
                     chunk = c_test[r:r+64, col:col+64]
                     ref_chunk = c_ref[r:r+64, col:col+64]
-                    diff_chunk = (chunk - ref_chunk).abs().max().item()
+                    diff_chunk = (chunk - ref_chunk).abs()
+                    diff_max = diff_chunk.max().item()
                     chunk_max = chunk.abs().max().item()
-                    print(f"  [m={r:4d}, n={col:4d}] cAB cell: chunk_max={chunk_max:.3f} diff_max={diff_chunk:.3f}")
+                    if diff_max > 0.5:
+                        # Find offending rows
+                        bad_rows = (diff_chunk.max(dim=1).values > 0.5).nonzero().flatten().tolist()
+                        bad_cols = (diff_chunk.max(dim=0).values > 0.5).nonzero().flatten().tolist()
+                        print(f"  [m={r:4d}, n={col:4d}] cAB cell: chunk_max={chunk_max:.3f} diff_max={diff_max:.3f}")
+                        print(f"    BAD rows_in_cell ({len(bad_rows)} total)={bad_rows}")
+                        print(f"    BAD cols_in_cell ({len(bad_cols)} total)={bad_cols}")
+                    else:
+                        print(f"  [m={r:4d}, n={col:4d}] cAB cell: chunk_max={chunk_max:.3f} diff_max={diff_max:.3f} OK")
     print(f"  shape M={M_total} N={N} K={K}: max_abs={max_abs:.4f} SNR={snr:.2f} dB")
     return max_abs, snr
 
