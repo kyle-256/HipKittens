@@ -2766,10 +2766,30 @@ void grouped_rcr_kernel(const grouped_layout_globals g) {
         // ``n1 <= n_limit`` fast-path. ``bc`` is uniform across the wave
         // so this is a single wave-uniform branch, not divergent control
         // flow.
-        const int r0 = m_subtile_C + br*WARPS_M*2+wm;
-        const int r1 = m_subtile_C + br*WARPS_M*2+WARPS_M+wm;
-        const int c0 = bc*WARPS_N*2+wn;
-        const int c1 = bc*WARPS_N*2+WARPS_N+wn;
+        // Round-24 (PT): readfirstlane on the 4 C-store wave-uniform coords.
+        // R22 ASM disassembly counted 411 divergent-SRD fallback loops in
+        // FUSED_KTAIL=true rcr<T,T> spec (vs 128 in <F,F>); 80 % live in the
+        // C-store epilog. Root cause: r0/r1/c0/c1 are wave-uniform IN PRINCIPLE
+        // (m_subtile_C, br, bc, wm, wn all uniform per tile-iter) but LLVM's
+        // uniformity analysis cannot prove it — the FUSED_KTAIL block's per-
+        // lane VGPR ops (SENTINEL voffsets, b128_lo_valid lane masks) earlier
+        // in the function taint downstream flow. Each store(g.c, cX, coord)
+        // therefore constructs a VGPR-derived buffer SRD inside the kittens
+        // helper (`make_buffer_resource(as_u64, ...)` at memory/tile/
+        // global_to_register.cuh:332) and emits the per-lane fallback loop
+        // pattern (`v_readfirstlane → v_cmp → s_and_saveexec → buffer_op →
+        // s_xor exec → s_cbranch_execnz`) that costs ~20 cy/loop on the
+        // common wave-uniform path.
+        //
+        // Localised readfirstlane HERE (not earlier) avoids R22's V-A/V-B
+        // backlash (those tried on `group_idx` in the binary search prologue
+        // → +21 dw spill on rcr<T,T> via wide downstream cascade). The 4
+        // coord ints are dead-after-stores (no downstream consumers in the
+        // tile-iter), so SGPR promotion is local.
+        const int r0 = __builtin_amdgcn_readfirstlane(m_subtile_C + br*WARPS_M*2+wm);
+        const int r1 = __builtin_amdgcn_readfirstlane(m_subtile_C + br*WARPS_M*2+WARPS_M+wm);
+        const int c0 = __builtin_amdgcn_readfirstlane(bc*WARPS_N*2+wn);
+        const int c1 = __builtin_amdgcn_readfirstlane(bc*WARPS_N*2+WARPS_N+wn);
         if constexpr (N_MASKED_STORE) {
             if ((bc + 1) * BLOCK_SIZE <= g.n) {
                 mul(cA, cA, combined_scale);
