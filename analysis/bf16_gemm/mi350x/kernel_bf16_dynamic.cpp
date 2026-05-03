@@ -701,6 +701,25 @@ __device__ __forceinline__ void device_gemm_tile_body(
             #pragma unroll 2
             for (int tile = 0; tile < num_tiles - 2; tile += 2) main_loop_iter(tile);
         } else {
+            // R64 attempted to attenuate full-unroll for KI_HINT >= 112 to
+            // relieve the 24 / 12 VGPR spill on RCR / RRR (KI=112 path,
+            // DSV3-GateUP K=7168). Two variants tried:
+            //   (a) constexpr num_tiles + #pragma unroll 8: spill UNCHANGED
+            //       (24/13). LLVM honored full-unroll despite the pragma —
+            //       confirming R15's "pragma is decorative with constexpr
+            //       num_tiles" finding extends to KI=112's larger body.
+            //   (b) opaque-cast `int num_tiles = KI_HINT; asm "+s"` +
+            //       #pragma unroll 8: spill ELIMINATED (24/12 → 0/0,
+            //       VGPR 256→246) but kernel produced GARBAGE output
+            //       (SNR -3.79 dB on DSV3-GateUP-B16-M2048 KI=112; R55
+            //       probe pre-/post-revert confirmed only the runtime-
+            //       num_tiles + partial-unroll variant breaks correctness).
+            // The hand-tuned schedule's prefetch + s_waitcnt vmcnt(N)
+            // pattern (lines 600-690) assumes single-basic-block full
+            // unroll where LLVM tracks in-flight VMEM count exactly.
+            // Partial-unroll's loop-back creates a scheduler boundary that
+            // breaks this assumption — the s_waitcnt vmcnt(6)/vmcnt(4)
+            // counters become wrong across the loop edge. Falsified R64.
             #pragma unroll
             for (int tile = 0; tile < num_tiles - 2; tile += 2) main_loop_iter(tile);
         }
