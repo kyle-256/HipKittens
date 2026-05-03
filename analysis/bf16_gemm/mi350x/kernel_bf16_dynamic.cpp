@@ -620,6 +620,7 @@ __device__ __forceinline__ void device_gemm_tile_body(
         DO_MMA(C_accum[0][1], A_tile, B_tile_1, C_accum[0][1]);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
+        __builtin_amdgcn_sched_barrier(0);
 
         load_a_subtile(A_tile, As[0][1], warp_row);
         G::load(As[0][0], a_gl, a_coord(row*2, tile+2), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_00);
@@ -641,6 +642,7 @@ __device__ __forceinline__ void device_gemm_tile_body(
         DO_MMA(C_accum[1][1], A_tile, B_tile_1, C_accum[1][1]);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
+        __builtin_amdgcn_sched_barrier(0);
 
         load_a_subtile(A_tile, As[1][0], warp_row);
         G::load(As[0][1], a_gl, a_coord(row*2+1, tile+2), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_01);
@@ -663,6 +665,7 @@ __device__ __forceinline__ void device_gemm_tile_body(
         DO_MMA(C_accum[0][1], A_tile, B_tile_1, C_accum[0][1]);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
+        __builtin_amdgcn_sched_barrier(0);
 
         load_a_subtile(A_tile, As[1][1], warp_row);
         G::load(As[1][0], a_gl, a_coord(row*2, tile+3), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_10);
@@ -683,6 +686,7 @@ __device__ __forceinline__ void device_gemm_tile_body(
         DO_MMA(C_accum[1][1], A_tile, B_tile_1, C_accum[1][1]);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
+        __builtin_amdgcn_sched_barrier(0);
     };
 
     // Schedule selection (matches the original baseline):
