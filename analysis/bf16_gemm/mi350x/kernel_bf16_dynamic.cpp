@@ -1624,6 +1624,22 @@ struct grouped_layout_globals {
     // ALSO consults this flag to decide whether to skip case-2 (interior
     // K-tail correction) — when LDS has handled it, we mustn't double-add.
     int m_per_group;
+    // R61: device int counter for the work-stealing persistent loop in
+    // `grouped_kernel`. Pre-zeroed by `dispatch_grouped` via
+    // `hipMemsetAsync` on a kernel-file-static buffer (lazily allocated
+    // once per process via `hipMalloc`); reused across launches. Each
+    // block atomicAdd's to claim the next (group, tile) pair. nullptr
+    // (legacy / direct callers that don't go through `dispatch_grouped`)
+    // makes the kernel fall back to the original static persistent-stride
+    // partition. R61 narrative: R60 PMC analysis (P + 3I = 1033 µs on
+    // gpt_oss-GateUP-B4-M2048; P + 2I idle for the 32 short blocks)
+    // showed wave imbalance from `tiles % NUM_CUS != 0` is a 1-2pp MFMA
+    // util penalty even with uniform-cost tiles, plus an additional
+    // memory-system variance penalty (slow blocks block the wall) the
+    // static partition can't absorb. Atomic-claim work-stealing
+    // dynamically reassigns tiles as blocks finish, so per-block wall
+    // converges toward `S + (total_tiles / NUM_CUS) × I`.
+    int* tile_counter;
     dim3 block() { return dim3(NUM_THREADS); }
     size_t dynamic_shared_memory() { return MAX_SHARED_MEMORY; }
 };
@@ -3715,8 +3731,27 @@ void grouped_kernel(const grouped_layout_globals g) {
     // persistent loop below.
     rt_fl<HALF_REG_BLOCK_M, HALF_REG_BLOCK_N, col_l, rt_16x16_s> C_accum[2][2];
 
-    // [grouped] Persistent: chiplet-swizzle pid against full grid (NUM_CUS).
-    int pid = chiplet_transform_chunked(blockIdx.x, NUM_CUS, g.num_xcds, 64);
+    // [grouped] Persistent: dynamic atomic-claim work-stealing (R61) when
+    // `g.tile_counter` is provided (set by `prime_grouped_tile_counter` in
+    // dispatch host code). When the pointer is nullptr (legacy / unit-test
+    // direct-call paths that bypass `dispatch_grouped`), fall back to the
+    // pre-R61 static `pid = chiplet_transform_chunked` partition with
+    // stride NUM_CUS — chiplet_transform_chunked is identity on grid 256
+    // (R60 finding: `limit = (256/512)*512 = 0` short-circuits), so the
+    // legacy branch reduces to `pid = blockIdx.x; gt += NUM_CUS`. The
+    // chosen `pid` (or first claim) seeds the persistent loop below; per
+    // -iter advance is via atomic claim or static stride accordingly.
+    __shared__ int s_claim;
+    int pid;
+    if (g.tile_counter != nullptr) {
+        if (threadIdx.x == 0) {
+            s_claim = atomicAdd(g.tile_counter, 1);
+        }
+        __syncthreads();
+        pid = s_claim;
+    } else {
+        pid = chiplet_transform_chunked(blockIdx.x, NUM_CUS, g.num_xcds, 64);
+    }
 
     const int num_pid_n = g.bpc;
 
@@ -3820,7 +3855,12 @@ void grouped_kernel(const grouped_layout_globals g) {
     i32x4 b_srsrc_curr = make_srsrc(b_base, b_inner_rows * b_row_stride, /*row_stride_bytes=*/0);
 
     // [grouped] Persistent outer loop: stream (group, tile) pairs through this CU.
-    for (int gt = pid; gt < total_tiles; gt += NUM_CUS) {
+    // R61: advance is via atomic claim (work-stealing) when `g.tile_counter`
+    // is set by `prime_grouped_tile_counter`, else static stride NUM_CUS.
+    // The advance lives at the bottom of this `while`-loop body (search
+    // `R61: advance`) so the runtime branch is hit once per tile.
+    int gt = pid;
+    while (gt < total_tiles) {
 
         // [grouped] O(G) linear scan over LDS-cached cumsum to map gt →
         // (group_idx, local_tile, m_start_g, M_g). LDS reads (~5 cyc) replace
@@ -3988,6 +4028,21 @@ void grouped_kernel(const grouped_layout_globals g) {
         // the next tile's prologue starts from a clean state.
         asm volatile("s_waitcnt vmcnt(0) lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
+
+        // R61: advance — claim next tile via atomic counter (work-stealing)
+        // or via static stride (legacy / nullptr counter). The counter
+        // path piggy-backs on `s_claim` declared near the chiplet/init
+        // section above. The drain above means atomicAdd issuance is
+        // properly ordered after the previous tile's HBM stores.
+        if (g.tile_counter != nullptr) {
+            if (threadIdx.x == 0) {
+                s_claim = atomicAdd(g.tile_counter, 1);
+            }
+            __syncthreads();
+            gt = s_claim;
+        } else {
+            gt += NUM_CUS;
+        }
     }
 }
 
@@ -4039,6 +4094,55 @@ INSTANTIATE_K_GRP(462);
 INSTANTIATE_K_GRP(832);
 #undef INSTANTIATE_K_GRP
 
+// R61: persistent device int counter for grouped_kernel work-stealing.
+// Lazily allocated on first call, leaked at process exit (single 4-byte
+// device buffer; non-recoverable but inconsequential given the kernel
+// module is loaded for the process lifetime). hipMemsetAsync zeros the
+// counter on the same stream as the upcoming kernel launch — the memset
+// completes before kernel entry without an explicit sync.
+static int* grouped_tile_counter_buffer() {
+    static int* d_counter = nullptr;
+    if (d_counter == nullptr) {
+        hipMalloc(&d_counter, sizeof(int));
+    }
+    return d_counter;
+}
+
+// R61: gate predicate. R61-A (initial) enabled work-stealing for ALL
+// shapes; this regressed DSV3-GateUP-B16-M2048 ratio 1.288 → 1.108
+// (-14 %) and Qwen3-Down-B16-M2048 1.346 → 1.143 (-15 %), both at
+// `tiles % NUM_CUS == 0` (no imbalance to recover). The static-stride
+// partition's deterministic per-CU tile sequence (CU n does tiles
+// {n, n+NUM_CUS, n+2·NUM_CUS, ...}) preserves L2 cache locality on
+// the B-tile reads that work-stealing's arrival-order claim destroys.
+//
+// R61 (this version) gates work-stealing on `tiles ∈ (0, NUM_CUS*4) ∧
+// tiles % NUM_CUS != 0`. This is a general predicate (no per-(M,N,K)
+// hardcode) that fires only on shapes where (a) imbalance exists
+// (`tiles % NUM_CUS != 0`) AND (b) the total tile count is small
+// enough (`< NUM_CUS*4 = 1024`) that the imbalance fraction is
+// significant (≥ ~6 % wave-imbalance penalty). For the 24-shape MoE
+// metric this catches exactly the 2 worst-progress R61-baseline
+// shapes (`gpt_oss-Down-B4-M2048` tiles=384, ratio 0.949;
+// `gpt_oss-GateUP-B4-M2048` tiles=736, ratio 0.995) which both
+// jumped to ratio 1.187 / 1.325 (+25 / +33 %) under R61-A. The 22
+// other shapes keep the pre-R61 static partition.
+static inline bool should_use_work_stealing(int M_total, int bpc) {
+    if (bpc <= 0 || M_total <= 0) return false;
+    const int tiles = (M_total / BLOCK_SIZE) * bpc;
+    return (tiles > 0) && (tiles < NUM_CUS * 4) && ((tiles % NUM_CUS) != 0);
+}
+
+static inline void prime_grouped_tile_counter(grouped_layout_globals& g) {
+    if (!should_use_work_stealing(g.M_total, g.bpc)) {
+        g.tile_counter = nullptr;
+        return;
+    }
+    int* counter = grouped_tile_counter_buffer();
+    g.tile_counter = counter;
+    hipMemsetAsync(counter, 0, sizeof(int), g.stream);
+}
+
 template<Layout L, int KI>
 static inline void launch_one_grouped(grouped_layout_globals& g) {
     unsigned long mem_size = g.dynamic_shared_memory();
@@ -4047,6 +4151,7 @@ static inline void launch_one_grouped(grouped_layout_globals& g) {
         hipFuncSetAttribute((void*)grouped_kernel<L, KI>, hipFuncAttributeMaxDynamicSharedMemorySize, mem_size);
         attr_set = true;
     }
+    prime_grouped_tile_counter(g);
     grouped_kernel<L, KI><<<dim3(NUM_CUS), g.block(), mem_size, g.stream>>>(g);
 }
 
@@ -4058,6 +4163,7 @@ static inline void launch_one_grouped_fuse(grouped_layout_globals& g) {
         hipFuncSetAttribute((void*)grouped_kernel<L, 0, true>, hipFuncAttributeMaxDynamicSharedMemorySize, mem_size);
         attr_set = true;
     }
+    prime_grouped_tile_counter(g);
     grouped_kernel<L, 0, true><<<dim3(NUM_CUS), g.block(), mem_size, g.stream>>>(g);
 }
 
