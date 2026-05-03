@@ -3998,6 +3998,16 @@ template __global__ void grouped_kernel<Layout::RRR, 0, true>(const grouped_layo
     template __global__ void grouped_kernel<Layout::CRR, KI>(const grouped_layout_globals)
 INSTANTIATE_K_GRP(56);
 INSTANTIATE_K_GRP(64);
+// R52: KI=88 covers gpt_oss K=2880 (g.ki = 2816/32 = 88). Same FUSED=false
+// non-fuse template as KI=56/64/112 — sits at the same 256 VGPR / 0 spill
+// ceiling per build resource report. R39's KI=44 spill was on the FUSED=true
+// template which adds the K-tail epilog block (~8 VGPRs of live state) —
+// KI=88 / FUSED=false avoids that tax. K=2880 previously routed to KI_HINT=0
+// dynamic + #pragma unroll 2; KI=88 enables full #pragma unroll over 43
+// main_loop_iter calls (RCR/RRR branch in device_gemm_tile_body line 700).
+// Fast K%128==0 metric shapes (DSV3 KI=112, Qwen3 KI=64) already hit
+// compile-time KI specs; KI=88 closes the last fwd-side gpt_oss gap.
+INSTANTIATE_K_GRP(88);
 INSTANTIATE_K_GRP(112);
 INSTANTIATE_K_GRP(128);
 INSTANTIATE_K_GRP(172);
@@ -4209,6 +4219,7 @@ void dispatch_grouped(grouped_layout_globals g) {
             switch (g.ki) {
                 case 56:  launch_one_grouped<L, 56> (g); break;
                 case 64:  launch_one_grouped<L, 64> (g); break;
+                case 88:  launch_one_grouped<L, 88> (g); break;
                 case 112: launch_one_grouped<L, 112>(g); break;
                 case 128: launch_one_grouped<L, 128>(g); break;
                 case 172: launch_one_grouped<L, 172>(g); break;
