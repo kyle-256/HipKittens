@@ -4164,6 +4164,30 @@ static int* grouped_tile_counter_buffer() {
 // 3rd hipMemsetAsync per metric round (atomic counter contention)
 // + the L2-locality loss on the larger tiles=1472 working set
 // canceled the per-shape lift. Reverted to R61 cutoff.
+//
+// R65 attempted to revisit the R62-B extension by ALSO replacing the
+// single global atomic counter with 8 per-XCD counters (padded to 64-B
+// L2 cache lines + steal fallback when own slot exhausted). Hypothesis:
+// per-XCD reduces atomic contention 256-way → 32-way AND preserves
+// per-XCD L2 locality (each XCD owns a contiguous tile slice). 8-sample
+// alternating paired test: pre-R65 mean 874.9 (range 2), post-R65 mean
+// 873.5 (range 3) → Δ_mean -1.4, NEUTRAL within noise. Three causes:
+//   (a) Hot-KI register pressure: per_xcd_claim helper added +5 VGPR
+//       spill on KI=48/64/88 RCR (the gpt_oss/Qwen3-Down hot paths) and
+//       +20 VGPR spill on KI=88 CRR (cold). The helper's local SGPRs
+//       (per_xcd_floor, residual, my_start, my_end, target_start,
+//       target_end) inflate the kernel's regalloc peak even though the
+//       helper body is single-thread (`if (threadIdx.x == 0)`).
+//   (b) The R62-B variance was NOT primarily atomic-contention-driven
+//       (per-XCD didn't tame it: post-R65 range 3 vs pre-R65 range 2 is
+//       within scope; tiles=1472 perf is still HK ~1.11 vs Triton).
+//   (c) tiles=1472 working set (1.5 MB / tile × 184 tiles per XCD = 276
+//       MB) still exceeds 4 MB per-XCD L2 partition, so XCD-local
+//       contiguous slicing doesn't enable L2 reuse beyond what static
+//       stride already provides. R62-B doc's "L2-locality loss"
+//       analysis was correct but its fix (per-XCD slicing) doesn't help
+//       at this working-set scale.
+// Reverted at HK SHA <TBD> (docs-only). R65 closes the per-XCD lever.
 static inline bool should_use_work_stealing(int M_total, int bpc) {
     if (bpc <= 0 || M_total <= 0) return false;
     const int tiles = (M_total / BLOCK_SIZE) * bpc;
