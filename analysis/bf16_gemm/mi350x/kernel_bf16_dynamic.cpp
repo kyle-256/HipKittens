@@ -3996,6 +3996,16 @@ template __global__ void grouped_kernel<Layout::RRR, 0, true>(const grouped_layo
     template __global__ void grouped_kernel<Layout::RCR, KI>(const grouped_layout_globals); \
     template __global__ void grouped_kernel<Layout::RRR, KI>(const grouped_layout_globals); \
     template __global__ void grouped_kernel<Layout::CRR, KI>(const grouped_layout_globals)
+// R53: KI=48 covers Qwen3-Down K=1536 (g.ki = 1536/32 = 48). RCR-ONLY
+// because RRR / CRR at KI=48 spill 16-20 VGPRs (per R53 build report) —
+// the larger compile-time-bound RRR mma_AB / CRR mma_AtB schedules at
+// 24 main_loop_iter unroll iters exceed the 256 VGPR ceiling. RCR is
+// the ONLY layout that runs Qwen3-Down forward (K=1536); Qwen3 dA on
+// RRR uses K_dA = N_fwd = 4096 (g.ki=128) — already in the spec list —
+// so RCR-only KI=48 covers all metric paths without paying a bwd-side
+// spill tax. Qwen3-Down (4 metric shapes, weight 1) was the only
+// remaining family routing through KI_HINT=0 dynamic after R52's KI=88.
+template __global__ void grouped_kernel<Layout::RCR, 48>(const grouped_layout_globals);
 INSTANTIATE_K_GRP(56);
 INSTANTIATE_K_GRP(64);
 // R52: KI=88 covers gpt_oss K=2880 (g.ki = 2816/32 = 88). Same FUSED=false
@@ -4217,6 +4227,14 @@ void dispatch_grouped(grouped_layout_globals g) {
             }
         } else {
             switch (g.ki) {
+                case 48:
+                    // R53: RCR-only spec (RRR/CRR spill 16-20 VGPRs at KI=48).
+                    if constexpr (L == Layout::RCR) {
+                        launch_one_grouped<L, 48>(g);
+                    } else {
+                        launch_one_grouped<L, 0>(g);
+                    }
+                    break;
                 case 56:  launch_one_grouped<L, 56> (g); break;
                 case 64:  launch_one_grouped<L, 64> (g); break;
                 case 88:  launch_one_grouped<L, 88> (g); break;
