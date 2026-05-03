@@ -723,6 +723,7 @@ __device__ __forceinline__ void device_gemm_tile_body(
         DO_MMA(C_accum[0][0], A_tile, B_tile_0, C_accum[0][0]);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
+        __builtin_amdgcn_sched_barrier(0);
 
         load_b_subtile(B_tile_1, Bs[tic][1], warp_col);
         __builtin_amdgcn_s_barrier();
@@ -732,6 +733,7 @@ __device__ __forceinline__ void device_gemm_tile_body(
         DO_MMA(C_accum[0][1], A_tile, B_tile_1, C_accum[0][1]);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
+        __builtin_amdgcn_sched_barrier(0);
 
         load_a_subtile(A_tile, As[tic][1], warp_row);
         asm volatile("s_waitcnt vmcnt(4)");
@@ -743,6 +745,7 @@ __device__ __forceinline__ void device_gemm_tile_body(
         DO_MMA(C_accum[1][1], A_tile, B_tile_1, C_accum[1][1]);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
+        __builtin_amdgcn_sched_barrier(0);
         tic ^= 1; toc ^= 1;
     }
 
@@ -758,6 +761,7 @@ __device__ __forceinline__ void device_gemm_tile_body(
         DO_MMA(C_accum[0][0], A_tile, B_tile_0, C_accum[0][0]);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
+        __builtin_amdgcn_sched_barrier(0);
 
         load_b_subtile(B_tile_1, Bs[tic][1], warp_col);
         asm volatile("s_waitcnt vmcnt(0)");
@@ -768,6 +772,7 @@ __device__ __forceinline__ void device_gemm_tile_body(
         DO_MMA(C_accum[0][1], A_tile, B_tile_1, C_accum[0][1]);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
+        __builtin_amdgcn_sched_barrier(0);
 
         load_a_subtile(A_tile, As[tic][1], warp_row);
         __builtin_amdgcn_s_barrier();
@@ -778,6 +783,7 @@ __device__ __forceinline__ void device_gemm_tile_body(
         DO_MMA(C_accum[1][1], A_tile, B_tile_1, C_accum[1][1]);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
+        __builtin_amdgcn_sched_barrier(0);
     }
 
     /********** Round-4 path A: fused K-tail epilog (RCR only) **********/
