@@ -4127,6 +4127,15 @@ static int* grouped_tile_counter_buffer() {
 // `gpt_oss-GateUP-B4-M2048` tiles=736, ratio 0.995) which both
 // jumped to ratio 1.187 / 1.325 (+25 / +33 %) under R61-A. The 22
 // other shapes keep the pre-R61 static partition.
+//
+// R62 attempted to extend the upper bound to NUM_CUS*6=1536 to also
+// gate `gpt_oss-GateUP-B4-M4096` (tiles=1472). 5-sample paired
+// metric showed +0.03 mean ratio on that shape (HK 1067-1145 → mean
+// 1.139 vs R61 baseline 1.11) but **mean score Δ = -0.4 with range
+// 54 vs R61 baseline range 17** — the variance increase from the
+// 3rd hipMemsetAsync per metric round (atomic counter contention)
+// + the L2-locality loss on the larger tiles=1472 working set
+// canceled the per-shape lift. Reverted to R61 cutoff.
 static inline bool should_use_work_stealing(int M_total, int bpc) {
     if (bpc <= 0 || M_total <= 0) return false;
     const int tiles = (M_total / BLOCK_SIZE) * bpc;
