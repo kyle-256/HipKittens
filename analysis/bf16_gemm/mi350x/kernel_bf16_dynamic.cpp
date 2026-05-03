@@ -3758,6 +3758,15 @@ void grouped_kernel(const grouped_layout_globals g) {
     // [grouped] Cooperative init of the LDS group-metadata caches. Single
     // thread does the O(G) scan once; then everyone uses s_offs / s_cum_tiles.
     // group_offs is in element units; per-group tile count = (M_g/256)*bpc.
+    //
+    // R63 attempted to split this into (a) parallel HBM load via threads
+    // 0..G + (b) single-thread cumsum on LDS-cached values. 5×R63 vs
+    // 5×R62 baseline (GPU 3) showed mean Δ = -6.6 score, ~2σ regression
+    // — likely the compiler optimizes the original `prev → next` register
+    // chain better than the LDS-cached split, plus the additional sync
+    // barrier and broader HBM L2 pressure (256 blocks × 33-lane fan-out
+    // vs single-thread sequential pipeline) cost more than the
+    // theoretical 5 µs HBM round-trip savings. Reverted to pre-R63 form.
     if (threadIdx.x == 0) {
         int prev = static_cast<int>(g.group_offs[0]);
         s_offs[0] = prev;
