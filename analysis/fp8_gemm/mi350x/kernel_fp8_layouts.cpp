@@ -2243,6 +2243,181 @@ template __global__ void gemm_tail_kernel<Layout::CRR>(const layout_globals);
 // Scale epilog: ``scale_a * scale_b`` applied per tile (matches dense).
 // =============================================================================
 
+// =============================================================================
+// [fused-act R6] Forward-relocated R5a deposit so the FUSE_ACT=true
+// instantiation of grouped_rcr_kernel can refer to the helper + struct. The
+// R4 cvt builtin (line ~7390) is forward-declared; the R5a struct + load
+// helper (line ~7490 and ~7520 originally) are fully relocated here. The
+// originals are stubbed out (comment-only) at their old positions so the
+// compile-test kernel + binding still in the bottom-of-file pybind block
+// continue to find the symbols.
+// =============================================================================
+
+namespace fused_act_round4_compile_test {
+__device__ __forceinline__ uint32_t cvt_bf16x4_to_fp8x4(
+    bf16_2 lo, bf16_2 hi, float scale);
+}  // namespace fused_act_round4_compile_test
+
+struct grouped_layout_globals_fused_act {
+    _gl_bf16 a;
+    _gl_fp8 b;
+    _gl_bf16 c;
+    float scale_a, scale_b;
+    const float* dscale_a;
+    const float* dscale_b;
+    const int64_t* group_offs;
+    hipStream_t stream;
+    int G;
+    int n;
+    int k;
+    int ki;
+    int bpc;
+    int group_m;
+    int num_xcds;
+    int M_total;
+    int fast_n, fast_k;
+    int m_per_group;
+    dim3 block() { return dim3(_NUM_THREADS); }
+    size_t dynamic_shared_memory() { return 0; }
+};
+
+namespace fused_act_round5_compile_test {
+
+template<int N_THREADS,
+         ducks::st::all ST_DST,
+         ducks::gl::all GL_SRC,
+         ducks::coord::tile COORD = coord<ST_DST>>
+__device__ __forceinline__ void rcr_8w_load_hoist_fused_act(
+    ST_DST& dst,
+    const GL_SRC& src,
+    const COORD& idx,
+    const uint32_t* __restrict__ swizzled_offsets,
+    float scale)
+{
+    using T_DST = typename ST_DST::dtype;
+    using T_SRC = typename GL_SRC::dtype;
+    static_assert(sizeof(T_SRC) == 2, "fused-act expects BF16 src");
+    static_assert(sizeof(T_DST) == 1, "fused-act expects FP8 dst");
+
+    constexpr int dst_bytes_per_thread =
+        ST_DST::underlying_subtile_bytes_per_thread;
+    constexpr int dst_bytes_per_warp =
+        dst_bytes_per_thread * kittens::WARP_THREADS;
+    constexpr int memcpy_per_tile =
+        ST_DST::rows * ST_DST::cols * sizeof(T_DST) /
+        (dst_bytes_per_thread * N_THREADS);
+    static_assert(
+        ST_DST::rows * ST_DST::cols * sizeof(T_DST) >= dst_bytes_per_warp,
+        "shared tile must be at least 1024 bytes"
+    );
+
+    constexpr int num_warps = N_THREADS / kittens::WARP_THREADS;
+    const int warpid = kittens::warpid() % num_warps;
+    const int laneid = kittens::laneid();
+
+    coord<> unit_coord = idx.template unit_coord<2, 3>();
+    T_SRC* tensor_base = (T_SRC*)src.raw_ptr;
+    T_SRC* global_ptr  = (T_SRC*)&src[unit_coord];
+    const uint32_t total_bytes = static_cast<uint32_t>(
+        size_t(src.batch()) * size_t(src.depth()) *
+        size_t(src.rows())  * size_t(src.cols())  * sizeof(T_SRC));
+    i32x4 srsrc = make_srsrc(tensor_base, total_bytes);
+    const uint32_t tile_byte_offset = __builtin_amdgcn_readfirstlane(
+        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(global_ptr) -
+                              reinterpret_cast<uintptr_t>(tensor_base)));
+
+    const uintptr_t lds_tile_base =
+        reinterpret_cast<uintptr_t>(&dst.data[0]);
+
+    uint32_t lds_addrs[memcpy_per_tile + 1];
+    #pragma unroll
+    for (int i = 0; i < memcpy_per_tile; ++i) {
+        const int warp_linear_offset =
+            (warpid * dst_bytes_per_warp) + (i * num_warps * dst_bytes_per_warp);
+        const int lds_subtile_id =
+            warp_linear_offset / ST_DST::underlying_subtile_bytes;
+        const uint32_t off32 = static_cast<uint32_t>(
+            lds_tile_base + warp_linear_offset +
+            lds_subtile_id * ST_DST::subtile_padding);
+        lds_addrs[i] = __builtin_amdgcn_readfirstlane(off32);
+    }
+
+    const uint32_t lds_lane_off = static_cast<uint32_t>(laneid) * 16u;
+
+    #pragma unroll
+    for (int i = 0; i < memcpy_per_tile; ++i) {
+        const uint32_t voff_lo = swizzled_offsets[i] * 2u;
+        const uint32_t voff_hi = voff_lo + 16u;
+
+        __uint128_t v_lo = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
+            srsrc, voff_lo, tile_byte_offset, 0);
+        __uint128_t v_hi = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
+            srsrc, voff_hi, tile_byte_offset, 0);
+
+        bf16_2* bf_lo = reinterpret_cast<bf16_2*>(&v_lo);
+        bf16_2* bf_hi = reinterpret_cast<bf16_2*>(&v_hi);
+
+        u32x4 fp8_pack = {
+            fused_act_round4_compile_test::cvt_bf16x4_to_fp8x4(
+                bf_lo[0], bf_lo[1], scale),
+            fused_act_round4_compile_test::cvt_bf16x4_to_fp8x4(
+                bf_lo[2], bf_lo[3], scale),
+            fused_act_round4_compile_test::cvt_bf16x4_to_fp8x4(
+                bf_hi[0], bf_hi[1], scale),
+            fused_act_round4_compile_test::cvt_bf16x4_to_fp8x4(
+                bf_hi[2], bf_hi[3], scale),
+        };
+
+        const uint32_t lds_addr = lds_addrs[i] + lds_lane_off;
+        ::kittens::macros::ds_write_b128(fp8_pack, lds_addr, /*i_offset=*/0);
+    }
+
+    if constexpr (memcpy_per_tile * (dst_bytes_per_thread * N_THREADS) !=
+                  ST_DST::rows * ST_DST::cols * sizeof(T_DST)) {
+        constexpr int leftover_bytes =
+            ST_DST::rows * ST_DST::cols * sizeof(T_DST) -
+            memcpy_per_tile * (dst_bytes_per_thread * N_THREADS);
+        constexpr int leftover_threads = leftover_bytes / dst_bytes_per_thread;
+        constexpr int leftover_warps   = leftover_threads / kittens::WARP_THREADS;
+        if (warpid < leftover_warps) {
+            const int warp_linear_offset =
+                (warpid * dst_bytes_per_warp) +
+                (memcpy_per_tile * num_warps * dst_bytes_per_warp);
+            const int lds_subtile_id =
+                warp_linear_offset / ST_DST::underlying_subtile_bytes;
+            const uint32_t off32 = static_cast<uint32_t>(
+                lds_tile_base + warp_linear_offset +
+                lds_subtile_id * ST_DST::subtile_padding);
+            const uint32_t lds_warp_addr = __builtin_amdgcn_readfirstlane(off32);
+            const uint32_t voff_lo = swizzled_offsets[memcpy_per_tile] * 2u;
+            const uint32_t voff_hi = voff_lo + 16u;
+
+            __uint128_t v_lo = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
+                srsrc, voff_lo, tile_byte_offset, 0);
+            __uint128_t v_hi = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
+                srsrc, voff_hi, tile_byte_offset, 0);
+
+            bf16_2* bf_lo = reinterpret_cast<bf16_2*>(&v_lo);
+            bf16_2* bf_hi = reinterpret_cast<bf16_2*>(&v_hi);
+            u32x4 fp8_pack = {
+                fused_act_round4_compile_test::cvt_bf16x4_to_fp8x4(
+                    bf_lo[0], bf_lo[1], scale),
+                fused_act_round4_compile_test::cvt_bf16x4_to_fp8x4(
+                    bf_lo[2], bf_lo[3], scale),
+                fused_act_round4_compile_test::cvt_bf16x4_to_fp8x4(
+                    bf_hi[0], bf_hi[1], scale),
+                fused_act_round4_compile_test::cvt_bf16x4_to_fp8x4(
+                    bf_hi[2], bf_hi[3], scale),
+            };
+
+            const uint32_t lds_addr = lds_warp_addr + lds_lane_off;
+            ::kittens::macros::ds_write_b128(fp8_pack, lds_addr, /*i_offset=*/0);
+        }
+    }
+}
+
+}  // namespace fused_act_round5_compile_test
+
 struct grouped_layout_globals {
     _gl_fp8 a;                   // [M_total, K]
     _gl_fp8 b;                   // [G, N, K] (RCR)
@@ -2282,11 +2457,25 @@ struct grouped_layout_globals {
     size_t dynamic_shared_memory() { return 0; }
 };
 
-__device__ __forceinline__ float resolve_combined_scale_grp(
-    const grouped_layout_globals &g) {
-    const float sa = g.dscale_a ? *g.dscale_a : g.scale_a;
-    const float sb = g.dscale_b ? *g.dscale_b : g.scale_b;
-    return sa * sb;
+// [fused-act R6] Generalized to a template so the BF16-input fused-act path
+// can pass ``FUSE_ACT=true`` and have the resolver invert the stored
+// forward scale (``FP8_MAX / amax(a)``) into the dequant scale (``amax / FP8_MAX``)
+// the FP8 output epilog needs. Existing un-fused calls deduce GL from the
+// argument and pick up the default ``FUSE_ACT=false`` (bit-identical
+// behaviour, existing instantiations untouched).
+template<bool FUSE_ACT = false, typename GL>
+__device__ __forceinline__ float resolve_combined_scale_grp(const GL &g) {
+    const float sa_dev = g.dscale_a ? *g.dscale_a : g.scale_a;
+    const float sb_dev = g.dscale_b ? *g.dscale_b : g.scale_b;
+    if constexpr (FUSE_ACT) {
+        // ``g.dscale_a`` for fused-act stores the FORWARD scale (output of
+        // the R1 ``max_abs_bf16_to_fp8_scale`` binding). Invert to recover
+        // the dequant scale that the FP8 epilog multiplies by.
+        const float sa = (sa_dev > 0.0f) ? (1.0f / sa_dev) : 0.0f;
+        return sa * sb_dev;
+    } else {
+        return sa_dev * sb_dev;
+    }
 }
 
 // Persistent RCR kernel: grid_x = NUM_CUS. One block per CU; each block
@@ -2314,9 +2503,23 @@ __device__ __forceinline__ float resolve_combined_scale_grp(
 // ``analysis/_notes/round-2-ktail-fuse-result.md``) was retired in
 // rounds 3-11; the supporting helper
 // ``prefill_swizzled_offsets_partial_K`` was deleted in round 13.
-template<int KI_HINT = 0, bool N_MASKED_STORE = false, bool FUSED_KTAIL = false>
+template<int KI_HINT = 0, bool N_MASKED_STORE = false, bool FUSED_KTAIL = false,
+         bool FUSE_ACT = false>
 __global__ __launch_bounds__(_NUM_THREADS, 1)
-void grouped_rcr_kernel(const grouped_layout_globals g) {
+void grouped_rcr_kernel(
+    const std::conditional_t<FUSE_ACT,
+                             grouped_layout_globals_fused_act,
+                             grouped_layout_globals> g) {
+    // [fused-act R6] The FUSE_ACT=true instantiation reads BF16 ``g.a`` from
+    // HBM and converts to FP8 inside the load helper (Phase 1 of the FP8
+    // grouped fused-act forward optimization). The K-tail fuse path B reads
+    // FP8 bytes via reinterpret_cast — incompatible with the BF16 fused-act
+    // input — so we gate the two flags as mutually exclusive at compile time.
+    // The un-fused fallback (Primus ``_unfused_forward``) handles K-tail
+    // correctness when fused-act is selected on K%128 != 0 shapes (none in
+    // our initial gate; Phase 1 covers K%128==0 = 16/24 metric shapes).
+    static_assert(!(FUSE_ACT && FUSED_KTAIL),
+                  "FUSE_ACT=true requires FUSED_KTAIL=false");
     using ST_rcr = ST_v2;
     __shared__ ST_rcr As[2][2];
     __shared__ ST_rcr Bs[2][2];
@@ -2397,6 +2600,18 @@ void grouped_rcr_kernel(const grouped_layout_globals g) {
     uint32_t soA[mpt], soB[mpt];
     G::prefill_swizzled_offsets(As[0][0], g.a, soA);
     G::prefill_swizzled_offsets(Bs[0][0], g.b, soB);
+
+    // [fused-act R6] One-shot read of the forward FP8 scale (FP8_MAX / amax)
+    // into a wave-uniform float register. Used by every load_a call in the
+    // FUSE_ACT=true path. Read ONCE here (not in the per-tile epilog) so the
+    // HBM load is shared across all tiles processed by this CU. ``g.dscale_a``
+    // stores the forward scale for fused-act (output of the R1
+    // ``max_abs_bf16_to_fp8_scale`` binding); for the un-fused (FUSE_ACT=false)
+    // path this variable is unused (compiler DCE drops the load).
+    float scale_a_inv = 0.0f;
+    if constexpr (FUSE_ACT) {
+        scale_a_inv = (g.dscale_a != nullptr) ? *g.dscale_a : 0.0f;
+    }
 
     // K-tail fuse uses path B (round-3 commit 07354791): direct per-lane
     // ``raw_buffer_load_b128`` HBM→register inside the fuse epilog (~line
@@ -2486,16 +2701,19 @@ void grouped_rcr_kernel(const grouped_layout_globals g) {
         int tic = 0, toc = 1;
         // Prologue: load tile-0 + tile-1 (mirrors gemm_kernel<RCR> 1040-1054).
         rcr_8w_load_hoist<_NUM_THREADS>(b_tile(tic, 0), g.b, b_co(bc*2,   0), soB);
-        rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0],    g.a, a_co(br*2,   0), soA);
+        if constexpr (FUSE_ACT) fused_act_round5_compile_test::rcr_8w_load_hoist_fused_act<_NUM_THREADS>(As[tic][0], g.a, a_co(br*2,   0), soA, scale_a_inv);
+        else                    rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0],    g.a, a_co(br*2,   0), soA);
         rcr_8w_load_hoist<_NUM_THREADS>(b_tile(tic, 1), g.b, b_co(bc*2+1, 0), soB);
-        rcr_8w_load_hoist<_NUM_THREADS>(As[tic][1],    g.a, a_co(br*2+1, 0), soA);
+        if constexpr (FUSE_ACT) fused_act_round5_compile_test::rcr_8w_load_hoist_fused_act<_NUM_THREADS>(As[tic][1], g.a, a_co(br*2+1, 0), soA, scale_a_inv);
+        else                    rcr_8w_load_hoist<_NUM_THREADS>(As[tic][1],    g.a, a_co(br*2+1, 0), soA);
 
         if (wm == 1) __builtin_amdgcn_s_barrier();
         TK_WAIT_VMCNT(RCR_INIT0_VMCNT);
         __builtin_amdgcn_s_barrier();
 
         rcr_8w_load_hoist<_NUM_THREADS>(b_tile(toc, 0), g.b, b_co(bc*2,   1), soB);
-        rcr_8w_load_hoist<_NUM_THREADS>(As[toc][0],    g.a, a_co(br*2,   1), soA);
+        if constexpr (FUSE_ACT) fused_act_round5_compile_test::rcr_8w_load_hoist_fused_act<_NUM_THREADS>(As[toc][0], g.a, a_co(br*2,   1), soA, scale_a_inv);
+        else                    rcr_8w_load_hoist<_NUM_THREADS>(As[toc][0],    g.a, a_co(br*2,   1), soA);
         rcr_8w_load_hoist<_NUM_THREADS>(b_tile(toc, 1), g.b, b_co(bc*2+1, 1), soB);
 
         TK_WAIT_VMCNT(RCR_INIT1_VMCNT);
@@ -2521,7 +2739,8 @@ void grouped_rcr_kernel(const grouped_layout_globals g) {
         for (int k = 0; k < ki_dyn - 2; k++, tic ^= 1, toc ^= 1) {
             load_b(b0, b_tile(tic, 0), wn);
             load_a(a, As[tic][0], wm);
-            rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], g.a, a_co(br*2+1, k+1), soA);
+            if constexpr (FUSE_ACT) fused_act_round5_compile_test::rcr_8w_load_hoist_fused_act<_NUM_THREADS>(As[toc][1], g.a, a_co(br*2+1, k+1), soA, scale_a_inv);
+            else                    rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], g.a, a_co(br*2+1, k+1), soA);
             TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); rcr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
@@ -2535,7 +2754,8 @@ void grouped_rcr_kernel(const grouped_layout_globals g) {
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
-            rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0], g.a, a_co(br*2, k+2), soA);
+            if constexpr (FUSE_ACT) fused_act_round5_compile_test::rcr_8w_load_hoist_fused_act<_NUM_THREADS>(As[tic][0], g.a, a_co(br*2, k+2), soA, scale_a_inv);
+            else                    rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0], g.a, a_co(br*2, k+2), soA);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); rcr_mma(cC, a, b0); __builtin_amdgcn_s_setprio(0);
@@ -2551,7 +2771,8 @@ void grouped_rcr_kernel(const grouped_layout_globals g) {
         {
             load_b(b0, b_tile(tic, 0), wn);
             load_a(a, As[tic][0], wm);
-            rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], g.a, a_co(br*2+1, ki_dyn-1), soA);
+            if constexpr (FUSE_ACT) fused_act_round5_compile_test::rcr_8w_load_hoist_fused_act<_NUM_THREADS>(As[toc][1], g.a, a_co(br*2+1, ki_dyn-1), soA, scale_a_inv);
+            else                    rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], g.a, a_co(br*2+1, ki_dyn-1), soA);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); rcr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
@@ -2863,7 +3084,7 @@ void grouped_rcr_kernel(const grouped_layout_globals g) {
         // giving the masked-store helper room to spill into vacated
         // slots instead of HBM scratch. Targets the actual bottleneck
         // (scratch I/O REQUEST rate, not allocation count).
-        const float combined_scale = resolve_combined_scale_grp(g);
+        const float combined_scale = resolve_combined_scale_grp<FUSE_ACT>(g);
 
         if (wm == 0) __builtin_amdgcn_s_barrier();
         // Round-12: mirror BF16 grouped's column-masked C store. With
@@ -6319,6 +6540,45 @@ void dispatch_grouped_rcr(grouped_layout_globals g) {
 }
 
 // =============================================================================
+// [fused-act R6] Persistent grouped RCR dispatcher — FP8 fused-act variant.
+// Mirrors ``dispatch_grouped_rcr`` but launches the FUSE_ACT=true template
+// instantiation with ``grouped_layout_globals_fused_act`` (BF16 ``a`` view +
+// device-side ``dscale_a`` storing the FORWARD scale = FP8_MAX / amax(a)).
+// Initial gate: K % 128 == 0 only (no K-tail), and ``fused_ktail`` is forced
+// to false (the K-tail fuse path B reads FP8 bytes via reinterpret_cast,
+// incompatible with BF16 src). For K % 128 != 0 shapes the Primus side
+// falls back to the un-fused path. The dispatcher pre-checks bpc > 0 and
+// ki > 0 + fast_k == k; if any check fails the launch is skipped (Primus
+// must call the un-fused path instead — caller responsibility).
+// =============================================================================
+void dispatch_grouped_rcr_fused_act(grouped_layout_globals_fused_act g) {
+    g.n = static_cast<int>(g.c.cols());
+    g.M_total = static_cast<int>(g.c.rows());
+    g.k = static_cast<int>(g.a.cols());
+
+    g.fast_n = (g.n / BLOCK_SIZE) * BLOCK_SIZE;
+    g.fast_k = (g.k / K_BLOCK)    * K_BLOCK;
+    g.bpc    = kittens::ceil_div(g.n, BLOCK_SIZE);
+    g.ki     = g.fast_k / K_BLOCK;
+
+    if (!(g.bpc > 0 && g.ki > 0 && g.fast_k == g.k)) {
+        // Caller is responsible for falling back to the un-fused path.
+        return;
+    }
+
+    const bool n_aligned = (g.bpc * BLOCK_SIZE == g.n);
+    if (n_aligned) {
+        grouped_rcr_kernel<0, /*N_MASKED_STORE=*/false,
+                           /*FUSED_KTAIL=*/false, /*FUSE_ACT=*/true>
+            <<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
+    } else {
+        grouped_rcr_kernel<0, /*N_MASKED_STORE=*/true,
+                           /*FUSED_KTAIL=*/false, /*FUSE_ACT=*/true>
+            <<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
+    }
+}
+
+// =============================================================================
 // Persistent grouped RRR dispatcher — FP8 (forward-A backward dA path).
 //
 // Mirror of ``dispatch_grouped_rcr``: aligned interior swept by the
@@ -6993,6 +7253,50 @@ static void grouped_rcr_dscale_fn(
     dispatch_grouped_rcr(g);
 }
 
+// [fused-act R6] Host wrapper for grouped_rcr_kernel<FUSE_ACT=true>.
+// Inputs:
+//   a              — BF16 [M_total, K] activation tensor.
+//   b              — FP8  [G, N, K] weight tensor.
+//   c              — BF16 [M_total, N] output tensor.
+//   scale_a_inv    — device float32 [1] holding FP8_MAX / amax(a) (output of
+//                    ``max_abs_bf16_to_fp8_scale`` from the R1 binding).
+//   scale_b        — device float32 [1] holding the FP8 dequant scale for b.
+//   group_offs     — device int64 [G+1] prefix-sum on M_total.
+//   group_m,m_per_group,num_xcds — same scheduling knobs as the un-fused path.
+// Returns ``true`` if the fused-act kernel ran; ``false`` if the dispatcher
+// rejected the shape (caller must fall back to the un-fused path).
+static bool grouped_rcr_fused_act_dscale_fn(
+    pybind11::object a, pybind11::object b, pybind11::object c,
+    pybind11::object scale_a_inv_obj, pybind11::object scale_b_obj,
+    pybind11::object group_offs_obj,
+    int group_m,
+    int m_per_group,
+    int num_xcds) {
+    auto sa_ptr = scale_a_inv_obj.attr("data_ptr")().cast<uintptr_t>();
+    auto sb_ptr = scale_b_obj.attr("data_ptr")().cast<uintptr_t>();
+    auto group_offs_ptr = group_offs_obj.attr("data_ptr")().cast<uintptr_t>();
+    int G = group_offs_obj.attr("numel")().cast<int>() - 1;
+    grouped_layout_globals_fused_act g{
+        py::from_object<_gl_bf16>::make(a),
+        py::from_object<_gl_fp8>::make(b),
+        py::from_object<_gl_bf16>::make(c),
+        0.f, 0.f,
+        reinterpret_cast<const float*>(sa_ptr),
+        reinterpret_cast<const float*>(sb_ptr),
+        reinterpret_cast<const int64_t*>(group_offs_ptr),
+        {},
+        G, 0, 0, 0, 0, group_m, num_xcds, 0, 0, 0, m_per_group,
+    };
+
+    const int K = static_cast<int>(g.a.cols());
+    const int N = static_cast<int>(g.c.cols());
+    if ((K % K_BLOCK) != 0 || (N <= 0) || (K <= 0)) {
+        return false;
+    }
+    dispatch_grouped_rcr_fused_act(g);
+    return true;
+}
+
 // Round-1 host wrappers for grouped RRR (backward dA) FP8 kernel.
 // Same global struct as RCR (identical scale + group_offs plumbing); the
 // dispatcher pins ``fast_n = fast_k = 0`` so the entire compute happens
@@ -7115,6 +7419,460 @@ static void grouped_variable_k_crr_dscale_fp8_fn(
     dispatch_grouped_var_k_fp8(g);
 }
 
+// =============================================================================
+// max_abs_bf16 — round-1 of FP8 grouped fused-activation-quantize support.
+//
+// Computes one fp32 device scalar over a flat BF16 buffer of length N.
+// Two outputs supported:
+//   * mode = MODE_AMAX     : ``out[0] = max(|a[i]|)``                       (raw amax)
+//   * mode = MODE_FP8_SCALE: ``out[0] = fp8_max / max(eps, max(|a[i]|))``  (= "scale"
+//     in primus_turbo's quantize_fp8_tensorwise convention — multiplier
+//     that maps amax -> fp8_max). Lets the Python helper hand the scalar
+//     STRAIGHT to ``quantize_fp8_tensorwise_impl(a, dtype, scale=scale)``
+//     without a Python-side ``FP8_MAX / amax`` div+clamp launch (a 2-kernel
+//     orchestration overhead that would otherwise eat the win on small
+//     shapes — see /tmp/probe_fused_amax_quantize.py round-1 measurements).
+//
+// Used by the Primus-Turbo Python-side ``_fused_act_grouped_fp8_forward``
+// to produce the activation tensorwise scale BEFORE calling C++
+// ``quantize_fp8_tensorwise(input, scale=...)`` — the optional-scale
+// branch skips its internal amax pass, so the net amax cost shrinks to
+// one HK kernel launch (no torch reduction workspace alloc, no 2-stage
+// reduce).
+//
+// Design:
+//   * Persistent grid: NUM_CUS (=304 on MI355X) blocks × _NUM_THREADS=256
+//     threads. Grid-stride loop over the flat BF16 buffer with vectorized
+//     uint4 (=128b=8 bf16) reads.
+//   * Reduce inside each block: warp-shuffle (xor reduction over the
+//     64-thread wavefront) + per-block LDS staging across the 4 wavefronts.
+//   * Final cross-block: each block runs ``atomicMax`` on the int-reinterpret
+//     of its block-local fp32 max. Float order matches uint32 order for
+//     non-negative values (which |·| guarantees), so the int-typed
+//     atomicMax produces the correct fp32 max.
+//   * Block 0, thread 0 ALSO runs the post-reduce ``fp8_max / amax``
+//     transform (when ``MODE_FP8_SCALE``) via a brief spin-wait on the
+//     final atomicMax sentinel. This keeps the entire scale pipeline in
+//     one launch.
+//
+// Output buffer ``out_fp32_scalar`` MUST be pre-zeroed by the caller.
+// (The Python helper allocates with ``torch.zeros(())``; cost is one
+// 4-byte zero kernel — negligible vs the MN-byte read pass below.)
+//
+// Numerics: identical to ``a.abs().to(torch.float32).amax()`` modulo the
+// order of fmaxf operations. Both routes promote BF16 to FP32 before
+// taking abs+max, so denorms / subnormals collapse the same way and the
+// result bit-matches torch's reduction within a single ULP. SNR vs torch
+// > 90 dB on uniform-random inputs; far beyond the >= 25 dB FP8 gate.
+// =============================================================================
+
+// Mode selector: 0 = raw amax, 1 = scale = fp8_max / max(eps, amax).
+enum MaxAbsMode : int { MODE_AMAX = 0, MODE_FP8_SCALE = 1 };
+
+template<int MODE>
+__global__ __launch_bounds__(_NUM_THREADS, 1)
+void max_abs_bf16_kernel(const bf16* __restrict__ a,
+                         float* __restrict__ out_fp32_scalar,
+                         int64_t N,
+                         float fp8_max,
+                         float eps,
+                         int* __restrict__ done_counter /* [1], pre-zeroed */ ) {
+    constexpr int VEC = 8;  // 8 BF16 = 128 bits = uint4
+    const int64_t N_vec = N / VEC;
+    const uint4* a_vec = reinterpret_cast<const uint4*>(a);
+
+    int64_t tid = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t stride = (int64_t)blockDim.x * gridDim.x;
+
+    float local_max = 0.0f;
+
+    // Vectorized inner pass.
+    #pragma unroll 1
+    for (int64_t i = tid; i < N_vec; i += stride) {
+        uint4 v = a_vec[i];
+        const bf16* bf = reinterpret_cast<const bf16*>(&v);
+        #pragma unroll
+        for (int j = 0; j < VEC; ++j) {
+            float f = (float)bf[j];
+            local_max = fmaxf(local_max, fabsf(f));
+        }
+    }
+
+    // Tail elements (< VEC) — only the first stride contributes.
+    int64_t tail_base = N_vec * VEC;
+    for (int64_t i = tail_base + tid; i < N; i += stride) {
+        float f = (float)a[i];
+        local_max = fmaxf(local_max, fabsf(f));
+    }
+
+    // Wavefront reduce (64-wide on CDNA): xor butterfly, 6 steps.
+    #pragma unroll
+    for (int offset = 32; offset > 0; offset >>= 1) {
+        float other = __shfl_xor(local_max, offset);
+        local_max = fmaxf(local_max, other);
+    }
+
+    // Cross-wavefront reduce inside the block via LDS.
+    constexpr int WARPS_PER_BLOCK = _NUM_THREADS / WARP_THREADS;  // 256/64 = 4
+    __shared__ float smem[WARPS_PER_BLOCK];
+    __shared__ bool s_is_finalizer;
+    int warp_id = threadIdx.x / WARP_THREADS;
+    int lane = threadIdx.x % WARP_THREADS;
+
+    if (lane == 0) smem[warp_id] = local_max;
+    __syncthreads();
+
+    if (warp_id == 0) {
+        float v = (lane < WARPS_PER_BLOCK) ? smem[lane] : 0.0f;
+        #pragma unroll
+        for (int offset = 32; offset > 0; offset >>= 1) {
+            float other = __shfl_xor(v, offset);
+            v = fmaxf(v, other);
+        }
+        if (lane == 0) {
+            // Float comparison via int-reinterpret only valid for non-negative
+            // floats; |·| above guarantees that.
+            atomicMax(reinterpret_cast<int*>(out_fp32_scalar),
+                      __float_as_int(v));
+            // Round-1: detect the LAST block to retire so it can run the
+            // ``fp8_max / amax`` post-transform in-kernel (saves a Python
+            // FP8_MAX/amax kernel launch in the fused-act path). Convention
+            // mirrors AMD's persistent-launch sweep counters in the rest of
+            // the file: a counter pre-zeroed by the caller; the kernel
+            // bumps it once per block; whichever block hits ``gridDim.x``
+            // is the finalizer.
+            if (MODE == MODE_FP8_SCALE) {
+                int prev = atomicAdd(done_counter, 1);
+                s_is_finalizer = (prev == gridDim.x - 1);
+            } else {
+                s_is_finalizer = false;
+            }
+        }
+    }
+    __syncthreads();
+
+    // Single-thread post-transform: amax -> scale (= fp8_max / max(eps, amax)).
+    // Read the global amax with __threadfence-equivalent guarantee: the
+    // atomicMax / atomicAdd pair above is sequentially-consistent across
+    // blocks on AMD's GPU memory model (kfd buffer_atomic returns are
+    // ordered with prior atomic writes).
+    if (MODE == MODE_FP8_SCALE && warp_id == 0 && lane == 0 && s_is_finalizer) {
+        float amax = *reinterpret_cast<volatile float*>(out_fp32_scalar);
+        float denom = fmaxf(amax, eps);
+        float scale = fp8_max / denom;
+        *reinterpret_cast<volatile float*>(out_fp32_scalar) = scale;
+    }
+}
+
+// Host wrapper: bridges pybind11 device tensors to the kernel launch.
+// ``out_obj`` MUST be a pre-zeroed scalar fp32 device tensor (numel == 1).
+// ``a_obj`` is any contiguous BF16 device tensor; we read ``numel`` from it
+// and treat it as a flat array. Caller-side reshape / view is fine.
+// ``done_obj`` is a pre-zeroed int32 device tensor (numel == 1) used as
+// the finalizer counter; ignored by ``MODE_AMAX``.
+//
+// NUM_CUS-block × 256-thread persistent launch matches the existing FP8
+// grouped GEMM convention; uses the legacy default stream (==0), same as
+// every other binding in this file (see ``g.stream`` initialisers in
+// ``grouped_rcr_fn`` / ``grouped_rcr_dscale_fn`` / etc.). Default stream
+// auto-synchronises with PyTorch's per-thread streams, so callers don't
+// need a manual stream sync before subsequent ``quantize_fp8`` / GEMM ops.
+static constexpr int MAX_ABS_NUM_CUS = NUM_CUS;
+
+static void max_abs_bf16_fn(pybind11::object a_obj, pybind11::object out_obj) {
+    auto a_ptr   = a_obj.attr("data_ptr")().cast<uintptr_t>();
+    auto out_ptr = out_obj.attr("data_ptr")().cast<uintptr_t>();
+    int64_t N    = a_obj.attr("numel")().cast<int64_t>();
+    if (N <= 0) return;
+    max_abs_bf16_kernel<MODE_AMAX>
+        <<<dim3(MAX_ABS_NUM_CUS), dim3(_NUM_THREADS), 0, 0>>>(
+            reinterpret_cast<const bf16*>(a_ptr),
+            reinterpret_cast<float*>(out_ptr),
+            N, 0.0f, 0.0f, /*done_counter=*/nullptr);
+}
+
+// Round-1 fused-act helper: in-kernel FP8 scale = fp8_max / max(eps, amax).
+// ``done_obj`` MUST be a pre-zeroed int32 device tensor (numel == 1) — the
+// finalizer counter. Example FP8_E4M3_FN: fp8_max=448.0; FP8_E4M3_FNUZ:
+// fp8_max=240.0. The helper does NOT pick the constant — caller hands it
+// in so the kernel matches the Python-side ``get_float8_max`` choice.
+static void max_abs_bf16_to_fp8_scale_fn(
+        pybind11::object a_obj,
+        pybind11::object out_obj,
+        pybind11::object done_obj,
+        float fp8_max,
+        float eps) {
+    auto a_ptr   = a_obj.attr("data_ptr")().cast<uintptr_t>();
+    auto out_ptr = out_obj.attr("data_ptr")().cast<uintptr_t>();
+    auto done_ptr = done_obj.attr("data_ptr")().cast<uintptr_t>();
+    int64_t N    = a_obj.attr("numel")().cast<int64_t>();
+    if (N <= 0) return;
+    max_abs_bf16_kernel<MODE_FP8_SCALE>
+        <<<dim3(MAX_ABS_NUM_CUS), dim3(_NUM_THREADS), 0, 0>>>(
+            reinterpret_cast<const bf16*>(a_ptr),
+            reinterpret_cast<float*>(out_ptr),
+            N, fp8_max, eps,
+            reinterpret_cast<int*>(done_ptr));
+}
+
+// =============================================================================
+// R4 — Phase 1 fwd-fusion infra: BF16→FP8 cvt building block + compile-test.
+//
+// Foundation primitive for the future ``grouped_rcr_fused_act_kernel`` which
+// fuses BF16→FP8 activation cvt into the GEMM kernel's load_a path. R4 lands
+// just the inner-most cvt helper + a tiny compile-test kernel that forces
+// hipcc to emit codegen for the cvt builtin under CDNA4 / gfx950 — surfaces
+// any builtin-signature / register-class issue at build time, BEFORE the
+// surgical kernel-body changes that follow in R5+.
+//
+// `cvt_bf16x4_to_fp8x4`:
+//   4 BF16 lanes → 4 FP8e4m3 lanes packed in a single uint32_t.
+//   Two ``__builtin_amdgcn_cvt_pk_fp8_f32`` calls form the int: first call
+//   uses sel=false to write the lo half (WORD0); second call uses sel=true
+//   and passes the first result as ``dummy_old`` to merge WORD1 into the
+//   same int. The ``dummy_old`` accumulator pattern + the -Wuninitialized
+//   suppression mirror the composable_kernel reference at:
+//   3rdparty/composable_kernel/include/ck_tile/core/tensor/tile_elementwise_hip.hpp:197-213.
+//
+// Numerical semantics:
+//   fp8e4m3_lane[i] = round_to_e4m3(scale * bfloat16_to_fp32(bf16_lane[i]))
+//   where ``scale = FP8_MAX / max(eps, amax(a))`` is computed by the R1
+//   ``max_abs_bf16_to_fp8_scale`` kernel.
+//
+// Not yet wired to any production kernel — that's R5+ work where the helper
+// gets called from inside a DTR-mode load_a path replacing the existing
+// DTL ``buffer_load_dwordx4 ... offen lds`` for fused-act variants.
+// =============================================================================
+
+namespace fused_act_round4_compile_test {
+
+__device__ __forceinline__ uint32_t cvt_bf16x4_to_fp8x4(
+    bf16_2 lo,    // bf16 lanes 0, 1
+    bf16_2 hi,    // bf16 lanes 2, 3
+    float scale)  // a_scale_inv = FP8_MAX / amax(a)
+{
+    float2 lo_f = __bfloat1622float2(lo);
+    float2 hi_f = __bfloat1622float2(hi);
+    lo_f.x *= scale; lo_f.y *= scale;
+    hi_f.x *= scale; hi_f.y *= scale;
+
+    int dummy_old;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wuninitialized"
+    uint32_t packed = __builtin_amdgcn_cvt_pk_fp8_f32(
+        lo_f.x, lo_f.y, dummy_old, /*sel=*/false);
+    packed = __builtin_amdgcn_cvt_pk_fp8_f32(
+        hi_f.x, hi_f.y, packed, /*sel=*/true);
+#pragma clang diagnostic pop
+    return packed;
+}
+
+// Compile-test kernel: round-trips one bf16x4 → fp8x4 cvt. Forces LLVM to
+// emit codegen so any cvt-builtin issue surfaces at build time. Single-thread
+// body keeps the resource-usage report focused on the cvt sequence.
+__global__ __launch_bounds__(64, 1)
+void cvt_bf16x4_to_fp8x4_compile_test(
+    const bf16_2* __restrict__ src,    // length 2: 2 bf16_2 = 4 bf16
+    uint32_t* __restrict__ dst,        // length 1: packed fp8x4
+    float scale)
+{
+    if (threadIdx.x != 0) return;
+    bf16_2 lo = src[0];
+    bf16_2 hi = src[1];
+    *dst = cvt_bf16x4_to_fp8x4(lo, hi, scale);
+}
+
+// Bulk version: each thread cvts its own bf16x4 group → fp8x4. Used by the
+// Python-level numerical probe. Round-up the count to a multiple of 4 BF16.
+__global__ __launch_bounds__(256, 1)
+void cvt_bf16_to_fp8_bulk_compile_test(
+    const bf16* __restrict__ src,
+    fp8e4m3* __restrict__ dst,
+    int64_t N,             // number of bf16 elements (must be multiple of 4)
+    float scale)
+{
+    int64_t tid = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t stride = (int64_t)gridDim.x * blockDim.x;
+    const int64_t N4 = N / 4;
+    const bf16_2* src2 = reinterpret_cast<const bf16_2*>(src);
+    uint32_t* dst4 = reinterpret_cast<uint32_t*>(dst);
+    #pragma unroll 1
+    for (int64_t i = tid; i < N4; i += stride) {
+        bf16_2 lo = src2[2 * i + 0];
+        bf16_2 hi = src2[2 * i + 1];
+        dst4[i] = cvt_bf16x4_to_fp8x4(lo, hi, scale);
+    }
+}
+
+}  // namespace fused_act_round4_compile_test
+
+// =============================================================================
+// [Round 5a, fused-act] Production-grade DTR load helper for fused-act variant.
+//
+// The BF16-source counterpart of the FP8-source ``rcr_8w_load_hoist`` (lines
+// 806-915). Mirrors the same 8-warp swizzled multi-pass cooperative load but
+// replaces the DTL ``buffer_load_dwordx4 ... offen lds`` with:
+//   * 2× DTR (Direct Tile Read) ``raw_buffer_load_b128`` per pass — 32 bytes
+//     BF16 land in VGPRs (not LDS).
+//   * 4× ``cvt_bf16x4_to_fp8x4`` (the R4 helper) — 16 BF16 → 16 FP8 packed
+//     into a 16-byte u32x4 in registers.
+//   * 1× ``ds_write_b128`` per lane — the 16-byte FP8 chunk lands in LDS at
+//     the same swizzled slot the un-fused DTL would have written to.
+//
+// Per-pass HBM byte rate doubles (32 vs 16 bytes/lane — BF16 occupies twice
+// the bytes per element). Per-pass LDS write rate is unchanged (16 bytes/lane),
+// so ``memcpy_per_tile`` and the LDS subtile layout are bit-identical to the
+// un-fused helper. We can reuse ``prefill_swizzled_offsets`` as-is — its
+// output is in ``ST::dtype = FP8`` byte stride; we scale by 2 inside the
+// helper to recover the BF16-byte offset (the HBM stride for BF16 src).
+//
+// Wave-uniform / SGPR plumbing mirrors the un-fused helper:
+//   * SGPR-hoisted ``lds_addrs[]`` (warp-base; per-lane offset is added in
+//     a VGPR before ds_write_b128).
+//   * SGPR ``tile_byte_offset`` via ``__builtin_amdgcn_readfirstlane``.
+//   * Full-tensor SRD bound (so partial-N / partial-K tile loads clamp OOB
+//     bytes to 0 instead of faulting on unmapped pages — same robustness
+//     the un-fused helper already gets).
+//
+// Falsification gate: see ``rcr_8w_load_hoist_fused_act_compile_test`` below.
+// VGPR usage must stay comparable to the un-fused helper — kernel-level
+// resource numbers come in R5b when the helper is folded into a cloned
+// ``grouped_rcr_fused_act_kernel``. R5a ships only the helper, the new
+// ``grouped_layout_globals_fused_act`` struct, and a compile-test launcher
+// that forces codegen at build time so any signature / register-class issue
+// surfaces NOW rather than mid-kernel-clone in R5b.
+// =============================================================================
+
+// [fused-act R6] grouped_layout_globals_fused_act + rcr_8w_load_hoist_fused_act
+// were FORWARD-RELOCATED to ~line 2245 (just before grouped_layout_globals)
+// so the FUSE_ACT=true instantiation of grouped_rcr_kernel can refer to them.
+// The compile-test kernel + binding below still find both via the relocated
+// definitions (struct at file-scope, helper template in the
+// fused_act_round5_compile_test namespace re-opened here).
+namespace fused_act_round5_compile_test {
+
+// rcr_8w_load_hoist_fused_act body was FORWARD-RELOCATED to the
+// ``fused_act_round5_compile_test`` namespace at ~line 2245. The compile-test
+// kernel below references it via the same fully-qualified name.
+
+// Compile-test launcher: forces codegen for ``rcr_8w_load_hoist_fused_act``
+// at one representative (ST_v2 / _gl_bf16 / N_THREADS=256) instantiation. The
+// kernel does a single tile load (one ST_v2 worth of BF16 → FP8 in LDS) then
+// stripes the LDS contents to ``out_fp8`` so LLVM doesn't DCE the cvt path.
+// Used to:
+//   (a) Verify the helper compiles cleanly under hipcc / CDNA4.
+//   (b) Surface VGPR / scratch / register-class issues at build time.
+//   (c) Provide a Python-callable probe for R5b's numerical validation
+//       (compare LDS contents vs reference C++ ``quantize_fp8`` output;
+//       expect bit-exact match modulo BF16->FP8 rounding noise — same SNR
+//       budget as the R4 ``cvt_bf16_to_fp8_bulk`` probe).
+__global__ __launch_bounds__(_NUM_THREADS, 1)
+void rcr_8w_load_hoist_fused_act_kernel_test(
+    _gl_bf16 a,                       // [M, K] BF16 source
+    _gl_fp8  out,                     // [M, K] FP8 dst (LDS-dump)
+    float    scale)                   // FP8_MAX / amax(a)
+{
+    using ST_DST = ST_v2;
+    __shared__ ST_DST As;
+
+    // Zero LDS so subtile-padding bytes show up as 0 (not random 0x7F NaN
+    // encodings) in the strided dump below. Without this the SNR probe sees
+    // legitimate cvt output AND ~896 random padding bytes, contaminating the
+    // distributional comparison. Production kernels don't dump LDS so they
+    // don't need this — it's only here for the R5a numerical probe.
+    {
+        constexpr int total_lds_bytes = sizeof(As);
+        constexpr int per_thread_zero = total_lds_bytes / _NUM_THREADS;
+        static_assert(total_lds_bytes % _NUM_THREADS == 0,
+                      "LDS bytes must divide evenly across threads");
+        uint8_t* lds_bytes = (uint8_t*)&As.data[0];
+        #pragma unroll 1
+        for (int j = 0; j < per_thread_zero; ++j) {
+            lds_bytes[threadIdx.x * per_thread_zero + j] = 0;
+        }
+        __syncthreads();
+    }
+
+    constexpr int bpt = ST_DST::underlying_subtile_bytes_per_thread;
+    constexpr int mpt = ST_DST::rows * ST_DST::cols *
+                        sizeof(typename ST_DST::dtype) /
+                        (bpt * _NUM_THREADS);
+    uint32_t soA[mpt + 1];
+
+    G::prefill_swizzled_offsets(As, a, soA);
+
+    coord<ST_DST> base{0, 0, 0, 0};
+    rcr_8w_load_hoist_fused_act<_NUM_THREADS, ST_DST, _gl_bf16, coord<ST_DST>>(
+        As, a, base, soA, scale);
+    __syncthreads();
+
+    // Block-strided dump of the FULL LDS storage (including subtile padding)
+    // to ``out``. Caller supplies a buffer of ``sizeof(As)`` bytes (17408 for
+    // ST_v2 — 8 subtiles × (2048 valid + 128 padding)). Python-side strips
+    // the 7 × 128 padding gaps so the SNR probe sees just the 16384 cvt
+    // outputs. Without dumping the full LDS, the last subtile's tail (896
+    // bytes) is missed, contaminating the sorted-distributional SNR check.
+    if (blockIdx.x == 0 && out.raw_ptr) {
+        const int tid = threadIdx.x;
+        constexpr int total_lds_bytes = sizeof(As);
+        constexpr int per_thread = total_lds_bytes / _NUM_THREADS;
+        static_assert(total_lds_bytes % _NUM_THREADS == 0,
+                      "LDS bytes must divide evenly across threads");
+        uint8_t* hbm_base = (uint8_t*)out.raw_ptr;
+        const uint8_t* lds_base = (const uint8_t*)&As.data[0];
+        #pragma unroll 1
+        for (int j = 0; j < per_thread; ++j) {
+            const int idx = tid * per_thread + j;
+            hbm_base[idx] = lds_base[idx];
+        }
+    }
+}
+
+}  // namespace fused_act_round5_compile_test
+
+// Host wrapper for the bulk compile-test kernel (R4 numerical probe binding).
+// Exposes the cvt path to Python so the probe can verify SNR > 25 dB vs
+// torch's reference quantize. Not used by any production kernel — purely
+// validation of the cvt builtin numerics under CDNA4.
+static void cvt_bf16_to_fp8_bulk_fn(
+        pybind11::object src_obj,
+        pybind11::object dst_obj,
+        float scale) {
+    auto src_ptr = src_obj.attr("data_ptr")().cast<uintptr_t>();
+    auto dst_ptr = dst_obj.attr("data_ptr")().cast<uintptr_t>();
+    int64_t N    = src_obj.attr("numel")().cast<int64_t>();
+    if (N <= 0) return;
+    constexpr int BLOCK = 256;
+    constexpr int GRID  = NUM_CUS;
+    fused_act_round4_compile_test::cvt_bf16_to_fp8_bulk_compile_test
+        <<<dim3(GRID), dim3(BLOCK), 0, 0>>>(
+            reinterpret_cast<const bf16*>(src_ptr),
+            reinterpret_cast<fp8e4m3*>(dst_ptr),
+            N, scale);
+}
+
+// [fused-act R5a] Host wrapper for the DTR-load + cvt + LDS-write compile-test.
+// Single-block launch (no group/tile scheduling — just exercises the helper
+// once on a single ST_v2 worth of BF16 src). Output buffer is the strided LDS
+// dump so the load chain isn't DCE'd. R5b will use this binding for numerical
+// validation: cvt'd FP8 contents vs C++ ``quantize_fp8`` reference (expect
+// the same SNR ~340 dB profile as the R4 cvt-bulk probe).
+//
+// Caller contract:
+//   src — BF16 contiguous tensor, shape [≥ ST_v2::rows, ≥ ST_v2::cols].
+//   dst — FP8e4m3 contiguous tensor, numel ≥ ST_v2::rows * ST_v2::cols.
+//   scale — float (host-side; FP8_MAX / amax(src)).
+static void rcr_load_hoist_fused_act_test_fn(
+        pybind11::object src_obj,
+        pybind11::object dst_obj,
+        float scale) {
+    fused_act_round5_compile_test::rcr_8w_load_hoist_fused_act_kernel_test
+        <<<dim3(1), dim3(_NUM_THREADS), 0, 0>>>(
+            py::from_object<_gl_bf16>::make(src_obj),
+            py::from_object<_gl_fp8>::make(dst_obj),
+            scale);
+}
+
 PYBIND11_MODULE(tk_fp8_layouts, m) {
     m.doc() = "FP8 per-tensor GEMM: C = A op B * scale_a * scale_b";
     m.def("gemm_rcr", &gemm_wrapper<Layout::RCR>,
@@ -7144,6 +7902,49 @@ PYBIND11_MODULE(tk_fp8_layouts, m) {
     m.def("supports_shape", [](int m, int n, int k) -> bool {
         return m > 0 && n > 0 && k > 0;
     });
+    // [fused-act] BF16 max-abs reduction → single fp32 device scalar. Used by
+    // Primus-Turbo's ``_fused_act_grouped_fp8_forward`` (Round 1 of the FP8
+    // grouped fused-activation-quant lever) to produce the activation scale
+    // BEFORE calling the C++ ``quantize_fp8_tensorwise(input, scale=...)`` —
+    // the optional-scale branch skips its internal amax pass, so the net
+    // amax cost shrinks to one HK kernel launch (no torch reduction
+    // workspace alloc, no 2-stage reduce, single atomicMax target).
+    // Caller MUST pre-zero ``out`` (a 0-d / 1-elem fp32 device tensor).
+    m.def("max_abs_bf16", &max_abs_bf16_fn,
+          pybind11::arg("a"), pybind11::arg("out"));
+    // Same kernel as ``max_abs_bf16``, but the persistent-launch finalizer
+    // ALSO runs the ``out = fp8_max / max(eps, amax)`` post-transform — the
+    // primus_turbo "scale" convention used by ``quantize_fp8_tensorwise(
+    // input, scale=...)``. Saves the Python-side ``FP8_MAX / amax`` div +
+    // clamp launch (a 2-kernel orchestration overhead that otherwise eats
+    // the win on small shapes; see /tmp/probe_fused_amax_quantize.py).
+    // ``done`` MUST be a pre-zeroed int32 device scalar (numel == 1) for
+    // the finalizer detection; ``out`` MUST be a pre-zeroed fp32 device
+    // scalar (numel == 1).
+    m.def("max_abs_bf16_to_fp8_scale", &max_abs_bf16_to_fp8_scale_fn,
+          pybind11::arg("a"),
+          pybind11::arg("out"),
+          pybind11::arg("done"),
+          pybind11::arg("fp8_max"),
+          pybind11::arg("eps") = 1e-12f);
+    // [fused-act R4] Numerical-probe binding for the BF16→FP8 cvt builtin.
+    // Bulk-applies ``cvt_bf16x4_to_fp8x4`` over a contiguous BF16 buffer,
+    // multiplied by the caller-supplied ``scale`` (= FP8_MAX / amax(a)).
+    // Dst MUST be FP8e4m3-typed contiguous device tensor with same numel as
+    // src; src.numel() MUST be a multiple of 4. Used only by the R4 probe;
+    // not on any production hot path (R5+ folds this into a DTR load_a).
+    m.def("cvt_bf16_to_fp8_bulk", &cvt_bf16_to_fp8_bulk_fn,
+          pybind11::arg("src"),
+          pybind11::arg("dst"),
+          pybind11::arg("scale"));
+    // [fused-act R5a] DTR load + cvt + LDS write compile-test. Forces codegen
+    // for ``rcr_8w_load_hoist_fused_act`` at a representative ST_v2 tile size
+    // and exposes a single-block launcher to Python so R5b can do the
+    // numerical SNR probe before clone'ing the full grouped_rcr_kernel.
+    m.def("rcr_load_hoist_fused_act_test", &rcr_load_hoist_fused_act_test_fn,
+          pybind11::arg("src"),
+          pybind11::arg("dst"),
+          pybind11::arg("scale"));
     // [grouped] Persistent + CPU-sync-free FP8 RCR launcher. ``group_offs`` is
     // a [G+1] int64 device tensor (prefix-sum of per-group M); the kernel
     // consumes it on the GPU side via O(G) linear scan, no host reads.
@@ -7157,6 +7958,20 @@ PYBIND11_MODULE(tk_fp8_layouts, m) {
     m.def("grouped_rcr_dscale", &grouped_rcr_dscale_fn,
           pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("c"),
           pybind11::arg("scale_a"), pybind11::arg("scale_b"),
+          pybind11::arg("group_offs"),
+          pybind11::arg("group_m") = DEFAULT_GROUP_M,
+          pybind11::arg("m_per_group") = 0,
+          pybind11::arg("num_xcds") = 0);
+    // [fused-act R6] FUSE_ACT=true variant of the grouped RCR launcher.
+    // ``a`` is BF16 (not FP8); ``scale_a_inv`` is the device float32 scalar
+    // returned by ``max_abs_bf16_to_fp8_scale`` (= FP8_MAX / amax(a)).
+    // Returns ``True`` if the fused-act kernel ran; ``False`` if the
+    // dispatcher rejected the shape (caller must fall back to the un-fused
+    // path: ``quantize_fp8_tensorwise(a) → grouped_rcr_dscale(...)``).
+    // Initial gate: K % 128 == 0 only; FUSED_KTAIL=false.
+    m.def("grouped_rcr_fused_act_dscale", &grouped_rcr_fused_act_dscale_fn,
+          pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("c"),
+          pybind11::arg("scale_a_inv"), pybind11::arg("scale_b"),
           pybind11::arg("group_offs"),
           pybind11::arg("group_m") = DEFAULT_GROUP_M,
           pybind11::arg("m_per_group") = 0,
