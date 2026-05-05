@@ -1,5 +1,6 @@
 #include "kittens.cuh"
 #include "pyutils/pyutils.cuh"
+#include <cstdlib>
 using namespace kittens;
 
 constexpr int BLOCK_SIZE       = 256;
@@ -4398,6 +4399,25 @@ void dispatch_grouped(grouped_layout_globals g) {
 #ifndef BF16_RRR_FUSE_PROBE
 #define BF16_RRR_FUSE_PROBE 0
 #endif
+    // R84 PMC probe gate (off by default, runtime-readable env var):
+    // when ``BF16_FUSE_DISABLE=1`` is set in the process environment,
+    // bypass the in-kernel FUSE_KTAIL epilog and route K-tail shapes
+    // (currently RCR + K%128==64, i.e. gpt_oss K=2880) back through
+    // the non-FUSE main + standalone grouped_ktail_kernel_mfma32x32_M*
+    // RMW kernel. Used by R84 to A/B-test whether the FUSE epilog's
+    // live-state weight is what's keeping main-loop MfmaU pinned at
+    // 43%. PMC result on gpt_oss-Down-B4-M2048: FUSE_DISABLE main
+    // ran at MfmaU=46.3% / vgpr=124 vs FUSE on at MfmaU=42.9% /
+    // vgpr=128 — epilog costs 4 VGPRs + 3.4pp MFMA util through the
+    // main loop, but adding the standalone K-tail RMW (1358 us) more
+    // than cancels the main-loop speedup. Round-84 note has the full
+    // table. Read once per dispatch on the host side via static const
+    // lambda IIFE — the hot-path kernel body is unaffected. Default
+    // (env not set) = production behavior.
+    static const bool fuse_disable_probe = []() {
+        const char* env = std::getenv("BF16_FUSE_DISABLE");
+        return env != nullptr && env[0] == '1';
+    }();
     const bool fuse_ktail_eligible =
         ((L == Layout::RCR)
 #if BF16_RRR_FUSE_PROBE
@@ -4405,7 +4425,8 @@ void dispatch_grouped(grouped_layout_globals g) {
 #endif
          ) &&
         (g.bpc > 0) && (g.ki >= 2) &&
-        (K_rem_for_fuse == K_STEP) && lds_k_tail_safe_for_fuse;
+        (K_rem_for_fuse == K_STEP) && lds_k_tail_safe_for_fuse &&
+        !fuse_disable_probe;
 
     if (g.bpc > 0 && g.ki >= 2) {
         if (fuse_ktail_eligible) {
