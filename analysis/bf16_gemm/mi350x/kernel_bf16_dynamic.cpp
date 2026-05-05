@@ -4757,6 +4757,95 @@ struct grouped_var_k_layout_globals {
     size_t dynamic_shared_memory() { return MAX_SHARED_MEMORY; }
 };
 
+// =============================================================================
+// Round-89 (auto_optimize R12, Lever B6 step 1): per-helper VGPR
+// live-range profile of `grouped_var_k_kernel`.
+//
+// The kernel is at the 256-VGPR / Occ-2 ceiling per R87 PMC analysis,
+// blocking every swizzle/prefetch/permutation lever attempted in
+// R83-R88 (5-round falsified streak). To unblock R13's recompute-
+// instead-of-store trim, R12 extracts the persistent loop's
+// per-tile coord swizzle (the most complex inline region in var_k,
+// with multiple branches and intermediate locals) into a separate
+// `__device__` helper. The helper retains `__forceinline__` by
+// default so the production .so is bit-identical to baseline; a
+// build-time flag `-DPROFILE_VAR_K_NOINLINE` swaps to
+// `__attribute__((noinline))` for an out-of-line measurement build
+// that lets `-Rpass-analysis` report the helper's standalone VGPR
+// live-range. The diff (kernel VGPR with helper inline vs noinline)
+// gives the trim payoff for R13.
+//
+// Helper structure: all loop-invariant inputs are passed by value
+// (4 ints), 3 ints returned via small POD struct. ABI-clean for the
+// noinline path; CSE-friendly for the inlined path. No state shared
+// with caller via reference -> compiler is free to rematerialize
+// across the call boundary.
+struct var_k_coord_result_t {
+    int pid_m;
+    int pid_n;
+    int valid;  // 1 == live tile, 0 == skip (out-of-bounds partial group)
+};
+
+struct var_k_group_lookup_t {
+    int group_idx;
+    int local_tile;
+    int m_start_g;
+    int ki_g;
+    int valid;  // 0 if M_g/K_STEP < 2 -> skip
+};
+
+#ifdef PROFILE_VAR_K_NOINLINE
+#define VAR_K_HELPER_ATTR __attribute__((noinline))
+#else
+#define VAR_K_HELPER_ATTR __attribute__((always_inline))
+#endif
+
+__device__ VAR_K_HELPER_ATTR
+var_k_coord_result_t compute_var_k_coords(int local_tile,
+                                          int num_pid_m,
+                                          int num_pid_n,
+                                          int group_m) {
+    int pid_m = 0, pid_n = 0;
+    if (num_pid_n > num_pid_m) {
+        const int WGN = group_m;
+        const int num_wgid_in_group = num_pid_m * WGN;
+        int group_id = local_tile / num_wgid_in_group;
+        int first_pid_n = group_id * WGN;
+        int group_size_n = min(num_pid_n - first_pid_n, WGN);
+        if (group_size_n <= 0) return {0, 0, 0};
+        pid_n = first_pid_n + ((local_tile % num_wgid_in_group) % group_size_n);
+        pid_m = (local_tile % num_wgid_in_group) / group_size_n;
+    } else {
+        const int WGM = group_m;
+        const int num_wgid_in_group = WGM * num_pid_n;
+        int group_id = local_tile / num_wgid_in_group;
+        int first_pid_m = group_id * WGM;
+        int group_size_m = min(num_pid_m - first_pid_m, WGM);
+        if (group_size_m <= 0) return {0, 0, 0};
+        pid_m = first_pid_m + ((local_tile % num_wgid_in_group) % group_size_m);
+        pid_n = (local_tile % num_wgid_in_group) / group_size_m;
+    }
+    if (pid_m >= num_pid_m || pid_n >= num_pid_n) return {0, 0, 0};
+    return {pid_m, pid_n, 1};
+}
+
+// R12 second helper: group lookup + ki_g <2 skip. Reads s_offs LDS
+// cache (passed as int* — caller provides &s_offs[group_idx]). Returns
+// derived loop state in a small POD struct for the same ABI-clean
+// noinline/always-inline toggle as compute_var_k_coords.
+__device__ VAR_K_HELPER_ATTR
+var_k_group_lookup_t compute_var_k_group_lookup(int gt,
+                                                int tiles_per_group,
+                                                const int* s_offs) {
+    const int group_idx = gt / tiles_per_group;
+    const int local_tile = gt - group_idx * tiles_per_group;
+    const int m_start_g = s_offs[group_idx];
+    const int M_g = s_offs[group_idx + 1] - m_start_g;
+    const int ki_g = M_g / K_STEP;
+    if (ki_g < 2) return {0, 0, 0, 0, 0};
+    return {group_idx, local_tile, m_start_g, ki_g, 1};
+}
+
 template<int KI_HINT>
 __global__ __launch_bounds__(NUM_THREADS, 1)
 void grouped_var_k_kernel(const grouped_var_k_layout_globals g) {
@@ -4839,40 +4928,27 @@ void grouped_var_k_kernel(const grouped_var_k_layout_globals g) {
 
     // [grouped-var-k] Persistent outer loop: stream (group, tile) pairs through this CU.
     for (int gt = pid; gt < total_tiles; gt += NUM_CUS) {
-        const int group_idx = gt / tiles_per_group;
-        const int local_tile = gt - group_idx * tiles_per_group;
-
-        const int m_start_g = s_offs[group_idx];
-        const int M_g = s_offs[group_idx + 1] - m_start_g;
-        const int ki_g = M_g / K_STEP;
-        // Need at least 2 K-tiles for the prologue + epilog schedule; same
-        // constraint as dense / forward grouped (caller enforces M_g >= 128).
-        if (ki_g < 2) continue;
+        // R12 Lever B6 step 1: extracted to compute_var_k_group_lookup
+        // for live-range profiling (always_inline by default; flips to
+        // noinline under -DPROFILE_VAR_K_NOINLINE to expose the helper's
+        // standalone VGPR cost in -Rpass-analysis output).
+        const auto gl = compute_var_k_group_lookup(gt, tiles_per_group, s_offs);
+        if (!gl.valid) continue;
+        const int group_idx = gl.group_idx;
+        const int local_tile = gl.local_tile;
+        const int m_start_g = gl.m_start_g;
+        const int ki_g = gl.ki_g;
 
         // Within-group tile mapping (mirror dense gemm_compute_block_coords).
         // Both axes (m=output rows, n=output cols) are uniform; same dual
-        // tall-N / tall-M swizzle as dense.
-        int pid_m, pid_n;
-        if (num_pid_n > num_pid_m) {
-            const int WGN = g.group_m;
-            const int num_wgid_in_group = num_pid_m * WGN;
-            int group_id = local_tile / num_wgid_in_group;
-            int first_pid_n = group_id * WGN;
-            int group_size_n = min(num_pid_n - first_pid_n, WGN);
-            if (group_size_n <= 0) continue;
-            pid_n = first_pid_n + ((local_tile % num_wgid_in_group) % group_size_n);
-            pid_m = (local_tile % num_wgid_in_group) / group_size_n;
-        } else {
-            const int WGM = g.group_m;
-            const int num_wgid_in_group = WGM * num_pid_n;
-            int group_id = local_tile / num_wgid_in_group;
-            int first_pid_m = group_id * WGM;
-            int group_size_m = min(num_pid_m - first_pid_m, WGM);
-            if (group_size_m <= 0) continue;
-            pid_m = first_pid_m + ((local_tile % num_wgid_in_group) % group_size_m);
-            pid_n = (local_tile % num_wgid_in_group) / group_size_m;
-        }
-        if (pid_m >= num_pid_m || pid_n >= num_pid_n) continue;
+        // tall-N / tall-M swizzle as dense. Round-89 (R12 Lever B6
+        // step 1): extracted to `compute_var_k_coords` with
+        // build-toggleable inline/noinline attribute for a
+        // -Rpass-analysis live-range profile (see helper above).
+        const auto coords = compute_var_k_coords(local_tile, num_pid_m, num_pid_n, g.group_m);
+        if (!coords.valid) continue;
+        const int pid_m = coords.pid_m;
+        const int pid_n = coords.pid_n;
         const int row = pid_m;
         const int col = pid_n;
 
