@@ -4285,16 +4285,26 @@ void dispatch_grouped(grouped_layout_globals g) {
     //               ``row*N_stride + col_oob``, which is still inside
     //               the per-group SRD (just wraps to the next K row's
     //               valid columns) — no clamp triggers, garbage data
-    //               feeds the MMA. Until we add a column-mask path on
-    //               the B load itself (Phase 6+), RRR/CRR keep the
-    //               legacy ``bpc = fast_n / BLOCK_SIZE`` and N-tail
-    //               flows through ``grouped_tail_kernel``.
-    // Round-11: ceil_div N coverage is enabled unconditionally for RCR
-    // (no K-alignment gate). The unswizzled per-group B SRD inside
-    // ``grouped_kernel`` clamps OOB rows reliably, and the LDS K-tail
-    // kernel grid ``ceil_div(g.n, TBN)`` covers the partial last
-    // col-tile of the K-tail correction.
-    if constexpr (L == Layout::RCR) {
+    //               feeds the MMA. UNTIL R80, RRR/CRR kept the legacy
+    //               ``bpc = fast_n / BLOCK_SIZE`` and N-tail flowed
+    //               through ``grouped_ntail_kernel_lds_rrr`` /
+    //               ``grouped_tail_kernel``.
+    // Round-80 (R80): EXTEND ceil_div N coverage to RRR. The garbage
+    // B data in OOB N columns produces garbage *outputs* in the MFMA
+    // sub-tile lanes whose (m, n_out) maps to n_out >= g.n — but those
+    // are precisely the lanes whose results are dropped by the existing
+    // ``store_c_tile_n_masked`` path (line 4043-4053). MFMA lane→cell
+    // mapping is fixed: lane(B[k, n_oob]) is NOT read by the lanes
+    // computing D[m, n_in] (n_in < g.n), only by the lanes computing
+    // D[m, n_oob) which are masked at store. The K-tail RMW kernel
+    // ``grouped_ktail_kernel_lds_rrr<64>`` already handles ``col >= g.n``
+    // correctly (line 2204, 2278-2298, 2311) — only its launch grid is
+    // currently capped at ``ceil_div(g.fast_n, TBN)``; we extend it to
+    // ``ceil_div(g.n, TBN)`` below to cover the partial col-tile too.
+    // CRR is the var-K dB path with per-tile output [G, n, k] — its
+    // launch geometry is fundamentally different (no main-kernel n-tail
+    // structure to extend), so CRR keeps the legacy gate.
+    if constexpr (L == Layout::RCR || L == Layout::RRR) {
         g.bpc = kittens::ceil_div(g.n, BLOCK_SIZE);
     } else {
         g.bpc = g.fast_n / BLOCK_SIZE;
@@ -4443,10 +4453,13 @@ void dispatch_grouped(grouped_layout_globals g) {
     // col-tile via a wider grid. The dedicated LDS N-tail kernel is
     // therefore no longer launched on RCR — main + LDS K-tail together
     // cover every cell.
-    // RRR/CRR can't activate ceil_div N coverage (see dispatch comment
-    // above) — N-tail still runs through the scalar tail kernel for
-    // those layouts.
-    constexpr bool layout_supports_main_n = (L == Layout::RCR);
+    // R80: RRR ALSO supports main-kernel N coverage (ceil_div bpc above).
+    // The K-tail RMW kernel grid is extended below from ``ceil_div(fast_n, TBN)``
+    // to ``ceil_div(g.n, TBN)``, mirroring the RCR R11 path. The dedicated
+    // ``grouped_ntail_kernel_lds_rrr<64>`` is therefore no longer launched —
+    // main + LDS K-tail cover every cell. CRR stays on legacy gating.
+    constexpr bool layout_supports_main_n =
+        (L == Layout::RCR) || (L == Layout::RRR);
     const bool main_covers_n = layout_supports_main_n;
     const bool need_tail_run =
         (g.fast_k != g.k) ||
@@ -4576,33 +4589,34 @@ void dispatch_grouped(grouped_layout_globals g) {
             // the legacy ``grouped_ktail_kernel_lds_rrr`` RMW pass —
             // running it would double-count the K-tail contribution
             // for cols [0, fast_n).
-            if (K_rem == 64 && lds_k_tail_safe && g.fast_n > 0
+            // Round-80: RRR main now covers cols [0, g.n) via ceil_div
+            // bpc + masked C store. EXTEND the K-tail RMW grid from
+            // ``ceil_div(g.fast_n, TBN)`` (legacy: covered only the
+            // aligned interior region) to ``ceil_div(g.n, TBN)`` so the
+            // partial last col-tile [fast_n, n) ALSO gets the K-tail
+            // correction. The kernel body already handles ``col >= g.n``
+            // (early-return at line 2204; per-col guards in the B coop-
+            // load at 2278-2298). Mirrors RCR's R11 grid extension.
+            if (K_rem == 64 && lds_k_tail_safe && g.bpc > 0
                 && !fuse_ktail_eligible) {
                 dim3 lds_block(TAIL_BLOCK_N, TAIL_BLOCK_M);
                 dim3 lds_grid(
-                    kittens::ceil_div(g.fast_n, TAIL_BLOCK_N),
+                    kittens::ceil_div(g.n, TAIL_BLOCK_N),
                     kittens::ceil_div(g.M_total, TAIL_BLOCK_M)
                 );
                 grouped_ktail_kernel_lds_rrr<64>
                     <<<lds_grid, lds_block, 0, g.stream>>>(g);
             }
-            // Round-56: LDS-staged N-tail full-K reduction. Launches when
-            // the N-axis has a partial last col-tile (g.fast_n < g.n)
-            // AND m_per_group passes the same TBM-uniform gate as the
-            // K-tail kernel. K_CHUNK = 64 covers the full K reduction in
-            // ``ceil_div(g.k, K_CHUNK)`` chunks. Cells in [fast_n, n) ×
-            // M_total are written ABSOLUTE (overwrite); the scalar tail
-            // skip predicate below mirrors this gate so it does not
-            // double-write.
-            if (lds_k_tail_safe && g.fast_n < g.n) {
-                dim3 lds_block(TAIL_BLOCK_N, TAIL_BLOCK_M);
-                dim3 lds_grid(
-                    kittens::ceil_div(g.n - g.fast_n, TAIL_BLOCK_N),
-                    kittens::ceil_div(g.M_total, TAIL_BLOCK_M)
-                );
-                grouped_ntail_kernel_lds_rrr<64>
-                    <<<lds_grid, lds_block, 0, g.stream>>>(g);
-            }
+            // Round-80: ``grouped_ntail_kernel_lds_rrr`` launch DROPPED.
+            // Main-kernel ceil_div bpc + masked C-store now covers
+            // [fast_n, n) × M_total natively, with the K-tail RMW
+            // (above, when K_rem=64) handling the K-axis correction
+            // for that same partial col-tile. This eliminates the
+            // ~3.5 ms ntail-kernel call on gpt_oss-Down B=32 dA when
+            // H4 is disabled (R30/R31 wall-decomp), unlocking native
+            // RRR as the fast path for K%128 != 0 / N%256 != 0 shapes.
+            // Mirror of the R11 RCR removal of the same dedicated
+            // ntail kernel (kernel comment line 4266-4270).
         }
 
         // [round-10] Skip scalar tail launch when LDS K-tail covers
@@ -4613,8 +4627,18 @@ void dispatch_grouped(grouped_layout_globals g) {
         // N-tail (cols [fast_n, n)) full-K reduction; the LDS K-tail
         // above only covered the [0, fast_n) interior K-tail RMW.
         // Cap the scalar tail's launch grid to the OUTSTANDING work.
+        // Round-80: With RRR's main now covering [0, g.n) via ceil_div
+        // bpc + masked C-store, AND the LDS K-tail RMW grid extended to
+        // ceil_div(g.n, TBN), the scalar tail's full-K reduction at
+        // [fast_n, n) cells would DOUBLE-COUNT the K-tail contribution
+        // (main's main-loop wrote [0, fast_k); LDS K-tail RMW added
+        // [fast_k, k); scalar would OVERWRITE with full [0, k)). Extend
+        // ``lds_handles_all`` to RRR with K_rem=64 — same condition as
+        // RCR's R11 gate. CRR / non-K_STEP K_rem still need the scalar
+        // tail (CRR has no main-kernel n-tail extension; non-K_STEP
+        // K_rem doesn't match the K-tail kernel's K_REM=64 template).
         const bool lds_handles_all =
-            (L == Layout::RCR) &&
+            ((L == Layout::RCR) || (L == Layout::RRR)) &&
             (K_rem == 64) &&
             lds_k_tail_safe;
         if (!lds_handles_all) {
