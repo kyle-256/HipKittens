@@ -7685,6 +7685,15 @@ struct grouped_var_k_layout_globals_fp8 {
     int bpc;                       // ceil_div(k, BLOCK_SIZE)
     int fast_n, fast_k;
     int num_xcds;                  // chiplet-swizzle XCD count (0 → default 8)
+    int num_slots;                 // Round-3 (gpt_oss FP8 kernel-only ceiling,
+                                   // current Primus run; 2026-05-07): persistent-
+                                   // grid slot count override. 0 → fall back to
+                                   // TK_VARK_NUM_CUS env hook (R2) → NUM_CUS=256.
+                                   // Clamped to [1, NUM_CUS] in dispatch.
+                                   // Used by short-grid Down-B4 wgrad rule that
+                                   // sets num_slots=192 for +5-6% kernel TFLOPS
+                                   // (R2 sweep evidence; see Primus
+                                   // grouped_gemm_fp8_impl.py R3 predicate).
     dim3 block() { return dim3(_NUM_THREADS); }
     size_t dynamic_shared_memory() { return 0; }
 };
@@ -8059,15 +8068,28 @@ void dispatch_grouped_var_k_fp8(grouped_var_k_layout_globals_fp8 g) {
     // stride + chiplet swizzle range so any ``slots ∈ [1, NUM_CUS]`` is
     // correctness-preserving. ``static`` cache avoids repeated getenv()
     // syscalls in the hot path.
-    static const int slots = []() {
-        if (const char* e = std::getenv("TK_VARK_NUM_CUS")) {
-            const int v = std::atoi(e);
-            if (v > 0 && v <= NUM_CUS) return v;
-        }
-        return NUM_CUS;
-    }();
+    //
+    // Round-3 (this run, 2026-05-07): per-call ``g.num_slots`` override
+    // (set via the new pybind ``num_slots`` arg) takes precedence over
+    // the env hook. Lets the Python dispatcher pick slots=192 for the
+    // short-grid Down-B4 wgrad family without affecting any other
+    // var-K caller in the process. ``g.num_slots == 0`` → fall back to
+    // env or NUM_CUS (preserves R2 probe semantics).
+    int slots_dispatch;
+    if (g.num_slots > 0 && g.num_slots <= NUM_CUS) {
+        slots_dispatch = g.num_slots;
+    } else {
+        static const int env_slots = []() {
+            if (const char* e = std::getenv("TK_VARK_NUM_CUS")) {
+                const int v = std::atoi(e);
+                if (v > 0 && v <= NUM_CUS) return v;
+            }
+            return NUM_CUS;
+        }();
+        slots_dispatch = env_slots;
+    }
 
-    grouped_var_k_kernel_fp8<0><<<dim3(slots), g.block(), 0, g.stream>>>(g);
+    grouped_var_k_kernel_fp8<0><<<dim3(slots_dispatch), g.block(), 0, g.stream>>>(g);
 }
 
 template<Layout L>
@@ -8384,7 +8406,8 @@ static void grouped_variable_k_crr_fp8_fn(
     pybind11::object scale_a_obj, pybind11::object scale_b_obj,
     pybind11::object group_offs_obj,
     int group_m,
-    int num_xcds) {
+    int num_xcds,
+    int num_slots) {
     auto group_offs_ptr = group_offs_obj.attr("data_ptr")().cast<uintptr_t>();
     int G = group_offs_obj.attr("numel")().cast<int>() - 1;
     grouped_var_k_layout_globals_fp8 g{
@@ -8397,8 +8420,8 @@ static void grouped_variable_k_crr_fp8_fn(
         nullptr,
         reinterpret_cast<const int64_t*>(group_offs_ptr),
         {},
-        /* G, M_total, n, k, group_m, bpr, bpc, fast_n, fast_k, num_xcds */
-        G, 0, 0, 0, group_m, 0, 0, 0, 0, num_xcds,
+        /* G, M_total, n, k, group_m, bpr, bpc, fast_n, fast_k, num_xcds, num_slots */
+        G, 0, 0, 0, group_m, 0, 0, 0, 0, num_xcds, num_slots,
     };
     dispatch_grouped_var_k_fp8(g);
 }
@@ -8408,7 +8431,8 @@ static void grouped_variable_k_crr_dscale_fp8_fn(
     pybind11::object scale_a_obj, pybind11::object scale_b_obj,
     pybind11::object group_offs_obj,
     int group_m,
-    int num_xcds) {
+    int num_xcds,
+    int num_slots) {
     auto sa_ptr = scale_a_obj.attr("data_ptr")().cast<uintptr_t>();
     auto sb_ptr = scale_b_obj.attr("data_ptr")().cast<uintptr_t>();
     auto group_offs_ptr = group_offs_obj.attr("data_ptr")().cast<uintptr_t>();
@@ -8422,8 +8446,8 @@ static void grouped_variable_k_crr_dscale_fp8_fn(
         reinterpret_cast<const float*>(sb_ptr),
         reinterpret_cast<const int64_t*>(group_offs_ptr),
         {},
-        /* G, M_total, n, k, group_m, bpr, bpc, fast_n, fast_k, num_xcds */
-        G, 0, 0, 0, group_m, 0, 0, 0, 0, num_xcds,
+        /* G, M_total, n, k, group_m, bpr, bpc, fast_n, fast_k, num_xcds, num_slots */
+        G, 0, 0, 0, group_m, 0, 0, 0, 0, num_xcds, num_slots,
     };
     dispatch_grouped_var_k_fp8(g);
 }
@@ -9017,14 +9041,16 @@ PYBIND11_MODULE(tk_fp8_layouts, m) {
           pybind11::arg("scale_a"), pybind11::arg("scale_b"),
           pybind11::arg("group_offs"),
           pybind11::arg("group_m") = DEFAULT_GROUP_M,
-          pybind11::arg("num_xcds") = 0);
+          pybind11::arg("num_xcds") = 0,
+          pybind11::arg("num_slots") = 0);
     m.def("grouped_variable_k_crr_dscale",
           &grouped_variable_k_crr_dscale_fp8_fn,
           pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("c"),
           pybind11::arg("scale_a"), pybind11::arg("scale_b"),
           pybind11::arg("group_offs"),
           pybind11::arg("group_m") = DEFAULT_GROUP_M,
-          pybind11::arg("num_xcds") = 0);
+          pybind11::arg("num_xcds") = 0,
+          pybind11::arg("num_slots") = 0);
     m.attr("DEFAULT_GROUP_M") = DEFAULT_GROUP_M;
     m.attr("BLOCK_SIZE") = BLK;
     m.attr("K_BLOCK") = BK;
