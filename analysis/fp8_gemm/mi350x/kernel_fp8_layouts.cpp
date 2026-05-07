@@ -2678,14 +2678,27 @@ void grouped_rcr_kernel(
     // codegen but clearer intent).
     rt_fl<RBM, RBN, col_l, rt_16x16_s> cA, cB, cC, cD;
 
-    // [grouped] Persistent: chiplet-swizzle pid against full NUM_CUS grid.
+    // [grouped] Persistent: chiplet-swizzle pid against the actual launch
+    // grid (NUM_CUS in the default case; smaller when the dispatcher
+    // applies the R4 short-grid lever).
     // Round-67: ``g.num_xcds`` is a host-side knob (default 0 → fallback
     // to ``BLOCK_SWIZZLE_NUM_XCDS=8``). Each shape can override via the
     // Python config rule. Mirrors BF16 grouped's existing ``g.num_xcds``
     // handling (analysis/bf16_gemm/mi350x/kernel_bf16_dynamic.cpp:3249).
+    //
+    // Round-4 (gpt_oss FP8 kernel-only): swap constexpr ``NUM_CUS`` for
+    // runtime ``gridDim.x`` so the chiplet swizzle range tracks the
+    // actual launch geometry. Identical math when ``gridDim.x ==
+    // NUM_CUS`` (the default); enables the ``TK_RCR_NUM_CUS`` env probe
+    // (and a future ``g.num_slots`` knob, mirroring the var-K R2/R3
+    // lever) to reduce the persistent grid for short-grid sparse fwd
+    // shapes (e.g. Down-B4-M2048 fwd at ~1.5 wave-steps/CU).
+    // ``gridDim.x`` is wave-uniform so codegen is stable; no change to
+    // register pressure, LDS layout, or HBM stride.
+    const int slots_eff = gridDim.x;
     const int xcds_eff = g.num_xcds > 0 ? g.num_xcds : BLOCK_SWIZZLE_NUM_XCDS;
     int pid = chiplet_transform_chunked(
-        blockIdx.x, NUM_CUS, xcds_eff, 64);
+        blockIdx.x, slots_eff, xcds_eff, 64);
 
     int wm = warpid() / WARPS_N;
     int wn = warpid() % WARPS_N;
@@ -2756,7 +2769,11 @@ void grouped_rcr_kernel(
     // (commit f9d591cb); the helper itself was removed in round 13.
 
     // [grouped] Persistent outer loop.
-    for (int gt = pid; gt < total_tiles; gt += NUM_CUS) {
+    // Round-4: stride by ``slots_eff`` (= gridDim.x) instead of constexpr
+    // NUM_CUS so the persistent loop covers all tiles when the dispatcher
+    // launches with a reduced grid. When gridDim.x == NUM_CUS this is
+    // bit-identical to the prior constexpr stride.
+    for (int gt = pid; gt < total_tiles; gt += slots_eff) {
         // [grouped] 6-step branch-free binary search over LDS-cached cumsum
         // (covers G ∈ [1, 64] since 2^6 = 64 = MAX_G_PLUS_1-1). Sentinel
         // INT_MAX past g.G keeps the `gt >= s_cum_tiles[mid]` cmp false so
@@ -3471,14 +3488,27 @@ void grouped_rcr_kernel(
     // codegen but clearer intent).
     rt_fl<RBM, RBN, col_l, rt_16x16_s> cA, cB, cC, cD;
 
-    // [grouped] Persistent: chiplet-swizzle pid against full NUM_CUS grid.
+    // [grouped] Persistent: chiplet-swizzle pid against the actual launch
+    // grid (NUM_CUS in the default case; smaller when the dispatcher
+    // applies the R4 short-grid lever).
     // Round-67: ``g.num_xcds`` is a host-side knob (default 0 → fallback
     // to ``BLOCK_SWIZZLE_NUM_XCDS=8``). Each shape can override via the
     // Python config rule. Mirrors BF16 grouped's existing ``g.num_xcds``
     // handling (analysis/bf16_gemm/mi350x/kernel_bf16_dynamic.cpp:3249).
+    //
+    // Round-4 (gpt_oss FP8 kernel-only): swap constexpr ``NUM_CUS`` for
+    // runtime ``gridDim.x`` so the chiplet swizzle range tracks the
+    // actual launch geometry. Identical math when ``gridDim.x ==
+    // NUM_CUS`` (the default); enables the ``TK_RCR_NUM_CUS`` env probe
+    // (and a future ``g.num_slots`` knob, mirroring the var-K R2/R3
+    // lever) to reduce the persistent grid for short-grid sparse fwd
+    // shapes (e.g. Down-B4-M2048 fwd at ~1.5 wave-steps/CU).
+    // ``gridDim.x`` is wave-uniform so codegen is stable; no change to
+    // register pressure, LDS layout, or HBM stride.
+    const int slots_eff = gridDim.x;
     const int xcds_eff = g.num_xcds > 0 ? g.num_xcds : BLOCK_SWIZZLE_NUM_XCDS;
     int pid = chiplet_transform_chunked(
-        blockIdx.x, NUM_CUS, xcds_eff, 64);
+        blockIdx.x, slots_eff, xcds_eff, 64);
 
     int wm = warpid() / WARPS_N;
     int wn = warpid() % WARPS_N;
@@ -3549,7 +3579,11 @@ void grouped_rcr_kernel(
     // (commit f9d591cb); the helper itself was removed in round 13.
 
     // [grouped] Persistent outer loop.
-    for (int gt = pid; gt < total_tiles; gt += NUM_CUS) {
+    // Round-4: stride by ``slots_eff`` (= gridDim.x) instead of constexpr
+    // NUM_CUS so the persistent loop covers all tiles when the dispatcher
+    // launches with a reduced grid. When gridDim.x == NUM_CUS this is
+    // bit-identical to the prior constexpr stride.
+    for (int gt = pid; gt < total_tiles; gt += slots_eff) {
         // [grouped] 6-step branch-free binary search over LDS-cached cumsum
         // (covers G ∈ [1, 64] since 2^6 = 64 = MAX_G_PLUS_1-1). Sentinel
         // INT_MAX past g.G keeps the `gt >= s_cum_tiles[mid]` cmp false so
@@ -7355,6 +7389,28 @@ void dispatch_grouped_rcr(grouped_layout_globals g) {
         // hits the raw-store instance (zero overhead, ratios stable);
         // gpt_oss N=2880/5760 hits the masked-store instance.
         const bool n_aligned = (g.bpc * BLOCK_SIZE == g.n);
+
+        // Round-4 (gpt_oss FP8 kernel-only): optional persistent-grid
+        // slot override for short-grid sparse fwd shapes. The kernel
+        // body uses ``gridDim.x`` for both the chiplet-swizzle range
+        // and the persistent-loop stride (see lines ~2696 / ~2766);
+        // any ``slots ∈ [1, NUM_CUS]`` produces bit-identical math
+        // (only the (CU, tile) assignment changes). The R2 var-K
+        // sweep proved short-grid wgrad shapes gain ~6% by reducing
+        // slots; the same lever is plausible for sparse fwd RCR
+        // (Down-B4-M2048 fwd at 1.5 wave-steps/CU). Probed via
+        // ``TK_RCR_NUM_CUS`` env. Cached on first read so the per-
+        // launch host-side cost is one ``getenv`` only on the first
+        // dispatch (the cache is process-static, mirroring the
+        // existing ``TURBO_FP8_B128`` env hook).
+        static const int rcr_slots = []() {
+            if (const char* e = std::getenv("TK_RCR_NUM_CUS")) {
+                const int v = std::atoi(e);
+                if (v > 0 && v <= NUM_CUS) return v;
+            }
+            return NUM_CUS;
+        }();
+
         if (fuse_ktail_eligible) {
             // R63 Lever F (KI_HINT short-K specialization) FALSIFIED:
             // ki={12,32} compile-time loop bounds INCREASED VGPR spill
@@ -7365,15 +7421,15 @@ void dispatch_grouped_rcr(grouped_layout_globals g) {
             // (runtime loop) which lets LLVM reuse registers across
             // iterations more aggressively.
             if (n_aligned) {
-                grouped_rcr_kernel<0, false, true><<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
+                grouped_rcr_kernel<0, false, true><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
             } else {
-                grouped_rcr_kernel<0, true , true><<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
+                grouped_rcr_kernel<0, true , true><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
             }
         } else {
             if (n_aligned) {
-                grouped_rcr_kernel<0, false, false><<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
+                grouped_rcr_kernel<0, false, false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
             } else {
-                grouped_rcr_kernel<0, true , false><<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
+                grouped_rcr_kernel<0, true , false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
             }
         }
     } else {
