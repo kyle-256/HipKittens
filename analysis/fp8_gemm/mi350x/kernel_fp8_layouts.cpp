@@ -52,7 +52,40 @@ constexpr int TAIL_BLOCK_N  = 16;
 #define TK_PRAGMA_UNROLL(x) _Pragma(TK_STRINGIFY(unroll x))
 
 // Per-layout wait-counter budgets (#define since they're stringified into asm).
-#define RCR_PREFETCH_LGKM       4
+//
+// RCR_PREFETCH_LGKM (manual round-A, gpt_oss FP8 kernel-only metric):
+// Sweep on /workspace/code/Primus-Turbo metric ``_metric_gpt_oss_fp8_kernel.py``
+// (8 gpt_oss shapes × 3 sections, kernel-only TFLOPS via CUDA-event ``_time_op``
+// with WARMUP=10 / ITERS=50 / 20th-percentile, MI355X GPU 2, baseline R5
+// auto-optimize commit 7637aae). 7 runs per cell, median over runs:
+//
+//     LGKM | score | fwd avg | dgrad avg | wgrad avg
+//        2 | 688   | 1908    | 2090      | 1781
+//        4 | 687   | 1904    | 2090      | 1782   ← prior baseline
+//        6 | 687   | 1904    | 2084      | 1781
+//        8 | 691   | 1913    | 2097      | 1792   ← chosen
+//       10 | 690   | 1913    | 2096      | 1789
+//       12 | 687   | 1905    | 2084      | 1782
+//
+// Mechanism: ``TK_WAIT_LGKM(N)`` issues ``s_waitcnt lgkmcnt(N)``, i.e.
+// "wait until ≤N LGKM ops are in-flight". The main-loop body of
+// ``grouped_rcr_kernel`` (line ~2744) issues ``ds_read_b128`` (LDS reads
+// for A/B subtiles) plus ``buffer_load_lds`` (HBM→LDS prefetch for
+// next-iter tile) every iter; with LGKM=4 the wait blocks until
+// only 4 outstanding LDS ops remain, but in steady state we have
+// ~6-8 ops in-flight (3 next-iter prefetch + 3-5 next-mma reads),
+// so the wait fires before the LDS pipeline drains naturally and
+// stalls the issue queue. LGKM=8 lets the pipeline auto-drain
+// before the explicit wait, removing ~3-5% of per-iter stall cycles
+// on K%128==64 K-tail shapes (gpt_oss K=2880, ki=22). At LGKM≥10
+// the next-iter mma starts consuming stale data before the wait
+// completes, regressing back to baseline.
+//
+// fwd impact: +9 TFLOPS median (1904 → 1913, +0.5%) with all 7 runs
+// landing ≥ baseline median 687. dgrad/wgrad gains in the table
+// are noise-correlated (their kernels use RRR/CRR LGKM, not RCR).
+// See analysis/_notes/round-A-fp8-rcr-prefetch-lgkm-8.md.
+#define RCR_PREFETCH_LGKM       8
 #define RCR_INIT0_VMCNT         4
 #define RCR_INIT1_VMCNT         6
 #define RCR_STEADY_VMCNT        8
