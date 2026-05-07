@@ -353,100 +353,63 @@ namespace lever_c2_round_54_step1_scaffold {
 // M2 will port grouped_rcr_kernel body verbatim (replacing constants), M3
 // adds the dispatcher gate, M4 validates correctness, M5 measures metric.
 namespace kernel_b128 {
-    constexpr int BLOCK_SIZE_b128 = 128;          // half of outer 256
-    constexpr int HB_b128         = BLOCK_SIZE_b128 / 2;  // 64 (was 128)
-    constexpr int K_BLOCK_b128    = K_BLOCK;      // 128 unchanged (K_BLOCK is K-direction, not output tile dim)
-    constexpr int WARPS_M_b128    = WARPS_M;      // 2 unchanged
-    constexpr int WARPS_N_b128    = WARPS_N;      // 4 unchanged
-    constexpr int _NUM_WARPS_b128 = WARPS_M_b128 * WARPS_N_b128;        // 8
-    constexpr int _NUM_THREADS_b128 = _NUM_WARPS_b128 * WARP_THREADS;   // 512
-    constexpr int RBM_b128        = BLOCK_SIZE_b128 / WARPS_M_b128 / 2; // 32 (was 64)
-    constexpr int RBN_b128        = BLOCK_SIZE_b128 / WARPS_N_b128 / 2; // 16 (was 32)
+    // === Round-F M2: namespace-local constants that SHADOW file-scope ===
+    // The kernel function body (M2 port below) uses unqualified names like
+    // `BLOCK_SIZE`, `RBM`, `RBN`, `ST_v2`, `A_row_reg` — when defined inside
+    // this namespace, those resolve to the local versions (smaller HB / RBM
+    // / RBN), enabling a verbatim copy of the production grouped_rcr_kernel
+    // body without text changes. References to outer-scope names use ``::``
+    // explicitly when needed.
 
-    static_assert(_NUM_THREADS_b128 == 512,
-        "kernel_b128: 8-warp 512-thread CTA preserved (only output tile shrinks)");
-    static_assert(RBM_b128 == 32 && RBN_b128 == 16,
-        "kernel_b128: per-warp acc cell drops from 64x32 to 32x16 (4x smaller)");
+    constexpr int BLOCK_SIZE = 128;          // shadows outer 256
+    constexpr int HB         = BLOCK_SIZE / 2;  // = 64 (was 128)
+    constexpr int BLK        = BLOCK_SIZE;
+    constexpr int BK         = K_BLOCK;       // outer K_BLOCK = 128 (unchanged)
+    constexpr int WARPS_M    = 2;
+    constexpr int WARPS_N    = 4;
+    constexpr int _NUM_WARPS = WARPS_M * WARPS_N;          // 8 (unchanged)
+    constexpr int _NUM_THREADS = _NUM_WARPS * WARP_THREADS;// 512 (unchanged)
+    constexpr int RBM        = BLOCK_SIZE / WARPS_M / 2;   // 32 (was 64)
+    constexpr int RBN        = BLOCK_SIZE / WARPS_N / 2;   // 16 (was 32)
+
+    using G = ::G;  // kittens::group<8> (8-warp group)
 
     // LDS tile types. Underlying sub-tile is 16x128 (st_16x128_v2_s); with
     // HB=64 we have 4 sub-tiles per A/B-slab (vs 8 sub-tiles at HB=128).
-    // Swizzle is per-sub-tile so the bank-conflict-free property carries
-    // over (PMC verified bank conflicts = 0 at HB=128 in Round-D; same
-    // swizzle on smaller stack should also yield 0).
-    using ST_v2_b128  = st_fp8e4m3<HB_b128, K_BLOCK_b128, st_16x128_v2_s>;
-    using ST_v2a_b128 = st_fp8e4m3<HB_b128, K_BLOCK_b128, st_16x128_v2a_s>;
+    using ST_v2  = st_fp8e4m3<HB, BK, st_16x128_v2_s>;
+    using ST_v2a = st_fp8e4m3<HB, BK, st_16x128_v2a_s>;
+    using ST_row = st_fp8e4m3<HB, BK, st_16x128_s>;
 
-    // Register tile types. Same 16x128 base tile as the BLK=256 path, just
-    // fewer cells per register tile (RBM/RBN smaller).
-    //   A_row_reg_b128: 32 rows × 128 K-cols → height = 32/16 = 2,
-    //                   width = 128/128 = 1. Total cells = 2.
-    //   B_row_reg_b128: 16 rows × 128 K-cols → height = 16/16 = 1,
-    //                   width = 1. Total cells = 1.
-    using A_row_reg_b128 = rt_fp8e4m3<RBM_b128, K_BLOCK_b128, row_l, rt_16x128_s>;
-    using B_row_reg_b128 = rt_fp8e4m3<RBN_b128, K_BLOCK_b128, row_l, rt_16x128_s>;
+    // Register tile types. Same 16x128 base tile as BLK=256, just fewer
+    // cells per tile.
+    using A_row_reg = rt_fp8e4m3<RBM, BK, row_l, rt_16x128_s>;
+    using B_row_reg = rt_fp8e4m3<RBN, BK, row_l, rt_16x128_s>;
 
-    // Accumulator tile (4 of these per warp = cA, cB, cC, cD).
-    //   rt_fl<RBM=32, RBN=16, col_l, rt_16x16_s>: height = 2, width = 1,
-    //   2 cells per acc * 4 fp32/lane/cell = 8 fp32/lane per acc.
-    //   4 accs per warp * 8 fp32/lane = 32 fp32/lane (vs 128 fp32/lane
-    //   for BLK=256). Below the AGPR-trigger threshold (256 fp32/lane per
-    //   R47), so LLVM allocates standard VGPR — avoids the rcr_4w R54-R61
-    //   AGPR codegen bug that blocked Lever C.
-    using C_acc_b128 = rt_fl<RBM_b128, RBN_b128, col_l, rt_16x16_s>;
+    // Compile-time validation (shadowed sizes vs file-scope outer)
+    static_assert(_NUM_THREADS == 512, "8-warp 512-thread CTA preserved");
+    static_assert(RBM == 32 && RBN == 16, "per-warp acc cell shrinks to 32x16");
+    static_assert(sizeof(ST_v2) * 2 == sizeof(::ST_v2),
+        "ST_v2 (b128) should be exactly half of outer ::ST_v2 (HB halved)");
+    static_assert(sizeof(ST_v2a) * 2 == sizeof(::ST_v2a),
+        "ST_v2a (b128) should be exactly half of outer ::ST_v2a (HB halved)");
+    static_assert(sizeof(A_row_reg) * 2 == sizeof(::A_row_reg),
+        "A_row_reg (b128) should be half of outer ::A_row_reg (RBM halved)");
+    static_assert(sizeof(B_row_reg) * 2 == sizeof(::B_row_reg),
+        "B_row_reg (b128) should be half of outer ::B_row_reg (RBN halved)");
 
-    // Compile-time validation
-    static_assert(sizeof(ST_v2_b128) == sizeof(ST_v2) / 2,
-        "kernel_b128: ST_v2_b128 should be half the size of ST_v2 (HB halved)");
-    static_assert(sizeof(ST_v2a_b128) == sizeof(ST_v2a) / 2,
-        "kernel_b128: ST_v2a_b128 should be half the size of ST_v2a (HB halved)");
-    static_assert(sizeof(A_row_reg_b128) == sizeof(::A_row_reg) / 2,
-        "kernel_b128: A_row_reg_b128 should be half the outer A_row_reg (RBM halved)");
-    static_assert(sizeof(B_row_reg_b128) == sizeof(::B_row_reg) / 2,
-        "kernel_b128: B_row_reg_b128 should be half the outer B_row_reg (RBN halved)");
-
-    // Per-acc-tile cell count
-    static_assert(C_acc_b128::height == 2,
-        "C_acc_b128 height = RBM_b128 / 16 = 32/16 = 2");
-    static_assert(C_acc_b128::width == 1,
-        "C_acc_b128 width = RBN_b128 / 16 = 16/16 = 1");
-
-    // Per-warp accumulator footprint (4 acc tiles × 2 cells × 4 fp32/lane
-    // = 32 fp32/lane). At 8 warps per CTA, total CTA accumulator footprint
-    // = 256 fp32/lane — but split across 8 warps, that's 32 fp32/lane per
-    // warp (NOT 256 per warp), which keeps each warp below the AGPR
-    // allocator's trigger threshold. Critical for codegen: stays in VGPR.
-    //
-    // sizeof(C_acc_b128) per-lane = packed_per_thread (1) × elements_per_thread
-    //   (4) × sizeof(fp32) (4) × height (2) × width (1) = 32 bytes / lane / acc
-    //   = 8 fp32/lane / acc.
-    static_assert(sizeof(C_acc_b128) == 32,
-        "C_acc_b128 must be 32 bytes/lane = 8 fp32/lane (per-warp). "
-        "4 accs * 8 fp32/lane = 32 fp32/lane per warp = 1/4 of BLK=256's "
-        "128 fp32/lane. Stays well below the 256-fp32/lane AGPR-trigger "
-        "threshold per R47 — LLVM allocates standard VGPR, avoiding the "
-        "rcr_4w R54-R61 AGPR-allocator codegen bug.");
-
-    // LDS budget per CTA (M2+ will allocate these):
-    //   2 buffers * 2 sub-tiles per axis * sizeof(ST_v2) per sub-tile
-    //   = 2 * 2 * (HB * BK * sizeof(fp8e4m3))
-    //   = 2 * 2 * (64 * 128 * 1) = 32 KB for A
-    //   + same for B = 64 KB total LDS / CTA (same as BLK=256 since each
-    //     ST_v2_b128 is half the size BUT we allocate 4 instead of 4
-    //     sub-tile copies — actually same allocation pattern, just smaller
-    //     per-buffer). Verified: 32 KB on M2 build.
-    // The HK ST type may include sub-tile padding for swizzle-friendly LDS
-    // layout. We sanity-check by comparing to ST_v2 (HB=128) instead of
-    // hardcoding bytes — the b128 variant should be exactly half the BLK=256
-    // size since only HB halved.
-    static_assert(sizeof(ST_v2_b128) * 2 == sizeof(ST_v2),
-        "ST_v2_b128 should be exactly half of ST_v2 (HB halved 128->64)");
-
-    // Per-tile FLOP count (for tflops calculations):
-    //   Per outer K-iter (K_BLOCK=128): 4 acc * RBM * RBN * K_BLOCK * 2
-    //   = 4 * 32 * 16 * 128 * 2 = 524288 FLOP / warp / iter
-    //   = 1/4 of BLK=256's 2.097 MFLOP / warp / iter. With 4× more tiles,
-    //   total FLOP across all tiles is identical (B=4: 384 tiles @ 256 vs
-    //   1536 tiles @ 128 → same total work).
+    // Per-warp accumulator footprint check. C_acc = rt_fl<RBM=32, RBN=16,
+    // col_l, rt_16x16_s>: height=2, width=1, 4 fp32/lane/cell.
+    // 4 accs (cA,cB,cC,cD) * 2 cells * 4 fp32/lane = 32 fp32/lane per warp.
+    //   - 1/4 of BLK=256's 128 fp32/lane footprint
+    //   - WELL BELOW the 256-fp32/lane AGPR-trigger threshold (per R47)
+    //   - LLVM stays in standard VGPR allocation, avoids the rcr_4w
+    //     R54-R61 AGPR-allocator codegen bug entirely
+    using C_acc = rt_fl<RBM, RBN, col_l, rt_16x16_s>;
+    static_assert(C_acc::height == 2, "C_acc height = 32/16 = 2");
+    static_assert(C_acc::width  == 1, "C_acc width  = 16/16 = 1");
+    static_assert(sizeof(C_acc) == 32,
+        "C_acc must be 32 bytes/lane = 8 fp32/lane per acc; 4 accs = 32 fp32/lane "
+        "per warp << 256 fp32/lane AGPR threshold per R47");
 
 } // namespace kernel_b128
 
@@ -3372,6 +3335,748 @@ template __global__ void grouped_rcr_kernel<0, false, false>(const grouped_layou
 template __global__ void grouped_rcr_kernel<0, true , false>(const grouped_layout_globals);
 template __global__ void grouped_rcr_kernel<0, false, true >(const grouped_layout_globals);
 template __global__ void grouped_rcr_kernel<0, true , true >(const grouped_layout_globals);
+// =============================================================================
+// Round-F M2a: BLOCK_SIZE=128 tile-port (no K-tail, no fused-act) =============
+// =============================================================================
+// Mechanical port of the file-scope ``grouped_rcr_kernel`` body into
+// ``namespace kernel_b128``. The namespace shadows BLOCK_SIZE, HB, RBM, RBN,
+// ST_v2, A_row_reg, B_row_reg with smaller variants (HB=64, RBM=32, RBN=16);
+// inside this re-opened namespace block, every unqualified reference in the
+// kernel body resolves to the smaller types. References to file-scope
+// helpers (``rcr_8w_load_hoist``, ``store_c_tile_n_masked``,
+// ``resolve_combined_scale_grp``, ``chiplet_transform_chunked``, the various
+// ``RCR_*`` wait-counter macros, ``grouped_layout_globals``, ``NUM_CUS``,
+// ``BLOCK_SWIZZLE_NUM_XCDS``, ``WARP_THREADS``) resolve to file scope via
+// outer-namespace lookup — no source change needed in the body.
+//
+// ``rcr_mma`` cannot be reached this way because the file-scope definition
+// is hard-typed on the outer ``RBM/RBN`` (rt_fl<64, 32, ...>); we therefore
+// provide a namespace-local overload that takes the smaller acc/A/B tiles
+// and forwards to ``mma_ABt`` directly. Same FMA primitive
+// (``mfma_scale_f32_16x16x128_f8f6f4`` × cells/warp), only the cell count
+// per accumulator changes (height=2, width=1 vs 4, 2).
+//
+// M2a only instantiates ``<0, false, false>`` and ``<0, true , false>``
+// (FUSED_KTAIL=false, FUSE_ACT=false). K-tail and fused-act variants come
+// in M2b after correctness validation lands.
+//
+// Dispatch wiring lands in M3 (file ~5300+ in dispatch_grouped_rcr).
+namespace kernel_b128 {
+
+// Namespace-local rcr_mma overload — accepts the half-sized accumulator /
+// A / B tiles defined at the top of namespace kernel_b128 (line ~340).
+// Dispatches to the same ``mma_ABt`` primitive as the outer rcr_mma; the
+// per-cell mfma intrinsic is identical (``mfma_scale_f32_16x16x128_f8f6f4``).
+__device__ __forceinline__ void rcr_mma(
+    C_acc& acc,
+    const A_row_reg& a,
+    const B_row_reg& b)
+{
+    mma_ABt(acc, a, b, acc);
+}
+
+template<int KI_HINT = 0, bool N_MASKED_STORE = false, bool FUSED_KTAIL = false,
+         bool FUSE_ACT = false>
+__global__ __launch_bounds__(_NUM_THREADS, 1)
+void grouped_rcr_kernel(
+    const std::conditional_t<FUSE_ACT,
+                             grouped_layout_globals_fused_act,
+                             grouped_layout_globals> g) {
+    // [fused-act R6] The FUSE_ACT=true instantiation reads BF16 ``g.a`` from
+    // HBM and converts to FP8 inside the load helper (Phase 1 of the FP8
+    // grouped fused-act forward optimization). The K-tail fuse path B reads
+    // FP8 bytes via reinterpret_cast — incompatible with the BF16 fused-act
+    // input — so we gate the two flags as mutually exclusive at compile time.
+    // The un-fused fallback (Primus ``_unfused_forward``) handles K-tail
+    // correctness when fused-act is selected on K%128 != 0 shapes (none in
+    // our initial gate; Phase 1 covers K%128==0 = 16/24 metric shapes).
+    static_assert(!(FUSE_ACT && FUSED_KTAIL),
+                  "FUSE_ACT=true requires FUSED_KTAIL=false");
+    using ST_rcr = ST_v2;
+    __shared__ ST_rcr As[2][2];
+    __shared__ ST_rcr Bs[2][2];
+    // [grouped] LDS cache for device group_offs (int32 view) + per-group
+    // tile-cumsum. group_offs is read O(N_iter * G) times by the per-tile
+    // inner scan; caching to LDS once at kernel entry replaces ~640 cycles
+    // of HBM-cached ld/iter with ~320 cycles of LDS ld/iter, ~3-5% kernel
+    // speedup on shapes with low ki / many tiles. Cap MAX_G_PLUS_1 = 65 to
+    // cover G ≤ 64 (metric uses G ≤ 32). 8×65 = 520 bytes LDS, negligible.
+    constexpr int MAX_G_PLUS_1 = 65;
+    __shared__ int s_offs[MAX_G_PLUS_1];
+    __shared__ int s_cum_tiles[MAX_G_PLUS_1];
+    __shared__ int s_total_tiles;
+    A_row_reg a;
+    B_row_reg b0, b1;
+    // Round-3 (gpt_oss FP8 focus) — extra A register tile for K-tail
+    // M-slab 1, declared inside the ``if constexpr (FUSED_KTAIL)``
+    // block at line ~2290 (round-7-dm scoping cleanup: was previously
+    // declared at function scope; compiler DCE was already eliminating
+    // the slot for FUSED_KTAIL=false template spec; bit-identical
+    // codegen but clearer intent).
+    rt_fl<RBM, RBN, col_l, rt_16x16_s> cA, cB, cC, cD;
+
+    // [grouped] Persistent: chiplet-swizzle pid against full NUM_CUS grid.
+    // Round-67: ``g.num_xcds`` is a host-side knob (default 0 → fallback
+    // to ``BLOCK_SWIZZLE_NUM_XCDS=8``). Each shape can override via the
+    // Python config rule. Mirrors BF16 grouped's existing ``g.num_xcds``
+    // handling (analysis/bf16_gemm/mi350x/kernel_bf16_dynamic.cpp:3249).
+    const int xcds_eff = g.num_xcds > 0 ? g.num_xcds : BLOCK_SWIZZLE_NUM_XCDS;
+    int pid = chiplet_transform_chunked(
+        blockIdx.x, NUM_CUS, xcds_eff, 64);
+
+    int wm = warpid() / WARPS_N;
+    int wn = warpid() % WARPS_N;
+    const int num_pid_n = g.bpc;
+    const int ki_dyn   = (KI_HINT > 0) ? KI_HINT : g.ki;
+
+    // [grouped] Cooperative init of the LDS group-metadata caches.
+    //
+    // Round-9-dm: split the original single-threaded init into
+    //   (a) parallel HBM read of g.group_offs[0 .. g.G] (65 entries max, fit
+    //       in <3 warp-coalesced cachelines so the original O(G) serialized
+    //       HBM loads collapse to a single warp-wide wavefront transfer),
+    //   (b) parallel pad of s_cum_tiles[g.G+1 .. MAX_G_PLUS_1),
+    //   (c) intra-CTA sync, then thread-0 runs the O(G) prefix-scan from
+    //       LDS (all the g.group_offs[] fetches have already retired).
+    // Pad s_cum_tiles[g.G + 1 .. MAX_G_PLUS_1) with INT_MAX so a constant-
+    // depth (6-step) branch-free binary search reading any mid > g.G never
+    // updates lo (the cmp `gt >= INT_MAX` is always false for finite gt).
+    if (threadIdx.x <= g.G && threadIdx.x < MAX_G_PLUS_1) {
+        s_offs[threadIdx.x] = static_cast<int>(g.group_offs[threadIdx.x]);
+    }
+    if (threadIdx.x > g.G && threadIdx.x < MAX_G_PLUS_1) {
+        s_cum_tiles[threadIdx.x] = 0x7FFFFFFF;
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        int prev = s_offs[0];
+        s_cum_tiles[0] = 0;
+        int t = 0;
+        #pragma unroll 1
+        for (int gi = 0; gi < g.G; ++gi) {
+            const int next = s_offs[gi + 1];
+            t += ((next - prev) / BLOCK_SIZE) * num_pid_n;
+            s_cum_tiles[gi + 1] = t;
+            prev = next;
+        }
+        s_total_tiles = t;
+    }
+    __syncthreads();
+    const int total_tiles = s_total_tiles;
+
+    // Prefill swizzled offsets ONCE (shared across all tiles & all groups —
+    // depends only on the GL strides which are constant within the launch).
+    constexpr int bpt = ST_rcr::underlying_subtile_bytes_per_thread;
+    constexpr int bpm = bpt * _NUM_THREADS;
+    constexpr int mpt = ST_rcr::rows * ST_rcr::cols * sizeof(fp8e4m3) / bpm;
+    uint32_t soA[mpt], soB[mpt];
+    G::prefill_swizzled_offsets(As[0][0], g.a, soA);
+    G::prefill_swizzled_offsets(Bs[0][0], g.b, soB);
+
+    // [fused-act R6] One-shot read of the forward FP8 scale (FP8_MAX / amax)
+    // into a wave-uniform float register. Used by every load_a call in the
+    // FUSE_ACT=true path. Read ONCE here (not in the per-tile epilog) so the
+    // HBM load is shared across all tiles processed by this CU. ``g.dscale_a``
+    // stores the forward scale for fused-act (output of the R1
+    // ``max_abs_bf16_to_fp8_scale`` binding); for the un-fused (FUSE_ACT=false)
+    // path this variable is unused (compiler DCE drops the load).
+    float scale_a_inv = 0.0f;
+    if constexpr (FUSE_ACT) {
+        scale_a_inv = (g.dscale_a != nullptr) ? *g.dscale_a : 0.0f;
+    }
+
+    // K-tail fuse uses path B (round-3 commit 07354791): direct per-lane
+    // ``raw_buffer_load_b128`` HBM→register inside the fuse epilog (~line
+    // 2300+ below), no LDS round-trip and no swizzled-offset prefill. The
+    // path-A scaffolding (``soA_tail`` / ``soB_tail`` declarations +
+    // ``prefill_swizzled_offsets_partial_K`` calls) was removed in round 11
+    // (commit f9d591cb); the helper itself was removed in round 13.
+
+    // [grouped] Persistent outer loop.
+    for (int gt = pid; gt < total_tiles; gt += NUM_CUS) {
+        // [grouped] 6-step branch-free binary search over LDS-cached cumsum
+        // (covers G ∈ [1, 64] since 2^6 = 64 = MAX_G_PLUS_1-1). Sentinel
+        // INT_MAX past g.G keeps the `gt >= s_cum_tiles[mid]` cmp false so
+        // lo never advances past g.G. Compared to the linear O(G) scan,
+        // this collapses ~32 LDS lds + cmp into 6 sequential lookups: ~70
+        // cyc instead of ~320 cyc per outer iter (kernel-only saving ~3-5%
+        // on shapes with low ki / many tiles).
+        int lo = 0;
+        int hi = MAX_G_PLUS_1 - 1;
+        #pragma unroll
+        for (int level = 0; level < 6; ++level) {
+            const int mid = (lo + hi + 1) >> 1;
+            if (gt >= s_cum_tiles[mid]) lo = mid;
+            else hi = mid - 1;
+        }
+        const int group_idx = lo;
+        const int tile_start = s_cum_tiles[lo];
+        const int local_tile = gt - tile_start;
+        const int m_start_g = s_offs[group_idx];
+        const int M_g = s_offs[group_idx + 1] - m_start_g;
+        const int bpr_g = M_g / BLOCK_SIZE;
+
+        // Group-by-M / group-by-N swizzle (matches dense kernel mapping).
+        int br, bc;
+        if (g.bpc > bpr_g) {
+            const int WGN = g.group_m;
+            const int num_wgid_in_group = bpr_g * WGN;
+            int group_id = local_tile / num_wgid_in_group;
+            int first_pid_n = group_id * WGN;
+            int group_size_n = min(num_pid_n - first_pid_n, WGN);
+            if (group_size_n <= 0) continue;
+            bc = first_pid_n + ((local_tile % num_wgid_in_group) % group_size_n);
+            br = (local_tile % num_wgid_in_group) / group_size_n;
+        } else {
+            const int WGM = g.group_m;
+            const int num_wgid_in_group = WGM * num_pid_n;
+            int group_id = local_tile / num_wgid_in_group;
+            int first_pid_m = group_id * WGM;
+            int group_size_m = min(bpr_g - first_pid_m, WGM);
+            if (group_size_m <= 0) continue;
+            br = first_pid_m + ((local_tile % num_wgid_in_group) % group_size_m);
+            bc = (local_tile % num_wgid_in_group) / group_size_m;
+        }
+        if (br >= bpr_g || bc >= num_pid_n) continue;
+
+        // Coord shifts:
+        //   ST_A: st_fp8e4m3<HB=128, BK=128, ...> → row-coord unit = HB = 128.
+        //         m_subtile_A = m_start_g / HB.
+        //   C (RT store): rt_fl<RBM=64, RBN=32, ...> → row-coord unit = RBM=64.
+        //         m_subtile_C = m_start_g / RBM.
+        const int m_subtile_A = m_start_g / HB;
+        const int m_subtile_C = m_start_g / RBM;
+
+        auto a_co = [&](int s, int k) -> coord<ST_rcr> {
+            return {0, 0, m_subtile_A + s, k};
+        };
+        auto b_co = [&](int s, int k) -> coord<ST_rcr> {
+            return {0, group_idx, s, k};
+        };
+
+        auto load_a = [&](A_row_reg& dst, ST_rcr& tile, int wi) {
+            auto sub = subtile_inplace<RBM, BK>(tile, {wi, 0});
+            load(dst, sub);
+        };
+        auto load_b = [&](B_row_reg& dst, ST_rcr& tile, int wi) {
+            auto sub = subtile_inplace<RBN, BK>(tile, {wi, 0});
+            load(dst, sub);
+        };
+
+        auto b_tile = [&](int stage, int which) -> ST_rcr& {
+            return Bs[stage][which];
+        };
+
+        // Reset accumulators per tile.
+        zero(cA); zero(cB); zero(cC); zero(cD);
+
+        int tic = 0, toc = 1;
+        // Prologue: load tile-0 + tile-1 (mirrors gemm_kernel<RCR> 1040-1054).
+        rcr_8w_load_hoist<_NUM_THREADS>(b_tile(tic, 0), g.b, b_co(bc*2,   0), soB);
+        if constexpr (FUSE_ACT) fused_act_round5_compile_test::rcr_8w_load_hoist_fused_act<_NUM_THREADS>(As[tic][0], g.a, a_co(br*2,   0), soA, scale_a_inv);
+        else                    rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0],    g.a, a_co(br*2,   0), soA);
+        rcr_8w_load_hoist<_NUM_THREADS>(b_tile(tic, 1), g.b, b_co(bc*2+1, 0), soB);
+        if constexpr (FUSE_ACT) fused_act_round5_compile_test::rcr_8w_load_hoist_fused_act<_NUM_THREADS>(As[tic][1], g.a, a_co(br*2+1, 0), soA, scale_a_inv);
+        else                    rcr_8w_load_hoist<_NUM_THREADS>(As[tic][1],    g.a, a_co(br*2+1, 0), soA);
+
+        if (wm == 1) __builtin_amdgcn_s_barrier();
+        TK_WAIT_VMCNT(RCR_INIT0_VMCNT);
+        __builtin_amdgcn_s_barrier();
+
+        rcr_8w_load_hoist<_NUM_THREADS>(b_tile(toc, 0), g.b, b_co(bc*2,   1), soB);
+        if constexpr (FUSE_ACT) fused_act_round5_compile_test::rcr_8w_load_hoist_fused_act<_NUM_THREADS>(As[toc][0], g.a, a_co(br*2,   1), soA, scale_a_inv);
+        else                    rcr_8w_load_hoist<_NUM_THREADS>(As[toc][0],    g.a, a_co(br*2,   1), soA);
+        rcr_8w_load_hoist<_NUM_THREADS>(b_tile(toc, 1), g.b, b_co(bc*2+1, 1), soB);
+
+        TK_WAIT_VMCNT(RCR_INIT1_VMCNT);
+        __builtin_amdgcn_s_barrier();
+
+        // Single-tile main loop (mirrors dense gemm_kernel<RCR> else-branch
+        // lines 1129-1158).
+        // Round-4 (gpt_oss FP8 focus) PROBE: removed 2x RCR_SCHED_BARRIER()
+        // per K-iter (compiler reorder hint), keeping all s_setprio +
+        // s_barrier + s_waitcnt. Round-2 falsified removing BOTH
+        // sched_barrier AND setprio together (-5.6%); this isolates whether
+        // the regression came from setprio alone (priority-bias for MFMA
+        // issue) or sched_barrier alone (compiler reorder block). If this
+        // probe is neutral or +ve, the round-2 regression was setprio-only
+        // → confirms sched_barrier overhead is removable.
+        //
+        // Round-3-dm: swept local UNROLL override {1, 2, 4} × 5 runs each.
+        // Means 816.2 / 816.2 / 816.4 — flat across the entire range.
+        // LLVM's unroll heuristic already produces optimal body layout;
+        // `#pragma unroll N` is an ignorable hint here. See round-3-dm
+        // note. Saturated. Use shared RCR_MAIN_UNROLL (=2, matches dense).
+        TK_PRAGMA_UNROLL(RCR_MAIN_UNROLL)
+        for (int k = 0; k < ki_dyn - 2; k++, tic ^= 1, toc ^= 1) {
+            load_b(b0, b_tile(tic, 0), wn);
+            load_a(a, As[tic][0], wm);
+            if constexpr (FUSE_ACT) fused_act_round5_compile_test::rcr_8w_load_hoist_fused_act<_NUM_THREADS>(As[toc][1], g.a, a_co(br*2+1, k+1), soA, scale_a_inv);
+            else                    rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], g.a, a_co(br*2+1, k+1), soA);
+            TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_b(b1, b_tile(tic, 1), wn);
+            rcr_8w_load_hoist<_NUM_THREADS>(b_tile(tic, 0), g.b, b_co(bc*2, k+2), soB);
+            __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cB, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_a(a, As[tic][1], wm);
+            if constexpr (FUSE_ACT) fused_act_round5_compile_test::rcr_8w_load_hoist_fused_act<_NUM_THREADS>(As[tic][0], g.a, a_co(br*2, k+2), soA, scale_a_inv);
+            else                    rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0], g.a, a_co(br*2, k+2), soA);
+            __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cC, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            rcr_8w_load_hoist<_NUM_THREADS>(b_tile(tic, 1), g.b, b_co(bc*2+1, k+2), soB);
+            TK_WAIT_VMCNT(RCR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cD, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+        }
+
+        // Epilog 1: second-to-last K-tile (mirrors dense lines 1160-1187).
+        {
+            load_b(b0, b_tile(tic, 0), wn);
+            load_a(a, As[tic][0], wm);
+            if constexpr (FUSE_ACT) fused_act_round5_compile_test::rcr_8w_load_hoist_fused_act<_NUM_THREADS>(As[toc][1], g.a, a_co(br*2+1, ki_dyn-1), soA, scale_a_inv);
+            else                    rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], g.a, a_co(br*2+1, ki_dyn-1), soA);
+            __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
+
+            load_b(b1, b_tile(tic, 1), wn);
+            __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cB, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_a(a, As[tic][1], wm);
+            TK_WAIT_VMCNT(RCR_EPILOGUE_VMCNT); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cC, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_b(b0, b_tile(toc, 0), wn);
+            __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cD, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
+            tic ^= 1; toc ^= 1;
+        }
+
+        // Epilog 2: last K-tile (mirrors dense lines 1189-1210).
+        {
+            load_a(a, As[tic][0], wm);
+            asm volatile("s_waitcnt vmcnt(0)"); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_b(b1, b_tile(tic, 1), wn);
+            __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cB, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_a(a, As[tic][1], wm);
+            __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1);
+            rcr_mma(cC, a, b0);
+            rcr_mma(cD, a, b1);
+            __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+        }
+
+        // === Fused K-tail epilog (path B, round-3 commit 07354791) ===
+        // After Epilog 2, cA/cB/cC/cD hold sum over K=[0, fast_k). For
+        // K-misaligned shapes (e.g. gpt_oss K=2880, K_REM=64) we accumulate
+        // K=[fast_k, fast_k + K_BLOCK) directly into cA/cB/cC/cD inside this
+        // same launch — no standalone K-tail kernel, no RMW on g.c.
+        //
+        // History (see ``analysis/_notes/round-{2,3}-fp8-ktail-*.md`` for
+        // full derivation):
+        //   * Round-2 (commit 4f6a2dee) shipped path A: LDS-staged K-tail
+        //     using ``prefill_swizzled_offsets_partial_K`` + SENTINEL
+        //     voffset + ``buffer_load_lds``. Saturated at SNR ~20.7 dB
+        //     because ``buffer_load_lds`` is a NO-OP on OOB voffset (it
+        //     does NOT zero LDS — only ``buffer_load.iX`` zero-fills VGPR
+        //     on OOB), leaving OOB lanes' LDS slots holding stale main-
+        //     loop K-tile data; ``load(reg, st_subtile)`` then accumulated
+        //     that stale data with weight 1.
+        //   * Round-3 (commit 07354791) shipped the live code below, path B:
+        //     each lane reads ``2 × buffer_load_b128`` directly from HBM
+        //     into A_row_reg / B_row_reg ``data[]``, lane-cell mapping
+        //     hand-derived for ``rt_16x128_s``. SRD range_bytes
+        //     auto-zero-fills VGPR for K-OOB lanes — exactly what path A
+        //     wanted but couldn't get from ``buffer_load_lds``. SNR
+        //     ≥25 dB on all 8 gpt_oss K=2880 cases; metric 153 → 465.
+        //   * Round-11 (commit f9d591cb) dropped the dead path-A scaffolding
+        //     (``soA_tail`` / ``soB_tail`` declarations + the two
+        //     ``prefill_swizzled_offsets_partial_K`` calls in the prologue);
+        //     round-13 dropped the helper definition itself.
+        if constexpr (FUSED_KTAIL) {
+            // Round-7-dm: scoped A register tile for K-tail M-slab 1
+            // (moved from function-scope; round-3 introduced the reg
+            // to save one ``vmcnt(0)`` wait on K-misaligned shapes).
+            A_row_reg a_kt1;
+            if (g.fast_k < g.k) {
+                // === Round-3 path B: direct HBM → register K-tail load ===
+                // Mirrors BF16 round-5 path B
+                // (kernel_bf16_dynamic.cpp:709-827). Each lane reads
+                // 2 × buffer_load_b128 (= 32 fp8 cells) directly from
+                // HBM into A_row_reg / B_row_reg `data[]`, sidestepping
+                // LDS entirely and the round-3 phantom-read pattern
+                // documented in
+                // ``analysis/_notes/round-3-bf16-ktail-phantom-read.md``
+                // and ``analysis/_notes/round-3-fp8-ktail-path-a-saturation.md``.
+                //
+                // Lane → cell mapping for ``rt_16x128_s`` (fp8e4m3, 64
+                // lanes/warp, 32 cells/lane = 32 bytes = 2 × b128):
+                //   row_lane    = laneid % 16     (16 rows/base tile)
+                //   k_lane_byte = (laneid/16) * 32 (contiguous K cells)
+                //   data[0..3]  = K=[k_lane_byte, k_lane_byte + 16) → b128 #1
+                //   data[4..7]  = K=[k_lane_byte + 16, k_lane_byte + 32) → b128 #2
+                //
+                // K_REM=64 < K_STEP=128 (gpt_oss K=2880=22*128+64):
+                //   laneid 0..15  : k_lane_byte=0  → both b128 valid
+                //   laneid 16..31 : k_lane_byte=32 → both b128 valid
+                //   laneid 32..47 : k_lane_byte=64 → both b128 K-OOB
+                //   laneid 48..63 : k_lane_byte=96 → both b128 K-OOB
+                //
+                // K-OOB lanes get ``voffset = SENTINEL`` so the SRD
+                // range_bytes check rejects the load → VGPR returns 0.
+                // ``raw_buffer_load_b128`` zero-fills VGPR on OOB
+                // (unlike ``raw_buffer_load_lds`` which is no-op, the
+                // path-A blocker).
+                //
+                // SRDs:
+                //   * A: full-tensor (M_total × K bytes). OOB row >
+                //     range clamps to 0.
+                //   * B: per-group ((group_idx + 1) × N × K bytes).
+                //     Without per-group bound, OOB N-rows on partial
+                //     last col-tile would wrap into NEXT group's data.
+                //     Per-group bound clamps to 0; column-masked C store
+                //     drops the OOB cells.
+                //
+                // ``row_stride_bytes=0`` in ``make_srsrc`` keeps the
+                // linear range-bytes bound check (mirror of BF16 round-11
+                // gpt_oss K=2880 fix: cache-swizzle on non-power-of-2
+                // strides has UB OOB-clamp behaviour; raw range works).
+                //
+                // Currently gated at K_REM ∈ {32, 64, 96} (32-aligned)
+                // at the dispatcher. Mixed K_REM (e.g. 80) requires
+                // partial-b128 lane mask; future round.
+
+                const int laneid = kittens::laneid();
+                const int row_lane = laneid % 16;
+                const int k_lane_byte = (laneid / 16) * 32;
+                // Round-49-dm (auto-optimize R49): FUSED_KTAIL invariant
+                // collapse — dispatcher gate ``fuse_ktail_eligible`` (line
+                // ~5335) only enables this template spec when
+                // ``K_rem_for_fuse ∈ {64, 0}``. The runtime branch
+                // ``if (g.fast_k < g.k)`` (parent of this scope) is FALSE
+                // when ``K_REM = 0`` (g.fast_k == g.k), so inside this
+                // scope K_REM is necessarily 64.
+                //
+                // Replaces the prior dynamic ``K_REM = g.k - g.fast_k`` +
+                // 2 per-lane masks ``b128_lo_valid = (k_lane_byte + 16) <=
+                // K_REM`` and ``b128_hi_valid = (k_lane_byte + 32) <=
+                // K_REM`` with a single constexpr-folded mask. Since
+                // ``k_lane_byte = (laneid / 16) * 32 ∈ {0, 32, 64, 96}``,
+                // for K_REM=64 both masks collapse to ``laneid < 32``:
+                //
+                //   laneid 0..15  : k_lane_byte=0  → lo: 16≤64 ✓ | hi: 32≤64 ✓ → both true
+                //   laneid 16..31 : k_lane_byte=32 → lo: 48≤64 ✓ | hi: 64≤64 ✓ → both true
+                //   laneid 32..47 : k_lane_byte=64 → lo: 80≤64 ✗ | hi: 96≤64 ✗ → both false
+                //   laneid 48..63 : k_lane_byte=96 → lo:112≤64 ✗ | hi:128≤64 ✗ → both false
+                //
+                // Eliminates 1 wave-uniform sub op (``g.k - g.fast_k``),
+                // 1 K_REM register slot, and one of the two per-lane
+                // mask cmps. The resource report (``-Rpass-analysis=
+                // kernel-resource-usage``) is bit-identical at the V/A/
+                // spill/scratch level (LLVM's CSE was already partially
+                // collapsing the redundancy); the .so binary md5 changes
+                // (codegen emits 1-3 fewer instructions in the K-tail
+                // load lambdas, observed via build comparison this
+                // round). Metric: 996 / 987 over 2 runs vs 997 baseline
+                // — within run-to-run noise band (982-998 centred ~990).
+                //
+                // **Future**: if ``fuse_ktail_eligible`` (line ~5335) is
+                // ever extended to allow K_REM ∈ {32, 96} or other
+                // partial-b128 values, this constexpr collapse must be
+                // replaced by a per-K_REM template specialisation.
+                // Currently only {0, 64} are gated through, so the
+                // invariant holds.
+                constexpr int KREM = 64;
+                static_assert(KREM == 64,
+                    "FUSED_KTAIL=true K_REM must be 64; see fuse_ktail_eligible");
+                const bool both_valid = (laneid < 32);
+                constexpr uint32_t SENTINEL = 0xFFFF0000u;
+
+                const fp8e4m3* a_base_ptr = (const fp8e4m3*)&g.a[{0, 0, 0, 0}];
+                const fp8e4m3* b_base_ptr = (const fp8e4m3*)&g.b[{0, 0, 0, 0}];
+                const int a_row_stride_bytes = g.a.template stride<2>();
+                const int b_row_stride_bytes = g.b.template stride<2>();
+                const uint32_t a_total_bytes =
+                    static_cast<uint32_t>(g.M_total) *
+                    static_cast<uint32_t>(a_row_stride_bytes);
+                const uint32_t b_per_group_bytes =
+                    static_cast<uint32_t>(group_idx + 1) *
+                    static_cast<uint32_t>(g.n) *
+                    static_cast<uint32_t>(b_row_stride_bytes);
+                i32x4 a_srsrc_kt = make_srsrc((const void*)a_base_ptr, a_total_bytes);
+                i32x4 b_srsrc_kt = make_srsrc((const void*)b_base_ptr, b_per_group_bytes);
+
+                const uint32_t K_tail_base_bytes =
+                    static_cast<uint32_t>(g.fast_k);
+                const uint32_t b_group_byte_base =
+                    static_cast<uint32_t>(group_idx) *
+                    static_cast<uint32_t>(g.n) *
+                    static_cast<uint32_t>(b_row_stride_bytes);
+
+                // M_warp_base derivation:
+                //   a_co(s, k) → coord {0, 0, m_subtile_A + s, k}
+                //   unit_coord<2,3>: row = (m_subtile_A + s) * ST_rcr::rows = (.) * HB
+                //   warp wm picks rows wm*RBM..wm*RBM+RBM-1 within the 128-row tile.
+                //   For h ∈ [0, A_row_reg::height = 4): row = M_warp_base + h*16 + row_lane.
+                // Round-3: refactored to take A_row_reg by reference so M-slab 0
+                // and M-slab 1 can target different register tiles (a vs a_kt1).
+                // This lets us issue all 12 K-tail buffer_loads up front and
+                // drain with a single vmcnt(0) before the 4 K-tail mfma —
+                // saves ~1 vmcnt(0) round-trip per output tile (~50-100 cyc).
+                auto load_a_kt = [&](A_row_reg& A_tile, int slab)
+                        __attribute__((always_inline)) {
+                    const int M_warp_base =
+                        (m_subtile_A + br * 2 + slab) * HB + wm * RBM;
+                    #pragma unroll
+                    for (int h = 0; h < A_row_reg::height; ++h) {
+                        const int A_row_idx = M_warp_base + h * 16 + row_lane;
+                        const uint32_t v_base = static_cast<uint32_t>(
+                            A_row_idx * a_row_stride_bytes +
+                            K_tail_base_bytes + k_lane_byte);
+                        const uint32_t v_lo = both_valid ? v_base : SENTINEL;
+                        const uint32_t v_hi = both_valid ? (v_base + 16) : SENTINEL;
+                        __uint128_t v0 = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
+                            a_srsrc_kt, v_lo, 0, 0);
+                        __uint128_t v1 = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
+                            a_srsrc_kt, v_hi, 0, 0);
+                        *reinterpret_cast<__uint128_t*>(&A_tile.tiles[h][0].data[0]) = v0;
+                        *reinterpret_cast<__uint128_t*>(&A_tile.tiles[h][0].data[4]) = v1;
+                    }
+                };
+
+                // N_warp_base derivation:
+                //   b_co(s, k) → coord {0, group_idx, s, k}
+                //   unit_coord: N-row in tile = s * ST_rcr::rows = s * HB.
+                //   warp wn picks rows wn*RBN..wn*RBN+RBN-1 within the 128-row tile.
+                //   For h_b ∈ [0, B_row_reg::height = 2):
+                //     B_row_idx_in_group = N_warp_base + h_b*16 + row_lane.
+                //   Global byte = group_idx * N * K + B_row_idx_in_group * K + ...
+                auto load_b_kt = [&](B_row_reg& B_tile, int n_strip) __attribute__((always_inline)) {
+                    const int N_warp_base =
+                        (bc * 2 + n_strip) * HB + wn * RBN;
+                    #pragma unroll
+                    for (int h_b = 0; h_b < B_row_reg::height; ++h_b) {
+                        const int B_row_idx_in_group = N_warp_base + h_b * 16 + row_lane;
+                        const uint32_t v_base = b_group_byte_base + static_cast<uint32_t>(
+                            B_row_idx_in_group * b_row_stride_bytes +
+                            K_tail_base_bytes + k_lane_byte);
+                        const uint32_t v_lo = both_valid ? v_base : SENTINEL;
+                        const uint32_t v_hi = both_valid ? (v_base + 16) : SENTINEL;
+                        __uint128_t v0 = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
+                            b_srsrc_kt, v_lo, 0, 0);
+                        __uint128_t v1 = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
+                            b_srsrc_kt, v_hi, 0, 0);
+                        *reinterpret_cast<__uint128_t*>(&B_tile.tiles[h_b][0].data[0]) = v0;
+                        *reinterpret_cast<__uint128_t*>(&B_tile.tiles[h_b][0].data[4]) = v1;
+                    }
+                };
+
+                // Round-3: issue ALL K-tail buffer_loads up front, drain with
+                // a SINGLE ``vmcnt(0)`` wait, then 4 mfma sequential. M-slab 0
+                // → ``a``, M-slab 1 → ``a_kt1`` (separate register). Saves one
+                // ``s_waitcnt vmcnt(0)`` round-trip per output tile (~50-100
+                // cyc) and lets the SQ overlap the buffer_loads.
+                //
+                // Round-12-dm: split the single ``vmcnt(0)`` into a 2-stage
+                // wait so the cA/cB mfmas can overlap with the M-slab-1
+                // ``a_kt1`` HBM drain. Issue order is now
+                //   a (8 b128) → b0 (4) → b1 (4) → a_kt1 (8)        // 24 total
+                // ``vmcnt(8)`` waits until <= 8 outstanding (i.e. only the
+                // last 8 issued = a_kt1 still in flight), at which point
+                // a/b0/b1 are guaranteed drained (vmcnt is in-issue-order
+                // retirement on AMDGCN — same semantics relied on by the
+                // main loop's ``RCR_STEADY_VMCNT=8`` mid-iter wait at line
+                // 2199). cA = a · b0 and cB = a · b1 then fire while the
+                // remaining 8 a_kt1 loads complete in parallel; the
+                // ``vmcnt(0)`` before cC/cD acts as a no-op when those
+                // already drained. Estimated saving: 1-2 mfma latencies
+                // (~32-64 cyc) per K-tail output tile, K-misaligned
+                // (gpt_oss K=2880 K_REM=64) shapes only.
+                // Round-37-dm: reorder K-tail issues from
+                //   [a(8), b0(4), b1(4), a_kt1(8)]  →  [b0(4), b1(4), a(8), a_kt1(8)]
+                // Rationale: issue the smaller B tiles FIRST so they saturate
+                // HBM controller request-queue slots with finer-grained fetches,
+                // then issue the larger A tiles. Under in-issue-order VMEM
+                // retirement (per R12-dm comment + main-loop RCR_STEADY_VMCNT=8
+                // invariant), the first 16 retired are now b0+b1+a — all three
+                // needed for mfma cA/cB. vmcnt(8) fires after first 16 retire
+                // (same semantics as original), mfma cA/cB runs overlapping
+                // with a_kt1 drain. Zero correctness impact. Potential win: if
+                // HBM scheduler prioritises smaller requests first, the 8
+                // b128-load B-batch drains slightly earlier than if A-batch
+                // came first, cascading to mfma cA starting sooner.
+                load_b_kt(b0,    0);   // 4 buffer_load → b0 (issued FIRST)
+                load_b_kt(b1,    1);   // 4 buffer_load → b1
+                load_a_kt(a,     0);   // 8 buffer_load → a (M slab 0)
+                load_a_kt(a_kt1, 1);   // 8 buffer_load → a_kt1 (M slab 1, LAST)
+                asm volatile("s_waitcnt vmcnt(8)");
+                rcr_mma(cA, a,     b0);
+                rcr_mma(cB, a,     b1);
+                asm volatile("s_waitcnt vmcnt(0)");
+                rcr_mma(cC, a_kt1, b0);
+                rcr_mma(cD, a_kt1, b1);
+            }
+        }
+
+        // Apply scale + store with m_subtile_C row shift.
+        // Round-44-dm-probe-A: interleave mul + store per accumulator
+        // (was: 4× mul, then 4× store). rocprof showed gpt_oss spec
+        // <0,true,true> uses 228 B/thread scratch vs 148 B/thread for
+        // dsv3_g spec <0,false,true> — the +80 B is N_MASKED helper's
+        // live state. Hypothesis: serialising mul→store→next-mul lets
+        // LLVM free cA/cB/cC/cD's accumulator VGPR slots progressively,
+        // giving the masked-store helper room to spill into vacated
+        // slots instead of HBM scratch. Targets the actual bottleneck
+        // (scratch I/O REQUEST rate, not allocation count).
+        const float combined_scale = resolve_combined_scale_grp<FUSE_ACT>(g);
+
+        if (wm == 0) __builtin_amdgcn_s_barrier();
+        // Round-12: mirror BF16 grouped's column-masked C store. With
+        // ``g.bpc = ceil_div(g.n, BLOCK_SIZE)`` (dispatch_grouped_rcr
+        // round-12 path) the last col-tile may straddle ``[fast_n, n)``;
+        // ``store_c_tile_n_masked`` drops OOB columns. ``rcr_8w_load_hoist``
+        // already uses the full-tensor SRD (line ~432) so OOB rows in B
+        // clamp to 0 — the masked C store then prevents those cells from
+        // being written. ``N_MASKED_STORE`` is a compile-time template
+        // parameter so the N-aligned dispatch path emits the raw store
+        // (no spill from the masked variant's row/col reconstruction).
+        //
+        // Round-59: hoist per-block N-tail branch from the helper into
+        // the kernel epilogue. The helper's top-of-body
+        // ``if (n1 <= n_limit) store(...)`` fast-path forwards interior
+        // tiles to the same bare ``store(...)`` as the unmasked kernel,
+        // but having the masked-helper body in scope on every block
+        // (even when the runtime branch falls through to the bare store)
+        // inflates VGPR pressure and serialises the epilogue: the
+        // unmasked ``<0,false>`` template runs N=5888 in 2.19 ms while
+        // the ``<0,true>`` template with helper-internal branching runs
+        // the same 23 col-tile work in 3.05 ms (+39 % wall time, gpt_oss
+        // GateUP B32-M4096 K=2816, /tmp/profile_fp8_n_alignment.py).
+        // Hoisting the branch — interior takes the bare ``store(...)``
+        // path identical to the unmasked template; only ``bc == bpc-1``
+        // on a misaligned N hits the masked helper — lets the compiler
+        // fully specialise both arms and recovers the unmasked-kernel
+        // throughput on the 22/23 interior col-tiles. Numerical safety:
+        // ``(bc + 1) * BLOCK_SIZE <= g.n`` is the necessary and
+        // sufficient condition for the four C sub-tiles cA/cB/cC/cD to
+        // fit entirely in [bc*BLOCK_SIZE, g.n) (combined col span of all
+        // 4 stores = [bc*BLOCK_SIZE, (bc+1)*BLOCK_SIZE)); when true, the
+        // bare ``store`` writes the same cells as the masked helper's
+        // ``n1 <= n_limit`` fast-path. ``bc`` is uniform across the wave
+        // so this is a single wave-uniform branch, not divergent control
+        // flow.
+        // Round-24 (PT): readfirstlane on the 4 C-store wave-uniform coords.
+        // R22 ASM disassembly counted 411 divergent-SRD fallback loops in
+        // FUSED_KTAIL=true rcr<T,T> spec (vs 128 in <F,F>); 80 % live in the
+        // C-store epilog. Root cause: r0/r1/c0/c1 are wave-uniform IN PRINCIPLE
+        // (m_subtile_C, br, bc, wm, wn all uniform per tile-iter) but LLVM's
+        // uniformity analysis cannot prove it — the FUSED_KTAIL block's per-
+        // lane VGPR ops (SENTINEL voffsets, b128_lo_valid lane masks) earlier
+        // in the function taint downstream flow. Each store(g.c, cX, coord)
+        // therefore constructs a VGPR-derived buffer SRD inside the kittens
+        // helper (`make_buffer_resource(as_u64, ...)` at memory/tile/
+        // global_to_register.cuh:332) and emits the per-lane fallback loop
+        // pattern (`v_readfirstlane → v_cmp → s_and_saveexec → buffer_op →
+        // s_xor exec → s_cbranch_execnz`) that costs ~20 cy/loop on the
+        // common wave-uniform path.
+        //
+        // Localised readfirstlane HERE (not earlier) avoids R22's V-A/V-B
+        // backlash (those tried on `group_idx` in the binary search prologue
+        // → +21 dw spill on rcr<T,T> via wide downstream cascade). The 4
+        // coord ints are dead-after-stores (no downstream consumers in the
+        // tile-iter), so SGPR promotion is local.
+        const int r0 = __builtin_amdgcn_readfirstlane(m_subtile_C + br*WARPS_M*2+wm);
+        const int r1 = __builtin_amdgcn_readfirstlane(m_subtile_C + br*WARPS_M*2+WARPS_M+wm);
+        const int c0 = __builtin_amdgcn_readfirstlane(bc*WARPS_N*2+wn);
+        const int c1 = __builtin_amdgcn_readfirstlane(bc*WARPS_N*2+WARPS_N+wn);
+        if constexpr (N_MASKED_STORE) {
+            if ((bc + 1) * BLOCK_SIZE <= g.n) {
+                mul(cA, cA, combined_scale);
+                store(g.c, cA, {0, 0, r0, c0});
+                mul(cB, cB, combined_scale);
+                store(g.c, cB, {0, 0, r0, c1});
+                mul(cC, cC, combined_scale);
+                store(g.c, cC, {0, 0, r1, c0});
+                mul(cD, cD, combined_scale);
+                store(g.c, cD, {0, 0, r1, c1});
+            } else {
+                mul(cA, cA, combined_scale);
+                store_c_tile_n_masked(g.c, cA, r0, c0, g.n);
+                mul(cB, cB, combined_scale);
+                store_c_tile_n_masked(g.c, cB, r0, c1, g.n);
+                mul(cC, cC, combined_scale);
+                store_c_tile_n_masked(g.c, cC, r1, c0, g.n);
+                mul(cD, cD, combined_scale);
+                store_c_tile_n_masked(g.c, cD, r1, c1, g.n);
+            }
+        } else {
+            mul(cA, cA, combined_scale);
+            store(g.c, cA, {0, 0, r0, c0});
+            mul(cB, cB, combined_scale);
+            store(g.c, cB, {0, 0, r0, c1});
+            mul(cC, cC, combined_scale);
+            store(g.c, cC, {0, 0, r1, c0});
+            mul(cD, cD, combined_scale);
+            store(g.c, cD, {0, 0, r1, c1});
+        }
+
+        // Round-50-dm probe: drain only LDS (lgkmcnt) at end of tile;
+        // skip vmcnt(0). C-store HBM writes (~32 buffer_store_b16 pending)
+        // do NOT alias with next tile's HBM loads (g.a / g.b reads of a
+        // different (br, bc) cell), so the next tile's prologue can issue
+        // its 16 buffer_loads in parallel with C-store drain. The
+        // prologue's own ``TK_WAIT_VMCNT(RCR_INIT0_VMCNT=4)`` enforces the
+        // sync it needs (prologue waits for ≤4 outstanding before mfma);
+        // since vmcnt is shared across loads + stores, that wait will
+        // also drain the C-store stragglers if they outlive the load
+        // issue path. Keep lgkmcnt(0) to ensure main-loop LDS writes
+        // retire before next tile's prologue overwrites the same slab.
+        // Estimated: ~150 cy/tile saved (overlap of ~30 cy search +
+        // prologue issue with ~150 cy store drain). On gpt_oss-GateUP-
+        // B32-M4096 with ~368 tiles/CU, that's ~55K cy = ~27 us = ~1 %
+        // wall-time saving, expected ~+1-2 pp on grp_FP8 ratio.
+        asm volatile("s_waitcnt lgkmcnt(0)");
+        __builtin_amdgcn_s_barrier();
+    }
+}
+
+
+// M2a instantiations only — KI_HINT=0, N_MASKED_STORE in {false, true},
+// FUSED_KTAIL=false. FUSE_ACT defaulted to false. Keeps codegen surface
+// minimal until M2b adds K-tail + M5 ships the dispatcher gate.
+template __global__ void grouped_rcr_kernel<0, false, false>(const grouped_layout_globals);
+template __global__ void grouped_rcr_kernel<0, true , false>(const grouped_layout_globals);
+
+} // namespace kernel_b128
+
 
 // =============================================================================
 // Round-57-dm (auto-optimize R57): Lever C-2 round-2 step 2A — minimal
