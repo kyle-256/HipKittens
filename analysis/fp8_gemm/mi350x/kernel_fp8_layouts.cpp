@@ -7716,8 +7716,17 @@ void grouped_var_k_kernel_fp8(const grouped_var_k_layout_globals_fp8 g) {
     // Round-2 (FP8 backward unblock): mirror RCR line ~2020 — host-side
     // ``g.num_xcds`` knob with fallback to the default 8 when unset.
     const int xcds_eff = g.num_xcds > 0 ? g.num_xcds : BLOCK_SWIZZLE_NUM_XCDS;
+    // Round-2 (gpt_oss FP8 kernel-only ceiling, current Primus run; 2026-05-07)
+    // Replace constexpr ``NUM_CUS`` with runtime ``gridDim.x`` for the
+    // persistent-grid stride + chiplet swizzle range. This makes the
+    // kernel honor smaller launch geometries (TK_VARK_NUM_CUS env probe
+    // in ``dispatch_grouped_var_k_fp8`` below). At ``gridDim.x ==
+    // NUM_CUS == 256`` (the existing default) the math is bit-identical
+    // to the constexpr-NUM_CUS version. Compiler will load gridDim.x
+    // into a scalar register once and reuse — no per-iter cost.
+    const int slots_eff = gridDim.x;
     int pid = chiplet_transform_chunked(
-        blockIdx.x, NUM_CUS, xcds_eff, 64);
+        blockIdx.x, slots_eff, xcds_eff, 64);
 
     int wm = warpid() / WARPS_N;
     int wn = warpid() % WARPS_N;
@@ -7773,7 +7782,7 @@ void grouped_var_k_kernel_fp8(const grouped_var_k_layout_globals_fp8 g) {
     uint32_t soB[mptB];
     G::prefill_swizzled_offsets(Bs[0][0], g.b, soB);
 
-    for (int gt = pid; gt < total_tiles; gt += NUM_CUS) {
+    for (int gt = pid; gt < total_tiles; gt += slots_eff) {
         int lo = 0;
         int hi = MAX_G_PLUS_1 - 1;
         #pragma unroll
@@ -8038,7 +8047,27 @@ void dispatch_grouped_var_k_fp8(grouped_var_k_layout_globals_fp8 g) {
 
     if (g.bpr <= 0 || g.bpc <= 0 || g.G <= 0) return;
 
-    grouped_var_k_kernel_fp8<0><<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
+    // Round-2 (gpt_oss FP8 kernel-only ceiling, current Primus run; 2026-05-07)
+    // Optional env override TK_VARK_NUM_CUS for the persistent-grid slot
+    // count. Used by ``_probe_round_2_vark_numcus_sweep.py`` to validate
+    // the R1 PMC characterisation hypothesis (Down-B4-M2048 wgrad at
+    // 16.6 % MFMA-active is launch-geometry bound — too few wave-steps
+    // per slot at NUM_CUS=256 / 484 tiles = 1.89 steps/slot). Clamped
+    // to [1, NUM_CUS] to preserve the existing upper bound (kernel
+    // assumes pid < NUM_CUS-related LDS tables / chiplet swizzle range).
+    // The kernel body itself uses ``gridDim.x`` for the persistent-loop
+    // stride + chiplet swizzle range so any ``slots ∈ [1, NUM_CUS]`` is
+    // correctness-preserving. ``static`` cache avoids repeated getenv()
+    // syscalls in the hot path.
+    static const int slots = []() {
+        if (const char* e = std::getenv("TK_VARK_NUM_CUS")) {
+            const int v = std::atoi(e);
+            if (v > 0 && v <= NUM_CUS) return v;
+        }
+        return NUM_CUS;
+    }();
+
+    grouped_var_k_kernel_fp8<0><<<dim3(slots), g.block(), 0, g.stream>>>(g);
 }
 
 template<Layout L>
