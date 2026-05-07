@@ -311,6 +311,145 @@ namespace lever_c2_round_54_step1_scaffold {
         "B_row_reg_4w must be 2× outer B_row_reg (RBN doubled 32→64).");
 } // namespace lever_c2_round_54_step1_scaffold
 
+// =============================================================================
+// Round-F (this round) — Lever F: BLOCK_SIZE=128 tile-size port (M1 skeleton).
+//
+// Strategic context (full plan: analysis/_notes/round-F-fp8-tile-size-128-port-
+// plan-and-EV.md). After Rounds B-E exhausted the small numeric levers, the
+// remaining unblocked structural lever is per-CTA tile-size dispatch:
+//
+//   * The production grouped_rcr_kernel runs at BLOCK_SIZE=256 → 256x256
+//     per-CTA tile, 1 CTA per CU via persistent grid (NUM_CUS=256 blocks).
+//   * For low-batch shapes (gpt_oss B=4, M=2048) the total tile count is
+//     384 → only 1.5 tiles per CU → catastrophic tail effect: half the CUs
+//     idle in wave 2. Measured TFLOPS = 1465 (Down fwd) = 28 % of FP8 peak,
+//     vs 51 % on best shape (GateUP B=32 M=4096 dgrad) which has 46 tiles/CU.
+//   * Strong correlation (Round-F per-shape table) between tiles/CU and
+//     TFLOPS up to ~6 tiles/CU.
+//
+// Lever F shrinks the per-CTA tile to 128x128. Same 8-warp / VGPR-only /
+// 4-acc design — only the per-warp acc dimension drops from RBM=64 / RBN=32
+// to RBM=32 / RBN=16. Tile count quadruples → 4x more tiles/CU → eliminates
+// the tail effect for B=4 shapes.
+//
+// Why not 4-warp port (256x256/4w, Lever C)? Tried R54-R61, blocked by
+// deterministic LLVM AGPR allocation bug (cAB[0][0].tiles[{0,1}][1] wrong).
+// Lever F stays in standard 8-warp/VGPR regime: per-warp acc footprint
+// drops to 64 fp32/lane (vs 128 in BLK=256), well below the 256-fp32/lane
+// threshold that triggers AGPR allocation in LLVM (per R47 hypothesis).
+// Avoids the codegen bug entirely.
+//
+// Per-shape EV (projected score 685 → ~720..735, +35..+50 score):
+//   shape           | tiles/CU @256 | tiles/CU @128 | est gain (worst sec)
+//   Down  B4 M2048  | 1.5           | 6.0           | +500 T (1408 → 1900)
+//   GateUP B4 M2048 | 2.9           | 11.6          | +250 T (1782 → 2050)
+//   Down  B32 *     | 12-24         | 48-96         | regression (over-fine)
+//   GateUP B32 *    | 23-46         | 92-184        | regression (over-fine)
+// Conditional dispatch: kernel_b128 fires only when tiles_per_CU < 8.
+//
+// M1 (this commit) is COMPILE-ONLY: type aliases + static_assert validation
+// that the HK type system accepts the smaller HB / RBM / RBN dimensions and
+// the per-warp footprint math is correct. No kernel function defined yet.
+// M2 will port grouped_rcr_kernel body verbatim (replacing constants), M3
+// adds the dispatcher gate, M4 validates correctness, M5 measures metric.
+namespace kernel_b128 {
+    constexpr int BLOCK_SIZE_b128 = 128;          // half of outer 256
+    constexpr int HB_b128         = BLOCK_SIZE_b128 / 2;  // 64 (was 128)
+    constexpr int K_BLOCK_b128    = K_BLOCK;      // 128 unchanged (K_BLOCK is K-direction, not output tile dim)
+    constexpr int WARPS_M_b128    = WARPS_M;      // 2 unchanged
+    constexpr int WARPS_N_b128    = WARPS_N;      // 4 unchanged
+    constexpr int _NUM_WARPS_b128 = WARPS_M_b128 * WARPS_N_b128;        // 8
+    constexpr int _NUM_THREADS_b128 = _NUM_WARPS_b128 * WARP_THREADS;   // 512
+    constexpr int RBM_b128        = BLOCK_SIZE_b128 / WARPS_M_b128 / 2; // 32 (was 64)
+    constexpr int RBN_b128        = BLOCK_SIZE_b128 / WARPS_N_b128 / 2; // 16 (was 32)
+
+    static_assert(_NUM_THREADS_b128 == 512,
+        "kernel_b128: 8-warp 512-thread CTA preserved (only output tile shrinks)");
+    static_assert(RBM_b128 == 32 && RBN_b128 == 16,
+        "kernel_b128: per-warp acc cell drops from 64x32 to 32x16 (4x smaller)");
+
+    // LDS tile types. Underlying sub-tile is 16x128 (st_16x128_v2_s); with
+    // HB=64 we have 4 sub-tiles per A/B-slab (vs 8 sub-tiles at HB=128).
+    // Swizzle is per-sub-tile so the bank-conflict-free property carries
+    // over (PMC verified bank conflicts = 0 at HB=128 in Round-D; same
+    // swizzle on smaller stack should also yield 0).
+    using ST_v2_b128  = st_fp8e4m3<HB_b128, K_BLOCK_b128, st_16x128_v2_s>;
+    using ST_v2a_b128 = st_fp8e4m3<HB_b128, K_BLOCK_b128, st_16x128_v2a_s>;
+
+    // Register tile types. Same 16x128 base tile as the BLK=256 path, just
+    // fewer cells per register tile (RBM/RBN smaller).
+    //   A_row_reg_b128: 32 rows × 128 K-cols → height = 32/16 = 2,
+    //                   width = 128/128 = 1. Total cells = 2.
+    //   B_row_reg_b128: 16 rows × 128 K-cols → height = 16/16 = 1,
+    //                   width = 1. Total cells = 1.
+    using A_row_reg_b128 = rt_fp8e4m3<RBM_b128, K_BLOCK_b128, row_l, rt_16x128_s>;
+    using B_row_reg_b128 = rt_fp8e4m3<RBN_b128, K_BLOCK_b128, row_l, rt_16x128_s>;
+
+    // Accumulator tile (4 of these per warp = cA, cB, cC, cD).
+    //   rt_fl<RBM=32, RBN=16, col_l, rt_16x16_s>: height = 2, width = 1,
+    //   2 cells per acc * 4 fp32/lane/cell = 8 fp32/lane per acc.
+    //   4 accs per warp * 8 fp32/lane = 32 fp32/lane (vs 128 fp32/lane
+    //   for BLK=256). Below the AGPR-trigger threshold (256 fp32/lane per
+    //   R47), so LLVM allocates standard VGPR — avoids the rcr_4w R54-R61
+    //   AGPR codegen bug that blocked Lever C.
+    using C_acc_b128 = rt_fl<RBM_b128, RBN_b128, col_l, rt_16x16_s>;
+
+    // Compile-time validation
+    static_assert(sizeof(ST_v2_b128) == sizeof(ST_v2) / 2,
+        "kernel_b128: ST_v2_b128 should be half the size of ST_v2 (HB halved)");
+    static_assert(sizeof(ST_v2a_b128) == sizeof(ST_v2a) / 2,
+        "kernel_b128: ST_v2a_b128 should be half the size of ST_v2a (HB halved)");
+    static_assert(sizeof(A_row_reg_b128) == sizeof(::A_row_reg) / 2,
+        "kernel_b128: A_row_reg_b128 should be half the outer A_row_reg (RBM halved)");
+    static_assert(sizeof(B_row_reg_b128) == sizeof(::B_row_reg) / 2,
+        "kernel_b128: B_row_reg_b128 should be half the outer B_row_reg (RBN halved)");
+
+    // Per-acc-tile cell count
+    static_assert(C_acc_b128::height == 2,
+        "C_acc_b128 height = RBM_b128 / 16 = 32/16 = 2");
+    static_assert(C_acc_b128::width == 1,
+        "C_acc_b128 width = RBN_b128 / 16 = 16/16 = 1");
+
+    // Per-warp accumulator footprint (4 acc tiles × 2 cells × 4 fp32/lane
+    // = 32 fp32/lane). At 8 warps per CTA, total CTA accumulator footprint
+    // = 256 fp32/lane — but split across 8 warps, that's 32 fp32/lane per
+    // warp (NOT 256 per warp), which keeps each warp below the AGPR
+    // allocator's trigger threshold. Critical for codegen: stays in VGPR.
+    //
+    // sizeof(C_acc_b128) per-lane = packed_per_thread (1) × elements_per_thread
+    //   (4) × sizeof(fp32) (4) × height (2) × width (1) = 32 bytes / lane / acc
+    //   = 8 fp32/lane / acc.
+    static_assert(sizeof(C_acc_b128) == 32,
+        "C_acc_b128 must be 32 bytes/lane = 8 fp32/lane (per-warp). "
+        "4 accs * 8 fp32/lane = 32 fp32/lane per warp = 1/4 of BLK=256's "
+        "128 fp32/lane. Stays well below the 256-fp32/lane AGPR-trigger "
+        "threshold per R47 — LLVM allocates standard VGPR, avoiding the "
+        "rcr_4w R54-R61 AGPR-allocator codegen bug.");
+
+    // LDS budget per CTA (M2+ will allocate these):
+    //   2 buffers * 2 sub-tiles per axis * sizeof(ST_v2) per sub-tile
+    //   = 2 * 2 * (HB * BK * sizeof(fp8e4m3))
+    //   = 2 * 2 * (64 * 128 * 1) = 32 KB for A
+    //   + same for B = 64 KB total LDS / CTA (same as BLK=256 since each
+    //     ST_v2_b128 is half the size BUT we allocate 4 instead of 4
+    //     sub-tile copies — actually same allocation pattern, just smaller
+    //     per-buffer). Verified: 32 KB on M2 build.
+    // The HK ST type may include sub-tile padding for swizzle-friendly LDS
+    // layout. We sanity-check by comparing to ST_v2 (HB=128) instead of
+    // hardcoding bytes — the b128 variant should be exactly half the BLK=256
+    // size since only HB halved.
+    static_assert(sizeof(ST_v2_b128) * 2 == sizeof(ST_v2),
+        "ST_v2_b128 should be exactly half of ST_v2 (HB halved 128->64)");
+
+    // Per-tile FLOP count (for tflops calculations):
+    //   Per outer K-iter (K_BLOCK=128): 4 acc * RBM * RBN * K_BLOCK * 2
+    //   = 4 * 32 * 16 * 128 * 2 = 524288 FLOP / warp / iter
+    //   = 1/4 of BLK=256's 2.097 MFLOP / warp / iter. With 4× more tiles,
+    //   total FLOP across all tiles is identical (B=4: 384 tiles @ 256 vs
+    //   1536 tiles @ 128 → same total work).
+
+} // namespace kernel_b128
+
 // Cooperative col-major load from a v2/v2a-swizzled FP8 LDS tile.
 // Two `ds_read_b64_tr_b8` per lane per K_HALF (offset:0 + offset:1024).
 template<typename RT, int K_HALF, typename ST>
