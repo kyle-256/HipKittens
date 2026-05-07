@@ -3361,6 +3361,62 @@ template __global__ void grouped_rcr_kernel<0, true , true >(const grouped_layou
 // in M2b after correctness validation lands.
 //
 // Dispatch wiring lands in M3 (file ~5300+ in dispatch_grouped_rcr).
+//
+// === Round-F M2-debug-3 (correctness-fix, 2026-05-07) ========================
+// The 5 file-scope wait-counter macros (RCR_PREFETCH_LGKM=8, RCR_INIT0_VMCNT=4,
+// RCR_INIT1_VMCNT=6, RCR_STEADY_VMCNT=8, RCR_EPILOGUE_VMCNT=4) were tuned for
+// the outer kernel's BLK=256 / HB=128 LDS volume. The b128 path has HALF the
+// LDS data per ST tile (HB=64 → memcpy_per_tile=1 vs 2 in outer; per-call
+// vmcnt/lgkm increments halved), so the inherited thresholds were LOOSE enough
+// to be no-ops in some prologue paths, allowing first-iter ds_read to fire
+// against not-yet-landed buffer_load_lds → MFMA on garbage → systematic SNR
+// degradation that grew with iter count (B=4 K=5760 dgrad: SNR 18-31 dB vs
+// outer 297 dB). Localised bug: line 3617's ``s_waitcnt lgkmcnt(0)`` already
+// drains all pending LDS ops before each MFMA, so steady-state correctness is
+// preserved by the explicit drain — but the PROLOGUE relies on
+// TK_WAIT_VMCNT(N) being a real wait, not a no-op. With outer's N=4/6, b128's
+// 4-tile prologue (4 vmcnt ops) leaves N=4 outstanding → no drain at all →
+// first-MFMA reads stale registers.
+//
+// Fix (5 hardcoded inline-asm waits replacing the 5 file-scope macro
+// expansions inside the b128 kernel body, halved proportionally to HB ratio):
+//   * vmcnt(2) for INIT0  (was 4)        — drain 2 of 4 prologue-1 vmcnt ops
+//   * vmcnt(3) for INIT1  (was 6)        — drain 5 of 8 prologue-1+2 ops
+//   * lgkmcnt(4) for PREFETCH (was 8)    — keep main-loop prefetch hint tight
+//   * vmcnt(4) for STEADY (was 8)        — same
+//   * vmcnt(2) for EPILOGUE (was 4)      — same
+//
+// === Round-F M5 perf-falsification (2026-05-07) ==============================
+// With M2-debug-3 wait fix in place, b128 produces correct output (8/8 PASS
+// on the gpt_oss kernel-only metric, SNR 297 dB vs outer's 297 dB on every
+// shape). However ALL gpt_oss shapes are SLOWER under b128 than the outer
+// BLK=256 kernel, including the tile-starvation cases the port targeted:
+//
+//   shape                  outer-fwd  b128-fwd  outer-dgrad  b128-dgrad
+//   GateUP_B4_M2048        1878       1875      1934         1487  (-23%)
+//   GateUP_B4_M4096        2051       2077      2529         1606  (-37%)
+//   GateUP_B32_M2048       2022       2021      2564         1664  (-35%)
+//   GateUP_B32_M4096       2108       2120      2602         1608  (-38%)
+//
+// (Down family doesn't enter b128 because K_kern=2880 is K%128=64 not aligned.
+// fwd shapes don't enter b128 because K=2880 is K%128=64 not aligned for fwd
+// either; b128 is only reached on H4-rerouted dgrad with K_kern=N_orig=5760.)
+//
+// Root cause: per-tile fixed overhead (binary group search, prefetch issue,
+// store epilog with 4 mul + 4 store) does NOT scale down with tile size. b128
+// has 4x more tiles per shape (BLK 128 vs 256 = 4x area reduction), so 4x
+// more per-tile overhead. The MFMA throughput per tile drops 4x in step (each
+// b128 tile = 2 cells × 1 MFMA per K-step vs outer's 8 cells), so MFMA isn't
+// faster either. Net: same MFMA work + 4x overhead = ~30-40 % regression on
+// the H4-dgrad shapes. The "1.26 tiles/CU" starvation hypothesis projected a
+// 1.5-2x speedup from CU-utilization — but the metric showed b128 at
+// "4.84 tiles/CU" still loses by 23-38 %, contradicting the projection.
+//
+// Round F status: M2a structural port WORKS, M2-debug-3 wait fix WORKS,
+// M5 perf hypothesis FALSIFIED. Kernel kept as scaffolding (env-gated to
+// TURBO_FP8_B128=1, OFF in production) for future research that may change
+// the conclusion (e.g., a 4-wave 2-CTA layout with different occupancy could
+// flip the per-tile-overhead arithmetic). Round G picks a different lever.
 namespace kernel_b128 {
 
 // Namespace-local rcr_mma overload — accepts the half-sized accumulator /
@@ -3580,7 +3636,7 @@ void grouped_rcr_kernel(
         else                    rcr_8w_load_hoist<_NUM_THREADS>(As[tic][1],    g.a, a_co(br*2+1, 0), soA);
 
         if (wm == 1) __builtin_amdgcn_s_barrier();
-        TK_WAIT_VMCNT(RCR_INIT0_VMCNT);
+        asm volatile("s_waitcnt vmcnt(2)");
         __builtin_amdgcn_s_barrier();
 
         rcr_8w_load_hoist<_NUM_THREADS>(b_tile(toc, 0), g.b, b_co(bc*2,   1), soB);
@@ -3588,7 +3644,7 @@ void grouped_rcr_kernel(
         else                    rcr_8w_load_hoist<_NUM_THREADS>(As[toc][0],    g.a, a_co(br*2,   1), soA);
         rcr_8w_load_hoist<_NUM_THREADS>(b_tile(toc, 1), g.b, b_co(bc*2+1, 1), soB);
 
-        TK_WAIT_VMCNT(RCR_INIT1_VMCNT);
+        asm volatile("s_waitcnt vmcnt(3)");
         __builtin_amdgcn_s_barrier();
 
         // Single-tile main loop (mirrors dense gemm_kernel<RCR> else-branch
@@ -3613,7 +3669,7 @@ void grouped_rcr_kernel(
             load_a(a, As[tic][0], wm);
             if constexpr (FUSE_ACT) fused_act_round5_compile_test::rcr_8w_load_hoist_fused_act<_NUM_THREADS>(As[toc][1], g.a, a_co(br*2+1, k+1), soA, scale_a_inv);
             else                    rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], g.a, a_co(br*2+1, k+1), soA);
-            TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(4)"); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); rcr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
@@ -3634,7 +3690,7 @@ void grouped_rcr_kernel(
             __builtin_amdgcn_s_barrier();
 
             rcr_8w_load_hoist<_NUM_THREADS>(b_tile(tic, 1), g.b, b_co(bc*2+1, k+2), soB);
-            TK_WAIT_VMCNT(RCR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt vmcnt(4)"); __builtin_amdgcn_s_barrier();
             __builtin_amdgcn_s_setprio(1); rcr_mma(cD, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
         }
@@ -3657,7 +3713,7 @@ void grouped_rcr_kernel(
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
-            TK_WAIT_VMCNT(RCR_EPILOGUE_VMCNT); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt vmcnt(2)"); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); rcr_mma(cC, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
@@ -7245,6 +7301,53 @@ void dispatch_grouped_rcr(grouped_layout_globals g) {
         (g.bpc > 0) && (g.ki > 0) &&
         ((K_rem_for_fuse == 64) || (K_rem_for_fuse == 0)) &&
         lds_k_tail_safe_for_fuse;
+
+    // === Round-F M3 (quarantined): BLOCK_SIZE=128 dispatch gate ==============
+    // Status (Round-F M5 perf-falsified, 2026-05-07):
+    //   M2a port + M2-debug-3 wait-counter halving = correct kernel (8/8
+    //   PASS on gpt_oss kernel-only metric, SNR 297 dB matches outer).
+    //   M5 perf falsified — b128 is 23-38 % SLOWER than outer on every
+    //   gpt_oss shape that enters the b128 path (per-tile fixed overhead
+    //   doesn't scale with tile size; 4x more tiles × same overhead per
+    //   tile swamps the CU-utilization gain from going 1.26 → 4.84
+    //   tiles/CU). See ``round-F-fp8-tile-size-128-port-correctness-fix-
+    //   perf-falsified.md`` for full per-shape numbers and PMC-ish
+    //   accounting.
+    //
+    // Quarantine: this gate is ENV-ONLY (TURBO_FP8_B128=1). Production
+    // traffic (env unset, env=0, env<0, env>1) goes through the outer
+    // BLOCK_SIZE=256 path verbatim, score 691 unchanged. Env=1 routes
+    // K-aligned + M-aligned shapes through the (correct, slow) b128 path
+    // for future research that may flip the perf conclusion (e.g.
+    // 4-wave / 2-CTA b128 layout, sub-tile fusion sharing prologue cost
+    // across 2 b128 tiles, or a different shape suite where tile-merge
+    // overhead is < CU-utilization gain).
+    constexpr int B128_BLOCK = 128;
+    const bool b128_k_aligned     = (g.fast_k == g.k);
+    const bool b128_m_per_grp_ok  = (g.m_per_group >= B128_BLOCK) &&
+                                    ((g.m_per_group % B128_BLOCK) == 0);
+    const char* env_b128 = std::getenv("TURBO_FP8_B128");
+    const int b128_force = (env_b128 != nullptr) ? std::atoi(env_b128) : 0;
+    const bool use_b128 =
+        b128_k_aligned && b128_m_per_grp_ok && (g.bpc > 0) &&
+        (b128_force == 1);   // env=1 only; quarantined until M4 lands.
+
+    if (use_b128) {
+        // Recompute geometry for BLOCK_SIZE=128 path.
+        g.fast_n = (g.n / B128_BLOCK) * B128_BLOCK;
+        g.fast_k = (g.k / K_BLOCK) * K_BLOCK;
+        g.bpc    = kittens::ceil_div(g.n, B128_BLOCK);
+        g.ki     = g.fast_k / K_BLOCK;
+        const bool n_aligned_b128 = (g.bpc * B128_BLOCK == g.n);
+        if (n_aligned_b128) {
+            kernel_b128::grouped_rcr_kernel<0, false, false>
+                <<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
+        } else {
+            kernel_b128::grouped_rcr_kernel<0, true , false>
+                <<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
+        }
+        return;
+    }
 
     if (g.bpc > 0 && g.ki > 0) {
         // Round-12: launch-uniform branch on N alignment selects the
