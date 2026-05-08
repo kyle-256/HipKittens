@@ -7784,6 +7784,24 @@ struct grouped_var_k_layout_globals_fp8 {
                                    // sets num_slots=192 for +5-6% kernel TFLOPS
                                    // (R2 sweep evidence; see Primus
                                    // grouped_gemm_fp8_impl.py R3 predicate).
+    int chunk_size;                // Round-13 (gpt_oss FP8 kernel-only ceiling,
+                                   // current Primus run; 2026-05-08): chunk_size
+                                   // override for the ``chiplet_transform_chunked``
+                                   // chiplet swizzle (line ~7827). 0 → fall back to
+                                   // TK_VARK_CHUNK_SIZE env hook → 64 (existing
+                                   // baseline). Lever lets the dispatcher align the
+                                   // chiplet swizzle granularity to the persistent
+                                   // grid (slots, xcds) topology — at default 64
+                                   // with xcds=2 + slots=192 the swizzle leaves the
+                                   // last 64 workgroups un-chunked (R12 falsification
+                                   // note observation). chunk_size=96 with xcds=2
+                                   // makes block=192 = exactly slots → all chunked
+                                   // in 1 clean chiplet-pair partition. Probe in
+                                   // R13 to see if this unlocks a +0.5pp+ lift on
+                                   // Down-B4 wgrad over the current slots=192 cell.
+                                   // Bit-equivalent: same persistent-grid scheduling
+                                   // knob class as group_m / num_xcds / num_slots —
+                                   // only blockIdx → tile-id mapping changes.
     dim3 block() { return dim3(_NUM_THREADS); }
     size_t dynamic_shared_memory() { return 0; }
 };
@@ -7824,8 +7842,14 @@ void grouped_var_k_kernel_fp8(const grouped_var_k_layout_globals_fp8 g) {
     // to the constexpr-NUM_CUS version. Compiler will load gridDim.x
     // into a scalar register once and reuse — no per-iter cost.
     const int slots_eff = gridDim.x;
+    // Round-13 (gpt_oss FP8 kernel-only ceiling, current Primus run; 2026-05-08):
+    // ``g.chunk_size`` overrides the chiplet swizzle chunk granularity. Default
+    // 64 mirrors the baseline R3/R15 behavior. Per-call values let the Primus
+    // dispatcher align the swizzle to the (slots, xcds) topology — see the
+    // struct field comment above.
+    const int chunk_size_eff = g.chunk_size > 0 ? g.chunk_size : 64;
     int pid = chiplet_transform_chunked(
-        blockIdx.x, slots_eff, xcds_eff, 64);
+        blockIdx.x, slots_eff, xcds_eff, chunk_size_eff);
 
     int wm = warpid() / WARPS_N;
     int wn = warpid() % WARPS_N;
@@ -8179,6 +8203,22 @@ void dispatch_grouped_var_k_fp8(grouped_var_k_layout_globals_fp8 g) {
         slots_dispatch = env_slots;
     }
 
+    // Round-13 (gpt_oss FP8 kernel-only ceiling, current Primus run; 2026-05-08):
+    // Optional env override TK_VARK_CHUNK_SIZE for the chiplet-swizzle
+    // chunk_size. Process-static cache. Per-call ``g.chunk_size`` (set via
+    // future pybind arg) takes precedence. ``g.chunk_size == 0`` AND env
+    // unset → fall through to kernel default 64 (existing baseline).
+    if (g.chunk_size <= 0 || g.chunk_size > NUM_CUS) {
+        static const int env_chunk_size = []() {
+            if (const char* e = std::getenv("TK_VARK_CHUNK_SIZE")) {
+                const int v = std::atoi(e);
+                if (v >= 1 && v <= 256) return v;
+            }
+            return 0;  // 0 → kernel uses default 64
+        }();
+        g.chunk_size = env_chunk_size;
+    }
+
     grouped_var_k_kernel_fp8<0><<<dim3(slots_dispatch), g.block(), 0, g.stream>>>(g);
 }
 
@@ -8499,7 +8539,8 @@ static void grouped_variable_k_crr_fp8_fn(
     pybind11::object group_offs_obj,
     int group_m,
     int num_xcds,
-    int num_slots) {
+    int num_slots,
+    int chunk_size = 0) {
     auto group_offs_ptr = group_offs_obj.attr("data_ptr")().cast<uintptr_t>();
     int G = group_offs_obj.attr("numel")().cast<int>() - 1;
     grouped_var_k_layout_globals_fp8 g{
@@ -8512,8 +8553,8 @@ static void grouped_variable_k_crr_fp8_fn(
         nullptr,
         reinterpret_cast<const int64_t*>(group_offs_ptr),
         {},
-        /* G, M_total, n, k, group_m, bpr, bpc, fast_n, fast_k, num_xcds, num_slots */
-        G, 0, 0, 0, group_m, 0, 0, 0, 0, num_xcds, num_slots,
+        /* G, M_total, n, k, group_m, bpr, bpc, fast_n, fast_k, num_xcds, num_slots, chunk_size */
+        G, 0, 0, 0, group_m, 0, 0, 0, 0, num_xcds, num_slots, chunk_size,
     };
     dispatch_grouped_var_k_fp8(g);
 }
@@ -8524,7 +8565,8 @@ static void grouped_variable_k_crr_dscale_fp8_fn(
     pybind11::object group_offs_obj,
     int group_m,
     int num_xcds,
-    int num_slots) {
+    int num_slots,
+    int chunk_size = 0) {
     auto sa_ptr = scale_a_obj.attr("data_ptr")().cast<uintptr_t>();
     auto sb_ptr = scale_b_obj.attr("data_ptr")().cast<uintptr_t>();
     auto group_offs_ptr = group_offs_obj.attr("data_ptr")().cast<uintptr_t>();
@@ -8538,8 +8580,8 @@ static void grouped_variable_k_crr_dscale_fp8_fn(
         reinterpret_cast<const float*>(sb_ptr),
         reinterpret_cast<const int64_t*>(group_offs_ptr),
         {},
-        /* G, M_total, n, k, group_m, bpr, bpc, fast_n, fast_k, num_xcds, num_slots */
-        G, 0, 0, 0, group_m, 0, 0, 0, 0, num_xcds, num_slots,
+        /* G, M_total, n, k, group_m, bpr, bpc, fast_n, fast_k, num_xcds, num_slots, chunk_size */
+        G, 0, 0, 0, group_m, 0, 0, 0, 0, num_xcds, num_slots, chunk_size,
     };
     dispatch_grouped_var_k_fp8(g);
 }
@@ -9141,7 +9183,8 @@ PYBIND11_MODULE(tk_fp8_layouts, m) {
           pybind11::arg("group_offs"),
           pybind11::arg("group_m") = DEFAULT_GROUP_M,
           pybind11::arg("num_xcds") = 0,
-          pybind11::arg("num_slots") = 0);
+          pybind11::arg("num_slots") = 0,
+          pybind11::arg("chunk_size") = 0);
     m.def("grouped_variable_k_crr_dscale",
           &grouped_variable_k_crr_dscale_fp8_fn,
           pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("c"),
@@ -9149,7 +9192,8 @@ PYBIND11_MODULE(tk_fp8_layouts, m) {
           pybind11::arg("group_offs"),
           pybind11::arg("group_m") = DEFAULT_GROUP_M,
           pybind11::arg("num_xcds") = 0,
-          pybind11::arg("num_slots") = 0);
+          pybind11::arg("num_slots") = 0,
+          pybind11::arg("chunk_size") = 0);
     m.attr("DEFAULT_GROUP_M") = DEFAULT_GROUP_M;
     m.attr("BLOCK_SIZE") = BLK;
     m.attr("K_BLOCK") = BK;
