@@ -2412,6 +2412,17 @@ struct grouped_layout_globals_fused_act {
     int M_total;
     int fast_n, fast_k;
     int m_per_group;
+    int chunk_size;              // Round-14 (gpt_oss FP8 kernel-only ceiling,
+                                 // current Primus run; 2026-05-08): mirrors
+                                 // R14's grouped_layout_globals.chunk_size lever
+                                 // for ABI parity. The fused-act kernel body
+                                 // reads g.chunk_size in the same call site
+                                 // (grouped_rcr_kernel<FUSE_ACT=true>); 0 →
+                                 // kernel default 64. Fused-act dispatch path
+                                 // (out of scope this round) does not yet
+                                 // wire a per-call lever — wrappers leave
+                                 // chunk_size at value-init = 0, preserving
+                                 // existing behaviour bit-identically.
     dim3 block() { return dim3(_NUM_THREADS); }
     size_t dynamic_shared_memory() { return 0; }
 };
@@ -2604,6 +2615,46 @@ struct grouped_layout_globals {
     // backward-compat extension. See R4 comments at lines 2693 and 7400
     // for the original env-only design and its limitations.
     int num_slots;
+    int chunk_size;              // Round-14 (gpt_oss FP8 kernel-only ceiling,
+                                 // current Primus run; 2026-05-08): per-call
+                                 // ``chunk_size`` override on the chiplet
+                                 // swizzle ``chiplet_transform_chunked`` call
+                                 // in the grouped_rcr_kernel body
+                                 // (file-scope and ``namespace kernel_b128``
+                                 // copy; see line ~2734 / ~3544 of this file).
+                                 // Default 0 → kernel uses historical
+                                 // baseline 64.
+                                 //
+                                 // CRITICAL observation: at the prevailing
+                                 // default cell (xcds=8 + slots=NUM_CUS=256),
+                                 // the swizzle math gives ``block = num_xcds
+                                 // * chunk_size = 8*64 = 512`` and ``limit =
+                                 // (slots / block) * block = (256 / 512) *
+                                 // 512 = 0``. The early-exit ``if
+                                 // (workgroup_id > limit) return
+                                 // workgroup_id`` therefore fires for ALL
+                                 // workgroup_id > 0 — the chiplet swizzle
+                                 // is effectively a NO-OP at the default
+                                 // chunk_size for nearly every RCR forward
+                                 // launch. chunk_size=32 → block=256=slots
+                                 // → all 256 workgroups participate in one
+                                 // clean partition (32 PIDs per XCD; 8
+                                 // chiplets × 32 = 256). chunk_size=16 →
+                                 // block=128, limit=256 → 16 PIDs per XCD
+                                 // per chunk × 2 chunks = 256 PIDs, also
+                                 // clean. R14 probe sweeps {16, 24, 32, 48,
+                                 // 64} per shape to find the cell-specific
+                                 // optimum.
+                                 //
+                                 // Bit-equivalent: only blockIdx → tile_id
+                                 // mapping changes; same scheduling-knob
+                                 // class as group_m / num_xcds / num_slots.
+                                 // Existing positional aggregate inits in
+                                 // wrappers leave this field zero-initialized
+                                 // by C++ aggregate value-init rules, so
+                                 // adding the field is a strict backward-
+                                 // compat extension (mirror of R9 num_slots
+                                 // ABI extension).
     dim3 block() { return dim3(_NUM_THREADS); }
     size_t dynamic_shared_memory() { return 0; }
 };
@@ -2713,8 +2764,15 @@ void grouped_rcr_kernel(
     // register pressure, LDS layout, or HBM stride.
     const int slots_eff = gridDim.x;
     const int xcds_eff = g.num_xcds > 0 ? g.num_xcds : BLOCK_SWIZZLE_NUM_XCDS;
+    // Round-14 (gpt_oss FP8 kernel-only ceiling, current Primus run; 2026-05-08):
+    // ``g.chunk_size`` overrides the chiplet swizzle chunk granularity. At
+    // the default (xcds=8 + slots=256) cell, the historical chunk_size=64
+    // gives block=512 > slots → swizzle is a NO-OP. chunk_size=32 makes
+    // block=256=slots → clean partition (32 PIDs per XCD). Per-shape
+    // override drives the lever from the Python dispatcher.
+    const int chunk_size_eff = g.chunk_size > 0 ? g.chunk_size : 64;
     int pid = chiplet_transform_chunked(
-        blockIdx.x, slots_eff, xcds_eff, 64);
+        blockIdx.x, slots_eff, xcds_eff, chunk_size_eff);
 
     int wm = warpid() / WARPS_N;
     int wn = warpid() % WARPS_N;
@@ -3523,8 +3581,15 @@ void grouped_rcr_kernel(
     // register pressure, LDS layout, or HBM stride.
     const int slots_eff = gridDim.x;
     const int xcds_eff = g.num_xcds > 0 ? g.num_xcds : BLOCK_SWIZZLE_NUM_XCDS;
+    // Round-14 (gpt_oss FP8 kernel-only ceiling, current Primus run; 2026-05-08):
+    // ``g.chunk_size`` overrides the chiplet swizzle chunk granularity. At
+    // the default (xcds=8 + slots=256) cell, the historical chunk_size=64
+    // gives block=512 > slots → swizzle is a NO-OP. chunk_size=32 makes
+    // block=256=slots → clean partition (32 PIDs per XCD). Per-shape
+    // override drives the lever from the Python dispatcher.
+    const int chunk_size_eff = g.chunk_size > 0 ? g.chunk_size : 64;
     int pid = chiplet_transform_chunked(
-        blockIdx.x, slots_eff, xcds_eff, 64);
+        blockIdx.x, slots_eff, xcds_eff, chunk_size_eff);
 
     int wm = warpid() / WARPS_N;
     int wn = warpid() % WARPS_N;
@@ -7445,6 +7510,23 @@ void dispatch_grouped_rcr(grouped_layout_globals g) {
         const int rcr_slots = (g.num_slots > 0 && g.num_slots <= NUM_CUS)
             ? g.num_slots : rcr_slots_env;
 
+        // Round-14 (gpt_oss FP8 kernel-only ceiling, current Primus run;
+        // 2026-05-08): Optional env override TK_RCR_CHUNK_SIZE for the
+        // chiplet swizzle chunk_size in the RCR forward kernel body
+        // (line ~2734). Process-static cache. Per-call ``g.chunk_size``
+        // (set via the new pybind kwarg) takes precedence. ``g.chunk_size
+        // == 0`` AND env unset → kernel uses default 64.
+        if (g.chunk_size <= 0 || g.chunk_size > NUM_CUS) {
+            static const int env_chunk_size = []() {
+                if (const char* e = std::getenv("TK_RCR_CHUNK_SIZE")) {
+                    const int v = std::atoi(e);
+                    if (v >= 1 && v <= 256) return v;
+                }
+                return 0;  // 0 → kernel uses default 64
+            }();
+            g.chunk_size = env_chunk_size;
+        }
+
         if (fuse_ktail_eligible) {
             // R63 Lever F (KI_HINT short-K specialization) FALSIFIED:
             // ki={12,32} compile-time loop bounds INCREASED VGPR spill
@@ -8370,7 +8452,8 @@ static void grouped_rcr_fn(pybind11::object a, pybind11::object b, pybind11::obj
                            int group_m,
                            int m_per_group,
                            int num_xcds,
-                           int num_slots) {
+                           int num_slots,
+                           int chunk_size = 0) {
     auto group_offs_ptr = group_offs_obj.attr("data_ptr")().cast<uintptr_t>();
     int G = group_offs_obj.attr("numel")().cast<int>() - 1;
     grouped_layout_globals g{
@@ -8383,8 +8466,8 @@ static void grouped_rcr_fn(pybind11::object a, pybind11::object b, pybind11::obj
         nullptr,
         reinterpret_cast<const int64_t*>(group_offs_ptr),
         {},
-        /* G,n,k,ki,bpc,group_m,num_xcds,M_total,fast_n,fast_k,m_per_group,num_slots */
-        G, 0, 0, 0, 0, group_m, num_xcds, 0, 0, 0, m_per_group, num_slots,
+        /* G,n,k,ki,bpc,group_m,num_xcds,M_total,fast_n,fast_k,m_per_group,num_slots,chunk_size */
+        G, 0, 0, 0, 0, group_m, num_xcds, 0, 0, 0, m_per_group, num_slots, chunk_size,
     };
     dispatch_grouped_rcr(g);
 }
@@ -8396,7 +8479,8 @@ static void grouped_rcr_dscale_fn(
     int group_m,
     int m_per_group,
     int num_xcds,
-    int num_slots) {
+    int num_slots,
+    int chunk_size = 0) {
     auto sa_ptr = scale_a_obj.attr("data_ptr")().cast<uintptr_t>();
     auto sb_ptr = scale_b_obj.attr("data_ptr")().cast<uintptr_t>();
     auto group_offs_ptr = group_offs_obj.attr("data_ptr")().cast<uintptr_t>();
@@ -8410,8 +8494,8 @@ static void grouped_rcr_dscale_fn(
         reinterpret_cast<const float*>(sb_ptr),
         reinterpret_cast<const int64_t*>(group_offs_ptr),
         {},
-        /* G,n,k,ki,bpc,group_m,num_xcds,M_total,fast_n,fast_k,m_per_group,num_slots */
-        G, 0, 0, 0, 0, group_m, num_xcds, 0, 0, 0, m_per_group, num_slots,
+        /* G,n,k,ki,bpc,group_m,num_xcds,M_total,fast_n,fast_k,m_per_group,num_slots,chunk_size */
+        G, 0, 0, 0, 0, group_m, num_xcds, 0, 0, 0, m_per_group, num_slots, chunk_size,
     };
     dispatch_grouped_rcr(g);
 }
@@ -9127,7 +9211,8 @@ PYBIND11_MODULE(tk_fp8_layouts, m) {
           pybind11::arg("group_m") = DEFAULT_GROUP_M,
           pybind11::arg("m_per_group") = 0,
           pybind11::arg("num_xcds") = 0,
-          pybind11::arg("num_slots") = 0);
+          pybind11::arg("num_slots") = 0,
+          pybind11::arg("chunk_size") = 0);
     m.def("grouped_rcr_dscale", &grouped_rcr_dscale_fn,
           pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("c"),
           pybind11::arg("scale_a"), pybind11::arg("scale_b"),
@@ -9135,7 +9220,8 @@ PYBIND11_MODULE(tk_fp8_layouts, m) {
           pybind11::arg("group_m") = DEFAULT_GROUP_M,
           pybind11::arg("m_per_group") = 0,
           pybind11::arg("num_xcds") = 0,
-          pybind11::arg("num_slots") = 0);
+          pybind11::arg("num_slots") = 0,
+          pybind11::arg("chunk_size") = 0);
     // [fused-act R6] FUSE_ACT=true variant of the grouped RCR launcher.
     // ``a`` is BF16 (not FP8); ``scale_a_inv`` is the device float32 scalar
     // returned by ``max_abs_bf16_to_fp8_scale`` (= FP8_MAX / amax(a)).
