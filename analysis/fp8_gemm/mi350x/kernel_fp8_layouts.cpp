@@ -2588,6 +2588,22 @@ struct grouped_layout_globals {
     // group" precondition holds for all blocks. Mirrors BF16 round-9/11
     // wiring; default 0 keeps the legacy scalar-tail fallback.
     int m_per_group;
+    // Round-9 (current Primus run, gpt_oss FP8 kernel-only ceiling task;
+    // 2026-05-08): per-launch persistent-grid slot override. Mirrors the
+    // ``num_slots`` field on the var-K CRR globals struct (line 7744) and
+    // its R3 wiring through ``grouped_variable_k_crr_*_fp8_fn``. When > 0
+    // and <= NUM_CUS, ``dispatch_grouped_rcr`` uses this as the launch
+    // ``gridDim.x`` instead of the legacy process-static ``rcr_slots``
+    // (which was env-only via ``TK_RCR_NUM_CUS`` per R4 — process-wide,
+    // unable to vary per-shape).
+    //
+    // Default 0 → legacy fallback chain: TK_RCR_NUM_CUS env (if set,
+    // process-static cached) → NUM_CUS. Existing positional aggregate
+    // initializers in callers leave this trailing field zero-initialized
+    // by C++ aggregate value-init rules, so adding the field is a strict
+    // backward-compat extension. See R4 comments at lines 2693 and 7400
+    // for the original env-only design and its limitations.
+    int num_slots;
     dim3 block() { return dim3(_NUM_THREADS); }
     size_t dynamic_shared_memory() { return 0; }
 };
@@ -7403,13 +7419,31 @@ void dispatch_grouped_rcr(grouped_layout_globals g) {
         // launch host-side cost is one ``getenv`` only on the first
         // dispatch (the cache is process-static, mirroring the
         // existing ``TURBO_FP8_B128`` env hook).
-        static const int rcr_slots = []() {
+        // Round-9 (current Primus run, gpt_oss FP8 kernel-only ceiling
+        // task; 2026-05-08): per-call ``g.num_slots`` override takes
+        // precedence over the legacy R4 env-static cache. Mirrors the
+        // var-K kernel's R3 ``g.num_slots`` lever (line ~8135). Default
+        // ``g.num_slots == 0`` → fall back to the env-static cache below
+        // → fall back to NUM_CUS.
+        //
+        // The R4 env-only design forced process-wide selection (because
+        // the cache is read once at process startup), which made it
+        // unusable for selective per-shape tuning: setting
+        // TK_RCR_NUM_CUS=200 globally tanked the metric -65 points
+        // (Down-B4-M2048 fwd lifted +1.3% but EVERY OTHER SHAPE
+        // regressed -10..-30%). The per-call knob makes the lever a
+        // proper Python dispatcher rule, gated on the same
+        // (m_total, n, k, tiles_m, tiles_n) predicates already used for
+        // (gm, num_xcds).
+        static const int rcr_slots_env = []() {
             if (const char* e = std::getenv("TK_RCR_NUM_CUS")) {
                 const int v = std::atoi(e);
                 if (v > 0 && v <= NUM_CUS) return v;
             }
             return NUM_CUS;
         }();
+        const int rcr_slots = (g.num_slots > 0 && g.num_slots <= NUM_CUS)
+            ? g.num_slots : rcr_slots_env;
 
         if (fuse_ktail_eligible) {
             // R63 Lever F (KI_HINT short-K specialization) FALSIFIED:
@@ -8295,7 +8329,8 @@ static void grouped_rcr_fn(pybind11::object a, pybind11::object b, pybind11::obj
                            pybind11::object group_offs_obj,
                            int group_m,
                            int m_per_group,
-                           int num_xcds) {
+                           int num_xcds,
+                           int num_slots) {
     auto group_offs_ptr = group_offs_obj.attr("data_ptr")().cast<uintptr_t>();
     int G = group_offs_obj.attr("numel")().cast<int>() - 1;
     grouped_layout_globals g{
@@ -8308,8 +8343,8 @@ static void grouped_rcr_fn(pybind11::object a, pybind11::object b, pybind11::obj
         nullptr,
         reinterpret_cast<const int64_t*>(group_offs_ptr),
         {},
-        /* G,n,k,ki,bpc,group_m,num_xcds,M_total,fast_n,fast_k,m_per_group */
-        G, 0, 0, 0, 0, group_m, num_xcds, 0, 0, 0, m_per_group,
+        /* G,n,k,ki,bpc,group_m,num_xcds,M_total,fast_n,fast_k,m_per_group,num_slots */
+        G, 0, 0, 0, 0, group_m, num_xcds, 0, 0, 0, m_per_group, num_slots,
     };
     dispatch_grouped_rcr(g);
 }
@@ -8320,7 +8355,8 @@ static void grouped_rcr_dscale_fn(
     pybind11::object group_offs_obj,
     int group_m,
     int m_per_group,
-    int num_xcds) {
+    int num_xcds,
+    int num_slots) {
     auto sa_ptr = scale_a_obj.attr("data_ptr")().cast<uintptr_t>();
     auto sb_ptr = scale_b_obj.attr("data_ptr")().cast<uintptr_t>();
     auto group_offs_ptr = group_offs_obj.attr("data_ptr")().cast<uintptr_t>();
@@ -8334,8 +8370,8 @@ static void grouped_rcr_dscale_fn(
         reinterpret_cast<const float*>(sb_ptr),
         reinterpret_cast<const int64_t*>(group_offs_ptr),
         {},
-        /* G,n,k,ki,bpc,group_m,num_xcds,M_total,fast_n,fast_k,m_per_group */
-        G, 0, 0, 0, 0, group_m, num_xcds, 0, 0, 0, m_per_group,
+        /* G,n,k,ki,bpc,group_m,num_xcds,M_total,fast_n,fast_k,m_per_group,num_slots */
+        G, 0, 0, 0, 0, group_m, num_xcds, 0, 0, 0, m_per_group, num_slots,
     };
     dispatch_grouped_rcr(g);
 }
@@ -9037,20 +9073,27 @@ PYBIND11_MODULE(tk_fp8_layouts, m) {
     // [grouped] Persistent + CPU-sync-free FP8 RCR launcher. ``group_offs`` is
     // a [G+1] int64 device tensor (prefix-sum of per-group M); the kernel
     // consumes it on the GPU side via O(G) linear scan, no host reads.
+    // Round-9 (current Primus run, gpt_oss FP8 kernel-only ceiling task;
+    // 2026-05-08): added ``num_slots`` per-call arg (default 0 → legacy
+    // env-only / NUM_CUS fallback). Mirrors the var-K binding's R3
+    // ``num_slots`` arg below. Existing positional callers stay
+    // backward-compat (trailing arg with default).
     m.def("grouped_rcr", &grouped_rcr_fn,
           pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("c"),
           pybind11::arg("scale_a"), pybind11::arg("scale_b"),
           pybind11::arg("group_offs"),
           pybind11::arg("group_m") = DEFAULT_GROUP_M,
           pybind11::arg("m_per_group") = 0,
-          pybind11::arg("num_xcds") = 0);
+          pybind11::arg("num_xcds") = 0,
+          pybind11::arg("num_slots") = 0);
     m.def("grouped_rcr_dscale", &grouped_rcr_dscale_fn,
           pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("c"),
           pybind11::arg("scale_a"), pybind11::arg("scale_b"),
           pybind11::arg("group_offs"),
           pybind11::arg("group_m") = DEFAULT_GROUP_M,
           pybind11::arg("m_per_group") = 0,
-          pybind11::arg("num_xcds") = 0);
+          pybind11::arg("num_xcds") = 0,
+          pybind11::arg("num_slots") = 0);
     // [fused-act R6] FUSE_ACT=true variant of the grouped RCR launcher.
     // ``a`` is BF16 (not FP8); ``scale_a_inv`` is the device float32 scalar
     // returned by ``max_abs_bf16_to_fp8_scale`` (= FP8_MAX / amax(a)).
