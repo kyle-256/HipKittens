@@ -91,6 +91,19 @@ constexpr int TAIL_BLOCK_N  = 16;
 #define RCR_STEADY_VMCNT        8
 #define RCR_EPILOGUE_VMCNT      4
 #define RCR_TWO_TILE_MID_VMCNT  6
+// Round-31 (auto-optimize): K-tail block wait-counter scaffold. Default = 8
+// is bit-equivalent to the prior hard-coded ``asm volatile("s_waitcnt
+// vmcnt(8)")`` at the FUSED_KTAIL block (two sites: grouped_rcr_kernel
+// <FUSED_KTAIL=true,N_MASKED_STORE={false,true}>). The K-tail block issues
+// 24 buffer_loads in order [b0(4), b1(4), a(8), a_kt1(8)] (R37-dm) then
+// vmcnt(8)+vmcnt(0). The vmcnt(8) is the overlap point: cA/cB mfma run
+// while a_kt1's 8 trailing loads drain. R8/R9 swept the GLOBAL
+// RCR_STEADY_VMCNT for the main loop; this macro lets the K-tail use a
+// different value for K%128==64 cells (gpt_oss K=2880, ki=22 with one
+// K-tail per cell). Override at build via -DRCR_KTAIL_VMCNT=N.
+#ifndef RCR_KTAIL_VMCNT
+#define RCR_KTAIL_VMCNT         8
+#endif
 #define RRR_PREFETCH_LGKM       8
 #define RRR_INIT0_VMCNT         4
 #define RRR_INIT1_VMCNT         6
@@ -106,6 +119,247 @@ constexpr int TAIL_BLOCK_N  = 16;
 #define RCR_MAIN_UNROLL 2
 #define RRR_MAIN_UNROLL 4
 #define CRR_MAIN_UNROLL 1
+// Round-22: split var-K wgrad unroll from shared CRR macro. R21 PMC
+// (analysis/_notes/round-21-vark-pmc-mfma-underfeed-IDENTIFIED.md) found
+// MfmaUtil=32% / MemUnitStalled=0.2% on Down_B4_M2048 wgrad — issue-rate
+// / dependency-latency bound. R22 sweep ∈ {1, 2, 4} found the pragma is a
+// no-op for var-K: VGPRs/Spill/Occupancy identical (256 / 37 dw / 2 waves)
+// and metric at noise floor (695 vs R21 696). Cause: the loop body's
+// `asm volatile("s_waitcnt lgkmcnt(0)")` + `__builtin_amdgcn_s_barrier()`
+// drains hard-sequence iterations and the compiler refuses to reorder
+// loads from iter k+1 into iter k's MMA shadow. Macro retained at 1
+// (bit-equivalent) as scaffolding for R23 (drain-reduction or manual
+// software-pipelined body). See analysis/_notes/round-22-fp8-vark-unroll-
+// pragma-FALSIFIED-volatile-asm-pin.md.
+#define VARK_MAIN_UNROLL 1
+
+// Round-23 FALSIFIED scaffolding (default 0 = bit-equivalent to pre-R23).
+// Surgical drain audit: gated the two `asm volatile("s_waitcnt lgkmcnt(0)")`
+// lines in the var-K wgrad steady-state body (real lines 8190 / 8205) behind
+// this macro. A/B (3-sample medians, GPU 3 MI355X):
+//   macro=1 (drains REMOVED):  Down_B4_M2048 wgrad 1399 T, score 702
+//   macro=0 (drains restored): Down_B4_M2048 wgrad 1399 T, score 701
+// Delta on the gate cell = 0 T median → FALSIFIED on the +10% TFLOPS gate
+// (compiler re-inserts equivalent s_waitcnt at the MMA-input-use point
+// because data dependency on a/b0/b1 + four __builtin_amdgcn_s_barrier()
+// CTA barriers per iter leave no room to reorder). Macro retained at
+// default=0 as zero-cost scaffolding; future round may flip via build
+// flag without re-editing the kernel. See analysis/_notes/round-23-fp8-
+// vark-lgkm-drain-FALSIFIED-compiler-reinserts-equivalent-wait.md
+// (Primus-Turbo) for full A/B + R24 forward pointer (manual SW-pipelined
+// loop body rewrite to defeat the CTA-barrier pin).
+#ifndef VARK_DROP_REDUNDANT_LGKM_DRAIN
+#define VARK_DROP_REDUNDANT_LGKM_DRAIN 0
+#endif
+
+// Round-24 scaffolding (default 0 = bit-equivalent to pre-R24).
+// Manual SW-pipelined hoist of the iter k+1 half-1 LDS A-read into iter
+// k's half-2 cC/cD MMA shadow. R22 (pragma unroll) and R23 (drain audit)
+// both confirmed compiler-driven levers cannot defeat the four CTA-
+// barrier-per-iter schedule pin (R21 PMC: MfmaUtil=32% / 58% issue-rate
+// or dependency-latency bound on Down_B4_M2048 wgrad).
+//
+// Mechanism (macro=1):
+//   - Declare A_col_reg a_next (one extra A-tile register: BK*RBM=64*64
+//     fp8 = 16 dw/lane).
+//   - Prologue peel: load_a(a_next, As[tic][0], wm) for iter 0 right
+//     after the existing HBM-prefetch barrier (line 8182). This is bit-
+//     identical correctness to iter 0's first half-1 LDS read in the
+//     loop, just hoisted outside.
+//   - Loop body half-1: replace `load_a(a, As[tic][0], wm)` with the
+//     register move `a = a_next;` (no LDS issue). The TK_WAIT_LGKM /
+//     asm waitcnt lgkmcnt(0) sequence still drains b0/b1 LDS reads.
+//   - Loop body half-2: insert `load_a(a_next, As[toc][0], wm)` AFTER
+//     the asm waitcnt lgkmcnt(0) and BEFORE the cC/cD MMAs. The MMA
+//     shadow (~10-20 cy per crr_mma issue) overlaps the LDS A-read
+//     latency. As[toc][0] holds iter k+1's first-half A data — loaded
+//     by prologue (k=0) or by iter k-1's half-2 prefetch + 4-CTA-
+//     barrier-per-iter sync (k>=1).
+//   - Loop tail: a_next loaded in the last iter is dead (loop exits
+//     before next half-1) — VGPR live range ends at end of body.
+//
+// Risk: VGPR pressure. Var-K is at 256 VGPR / 37 dw spill / 2 waves
+// (R14 Lever K + R22 unroll audit). Adding 16 dw of A_col_reg live
+// range across the half-2 body is expected to push spill toward ~50 dw.
+// Three-way gate (per R23 forward pointer):
+//   (a) VGPR <= 256 + spill <= 50 dw (-Rpass-analysis=kernel-resource-
+//       usage on _Z24grouped_var_k_kernel_fp8 ILi0EE).
+//   (b) SNR > 25 dB on Down_B4_M2048 wgrad output / dA / dB.
+//   (c) Median TFLOPS >= +5% on Down_B4_M2048 wgrad gate cell over
+//       3 dbg_remote samples.
+// Any gate fail -> default stays 0, FALSIFIED docs commit + R25
+// forward pointer (drop var-K to 4 warps per R23 fallback).
+#ifndef VARK_SW_PIPE_HOIST_AHEAD
+#define VARK_SW_PIPE_HOIST_AHEAD 0
+#endif
+
+// Round-26 FALSIFIED scaffolding (default 0 = bit-equivalent to pre-R26).
+// Mid-iter CTA barrier audit on the var-K wgrad loop body (real line ~8267,
+// the CRR_STEADY_MID_BARRIER call between the cA/cB and cC/cD MMA halves).
+// macro=1 (drop barrier) was tested on remote MI355X via dbg_remote.sh
+// and produced CATASTROPHIC correctness failure: 8/8 shapes dB-SNR < 25 dB
+// (range 22.7-24.9), score=1, all 8 shapes clipped to 0.0 in metric.
+//
+// Root cause (race the analytical safety check missed): the half-2
+// `global_load_a(As[tic][0], br*2, k+2)` (line 8270) and
+// `global_load_b(Bs[tic][1], bc*2+1, k+2)` (line 8271) are CTA-cooperative
+// per-warp-slice loads — each warp issues ITS OWN slice via
+// `rcr_8w_load_hoist<_NUM_THREADS>`. Without barrier #2:
+//   - Fast warp Y completes cA/cB MMAs and immediately issues line 8270/8271,
+//     loading Y's slice of k+2 data into LDS at As[tic][0] / Bs[tic][1].
+//   - Slow warp X is still computing cA/cB MMAs.
+//   - Y's slice writes to LDS may complete; X's slice for k+2 has not been
+//     requested yet.
+//   - Iter k+2 (when tic flips back to this buffer) reads As[tic][0]: Y reads
+//     Y's slice (k+2 data, written above) but X reads X's slice (still old
+//     k data because X never issued the k+2 slice load in iter k).
+//   - TK_WAIT_VMCNT at line 8272 only tracks per-warp vmcnt, so it does not
+//     synchronize the CTA-wide slice-completeness — only barrier #2's
+//     CTA-wide convergence does.
+//
+// Conclusion: barrier #2 is load-bearing for the CTA-cooperative load
+// scheduling; cannot be dropped without restructuring the prefetch into
+// a barrier-only point or moving it before the cA/cB MMAs. Macro retained
+// at default=0 as zero-cost FALSIFIED scaffolding documenting the analytical
+// trap (next-round agents should NOT re-attempt the same lever without
+// addressing the per-warp-slice-skew root cause).
+//
+// R27 forward pointer: try VARK_DROP_BARRIER_4 (the end-of-iter barrier
+// at line ~8289) — it sits between cC/cD MMAs and the line-8290
+// `global_load_b(Bs[tic][0], bc*2, k+2)`. The same per-warp-slice-skew
+// risk applies (line 8290 is also CTA-cooperative), so analytical
+// expectation is also FALSIFIED — but worth a 1-build empirical
+// confirmation (cost ~2 min) to close the barrier-audit chapter.
+// Alternative R27: replace barrier #2 with `s_setprio` priority hint
+// (no convergence; just biases the wave scheduler) — this WILL break
+// correctness for the same per-warp-slice reason but at lower magnitude
+// (priority hint can still allow some out-of-order without full skew).
+// Higher-value R27 candidates that DON'T touch barriers:
+//   - Hoist line 8270/8271 BEFORE cA/cB MMA (fold the cooperative load
+//     into the half-1 lgkm-drain shadow) — the half-1 wait already
+//     synchronizes warps after the cooperative load, so no extra barrier
+//     needed. This restructures the SW pipeline so the barrier itself
+//     becomes redundant (vs trying to drop it post-hoc).
+//   - Drop var-K from 8 warps to 4 warps with full SW-pipeline rewrite
+//     (R25 forward pointer's deferred fallback — analytical defects
+//     identified at R25 preflight; resolvable with new template variant).
+#ifndef VARK_DROP_BARRIER_2
+#define VARK_DROP_BARRIER_2 0
+#endif
+
+// Round-27 scaffolding (R26 forward pointer; R26 = R25 forward pointer).
+// macro=1: hoist the two CTA-cooperative half-2 HBM->LDS prefetches
+//   global_load_a(As[tic][0], br*2,   k+2)
+//   global_load_b(Bs[tic][1], bc*2+1, k+2)
+// from their default position (after the cA/cB MMAs, between barrier #2 and
+// the half-2 LDS read) to BEFORE the cA/cB MMAs, immediately after barrier #1
+// (TK_WAIT_LGKM(CRR_PREFETCH_LGKM) + s_barrier + asm waitcnt lgkmcnt(0)).
+//
+// Two coupled benefits:
+//   (1) Closes the per-warp slice race that R26 demonstrated CATASTROPHICALLY
+//       falsified at SNR 22.7-24.9 dB: the cooperative loads are now issued
+//       under barrier #1's CTA-wide convergence, so all warps issue their
+//       slice in the same window — no fast/slow skew. Barrier #2
+//       (CRR_STEADY_MID_BARRIER) becomes mechanically removable; macro=1
+//       therefore also drops it.
+//   (2) Places the cA/cB MMAs in the HBM-load shadow of the two hoisted
+//       loads. Each cooperative load is ~80-120 cy HBM latency; cA+cB MMAs
+//       cost ~2 × 16 = 32 cy per warp. Net: the MMAs run for free in the
+//       load shadow — recovers the ~58% non-MFMA window R21 PMC measured.
+//
+// Safety analysis:
+//   - The hoisted loads write to As[tic][0] and Bs[tic][1]. These slots
+//     were just READ at lines 8310 (load_a) and 8300 (load_b). Barrier #1
+//     CTA-syncs after lgkm-drain → all warps' LDS reads completed →
+//     register `a` and `b1` are loaded → safe to overwrite the LDS.
+//   - cA/cB MMAs consume `a`, `b0`, `b1` from registers, not LDS. They
+//     are unaffected by the LDS-side overwrites of As[tic][0] / Bs[tic][1].
+//   - Iter k+2 reads As[tic][0] and Bs[tic][1] (after tic toggles back).
+//     The hoisted loads issue under barrier #1, drain via TK_WAIT_VMCNT
+//     (CRR_STEADY_VMCNT) at the existing line 8328 + s_barrier convergence,
+//     then iter k+1 runs (full iter incl. all 4 barriers), then iter k+2
+//     reads — plenty of CTA convergence for HBM->LDS write completion.
+//   - The half-2 tail load global_load_b(Bs[tic][0], bc*2, k+2) at the
+//     end of the iter is NOT hoisted — it sits between the cC/cD MMAs and
+//     the next iter's cA/cB. Barrier #4 (line 8345 s_barrier) already
+//     converges warps before this load.
+//
+// Three-way gate (mirrors R23/R24/R25 ship-or-falsify):
+//   (a) VGPR / spill regression bounded: VGPR <= 256 + spill <= 50 dw
+//       (Rpass-analysis on _Z24grouped_var_k_kernel_fp8 ILi0EE). Hoist
+//       does not introduce new register live-ranges (a/b1 unchanged), so
+//       spill should be unchanged or near-unchanged.
+//   (b) Numerics: SNR > 25 dB on Down_B4_M2048 wgrad output / dA / dB AND
+//       all 8 metric shapes correctness PASS.
+//   (c) Median TFLOPS >= +5% on Down_B4_M2048 wgrad gate cell; metric
+//       score >= 707 (5 over R24/R25 baseline 702).
+// Any gate fail -> default stays 0, FALSIFIED docs commit + R28 forward
+// pointer (likely 8w->4w split per R23/R25 deferred fallback or PMC
+// re-pass to confirm whether the MMA-shadow lift materialized or whether
+// barrier #2's removal alone is the lever).
+#ifndef VARK_HOIST_PREFETCH_INTO_HALF1
+#define VARK_HOIST_PREFETCH_INTO_HALF1 0
+#endif
+
+// Round-28 scaffolding (R27 forward pointer line 214-219; the only un-tried
+// point in the var-K barrier-axis chain after R23/R26/R27 closed #2 + drain
+// + hoist).
+//
+// macro=1: drop the end-of-iter `__builtin_amdgcn_s_barrier()` at line ~8419
+// (between cD MMA and the line-8420 `global_load_b(Bs[tic][0], bc*2, k+2)`
+// cooperative HBM->LDS prefetch).
+//
+// Analytical safety vs R26 catastrophic FALSIFICATION on barrier #2:
+//   - Barrier #2 was load-bearing because cA/cB MMAs READ the LDS slots
+//     that the hoisted (g) prefetch overwrote (As[tic][0], Bs[tic][1] —
+//     same `tic`). Without barrier #2, fast warps' (g) writes raced with
+//     slow warps' still-pending LDS reads → CATASTROPHIC SNR collapse.
+//   - Barrier #4 is structurally different: cD MMA reads `a` (regs) and
+//     `b1` (regs, loaded from Bs[tic][1] at top of iter). The (h) load
+//     at line 8420 writes Bs[tic][0] — a SLOT NEITHER cA/cB NOR cC/cD
+//     READS in this iter (b0 was loaded from Bs[tic][0] at line 8353
+//     into the b0 register and consumed by cA/cC; b0 is now dead until
+//     overwritten in iter k+1).
+//   - Iter k+1 (after tic^=1, toc^=1) reads Bs[new_tic][0] = Bs[old_toc][0]
+//     — DIFFERENT slot than (h) wrote. No cross-iter race.
+//   - Iter k+2 (after another tic^=1) reads Bs[old_tic][0] = THE slot
+//     (h) wrote. By iter k+2 we've gone through iter k+1's full body
+//     (~250-400 cy) plus iter k+1's own barrier #1 + asm lgkmcnt(0)
+//     drain — far more than (h) HBM completion time. Plus iter k+2's
+//     barrier #1 / TK_WAIT_LGKM gates LDS-read-after-LDS-write-fence.
+//   - Barrier #4 is purely CTA-convergence (no associated wait counter);
+//     dropping it removes the wait but not any memory-completion check.
+//     The vmcnt drain for (h) happens at iter k+1's TK_WAIT_VMCNT
+//     (CRR_STEADY_VMCNT) on line 8402 → drain timing unchanged.
+//
+// Expected lift: 1× s_barrier per iter at ~10-30 cy = ~6-18 cy/iter on
+// Down_B4_M2048 wgrad gate cell (loop iters ~88, total ~528-1584 cy
+// saved per CTA = ~1-3% TFLOPS).  Same magnitude as R23-R27 ablations.
+//
+// Risk vs R26 lessons:
+//   - R26's catastrophic FALSIFICATION came from per-warp-slice race on
+//     the SAME LDS slot consumed by next-loop-body MMA. Barrier #4 sits
+//     between cD (the LAST MMA of iter k that uses the half-1 inputs)
+//     and (h) (write to a slot consumed two iters later). No same-slot
+//     same-iter race.
+//   - Compiler-level: line 8419 is an explicit __builtin_amdgcn_s_barrier()
+//     not a wait counter — removing it gives LLVM no fewer constraints
+//     on instruction scheduling (the barrier doesn't constrain LLVM's
+//     view of the (h) issue order, only HW execution).
+//
+// Gates (FALSIFY-fast pattern, identical to R23-R27):
+//   (a) Correctness: 8/8 metric shapes SNR > 25 dB on out / dA / dB.
+//       FALSIFY immediately on any failure (R26 was 8/8 dB-clipped).
+//   (b) VGPR/spill: identical to baseline (no register-pressure shift
+//       expected since we only remove a barrier instruction).
+//   (c) Median TFLOPS >= +1% on Down_B4_M2048 wgrad gate cell; metric
+//       score >= 700 (within +/-3 noise of R27 baseline 696/702).
+// Any gate fail -> default stays 0, FALSIFIED docs commit; close the
+// var-K barrier-axis chapter completely (#1 + #2 + #4 all audited; #3
+// is bound to vmcnt and not droppable without losing memory completion).
+#ifndef VARK_DROP_BARRIER_4
+#define VARK_DROP_BARRIER_4 0
+#endif
 
 // Sched/wait barrier helpers
 #define RRR_SCHED_BARRIER() __builtin_amdgcn_sched_barrier(0)
@@ -2655,6 +2909,19 @@ struct grouped_layout_globals {
                                  // adding the field is a strict backward-
                                  // compat extension (mirror of R9 num_slots
                                  // ABI extension).
+    // Round-16 (current Primus run, gpt_oss FP8 kernel-only ceiling task;
+    // 2026-05-08): per-call FUSED_KTAIL=true bypass. R14 introduced the
+    // process-static ``TK_GROUPED_RCR_FUSE_OFF`` env hook (line ~7440) and
+    // FALSIFIED a global flip (whole-suite -99 score), but its per-shape
+    // breakdown identified a positive cluster on GateUP B=32 dgrad-via-H4
+    // RCR (+1-2% / +28-41 T at M=2048/4096). Per-call gating lets the
+    // dispatcher pick fuse=OFF for that exact cluster while keeping fuse=ON
+    // (R34-dm load-bearing default) for every other call. Default 0 →
+    // legacy behavior. Wires through ``grouped_rcr{,_dscale}`` pybind
+    // (Round-16 HK commit). Existing positional aggregate inits leave
+    // this trailing field zero-initialized (same backward-compat property
+    // as R9 num_slots and R14 chunk_size).
+    int fuse_ktail_off;
     dim3 block() { return dim3(_NUM_THREADS); }
     size_t dynamic_shared_memory() { return 0; }
 };
@@ -2723,6 +2990,10 @@ void grouped_rcr_kernel(
     static_assert(!(FUSE_ACT && FUSED_KTAIL),
                   "FUSE_ACT=true requires FUSED_KTAIL=false");
     using ST_rcr = ST_v2;
+    // [kyle-L1 single-buf DEBUG] As/Bs decl LEFT AS [2][2] for now; loop
+    // body single-buffered (always reads [0]) to isolate loop-structure
+    // correctness from LDS-decl side effects. Will collapse to [1][2]
+    // once loop is verified.
     __shared__ ST_rcr As[2][2];
     __shared__ ST_rcr Bs[2][2];
     // [grouped] LDS cache for device group_offs (int32 view) + per-group
@@ -3291,7 +3562,7 @@ void grouped_rcr_kernel(
                 load_b_kt(b1,    1);   // 4 buffer_load → b1
                 load_a_kt(a,     0);   // 8 buffer_load → a (M slab 0)
                 load_a_kt(a_kt1, 1);   // 8 buffer_load → a_kt1 (M slab 1, LAST)
-                asm volatile("s_waitcnt vmcnt(8)");
+                TK_WAIT_VMCNT(RCR_KTAIL_VMCNT);
                 rcr_mma(cA, a,     b0);
                 rcr_mma(cB, a,     b1);
                 asm volatile("s_waitcnt vmcnt(0)");
@@ -3540,6 +3811,10 @@ void grouped_rcr_kernel(
     static_assert(!(FUSE_ACT && FUSED_KTAIL),
                   "FUSE_ACT=true requires FUSED_KTAIL=false");
     using ST_rcr = ST_v2;
+    // [kyle-L1 single-buf DEBUG] As/Bs decl LEFT AS [2][2] for now; loop
+    // body single-buffered (always reads [0]) to isolate loop-structure
+    // correctness from LDS-decl side effects. Will collapse to [1][2]
+    // once loop is verified.
     __shared__ ST_rcr As[2][2];
     __shared__ ST_rcr Bs[2][2];
     // [grouped] LDS cache for device group_offs (int32 view) + per-group
@@ -4108,7 +4383,7 @@ void grouped_rcr_kernel(
                 load_b_kt(b1,    1);   // 4 buffer_load → b1
                 load_a_kt(a,     0);   // 8 buffer_load → a (M slab 0)
                 load_a_kt(a_kt1, 1);   // 8 buffer_load → a_kt1 (M slab 1, LAST)
-                asm volatile("s_waitcnt vmcnt(8)");
+                TK_WAIT_VMCNT(RCR_KTAIL_VMCNT);
                 rcr_mma(cA, a,     b0);
                 rcr_mma(cB, a,     b1);
                 asm volatile("s_waitcnt vmcnt(0)");
@@ -7417,6 +7692,45 @@ void dispatch_grouped_rcr(grouped_layout_globals g) {
         ((K_rem_for_fuse == 64) || (K_rem_for_fuse == 0)) &&
         lds_k_tail_safe_for_fuse;
 
+    // Round-14 (current Primus run, gpt_oss FP8 kernel-only ceiling task;
+    // 2026-05-08): probe-only env hook to compare FUSED_KTAIL=true (R34-dm
+    // codegen-driven default) vs the standalone R60 mfma32x32_M2N2 K-tail
+    // path for the gpt_oss K_REM=64 / K_REM=0 suite. R34-dm flipped fuse ON
+    // for codegen reasons (epilog scratch_store/mfma 2-3x reduction). For the
+    // 8 gpt_oss FP8 shapes (M_per ∈ {2048,4096}, N ∈ {2880,5760}, K=2880),
+    // the standalone path lands on grouped_ktail_kernel_mfma32x32_M2N2
+    // (R60 winner, 64x64 K-tail block). The cross-comparison was never
+    // run head-to-head on this exact suite; counter-side audits (R8-R13
+    // wait-counter family, R10 PMC) all FALSIFIED on the dispatcher 4-axis
+    // ceiling, so the only remaining lever is template-class selection.
+    //
+    // Hook is process-static, env-only (mirrors TURBO_FP8_B128 R-F M5
+    // pattern). Default unset → fuse_ktail_eligible unchanged. Set
+    // ``TK_GROUPED_RCR_FUSE_OFF=1`` to force the dispatch through the
+    // standalone K-tail kernel path for this and all subsequent calls in
+    // the process. Both branches are correctness-equivalent (FUSED=true
+    // accumulates K-tail inside main; FUSED=false defers to the M2N2 K-tail
+    // launch, which is Round-60 verified bit-eq with the LDS scalar tail).
+    static const bool fuse_force_off = []() {
+        if (const char* e = std::getenv("TK_GROUPED_RCR_FUSE_OFF")) {
+            return std::atoi(e) >= 1;
+        }
+        return false;
+    }();
+    // Round-16 (current Primus run, gpt_oss FP8 kernel-only ceiling task;
+    // 2026-05-08): per-call FUSE_OFF gating. R14 env hook is process-static
+    // (one decision for the whole process). R14 per-shape probe identified
+    // a positive cluster on GateUP B=32 dgrad-via-H4 RCR only (+1-2 %),
+    // while every fwd shape and 4 of 8 dgrad shapes regress 20-37 %. Per-
+    // call gating via ``g.fuse_ktail_off`` lets the Primus dispatcher pick
+    // fuse=OFF for that exact cluster (rule guard: tiles_n==11, k==5760,
+    // m_total>=65536) and keep fuse=ON elsewhere. Logical OR with the env
+    // hook so the env still works as a process-wide kill switch for ad-hoc
+    // probes. Default ``g.fuse_ktail_off == 0`` reproduces R14's env-unset
+    // baseline byte-for-byte.
+    const bool fuse_ktail_active =
+        fuse_ktail_eligible && !fuse_force_off && (g.fuse_ktail_off == 0);
+
     // === Round-F M3 (quarantined): BLOCK_SIZE=128 dispatch gate ==============
     // Status (Round-F M5 perf-falsified, 2026-05-07):
     //   M2a port + M2-debug-3 wait-counter halving = correct kernel (8/8
@@ -7527,7 +7841,7 @@ void dispatch_grouped_rcr(grouped_layout_globals g) {
             g.chunk_size = env_chunk_size;
         }
 
-        if (fuse_ktail_eligible) {
+        if (fuse_ktail_active) {
             // R63 Lever F (KI_HINT short-K specialization) FALSIFIED:
             // ki={12,32} compile-time loop bounds INCREASED VGPR spill
             // 34 → 49 and Qwen FP8 ratios crashed from 1.13-1.22 to
@@ -7574,7 +7888,7 @@ void dispatch_grouped_rcr(grouped_layout_globals g) {
     // kernel ALREADY accumulated the K-tail into cA/cB/cC/cD before scale
     // + store. The standalone K-tail kernels below would double-count
     // and corrupt the result, so SKIP this entire block when fuse is on.
-    if (!fuse_ktail_eligible && (g.fast_k != g.k || g.bpc == 0)) {
+    if (!fuse_ktail_active && (g.fast_k != g.k || g.bpc == 0)) {
         const int K_rem = g.k - g.fast_k;
         // Round-20: prefer 32x32x64 mfma kernel (100 % util) when
         // ``m_per_group`` is 32-aligned. Falls back to the round-18
@@ -7896,6 +8210,76 @@ __device__ __forceinline__ float resolve_combined_scale_var_k_fp8(
 }
 
 template<int KI_HINT = 0>
+// Round-34 (gpt_oss FP8 kernel-only ceiling, current Primus run; 2026-05-08):
+// `__launch_bounds__(_NUM_THREADS, 2)` (vs current 1) per R33 forward pointer
+// is FALSIFIED at the codegen level — LLVM emits BYTE-IDENTICAL kernel
+// resource usage for min_blocks ∈ {1,2}: VGPRs=256 (architectural max),
+// AGPRs=0, ScratchSize/lane=152, VGPRs Spill=37, Occupancy/SIMD=2 waves,
+// LDS/block=139796 B. The hint is silently discarded because the 256-VGPR
+// ceiling already binds — `min_blocks=2` would need ≤128 VGPR/lane, which
+// the structural register pressure (4 fp32 acc tiles cA/cB/cC/cD allocated
+// to VGPR per AGPRs=0, plus A/B regs + 38-fp32 scratch spill) precludes.
+// Metric Δ_mean = +2.2 over 5 samples each is within R29's σ~3 noise floor
+// (binaries are byte-equal, so any Δ MUST be sample noise). To unlock the
+// occupancy axis, R35+ must FIRST attack VGPR pressure (the 37-VGPR spill
+// + 152-byte scratch overhead) — then a launch_bounds=2 hint becomes
+// honorable. See round-34-vark-launch-bounds-2-codegen-noop-FALSIFIED.md.
+// Round-36 (gpt_oss FP8 kernel-only ceiling, current Primus run; 2026-05-08):
+// Two attribute-level VGPR-pressure attacks evaluated for the launch_bounds=2
+// occupancy unlock R34/R35 forward-pointed:
+//   (a) R35's prescribed `__attribute__((amdgpu_num_agpr(N)))` — INVALID at
+//       the syntactic level. Standalone test (/tmp/test_agpr_attr.cu) under
+//       AMD clang 22.0.0git (ROCm 7.2.0) reports
+//       "unknown attribute 'amdgpu_num_agpr' ignored; did you mean
+//       'amdgpu_num_sgpr'?". Attribute does not exist in the AMDGPU
+//       attribute set; closest siblings are amdgpu_num_sgpr / amdgpu_num_vgpr.
+//   (b) The valid alternative `__attribute__((amdgpu_num_vgpr(128)))` paired
+//       with `__launch_bounds__(_NUM_THREADS, 2)` — SILENTLY IGNORED by the
+//       backend. Built and -Rpass-analysis=kernel-resource-usage captured
+//       on `_Z24grouped_var_k_kernel_fp8ILi0EEv32grouped_var_k_layout_globals_fp8`
+//       at remote MI355X via dbg_remote.sh. Result: VGPRs=256, AGPRs=0,
+//       ScratchSize=152, Occupancy=2 waves/SIMD, VGPRs Spill=37,
+//       LDS=139796 — every field BYTE-IDENTICAL to the R34 baseline. The
+//       attribute is not a hard constraint in the AMDGPU codegen pipeline
+//       when MFMA accumulator residency requires VGPR (the 4 fp32 tiles
+//       cA/cB/cC/cD feed v_mfma_f32_*_fp8 ops directly into VGPR; routing
+//       through AGPR would require accvgpr_write/read round-trips and the
+//       compiler refuses to insert them under the hint).
+// Both attacks closed at the codegen level → no metric run needed (binary
+// unchanged for (b); (a) doesn't compile to any binary). 7th closed surface
+// on var-K Down_B4_M2048 wgrad alongside wait-counter, persistent-grid,
+// alt-tile-shape, split-K, occupancy-hint, and R34-tandem.
+// See round-36-vark-amdgpu-num-vgpr-silent-noop-FALSIFIED.md for the full
+// codegen-equivalence table + R37 forward pointer (8w→4w fastpath port,
+// the only remaining structural lever per R23/R25 deferred fallback).
+// Round-37 (gpt_oss FP8 kernel-only ceiling, current Primus run; 2026-05-08):
+// R36's prescribed R37 step was a re-derivation of R25's two preflight
+// grounds against the 8w→4w port. Re-derivation against this file's own
+// constants finds R37 ground-1 has a BK arithmetic error: it computed
+// "LDS A+B = 2 × 256 × BK × 2 = 65 KB with BK=64 fp8", but BK = K_BLOCK
+// = 128 (line 12 of this file, also constexpr int BK = K_BLOCK at line 38).
+// With the correct BK=128, As[2][2] + Bs[2][2] = 4 × HB×BK + 4 × HB×BK
+// = 4 × 16 KB + 4 × 16 KB = 128 KB + ~520 B group-meta + LLVM padding
+// = 139796 B build-reported — IDENTICAL to 8w. R25 ground-1 re-verifies
+// as correct (per-CTA tile preserved at 256×256 across 8w→4w via RBN
+// 32→64 compensation; LDS sized off per-CTA tile + BK, neither changes
+// in a 4w port). LDS does NOT halve; "2 CTAs/CU" outcome does not
+// materialize. Ground-2 (R57-R61 AGPR codegen bug at 256 fp32/lane
+// per-warp acc footprint) remains structurally suspect — var-K at 4w
+// hits exactly that 256 fp32/lane threshold (4 accs × 64 fp32/lane each
+// at RBM=64/RBN=64), and although the source-level access pattern
+// (`crr_mma(cA,...)` separate-decl) differs from RCR's `cAB[2][2]`
+// subscript, the bug is structural to the LLVM AGPR allocator's
+// interaction with the rt_base<rt_16x16> × 4-cell layout, not specific
+// to the accessor syntax. R57-R61 spent 5 rounds on the RCR-side scaffold
+// and ended at a workaround without root-cause; the var-K port has the
+// same expected-value ledger and is NEV-negative to pursue.
+// 8th closed surface on var-K Down_B4_M2048 wgrad. All structural axes
+// on the existing 8w grouped_var_k_kernel_fp8 are now exhausted.
+// See round-37-vark-r37-forward-pointer-A-PRIORI-FALSIFIED-ground1-bk-arithmetic-error.md
+// for the full BK re-derivation + ground-2 re-evaluation + R38 pivot
+// (away from this cell, toward fwd Down_B4_M2048 RCR kernel-template
+// probe — task file Phase-3 PRIMARY target).
 __global__ __launch_bounds__(_NUM_THREADS, 1)
 void grouped_var_k_kernel_fp8(const grouped_var_k_layout_globals_fp8 g) {
     using ST_crr_a = ST_v2a;
@@ -7909,6 +8293,10 @@ void grouped_var_k_kernel_fp8(const grouped_var_k_layout_globals_fp8 g) {
     __shared__ int s_total_tiles;
 
     A_col_reg a;
+#if VARK_SW_PIPE_HOIST_AHEAD
+    // Round-24: extra A-tile register staging iter k+1's half-1 LDS A-read.
+    A_col_reg a_next;
+#endif
     B_col_reg b0, b1;
     rt_fl<RBM, RBN, col_l, rt_16x16_s> cA, cB, cC, cD;
 
@@ -8097,33 +8485,91 @@ void grouped_var_k_kernel_fp8(const grouped_var_k_layout_globals_fp8 g) {
         TK_WAIT_VMCNT(CRR_INIT1_VMCNT);
         __builtin_amdgcn_s_barrier();
 
+#if VARK_SW_PIPE_HOIST_AHEAD
+        // Round-24 prologue peel: hoist iter 0's first-half LDS A-read out
+        // of the loop body into a_next. The loop's first asm waitcnt
+        // lgkmcnt(0) (line ~8197) drains this LDS read before iter 0's
+        // cA/cB MMAs consume `a`, which receives `a_next` via register move
+        // at the top of half-1.
+        load_a(a_next, As[tic][0], wm);
+#endif
+
         // Main loop body — mirror of FP8 dense ``gemm_kernel<CRR>`` lines
         // ~1513-1538, but with per-group ki_g and ``a_co/b_co`` lambdas
         // that fold ``k_offset_tiles`` into the row-axis tile coord.
-        TK_PRAGMA_UNROLL(CRR_MAIN_UNROLL)
+        // Round-22: VARK_MAIN_UNROLL (line 113) — split from CRR_MAIN_UNROLL
+        // so dense path (line 2155) keeps unroll=1 while var-K can sweep.
+        TK_PRAGMA_UNROLL(VARK_MAIN_UNROLL)
         for (int k = 0; k < ki_g - 2; k++, tic ^= 1, toc ^= 1) {
             load_b(b0, Bs[tic][0], wn);
             load_b(b1, Bs[tic][1], wn);
+#if VARK_SW_PIPE_HOIST_AHEAD
+            // Round-24: iter k's half-1 a is staged in a_next from prologue
+            // peel (k=0) or from iter k-1's half-2 hoist (k>=1). Move the
+            // stage register to working `a` (no LDS issue). The 4-CTA-
+            // barrier-per-iter sync (last barrier of iter k-1 + iter k's
+            // TK_WAIT_LGKM/asm waitcnt below) sequences a_next's LDS read
+            // before this point.
+            a = a_next;
+#else
             load_a(a, As[tic][0], wm);
+#endif
             global_load_a(As[toc][1], br*2+1, k+1);
             TK_WAIT_LGKM(CRR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
+#if !VARK_DROP_REDUNDANT_LGKM_DRAIN
             asm volatile("s_waitcnt lgkmcnt(0)");
+#endif
+#if VARK_HOIST_PREFETCH_INTO_HALF1
+            // Round-27 hoist: the two CTA-cooperative half-2 prefetches now
+            // issue BEFORE cA/cB MMAs to place them in HBM-load shadow.
+            // The asm lgkmcnt(0) above is per-warp; we need a CTA s_barrier
+            // AFTER it (and before the hoisted writes) to ensure all warps'
+            // LDS reads of As[tic][0] / Bs[tic][1] are CTA-globally drained
+            // — otherwise fast warps' hoist writes race with slow warps'
+            // still-pending reads of the same LDS slots (R27 first-attempt
+            // failure mode: dB-SNR 7.6-12.4 dB across 8/8 shapes when this
+            // s_barrier was omitted on the assumption that asm lgkmcnt(0)
+            // alone sufficed). This s_barrier replaces the now-removed
+            // CRR_STEADY_MID_BARRIER (== identical barrier count and same
+            // CTA-convergence purpose, just relocated to BEFORE cA/cB MMAs
+            // instead of AFTER, so the MMAs run in the HBM-load shadow).
+            __builtin_amdgcn_s_barrier();
+            global_load_a(As[tic][0], br*2, k+2);
+            global_load_b(Bs[tic][1], bc*2+1, k+2);
+#endif
             CRR_MMA_BEGIN();
             crr_mma(cA, a, b0);
             crr_mma(cB, a, b1);
             CRR_MMA_END();
+#if !VARK_DROP_BARRIER_2 && !VARK_HOIST_PREFETCH_INTO_HALF1
             CRR_STEADY_MID_BARRIER();
+#endif
 
             load_a(a, As[tic][1], wm);
+#if !VARK_HOIST_PREFETCH_INTO_HALF1
             global_load_a(As[tic][0], br*2, k+2);
             global_load_b(Bs[tic][1], bc*2+1, k+2);
+#endif
             TK_WAIT_VMCNT(CRR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
+#if !VARK_DROP_REDUNDANT_LGKM_DRAIN
             asm volatile("s_waitcnt lgkmcnt(0)");
+#endif
+#if VARK_SW_PIPE_HOIST_AHEAD
+            // Round-24 hoist: iter k+1's first-half LDS A-read placed in
+            // the cC/cD MMA shadow. As[toc][0] for iter k+1 is HBM-ready
+            // (loaded by prologue at k=0, or by iter k-1's half-2 prefetch
+            // line ~8210 with TK_WAIT_VMCNT(CRR_STEADY_VMCNT) drain on
+            // line ~8217). Compiler is free to interleave this LDS issue
+            // with the two MMA cycles below — no CTA barrier blocks it.
+            load_a(a_next, As[toc][0], wm);
+#endif
             CRR_MMA_BEGIN();
             crr_mma(cC, a, b0);
             crr_mma(cD, a, b1);
             CRR_MMA_END();
+#if !VARK_DROP_BARRIER_4
             __builtin_amdgcn_s_barrier();
+#endif
             global_load_b(Bs[tic][0], bc*2, k+2);
         }
 
@@ -8453,7 +8899,8 @@ static void grouped_rcr_fn(pybind11::object a, pybind11::object b, pybind11::obj
                            int m_per_group,
                            int num_xcds,
                            int num_slots,
-                           int chunk_size = 0) {
+                           int chunk_size = 0,
+                           int fuse_ktail_off = 0) {
     auto group_offs_ptr = group_offs_obj.attr("data_ptr")().cast<uintptr_t>();
     int G = group_offs_obj.attr("numel")().cast<int>() - 1;
     grouped_layout_globals g{
@@ -8466,8 +8913,8 @@ static void grouped_rcr_fn(pybind11::object a, pybind11::object b, pybind11::obj
         nullptr,
         reinterpret_cast<const int64_t*>(group_offs_ptr),
         {},
-        /* G,n,k,ki,bpc,group_m,num_xcds,M_total,fast_n,fast_k,m_per_group,num_slots,chunk_size */
-        G, 0, 0, 0, 0, group_m, num_xcds, 0, 0, 0, m_per_group, num_slots, chunk_size,
+        /* G,n,k,ki,bpc,group_m,num_xcds,M_total,fast_n,fast_k,m_per_group,num_slots,chunk_size,fuse_ktail_off */
+        G, 0, 0, 0, 0, group_m, num_xcds, 0, 0, 0, m_per_group, num_slots, chunk_size, fuse_ktail_off,
     };
     dispatch_grouped_rcr(g);
 }
@@ -8480,7 +8927,8 @@ static void grouped_rcr_dscale_fn(
     int m_per_group,
     int num_xcds,
     int num_slots,
-    int chunk_size = 0) {
+    int chunk_size = 0,
+    int fuse_ktail_off = 0) {
     auto sa_ptr = scale_a_obj.attr("data_ptr")().cast<uintptr_t>();
     auto sb_ptr = scale_b_obj.attr("data_ptr")().cast<uintptr_t>();
     auto group_offs_ptr = group_offs_obj.attr("data_ptr")().cast<uintptr_t>();
@@ -8494,8 +8942,8 @@ static void grouped_rcr_dscale_fn(
         reinterpret_cast<const float*>(sb_ptr),
         reinterpret_cast<const int64_t*>(group_offs_ptr),
         {},
-        /* G,n,k,ki,bpc,group_m,num_xcds,M_total,fast_n,fast_k,m_per_group,num_slots,chunk_size */
-        G, 0, 0, 0, 0, group_m, num_xcds, 0, 0, 0, m_per_group, num_slots, chunk_size,
+        /* G,n,k,ki,bpc,group_m,num_xcds,M_total,fast_n,fast_k,m_per_group,num_slots,chunk_size,fuse_ktail_off */
+        G, 0, 0, 0, 0, group_m, num_xcds, 0, 0, 0, m_per_group, num_slots, chunk_size, fuse_ktail_off,
     };
     dispatch_grouped_rcr(g);
 }
@@ -9212,7 +9660,8 @@ PYBIND11_MODULE(tk_fp8_layouts, m) {
           pybind11::arg("m_per_group") = 0,
           pybind11::arg("num_xcds") = 0,
           pybind11::arg("num_slots") = 0,
-          pybind11::arg("chunk_size") = 0);
+          pybind11::arg("chunk_size") = 0,
+          pybind11::arg("fuse_ktail_off") = 0);
     m.def("grouped_rcr_dscale", &grouped_rcr_dscale_fn,
           pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("c"),
           pybind11::arg("scale_a"), pybind11::arg("scale_b"),
@@ -9221,7 +9670,8 @@ PYBIND11_MODULE(tk_fp8_layouts, m) {
           pybind11::arg("m_per_group") = 0,
           pybind11::arg("num_xcds") = 0,
           pybind11::arg("num_slots") = 0,
-          pybind11::arg("chunk_size") = 0);
+          pybind11::arg("chunk_size") = 0,
+          pybind11::arg("fuse_ktail_off") = 0);
     // [fused-act R6] FUSE_ACT=true variant of the grouped RCR launcher.
     // ``a`` is BF16 (not FP8); ``scale_a_inv`` is the device float32 scalar
     // returned by ``max_abs_bf16_to_fp8_scale`` (= FP8_MAX / amax(a)).
