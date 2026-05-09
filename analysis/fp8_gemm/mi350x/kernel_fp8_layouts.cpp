@@ -7879,8 +7879,17 @@ void dispatch_grouped_rcr(grouped_layout_globals g) {
     // and pivot R13b plan to either (a) plumb the buffer through pybind
     // from the Python caller, or (b) device-side cooperative alloc via
     // a one-time global pool.
+    // Round-17 (gpt_oss FP8 kernel-only ceiling, current Primus run; 2026-05-09):
+    // Caller-allocated workspace path. If g.sk_partial_buf is already non-null
+    // before entry (set by the wrapper from the new sk_workspace_ptr pybind
+    // kwarg), skip the per-call hipMallocAsync/hipFreeAsync. R14 measured the
+    // per-call alloc cost at 2.9-9.1 ms — well above the +25-30 score envelope
+    // budget. Caller-side cache (Primus WorkspaceCache singleton) drives that
+    // amortized cost to ~0 after warmup. Default kwarg 0 → buf nullptr → R13a
+    // alloc branch entered as before; production paths (sk_split_n=0) skip
+    // both branches, bit-identical to pre-R17.
     int* sk_partial_buf_owned = nullptr;
-    if (g.sk_split_n > 0 && g.bpc > 0 && g.ki > 0) {
+    if (g.sk_split_n > 0 && g.bpc > 0 && g.ki > 0 && g.sk_partial_buf == nullptr) {
         const int T_max = kittens::ceil_div(g.M_total, BLOCK_SIZE) * g.bpc;
         const size_t buf_bytes =
             static_cast<size_t>(T_max) * BLOCK_SIZE * BLOCK_SIZE * sizeof(float);
@@ -9045,7 +9054,8 @@ static void grouped_rcr_fn(pybind11::object a, pybind11::object b, pybind11::obj
                            int num_slots,
                            int chunk_size = 0,
                            int fuse_ktail_off = 0,
-                           int sk_split_n = 0) {
+                           int sk_split_n = 0,
+                           uint64_t sk_workspace_ptr = 0) {
     auto group_offs_ptr = group_offs_obj.attr("data_ptr")().cast<uintptr_t>();
     int G = group_offs_obj.attr("numel")().cast<int>() - 1;
     grouped_layout_globals g{
@@ -9062,6 +9072,12 @@ static void grouped_rcr_fn(pybind11::object a, pybind11::object b, pybind11::obj
         G, 0, 0, 0, 0, group_m, num_xcds, 0, 0, 0, m_per_group, num_slots, chunk_size, fuse_ktail_off, sk_split_n,
         // sk_partial_buf left default-init (nullptr); R13a alloc fills it when sk_split_n > 0.
     };
+    // R17: caller-allocated workspace override. If sk_workspace_ptr != 0, the
+    // dispatcher's per-call hipMallocAsync branch is skipped (gated below on
+    // g.sk_partial_buf == nullptr). Cast through void* to silence -Wcast-align.
+    if (sk_workspace_ptr != 0) {
+        g.sk_partial_buf = reinterpret_cast<int*>(static_cast<uintptr_t>(sk_workspace_ptr));
+    }
     dispatch_grouped_rcr(g);
 }
 
@@ -9075,7 +9091,8 @@ static void grouped_rcr_dscale_fn(
     int num_slots,
     int chunk_size = 0,
     int fuse_ktail_off = 0,
-    int sk_split_n = 0) {
+    int sk_split_n = 0,
+    uint64_t sk_workspace_ptr = 0) {
     auto sa_ptr = scale_a_obj.attr("data_ptr")().cast<uintptr_t>();
     auto sb_ptr = scale_b_obj.attr("data_ptr")().cast<uintptr_t>();
     auto group_offs_ptr = group_offs_obj.attr("data_ptr")().cast<uintptr_t>();
@@ -9093,6 +9110,10 @@ static void grouped_rcr_dscale_fn(
         G, 0, 0, 0, 0, group_m, num_xcds, 0, 0, 0, m_per_group, num_slots, chunk_size, fuse_ktail_off, sk_split_n,
         // sk_partial_buf left default-init (nullptr); R13a alloc fills it when sk_split_n > 0.
     };
+    // R17: caller-allocated workspace override (mirrors grouped_rcr_fn).
+    if (sk_workspace_ptr != 0) {
+        g.sk_partial_buf = reinterpret_cast<int*>(static_cast<uintptr_t>(sk_workspace_ptr));
+    }
     dispatch_grouped_rcr(g);
 }
 
@@ -9817,7 +9838,15 @@ PYBIND11_MODULE(tk_fp8_layouts, m) {
           // on g.stream. Used by scripts/_probe_round_14_alloc_cost.py to
           // measure the actual alloc/free overhead before R15 commits to
           // the kernel K-split branch (R11 cost decomp assumed ~3 µs).
-          pybind11::arg("sk_split_n") = 0);
+          pybind11::arg("sk_split_n") = 0,
+          // R17 (gpt_oss FP8 kernel-only ceiling, current Primus run; 2026-05-09):
+          // caller-allocated K-split workspace pointer. Default 0 → dispatcher
+          // falls back to R13a per-call hipMallocAsync. Setting to a device
+          // ptr (e.g. torch.empty(buf_bytes, dtype=uint8, device='cuda').data_ptr())
+          // skips the per-call alloc/free and reuses the caller's buffer —
+          // amortizes R14's 2.9-9.1 ms/call alloc cost to ~0 after warmup
+          // when paired with the Primus WorkspaceCache singleton (PT side).
+          pybind11::arg("sk_workspace_ptr") = uint64_t{0});
     m.def("grouped_rcr_dscale", &grouped_rcr_dscale_fn,
           pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("c"),
           pybind11::arg("scale_a"), pybind11::arg("scale_b"),
@@ -9828,7 +9857,9 @@ PYBIND11_MODULE(tk_fp8_layouts, m) {
           pybind11::arg("num_slots") = 0,
           pybind11::arg("chunk_size") = 0,
           pybind11::arg("fuse_ktail_off") = 0,
-          pybind11::arg("sk_split_n") = 0);
+          pybind11::arg("sk_split_n") = 0,
+          // R17: see grouped_rcr m.def above.
+          pybind11::arg("sk_workspace_ptr") = uint64_t{0});
     // [fused-act R6] FUSE_ACT=true variant of the grouped RCR launcher.
     // ``a`` is BF16 (not FP8); ``scale_a_inv`` is the device float32 scalar
     // returned by ``max_abs_bf16_to_fp8_scale`` (= FP8_MAX / amax(a)).
