@@ -8376,16 +8376,35 @@ void grouped_var_k_kernel_fp8(const grouped_var_k_layout_globals_fp8 g) {
     G::prefill_swizzled_offsets(Bs[0][0], g.b, soB);
 
     for (int gt = pid; gt < total_tiles; gt += slots_eff) {
-        int lo = 0;
-        int hi = MAX_G_PLUS_1 - 1;
-        #pragma unroll
-        for (int level = 0; level < 6; ++level) {
-            const int mid = (lo + hi + 1) >> 1;
-            if (gt >= s_cum_tiles[mid]) lo = mid;
-            else hi = mid - 1;
-        }
-        const int group_idx = lo;
-        const int tile_start = s_cum_tiles[lo];
+        // R9 (Direction D — var-K SALU coord-decode hoist; gpt_oss FP8
+        // kernel-only ceiling task, 2026-05-09): replace the 6-iter
+        // binary search over ``s_cum_tiles[]`` LDS reads with the O(1)
+        // closed-form decode. var-K is the special case where
+        // ``tiles_per_group = bpr * bpc`` is uniform across all groups
+        // (the init at line 8351-8356 above already exploits this:
+        // ``s_cum_tiles[k] = k * tiles_per_group``). The binary search
+        // therefore converges on ``floor(gt / tiles_per_group)`` for
+        // every legal ``gt``; inlining the closed form is bit-equivalent
+        // and eliminates 7 ``s_cum_tiles[]`` LDS loads per outer-loop
+        // iteration (6 in the search + 1 for ``tile_start``). Mirrors
+        // the BF16 var-K decode at
+        // ``analysis/bf16_gemm/mi350x/kernel_bf16_dynamic.cpp:4840``
+        // (``compute_var_k_group_lookup`` helper) — same closed form,
+        // shipped baseline. Targets R21 PMC ``SALU/SQ_busy = 85 %`` on
+        // var-K wgrad Down-B4 family; per-tile coord decode is one of
+        // the SALU contributors (the K-loop body has its own SALU but is
+        // not touched by this edit). ``s_cum_tiles[]`` storage + init
+        // left in place (smallest-diff; net LDS budget unchanged so no
+        // occupancy risk). Compiler should DCE the dead ``s_cum_tiles``
+        // load path; init writes remain because ``__syncthreads`` in
+        // the init guards CTA convergence and removing them would need
+        // its own audit. NEEDS-METRIC: integer divide by runtime
+        // non-pow-2 ``tiles_per_group`` (88-352 across cells) compiles
+        // to scalar ``s_div_*`` lowering on CDNA4 — BF16 ships with
+        // this so net is presumed positive on AMDGPU; metric will
+        // confirm.
+        const int group_idx = gt / tiles_per_group;
+        const int tile_start = group_idx * tiles_per_group;
         const int local_tile = gt - tile_start;
         const int m_start_g = s_offs[group_idx];
         const int M_g = s_offs[group_idx + 1] - m_start_g;
