@@ -9044,7 +9044,8 @@ static void grouped_rcr_fn(pybind11::object a, pybind11::object b, pybind11::obj
                            int num_xcds,
                            int num_slots,
                            int chunk_size = 0,
-                           int fuse_ktail_off = 0) {
+                           int fuse_ktail_off = 0,
+                           int sk_split_n = 0) {
     auto group_offs_ptr = group_offs_obj.attr("data_ptr")().cast<uintptr_t>();
     int G = group_offs_obj.attr("numel")().cast<int>() - 1;
     grouped_layout_globals g{
@@ -9057,8 +9058,9 @@ static void grouped_rcr_fn(pybind11::object a, pybind11::object b, pybind11::obj
         nullptr,
         reinterpret_cast<const int64_t*>(group_offs_ptr),
         {},
-        /* G,n,k,ki,bpc,group_m,num_xcds,M_total,fast_n,fast_k,m_per_group,num_slots,chunk_size,fuse_ktail_off */
-        G, 0, 0, 0, 0, group_m, num_xcds, 0, 0, 0, m_per_group, num_slots, chunk_size, fuse_ktail_off,
+        /* G,n,k,ki,bpc,group_m,num_xcds,M_total,fast_n,fast_k,m_per_group,num_slots,chunk_size,fuse_ktail_off,sk_split_n */
+        G, 0, 0, 0, 0, group_m, num_xcds, 0, 0, 0, m_per_group, num_slots, chunk_size, fuse_ktail_off, sk_split_n,
+        // sk_partial_buf left default-init (nullptr); R13a alloc fills it when sk_split_n > 0.
     };
     dispatch_grouped_rcr(g);
 }
@@ -9072,7 +9074,8 @@ static void grouped_rcr_dscale_fn(
     int num_xcds,
     int num_slots,
     int chunk_size = 0,
-    int fuse_ktail_off = 0) {
+    int fuse_ktail_off = 0,
+    int sk_split_n = 0) {
     auto sa_ptr = scale_a_obj.attr("data_ptr")().cast<uintptr_t>();
     auto sb_ptr = scale_b_obj.attr("data_ptr")().cast<uintptr_t>();
     auto group_offs_ptr = group_offs_obj.attr("data_ptr")().cast<uintptr_t>();
@@ -9086,8 +9089,9 @@ static void grouped_rcr_dscale_fn(
         reinterpret_cast<const float*>(sb_ptr),
         reinterpret_cast<const int64_t*>(group_offs_ptr),
         {},
-        /* G,n,k,ki,bpc,group_m,num_xcds,M_total,fast_n,fast_k,m_per_group,num_slots,chunk_size,fuse_ktail_off */
-        G, 0, 0, 0, 0, group_m, num_xcds, 0, 0, 0, m_per_group, num_slots, chunk_size, fuse_ktail_off,
+        /* G,n,k,ki,bpc,group_m,num_xcds,M_total,fast_n,fast_k,m_per_group,num_slots,chunk_size,fuse_ktail_off,sk_split_n */
+        G, 0, 0, 0, 0, group_m, num_xcds, 0, 0, 0, m_per_group, num_slots, chunk_size, fuse_ktail_off, sk_split_n,
+        // sk_partial_buf left default-init (nullptr); R13a alloc fills it when sk_split_n > 0.
     };
     dispatch_grouped_rcr(g);
 }
@@ -9805,7 +9809,15 @@ PYBIND11_MODULE(tk_fp8_layouts, m) {
           pybind11::arg("num_xcds") = 0,
           pybind11::arg("num_slots") = 0,
           pybind11::arg("chunk_size") = 0,
-          pybind11::arg("fuse_ktail_off") = 0);
+          pybind11::arg("fuse_ktail_off") = 0,
+          // R14 (gpt_oss FP8 kernel-only ceiling, current Primus run; 2026-05-09):
+          // sk_split_n probe kwarg. Default 0 → R13a alloc branch never entered;
+          // production path bit-identical. Setting >0 triggers per-call
+          // hipMallocAsync(T_max * 256 * 256 * 4 B) + hipMemsetAsync + hipFreeAsync
+          // on g.stream. Used by scripts/_probe_round_14_alloc_cost.py to
+          // measure the actual alloc/free overhead before R15 commits to
+          // the kernel K-split branch (R11 cost decomp assumed ~3 µs).
+          pybind11::arg("sk_split_n") = 0);
     m.def("grouped_rcr_dscale", &grouped_rcr_dscale_fn,
           pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("c"),
           pybind11::arg("scale_a"), pybind11::arg("scale_b"),
@@ -9815,7 +9827,8 @@ PYBIND11_MODULE(tk_fp8_layouts, m) {
           pybind11::arg("num_xcds") = 0,
           pybind11::arg("num_slots") = 0,
           pybind11::arg("chunk_size") = 0,
-          pybind11::arg("fuse_ktail_off") = 0);
+          pybind11::arg("fuse_ktail_off") = 0,
+          pybind11::arg("sk_split_n") = 0);
     // [fused-act R6] FUSE_ACT=true variant of the grouped RCR launcher.
     // ``a`` is BF16 (not FP8); ``scale_a_inv`` is the device float32 scalar
     // returned by ``max_abs_bf16_to_fp8_scale`` (= FP8_MAX / amax(a)).
