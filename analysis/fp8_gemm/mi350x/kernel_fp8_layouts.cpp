@@ -2922,6 +2922,52 @@ struct grouped_layout_globals {
     // this trailing field zero-initialized (same backward-compat property
     // as R9 num_slots and R14 chunk_size).
     int fuse_ktail_off;
+    // Round-12 (gpt_oss FP8 kernel-only ceiling, current Primus run; 2026-05-09):
+    // Stream-K (variant-2) K-split scaffolding fields. R12 declares only;
+    // R13 wires the kernel control flow; R14 adds the reduce post-kernel;
+    // R15 adds the per-cell dispatcher rule. See
+    // analysis/_notes/round-11-A1prime-variant-2-K-split-refined-cost-decomp-
+    // GREEN-LIGHT-R12-scaffold.md for the cost decomposition that GREEN-LIT
+    // this multi-round arc (per-cell envelope: B=4 cells +30/+10/+10/-8 %,
+    // B=32 cells near-neutral or mild regression; the per-cell dispatcher
+    // rule R15 will gate K-split ON only for the small-grid B=4 family
+    // where T < ~1500 tiles and tail-wave underfill on the 2nd persistent
+    // wave is the dominant idle-cycle source).
+    //
+    // ``sk_split_n``     — number of CTAs that share each "SK tile" (the
+    //                      tail-wave-recovered tiles). 0 → no K-split
+    //                      (static stride, current production behavior).
+    //                      >0 → R13 kernel uses Stream-K balanced K-iter
+    //                      assignment for the SK_tile_count = T - S *
+    //                      (ceil(T/S) - 1) trailing tiles, with each SK
+    //                      tile split sk_split_n ways across CTAs.
+    // ``sk_partial_buf`` — fp32 partial-accumulator buffer in HBM. Layout:
+    //                      SK_tile_count × 256 × 256 × 4 bytes (one fp32
+    //                      partial per output element of each SK tile).
+    //                      R13 K-split CTAs atomicAdd into this buffer;
+    //                      R14 reduce post-kernel sums + casts to fp8 and
+    //                      writes the SK tiles into ``g.c``. nullptr →
+    //                      caller did not request K-split (sk_split_n must
+    //                      also be 0; defensive check in R13). R12
+    //                      dispatch leaves this nullptr unconditionally
+    //                      (alloc lands in R13 alongside the kernel branch).
+    //
+    // R12 commit is FIELDS-ONLY: dispatcher does not allocate, kernel does
+    // not read, no positional aggregate-init in any wrapper sets these
+    // fields (C++ value-init zero-fills trailing aggregate-init fields per
+    // the same backward-compat property used by R9 num_slots / R14
+    // chunk_size / R16 fuse_ktail_off). Compiles and links bit-identically
+    // outside whatever incidental codegen the wider struct copy may induce
+    // at the dispatcher → kernel by-value boundary; the kernel reads
+    // neither field so its register schedule is unchanged.
+    //
+    // Falsification gate for R12 (per R11 plan, section "Falsification
+    // gates for R12"): metric must stay within ±3 score of pre-R12
+    // baseline on the full 8-shape suite, and SNR > 25 dB on every shape.
+    // Either condition violated → revert and pivot to Direction E (barrier
+    // scheme).
+    int sk_split_n;
+    int* sk_partial_buf;
     dim3 block() { return dim3(_NUM_THREADS); }
     size_t dynamic_shared_memory() { return 0; }
 };
