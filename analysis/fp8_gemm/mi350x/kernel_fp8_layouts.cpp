@@ -7824,6 +7824,72 @@ void dispatch_grouped_rcr(grouped_layout_globals g) {
         return;
     }
 
+    // Round-13a (gpt_oss FP8 kernel-only ceiling, current Primus run; 2026-05-09):
+    // Stream-K (variant-2) host-side partial-buffer allocator. R12 declared
+    // the trailing struct fields (sk_split_n, sk_partial_buf*) but did not
+    // allocate. R13a (this) lands the dispatcher-side alloc/free gated on
+    // g.sk_split_n > 0; the kernel control-flow branch + atomicAdd + reduce
+    // post-kernel + per-cell dispatcher rule follow in R13b/R14/R15 per the
+    // R11 plan (analysis/_notes/round-11-A1prime-variant-2-K-split-refined-
+    // cost-decomp-GREEN-LIGHT-R12-scaffold.md).
+    //
+    // Why split R13 again from the R12 commit's "alloc + kernel branch as
+    // one atomic transaction" plan: the same risk-isolation rationale R12
+    // used to narrow R11's "fields + alloc" to fields-only. Landing the
+    // alloc together with the 200+ line K-split kernel branch (in a 700-
+    // line MFMA kernel already at 256 VGPR / 37 spill near the LLVM
+    // ceiling) entangles three failure modes — alloc bug, K-split coord-
+    // decode bug, AGPR spill > 60 from extra K-iter bookkeeping. R13a
+    // lands alloc with zero kernel impact (the kernel reads neither new
+    // field, codegen unchanged); R13b/R14 lands kernel branch alone with
+    // the alloc machinery already verified bit-identical via R13a's
+    // metric gate. Mirrors R12's narrowing precedent.
+    //
+    // Why per-call hipMallocAsync (vs the host-cached pattern R7/R11
+    // sketched, referencing done_counter): on dispatcher re-read, the
+    // done_counter at line ~9281 is caller-allocated through pybind, NOT
+    // host-cached. There is no host-cached allocator pattern in this file
+    // to mirror. Per-call hipMallocAsync adds ~1-5 µs per call (gfx950
+    // hipMallocAsync ~3 µs for 4 MiB-class buffers, stream-ordered,
+    // does NOT force host-side device sync — preserves the SKILL.md
+    // "no CPU sync" constraint). For Down-B4-M2048 (105 µs main kernel
+    // wall per R11 cost decomp), that is ~1-5 % overhead, eats into the
+    // 30 % projected lift but still leaves a positive EV envelope. R15
+    // dispatcher rule will gate K-split ON only for cells where
+    // (lift - alloc_overhead) > 0.
+    //
+    // SK_tile_count upper bound: dispatcher does not have per-group M
+    // counts (g.group_offsets is device memory; reading would violate
+    // the no-CPU-sync constraint). Use T_max = ceil_div(g.M_total,
+    // BLOCK_SIZE) * g.bpc — a strict upper bound on T (over-allocates by
+    // at most (num_groups - 1) partial M-tiles per call, ~0.1-1 % over-
+    // alloc). Actual SK_tile_count <= T_max in the worst case (every tile
+    // becomes an SK tile when sk_split_n=full). Per-tile payload is
+    // 256 * 256 * 4 = 256 KiB; for the gpt_oss B=4 cells T_max is
+    // 8 * 22 .. 16 * 22 = 176 .. 352 tiles → 44 .. 88 MiB per call (well
+    // below MI355X 192 GiB HBM3e per-call peak working set).
+    //
+    // Falsification gate (mirrors R12 plan): metric within ±3 of recent
+    // baseline, SNR > 25 dB on every shape. With g.sk_split_n=0 default
+    // and the alloc branch gated, the host code path for production
+    // calls is unchanged byte-for-byte (one host-side branch on a struct
+    // member that compiles to a compare + jump-not-taken; the kernel
+    // launch parameter bytes are bit-identical because g.sk_partial_buf
+    // remains nullptr). Either condition violated → revert this commit
+    // and pivot R13b plan to either (a) plumb the buffer through pybind
+    // from the Python caller, or (b) device-side cooperative alloc via
+    // a one-time global pool.
+    int* sk_partial_buf_owned = nullptr;
+    if (g.sk_split_n > 0 && g.bpc > 0 && g.ki > 0) {
+        const int T_max = kittens::ceil_div(g.M_total, BLOCK_SIZE) * g.bpc;
+        const size_t buf_bytes =
+            static_cast<size_t>(T_max) * BLOCK_SIZE * BLOCK_SIZE * sizeof(float);
+        hipMallocAsync(reinterpret_cast<void**>(&sk_partial_buf_owned),
+                       buf_bytes, g.stream);
+        hipMemsetAsync(sk_partial_buf_owned, 0, buf_bytes, g.stream);
+        g.sk_partial_buf = sk_partial_buf_owned;
+    }
+
     if (g.bpc > 0 && g.ki > 0) {
         // Round-12: launch-uniform branch on N alignment selects the
         // masked-vs-raw store variant at compile time. DSV3 N=4096/7168
@@ -8048,6 +8114,19 @@ void dispatch_grouped_rcr(grouped_layout_globals g) {
             grouped_tail_kernel<Layout::RCR>
                 <<<tail_grid, tail_block, 0, g.stream>>>(g);
         }
+    }
+
+    // Round-13a (gpt_oss FP8 kernel-only ceiling): release the K-split
+    // partial buffer allocated above. hipFreeAsync is stream-ordered:
+    // the actual free executes after all pending work on g.stream
+    // completes, so the main + tail kernel launches above (which by
+    // the time R13b lands will read sk_partial_buf via atomic-add)
+    // are guaranteed to have consumed the buffer first. nullptr on
+    // every production call (g.sk_split_n=0 default), so this is a
+    // host-side compare + jump-not-taken with no HIP API call on the
+    // production path.
+    if (sk_partial_buf_owned != nullptr) {
+        hipFreeAsync(sk_partial_buf_owned, g.stream);
     }
 }
 
