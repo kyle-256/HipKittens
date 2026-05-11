@@ -1241,6 +1241,7 @@ void dispatch_gemm(layout_globals g) {
     }
 }
 
+#ifndef PRIMUS_TURBO_HK_INTEGRATION
 static void gemm_dispatch(pybind11::object a, pybind11::object b, pybind11::object c,
                           int gm, int num_xcds, const char* layout_name) {
     auto c_gl = py::from_object<_gl>::make(c);
@@ -1264,6 +1265,7 @@ static void rrr(pybind11::object a, pybind11::object b, pybind11::object c, int 
 static void crr(pybind11::object a, pybind11::object b, pybind11::object c, int gm, int num_xcds) {
     gemm_dispatch(a, b, c, gm, num_xcds, "crr");
 }
+#endif  // PRIMUS_TURBO_HK_INTEGRATION
 
 // =============================================================================
 // Persistent grouped GEMM (CPU-sync-free).
@@ -3261,7 +3263,59 @@ void dispatch_grouped(grouped_layout_globals g) {
     const bool lds_k_tail_safe_for_fuse = (g.m_per_group >= TAIL_BLOCK_M) &&
                                           ((g.m_per_group % TAIL_BLOCK_M) == 0);
 #ifndef BF16_RRR_FUSE_PROBE
-#define BF16_RRR_FUSE_PROBE 0
+// Force-enable RRR K-tail fuse when included under the Primus-Turbo
+// csrc embed: the fuse code was added in upstream HK as a "probe" but
+// gating-disabled by default. Enabling avoids the bf16→fp32→bf16 RMW
+// in the tail kernel that was breaking check_allclose on dgrad
+// (RRR-via-trans_b=False), which had forced the Python backend to
+// reroute through a costly bf16_transpose_3d → RCR fast path. With
+// fuse enabled here AND fuse_handles_all_cells extended to RRR
+// (see below), the tail launch is skipped entirely on aligned shapes.
+//
+// =========================================================================
+// TODO(upstream): RRR small-N perf cliff
+// =========================================================================
+// RRR direct (with this fuse enabled) is correct (SNR 45 dB on K=2880)
+// but exhibits a hard performance ceiling on small N due to B's HBM
+// access pattern. Measured on MI355X for gpt_oss-20B Balanced shapes:
+//
+//   shape          BLOCK_N tiles  HK-RRR-direct  HK-RCR-via-H4
+//   -----------------------------------------------------------
+//   GateUP N=5760     23          1300+ TF       880-1300 TF   ← RRR wins
+//   Down   N=2880     12          470-540 TF     700-1050 TF   ← RCR wins
+//
+// Root cause: B is stored [G, K, N] with N as the inner (stride-1) dim.
+// The main K-loop reads a [K_STEP=64, BLOCK_N=128] tile per iter; each
+// successive K-iter reads new K-rows whose addresses are N*sizeof(bf16)
+// apart (= 5760 B for N=2880 → 11520 B for stride). For small N this
+// puts each K-row in a different L1 cache line with NO temporal reuse
+// across K-iters within an output tile. RCR (B as [N, K]) iterates K
+// along the inner dim where L1 cache-line spatial locality holds.
+//
+// Sweep across (group_m, num_xcds) ∈ {(1,4),(2,4),(2,32),(4,4),(4,8),
+// (4,32),(8,4),(16,4),(24,2)} confirmed 470-540 TF flat plateau on
+// Down — not a scheduling issue, fundamental memory-pattern bound.
+// HBM-bandwidth lower bound for the shape is ~68us; actual run is
+// ~258us, a ~4× gap pointing at L1/L2 cache-miss latency rather than
+// raw bandwidth.
+//
+// Candidate fix: deepen B's LDS double-buffer to 3 K-pairs (Bs[3][2]
+// instead of Bs[2][2]) so the main loop has 2 iters of compute (~512
+// cycles) to overlap each L2-miss latency vs the current 1 iter (~256
+// cycles). Blocked by LDS budget: Bs[3][2] = 96 KB + As[2][2] = 64 KB
+// + static {s_offs, s_cum_tiles} = ~528 B totals 160.5 KB > the 160 KB
+// per-CU LDS limit on gfx950. Either trim MAX_G_PLUS_1 to 33 entries
+// (saves 256 B, still 256 B short) or move {s_offs, s_cum_tiles} into
+// the dynamic shared pool. Workaround in Primus-Turbo: dispatch by N
+// — RRR direct for N ≥ 4096, H4 reroute (transpose then RCR) for
+// smaller N. See primus_turbo/pytorch/kernels/grouped_gemm/
+// grouped_gemm_impl.py::GroupedGEMMHipKittenBackend.execute.
+// =========================================================================
+#  ifdef PRIMUS_TURBO_HK_INTEGRATION
+#    define BF16_RRR_FUSE_PROBE 1
+#  else
+#    define BF16_RRR_FUSE_PROBE 0
+#  endif
 #endif
     static const bool fuse_disable_probe = []() {
         const char* env = std::getenv("BF16_FUSE_DISABLE");
@@ -3323,8 +3377,11 @@ void dispatch_grouped(grouped_layout_globals g) {
     const bool need_tail_run =
         (g.fast_k != g.k) ||
         (!main_covers_n && g.fast_n != g.n);
+    // RRR fuse landed (BF16_RRR_FUSE_PROBE) — the main kernel writes the
+    // full K reduction including K-tail, so the tail kernel must NOT
+    // run for those cells (it would RMW-double-count the K-tail).
     const bool fuse_handles_all_cells =
-        fuse_ktail_eligible && (L == Layout::RCR);
+        fuse_ktail_eligible && (L == Layout::RCR || L == Layout::RRR);
     if (need_tail_run && !fuse_handles_all_cells) {
         const int K_rem = g.k - g.fast_k;
         const bool lds_k_tail_safe = (g.m_per_group >= TAIL_BLOCK_M) &&
@@ -3405,6 +3462,7 @@ void dispatch_grouped(grouped_layout_globals g) {
     }
 }
 
+#ifndef PRIMUS_TURBO_HK_INTEGRATION
 static void grouped_dispatch(pybind11::object a, pybind11::object b, pybind11::object c,
                              pybind11::object group_offs, int gm, int num_xcds,
                              int m_per_group, const char* layout_name) {
@@ -3426,6 +3484,7 @@ static void grouped_dispatch(pybind11::object a, pybind11::object b, pybind11::o
     else if (layout_name[0] == 'r' && layout_name[1] == 'r') dispatch_grouped<Layout::RRR>(g);
     else dispatch_grouped<Layout::CRR>(g);
 }
+#endif  // PRIMUS_TURBO_HK_INTEGRATION
 
 struct grouped_var_k_layout_globals {
     _gl a;                       // [1, 1, M_total, n] — grad_out
@@ -3697,6 +3756,7 @@ void dispatch_grouped_var_k(grouped_var_k_layout_globals g) {
     launch_grouped_var_k(g);
 }
 
+#ifndef PRIMUS_TURBO_HK_INTEGRATION
 static void grouped_var_k_crr_fn(pybind11::object a, pybind11::object b, pybind11::object c,
                                  pybind11::object group_offs, int gm, int num_xcds) {
     auto group_offs_ptr = group_offs.attr("data_ptr")().cast<uintptr_t>();
@@ -3756,3 +3816,4 @@ PYBIND11_MODULE(tk_bf16_layouts, m) {
     m.attr("BLOCK_SIZE") = BLOCK_SIZE;
     m.attr("K_STEP") = K_STEP;
 }
+#endif  // PRIMUS_TURBO_HK_INTEGRATION

@@ -1495,8 +1495,26 @@ template __global__ void gemm_tail_kernel<Layout::RRR>(const layout_globals);
 template __global__ void gemm_tail_kernel<Layout::CRR>(const layout_globals);
 
 namespace fused_act_round4_compile_test {
+// Definition inlined here (was forward-declared previously) so -fgpu-rdc
+// builds (Primus-Turbo csrc integration) link cleanly without relying on
+// late-defined hidden symbols.
 __device__ __forceinline__ uint32_t cvt_bf16x4_to_fp8x4(
-    bf16_2 lo, bf16_2 hi, float scale);
+    bf16_2 lo, bf16_2 hi, float scale)
+{
+    float2 lo_f = __bfloat1622float2(lo);
+    float2 hi_f = __bfloat1622float2(hi);
+    lo_f.x *= scale; lo_f.y *= scale;
+    hi_f.x *= scale; hi_f.y *= scale;
+    int dummy_old;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wuninitialized"
+    uint32_t packed = __builtin_amdgcn_cvt_pk_fp8_f32(
+        lo_f.x, lo_f.y, dummy_old, /*sel=*/false);
+    packed = __builtin_amdgcn_cvt_pk_fp8_f32(
+        hi_f.x, hi_f.y, packed, /*sel=*/true);
+#pragma clang diagnostic pop
+    return packed;
+}
 }  // namespace fused_act_round4_compile_test
 
 struct grouped_layout_globals_fused_act {
@@ -4739,6 +4757,7 @@ void dispatch(layout_globals g) {
     }
 }
 
+#ifndef PRIMUS_TURBO_HK_INTEGRATION
 static float to_float(pybind11::object obj) {
     if (pybind11::hasattr(obj, "item"))
         return obj.attr("item")().cast<float>();
@@ -4998,30 +5017,12 @@ static void grouped_variable_k_crr_dscale_fp8_fn(
     };
     dispatch_grouped_var_k_fp8(g);
 }
+#endif  // !PRIMUS_TURBO_HK_INTEGRATION (close range #1)
 
-// Mode selector: 0 = raw amax, 1 = scale = fp8_max / max(eps, amax).
 namespace fused_act_round4_compile_test {
 
-__device__ __forceinline__ uint32_t cvt_bf16x4_to_fp8x4(
-    bf16_2 lo,    // bf16 lanes 0, 1
-    bf16_2 hi,    // bf16 lanes 2, 3
-    float scale)  // a_scale_inv = FP8_MAX / amax(a)
-{
-    float2 lo_f = __bfloat1622float2(lo);
-    float2 hi_f = __bfloat1622float2(hi);
-    lo_f.x *= scale; lo_f.y *= scale;
-    hi_f.x *= scale; hi_f.y *= scale;
-
-    int dummy_old;
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wuninitialized"
-    uint32_t packed = __builtin_amdgcn_cvt_pk_fp8_f32(
-        lo_f.x, lo_f.y, dummy_old, /*sel=*/false);
-    packed = __builtin_amdgcn_cvt_pk_fp8_f32(
-        hi_f.x, hi_f.y, packed, /*sel=*/true);
-#pragma clang diagnostic pop
-    return packed;
-}
+// (cvt_bf16x4_to_fp8x4 definition relocated to line 1501 above for
+// -fgpu-rdc compatibility; the test kernel below still uses it.)
 
 // Compile-test kernel: round-trips one bf16x4 → fp8x4 cvt. Forces LLVM to
 // emit codegen so any cvt-builtin issue surfaces at build time. Single-thread
