@@ -25,6 +25,7 @@ We support CDNA3 and CDNA 4.
 - [January 2026] HipKittens is accepted to [MLSys 2026 in Seattle]()!
 - [February 2026] Will presented HipKittens as a GPU Mode lecture, [check it out](https://www.youtube.com/watch?v=jsYyF03Fs3o)!
 - [March 2026] HipKittens is officially an AITER backend! The first [HK kernels have landed in AITER](https://github.com/ROCm/aiter/pull/2039)!
+- [May 2026] `turbo` branch adds production FP8 (E4M3) + BF16 grouped GEMM kernels for MoE training under `analysis/{fp8,bf16}_gemm/mi350x/`, integrated as a backend in [Primus-Turbo](https://github.com/AMD-AGI/Primus-Turbo). On gpt_oss-20B Expert grouped GEMM (B=32) the kernels run +9% over Triton on FWD and +54% over Triton on BWD.
 
 ## Setup
 

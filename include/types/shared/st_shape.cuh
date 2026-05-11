@@ -19,6 +19,7 @@ namespace st_shape {
 struct st_16x16 {
     static constexpr int rows = 16;
     static constexpr int cols = 16;
+    static constexpr int subtile_padding = 0;
 
     template<typename _T>
     static constexpr int bytes_per_thread() {
@@ -48,6 +49,7 @@ struct st_16x16 {
 struct st_16x16_swizzled {
     static constexpr int rows = 16;
     static constexpr int cols = 16;
+    static constexpr int subtile_padding = 0;
 
     template<typename _T>
     static constexpr int bytes_per_thread() {
@@ -83,6 +85,7 @@ struct st_16x16_swizzled {
 struct st_32x32 {
     static constexpr int rows = 32;
     static constexpr int cols = 32;
+    static constexpr int subtile_padding = 0;
 
     template<typename _T>
     static constexpr int bytes_per_thread() {
@@ -116,6 +119,7 @@ struct st_32x32 {
 struct st_16x32 {
     static constexpr int rows = 16;
     static constexpr int cols = 32;
+    static constexpr int subtile_padding = 0;
 
     template<typename _T>
     static constexpr int bytes_per_thread() {
@@ -148,6 +152,7 @@ struct st_16x32 {
 struct st_32x16 {
     static constexpr int rows = 32;
     static constexpr int cols = 16;
+    static constexpr int subtile_padding = 0;
 
     template<typename _T>
     static constexpr int bytes_per_thread() {
@@ -180,6 +185,7 @@ struct st_32x16 {
 struct st_8x32 {
     static constexpr int rows = 8;
     static constexpr int cols = 32;
+    static constexpr int subtile_padding = 0;
 
     template<typename _T>
     static constexpr int bytes_per_thread() {
@@ -208,6 +214,7 @@ struct st_8x32 {
 struct st_16x128 {
     static constexpr int rows = 16;
     static constexpr int cols = 128;
+    static constexpr int subtile_padding = 0;
 
     template<typename _T>
     static constexpr int bytes_per_thread() {
@@ -235,6 +242,187 @@ struct st_16x128 {
     }
 };
 
+struct st_16x128_v2 {
+    static constexpr int rows = 16;
+    static constexpr int cols = 128;
+    static constexpr int subtile_padding = 128;
+
+    template<typename _T>
+    static constexpr int bytes_per_thread() {
+        if constexpr (sizeof(_T) == 1) {
+            return 16;
+        } else {
+            static_assert(false, "Unsupported type");
+        }
+    }
+
+    template<typename _T>
+    __device__ __forceinline__ static const uint32_t swizzle (int2 coord) {
+        const int r = coord.x, c = coord.y;
+        using T = _T;
+
+        const uint32_t offset = sizeof(T)*(r*cols + c);
+
+        if constexpr (sizeof(T) == 1) {
+            const int swizzle = ((offset >> 7) & 7) << 4;
+            const int swizzled_offset = offset ^ swizzle;
+            return swizzled_offset;
+        } else {
+            static_assert(false, "Unsupported type");
+        }
+    }
+};
+
+struct st_16x128_v2a {
+    static constexpr int rows = 16;
+    static constexpr int cols = 128;
+    static constexpr int subtile_padding = 128;
+
+    template<typename _T>
+    static constexpr int bytes_per_thread() {
+        if constexpr (sizeof(_T) == 1) {
+            return 16;
+        } else {
+            static_assert(false, "Unsupported type");
+        }
+    }
+
+    template<typename _T>
+    __device__ __forceinline__ static const uint32_t swizzle (int2 coord) {
+        const int r = coord.x, c = coord.y;
+        using T = _T;
+        const uint32_t offset = sizeof(T)*(r*cols + c);
+        if constexpr (sizeof(T) == 1) {
+            const int swizzle = ((offset >> 7) & 7) << 4;
+            const int swizzled_offset = offset ^ swizzle;
+            return swizzled_offset;
+        } else {
+            static_assert(false, "Unsupported type");
+        }
+    }
+};
+
+struct st_16x128_v3 {
+    static constexpr int rows = 16;
+    static constexpr int cols = 128;
+    static constexpr int subtile_padding = 0;
+
+    template<typename _T>
+    static constexpr int bytes_per_thread() {
+        if constexpr (sizeof(_T) == 1) {
+            return 16;
+        } else {
+            static_assert(false, "Unsupported type");
+        }
+    }
+
+    template<typename _T>
+    __device__ __forceinline__ static const uint32_t swizzle (int2 coord) {
+        const int r = coord.x, c = coord.y;
+        using T = _T;
+
+        const uint32_t offset = sizeof(T)*(r*cols + c);
+
+        if constexpr (sizeof(T) == 1) {
+            const int swizzle = (r & 15) << 3;
+            const int swizzled_offset = offset ^ swizzle;
+            return swizzled_offset;
+        } else {
+            static_assert(false, "Unsupported type");
+        }
+    }
+};
+
+struct st_64x32_padded_b128 {
+    static constexpr int rows = 64;
+    static constexpr int cols = 32;
+    static constexpr int subtile_padding = 32;
+
+    template<typename _T>
+    static constexpr int bytes_per_thread() {
+        if constexpr (sizeof(_T) == 2) {
+            return 16;
+        } else {
+            static_assert(false, "Unsupported type");
+        }
+    }
+
+    template<typename _T>
+    __device__ __forceinline__ static const uint32_t swizzle (int2 coord) {
+        const int r = coord.x, c = coord.y;
+        using T = _T;
+        const uint32_t offset = sizeof(T)*(r*cols + c);
+        if constexpr (sizeof(T) == 2) {
+            // Identity: padding lives between subtiles, not inside.
+            return offset;
+        } else {
+            static_assert(false, "Unsupported type");
+        }
+    }
+};
+
+struct st_32x64 {
+    static constexpr int rows = 32;
+    static constexpr int cols = 64;
+    // Match the ST_v2 family's subtile padding convention (64 B = one
+    // row) so that downstream prefill_swizzled_offsets + subtile
+    // logic in include/ops/warp/memory/tile/global_to_shared.cuh can
+    // compose via the same underlying_subtile_stride_bytes code path.
+    static constexpr int subtile_padding = 64;
+
+    template<typename _T>
+    static constexpr int bytes_per_thread() {
+        if constexpr (sizeof(_T) == 1) {
+            return 16;
+        } else {
+            static_assert(false, "Unsupported type");
+        }
+    }
+
+    template<typename _T>
+    __device__ __forceinline__ static const uint32_t swizzle (int2 coord) {
+        const int r = coord.x, c = coord.y;
+        using T = _T;
+        const uint32_t offset = sizeof(T)*(r*cols + c);
+        if constexpr (sizeof(T) == 1) {
+            // Step 1 (infra validation): identity swizzle. Step 2+
+            // will XOR in a bank-conflict-avoidance term once the
+            // mfma_323264 input lane map is derived (mirror of the
+            // st_16x128_v2 XOR pattern: ``((offset >> 7) & 7) << 4``
+            // adapted for the 64 B row stride of the 32x64 layout).
+            return offset;
+        } else {
+            static_assert(false, "Unsupported type");
+        }
+    }
+};
+
+struct st_128x16 {
+    static constexpr int rows = 128;
+    static constexpr int cols = 16;
+    static constexpr int subtile_padding = 0;
+
+    template<typename _T>
+    static constexpr int bytes_per_thread() {
+        if constexpr (sizeof(_T) == 1) {
+            return 16;
+        } else {
+            static_assert(false, "Unsupported type");
+        }
+    }
+
+    template<typename _T>
+    __device__ __forceinline__ static const uint32_t swizzle (int2 coord) {
+        using T = _T;
+        const uint32_t offset = sizeof(T)*(coord.x*cols + coord.y);
+        if constexpr (sizeof(T) == 1) {
+            return offset;
+        } else {
+            static_assert(false, "Unsupported type");
+        }
+    }
+};
+
 template<typename T>
 concept all = std::is_same_v<T, st_16x16> || 
               std::is_same_v<T, st_16x16_swizzled> || 
@@ -242,7 +430,13 @@ concept all = std::is_same_v<T, st_16x16> ||
               std::is_same_v<T, st_16x32> || 
               std::is_same_v<T, st_32x16> || 
               std::is_same_v<T, st_8x32>  ||
-              std::is_same_v<T, st_16x128>;
+              std::is_same_v<T, st_16x128> ||
+              std::is_same_v<T, st_16x128_v2> ||
+              std::is_same_v<T, st_16x128_v2a> ||
+              std::is_same_v<T, st_16x128_v3> ||
+              std::is_same_v<T, st_64x32_padded_b128> ||
+              std::is_same_v<T, st_32x64> ||
+              std::is_same_v<T, st_128x16>;
 
 
 } // namespace st_shape
