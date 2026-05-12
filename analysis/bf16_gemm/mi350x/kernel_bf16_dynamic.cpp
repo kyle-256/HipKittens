@@ -283,9 +283,28 @@ __device__ __forceinline__ void store_c_tile_mn_masked_grouped(
     const int row_offset = src.base_tile_stride * (laneid / src.base_tile_cols);
     const int col_offset = laneid % src.base_tile_cols;
 
-    uint32_t buffer_size = g_c.batch() * g_c.depth() * g_c.rows() * g_c.cols() * sizeof(U);
-    std::uintptr_t as_int = reinterpret_cast<std::uintptr_t>(dst_ptr);
-    std::uint64_t  as_u64 = static_cast<std::uint64_t>(as_int);
+    // SRD size = bytes from tile start to tensor end. Previous formulation
+    // used full_tensor_size with mid-tensor base, which let late-tile stores
+    // reach offsets beyond the actual mapped region → "Memory access fault
+    // by GPU node-N" on shapes where any output dim was BLOCK_SIZE-misaligned
+    // (gpt_oss N=5760, K=2880). The per-row m_limit/n_limit lambda guards
+    // already drop OOB-of-tensor stores; this size shrink adds a fault-safe
+    // outer bound for lanes that slip past the per-row guards.
+    const std::uintptr_t tensor_base_int =
+        reinterpret_cast<std::uintptr_t>(&g_c[(coord<>{0, 0, 0, 0})]);
+    const std::uint64_t  tensor_size_total =
+        static_cast<std::uint64_t>(g_c.batch()) *
+        static_cast<std::uint64_t>(g_c.depth()) *
+        static_cast<std::uint64_t>(g_c.rows())  *
+        static_cast<std::uint64_t>(g_c.cols())  *
+        static_cast<std::uint64_t>(sizeof(U));
+    const std::uintptr_t tensor_end_int = tensor_base_int + tensor_size_total;
+    const std::uintptr_t dst_int = reinterpret_cast<std::uintptr_t>(dst_ptr);
+    const std::uint64_t  remaining_bytes64 =
+        (dst_int < tensor_end_int) ? (tensor_end_int - dst_int) : 0;
+    const uint32_t buffer_size = static_cast<uint32_t>(
+        remaining_bytes64 > 0xFFFFFFFFu ? 0xFFFFFFFFu : remaining_bytes64);
+    std::uint64_t  as_u64 = static_cast<std::uint64_t>(dst_int);
     buffer_resource br = make_buffer_resource(as_u64, buffer_size, 0x00020000);
     i32x4 srsrc = std::bit_cast<i32x4>(br);
 
@@ -398,6 +417,34 @@ __device__ __forceinline__ void device_gemm_tile_body(
             return coord<ST_B_T>{0, group_idx, k_offset_tiles + k, spatial};
     };
 
+    // CRR-layout helpers: clamp the spatial arg to the last fully in-bounds
+    // slab. raw_buffer_load_lds is supposed to no-op on OOB voffsets, but
+    // on gfx950 a fully-OOB 64×128 BF16 prefetch via G::load reliably
+    // faults a downstream store on shapes where the global tensor's last
+    // dim is not a multiple of 2*HALF_BLOCK_SIZE (gpt_oss N=5760 K=2880
+    // wgrad). Loaded data is downstream-discarded for the clamped slabs —
+    // the store-helper's m_limit/n_limit early-return drops every output
+    // cell that would have used those slabs.
+    auto a_coord_safe = [&](int spatial, int k) {
+        if constexpr (L == Layout::CRR) {
+            const int spatial_abs  = m_subtile_A + spatial;
+            const int last_safe    = static_cast<int>(a_gl.cols()) / HALF_BLOCK_SIZE - 1;
+            const int spatial_safe = (spatial_abs <= last_safe) ? spatial_abs : last_safe;
+            return a_coord(spatial_safe - m_subtile_A, k);
+        } else {
+            return a_coord(spatial, k);
+        }
+    };
+    auto b_coord_safe = [&](int spatial, int k) {
+        if constexpr (L == Layout::CRR) {
+            const int last_safe    = static_cast<int>(b_gl.cols()) / HALF_BLOCK_SIZE - 1;
+            const int spatial_safe = (spatial <= last_safe) ? spatial : last_safe;
+            return b_coord(spatial_safe, k);
+        } else {
+            return b_coord(spatial, k);
+        }
+    };
+
     auto load_a_subtile = [&](A_reg_t& dst, auto& smem_tile, int warp_idx) {
         if constexpr (L == Layout::CRR) {
             auto sub = subtile_inplace<K_STEP, HALF_REG_BLOCK_M>(smem_tile, {0, warp_idx});
@@ -445,8 +492,8 @@ __device__ __forceinline__ void device_gemm_tile_body(
     /********** Prologue: load first two K-tiles **********/
     G::load(Bs[tic][0], b_gl, b_coord(col*2, 0), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_00);
     G::load(As[tic][0], a_gl, a_coord(row*2, 0), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_00);
-    G::load(Bs[tic][1], b_gl, b_coord(col*2+1, 0), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_01);
-    G::load(As[tic][1], a_gl, a_coord(row*2+1, 0), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_01);
+    G::load(Bs[tic][1], b_gl, b_coord_safe(col*2+1, 0), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_01);
+    G::load(As[tic][1], a_gl, a_coord_safe(row*2+1, 0), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_01);
 
     if (warp_row == 1) { __builtin_amdgcn_s_barrier(); }
     asm volatile("s_waitcnt vmcnt(4)");
@@ -454,7 +501,7 @@ __device__ __forceinline__ void device_gemm_tile_body(
 
     G::load(Bs[toc][0], b_gl, b_coord(col*2, 1), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_10);
     G::load(As[toc][0], a_gl, a_coord(row*2, 1), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_10);
-    G::load(Bs[toc][1], b_gl, b_coord(col*2+1, 1), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_11);
+    G::load(Bs[toc][1], b_gl, b_coord_safe(col*2+1, 1), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_11);
 
     asm volatile("s_waitcnt vmcnt(6)");
     __builtin_amdgcn_s_barrier();
@@ -463,7 +510,7 @@ __device__ __forceinline__ void device_gemm_tile_body(
     auto main_loop_iter = [&](int tile) {
         load_b_subtile(B_tile_0, Bs[0][0], warp_col);
         load_a_subtile(A_tile, As[0][0], warp_row);
-        G::load(As[1][1], a_gl, a_coord(row*2+1, tile+1), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_11);
+        G::load(As[1][1], a_gl, a_coord_safe(row*2+1, tile+1), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_11);
         asm volatile("s_waitcnt lgkmcnt(8)");
         __builtin_amdgcn_s_barrier();
 
@@ -497,7 +544,7 @@ __device__ __forceinline__ void device_gemm_tile_body(
         __builtin_amdgcn_sched_barrier(0);
 
         load_b_subtile(B_tile_0, Bs[1][0], warp_col);
-        G::load(Bs[0][1], b_gl, b_coord(col*2+1, tile+2), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_01);
+        G::load(Bs[0][1], b_gl, b_coord_safe(col*2+1, tile+2), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_01);
         asm volatile("s_waitcnt vmcnt(6)");
         __builtin_amdgcn_s_barrier();
 
@@ -508,7 +555,7 @@ __device__ __forceinline__ void device_gemm_tile_body(
         __builtin_amdgcn_sched_barrier(0);
 
         load_a_subtile(A_tile, As[1][0], warp_row);
-        G::load(As[0][1], a_gl, a_coord(row*2+1, tile+2), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_01);
+        G::load(As[0][1], a_gl, a_coord_safe(row*2+1, tile+2), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_01);
         asm volatile("s_waitcnt lgkmcnt(8)");
         __builtin_amdgcn_s_barrier();
 
@@ -520,7 +567,9 @@ __device__ __forceinline__ void device_gemm_tile_body(
         __builtin_amdgcn_sched_barrier(0);
 
         load_b_subtile(B_tile_1, Bs[1][1], warp_col);
-        G::load(Bs[1][0], b_gl, b_coord(col*2, tile+3), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_10);
+        if (tile + 4 < num_tiles_dyn) {
+            G::load(Bs[1][0], b_gl, b_coord(col*2, tile+3), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_10);
+        }
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
@@ -531,7 +580,9 @@ __device__ __forceinline__ void device_gemm_tile_body(
         __builtin_amdgcn_sched_barrier(0);
 
         load_a_subtile(A_tile, As[1][1], warp_row);
-        G::load(As[1][0], a_gl, a_coord(row*2, tile+3), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_10);
+        if (tile + 4 < num_tiles_dyn) {
+            G::load(As[1][0], a_gl, a_coord(row*2, tile+3), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_10);
+        }
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
@@ -541,7 +592,16 @@ __device__ __forceinline__ void device_gemm_tile_body(
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
-        G::load(Bs[1][1], b_gl, b_coord(col*2+1, tile+3), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_11);
+        // Skip the tile+3 prefetch on the LAST main-loop iter (= tile+4 == num_tiles_dyn).
+        // For ki_g >= 63 (gpt_oss B>=4 M>=4096 wgrad shapes), this prefetch
+        // combined with the prior tile+3 prefetches in the same iter triggers
+        // a downstream "Memory access fault by GPU node-N" on misaligned-N
+        // shapes. The prefetched tile is K=tile+3 = ki_g-1 (already loaded
+        // by the main loop's prior iter's tile+1 prefetch path or used by
+        // Epilog 1 directly), so dropping it on the last iter is safe.
+        if (tile + 4 < num_tiles_dyn) {
+            G::load(Bs[1][1], b_gl, b_coord_safe(col*2+1, tile+3), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_11);
+        }
         asm volatile("s_waitcnt vmcnt(6)");
         __builtin_amdgcn_s_barrier();
 
@@ -572,7 +632,7 @@ __device__ __forceinline__ void device_gemm_tile_body(
         const int tile = (KI_HINT > 0) ? (KI_HINT - 2) : (num_tiles_dyn - 2);
         load_b_subtile(B_tile_0, Bs[tic][0], warp_col);
         load_a_subtile(A_tile, As[tic][0], warp_row);
-        G::load(As[toc][1], a_gl, a_coord(row*2+1, tile+1), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_11);
+        G::load(As[toc][1], a_gl, a_coord_safe(row*2+1, tile+1), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_11);
         __builtin_amdgcn_s_barrier();
         asm volatile("s_waitcnt lgkmcnt(0)");
 
@@ -756,7 +816,7 @@ __device__ __forceinline__ void device_gemm_tile_body(
 
             G::load(Bs[1][0], b_gl, b_coord(col*2,   k_tail_tile),
                     swizzled_offsets_B, b_srsrc_base, b_base, b_lds_10);
-            G::load(Bs[1][1], b_gl, b_coord(col*2+1, k_tail_tile),
+            G::load(Bs[1][1], b_gl, b_coord_safe(col*2+1, k_tail_tile),
                     swizzled_offsets_B, b_srsrc_base, b_base, b_lds_11);
             asm volatile("s_waitcnt vmcnt(0) lgkmcnt(0)" ::: "memory");
             __syncthreads();
