@@ -2139,7 +2139,7 @@ template __global__ void grouped_rcr_kernel<0, true , true >(const grouped_layou
 #ifndef FP8_RRR_FUSE_PROBE
 #define FP8_RRR_FUSE_PROBE 0
 #endif
-template<int KI_HINT = 0, bool N_MASKED_STORE = false>
+template<int KI_HINT = 0, bool N_MASKED_STORE = false, bool FUSED_KTAIL = false>
 __global__ __launch_bounds__(_NUM_THREADS, 1)
 void grouped_rrr_kernel(const grouped_layout_globals g) {
     __shared__ ST_row As[2][2];
@@ -2366,6 +2366,119 @@ void grouped_rrr_kernel(const grouped_layout_globals g) {
             __builtin_amdgcn_s_barrier();
         }
 
+        // ===== FUSED_KTAIL (RRR FP8) =====
+        // K-tail K_REM=64 reduction fused into main kernel epilog. Both A
+        // AND B loaded direct-to-register via raw_buffer_load_b8 to avoid
+        // the load_col_from_st (ds_read_b64_tr_b8) path that triggers a
+        // mfma operand-forwarding quirk for RRR. Per-group SRD bounds
+        // protect against cross-group/OOB garbage reads (K_row >= g.k → 0).
+        // K-aligned-to-32 chunks: lane chunks 0,1 carry real data (K=0..64),
+        // chunks 2,3 zeroed (K=64..128, mfma's K=128 zero-pad).
+        if constexpr (FUSED_KTAIL) {
+            if (g.fast_k < g.k) {
+                typedef __attribute__((__vector_size__(8 * sizeof(int)))) int intx8_t;
+                A_row_reg a_kt0, a_kt1;
+                B_col_reg b0_kt, b1_kt;
+
+                const int laneid_fk  = kittens::laneid();
+                const int row_lane_fk = laneid_fk % 16;
+                const int chunk_fk    = laneid_fk / 16;          // 0..3
+                const int k_lane_byte_fk = chunk_fk * 32;
+                const bool ab_chunk_valid = (chunk_fk < 2);      // K=0..64 chunks have real K-tail data
+                constexpr uint32_t SENTINEL_FK = 0xFFFF0000u;
+
+                // ---- Per-group SRDs (so OOB voffset returns 0) ----
+                const fp8e4m3* a_base_ptr_fk =
+                    (const fp8e4m3*)&g.a[{0, 0, 0, 0}];
+                fp8e4m3* b_grp_base = const_cast<fp8e4m3*>(
+                    &g.b[{0, group_idx, 0, 0}]);
+                const uint32_t a_row_stride_bytes_fk = g.a.template stride<2>();
+                const uint32_t b_row_stride_bytes_fk = g.b.template stride<2>();
+                const uint32_t a_total_bytes_fk =
+                    static_cast<uint32_t>(g.M_total) * a_row_stride_bytes_fk;
+                const uint32_t b_grp_total_bytes_fk =
+                    static_cast<uint32_t>(g.k) * b_row_stride_bytes_fk;
+                i32x4 a_srsrc_fk = make_srsrc(
+                    (const void*)a_base_ptr_fk, a_total_bytes_fk);
+                i32x4 b_srsrc_fk = make_srsrc(
+                    (const void*)b_grp_base, b_grp_total_bytes_fk);
+                const uint32_t K_tail_byte_fk =
+                    static_cast<uint32_t>(g.fast_k);
+
+                // ---- Custom A K-tail load (direct-to-reg, mirror RCR) ----
+                auto load_a_kt_fk = [&](A_row_reg& A_tile, int slab)
+                        __attribute__((always_inline)) {
+                    const int M_warp_base =
+                        (m_subtile_A + br * 2 + slab) * HB + wm * RBM;
+                    #pragma unroll
+                    for (int h = 0; h < A_row_reg::height; ++h) {
+                        const int A_row_idx =
+                            M_warp_base + h * 16 + row_lane_fk;
+                        const uint32_t v_base = static_cast<uint32_t>(
+                            A_row_idx * a_row_stride_bytes_fk +
+                            K_tail_byte_fk + k_lane_byte_fk);
+                        const uint32_t v_lo = ab_chunk_valid ? v_base : SENTINEL_FK;
+                        const uint32_t v_hi = ab_chunk_valid ? (v_base + 16) : SENTINEL_FK;
+                        __uint128_t va0 = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
+                            a_srsrc_fk, v_lo, 0, 0);
+                        __uint128_t va1 = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
+                            a_srsrc_fk, v_hi, 0, 0);
+                        *reinterpret_cast<__uint128_t*>(
+                            &A_tile.tiles[h][0].data[0]) = va0;
+                        *reinterpret_cast<__uint128_t*>(
+                            &A_tile.tiles[h][0].data[4]) = va1;
+                    }
+                };
+
+                // ---- Custom B K-tail load (direct-to-reg, strided gather) ----
+                // For each base tile j (B_col_reg.tiles[0][j], j=0..1) of one
+                // n-strip, lane (l) holds 32 fp8 along K direction at one N
+                // column (col = col_block_base + n_strip*HB + wn*RBN + j*16 + l%16).
+                // Each fp8 byte lives at byte position
+                //   (K_idx * b_row_stride + N_col)
+                // → 32 strided 1-byte loads per base tile per lane.
+                auto load_b_kt_fk = [&](B_col_reg& B_tile, int n_strip)
+                        __attribute__((always_inline)) {
+                    const int N_warp_base =
+                        (bc * 2 + n_strip) * HB + wn * RBN;
+                    #pragma unroll
+                    for (int j = 0; j < B_col_reg::width; ++j) {
+                        const int n_col = N_warp_base + j * 16 + row_lane_fk;
+                        // Each lane holds 32 fp8 along K, packed into
+                        // .data[8] of fp8e4m3_4. Layout: data[idx][i] holds
+                        // fp8 at K = K_tail + chunk*32 + idx*4 + i.
+                        intx8_t b_pack = intx8_t{};
+                        if (ab_chunk_valid) {
+                            const uint32_t K_base_byte =
+                                K_tail_byte_fk + k_lane_byte_fk;
+                            uint8_t* bp_out = (uint8_t*)&b_pack;
+                            #pragma unroll
+                            for (int i = 0; i < 32; ++i) {
+                                const uint32_t voffset =
+                                    (K_base_byte + i) * b_row_stride_bytes_fk
+                                    + static_cast<uint32_t>(n_col);
+                                bp_out[i] = ::kittens::llvm_amdgcn_raw_buffer_load_b8(
+                                    b_srsrc_fk, voffset, 0, 0);
+                            }
+                        }
+                        *reinterpret_cast<intx8_t*>(
+                            &B_tile.tiles[0][j].data[0]) = b_pack;
+                    }
+                };
+
+                load_b_kt_fk(b0_kt, 0);
+                load_b_kt_fk(b1_kt, 1);
+                load_a_kt_fk(a_kt0, 0);
+                load_a_kt_fk(a_kt1, 1);
+                asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
+                rrr_mma(cA, a_kt0, b0_kt);
+                rrr_mma(cB, a_kt0, b1_kt);
+                rrr_mma(cC, a_kt1, b0_kt);
+                rrr_mma(cD, a_kt1, b1_kt);
+                __builtin_amdgcn_s_barrier();
+            }
+        }
+
 #if FP8_RRR_FUSE_PROBE
         if (g.fast_k < g.k) {
             // ---- Cooperative pre-zero of Bs[tic][0/1] ----
@@ -2488,8 +2601,10 @@ void grouped_rrr_kernel(const grouped_layout_globals g) {
     }
 }
 
-template __global__ void grouped_rrr_kernel<0, false>(const grouped_layout_globals);
-template __global__ void grouped_rrr_kernel<0, true >(const grouped_layout_globals);
+template __global__ void grouped_rrr_kernel<0, false, false>(const grouped_layout_globals);
+template __global__ void grouped_rrr_kernel<0, true , false>(const grouped_layout_globals);
+template __global__ void grouped_rrr_kernel<0, false, true >(const grouped_layout_globals);
+template __global__ void grouped_rrr_kernel<0, true , true >(const grouped_layout_globals);
 
 // =============================================================================
 // Grouped tail kernel — scalar fp32 fixup for cells the main grouped kernel
@@ -4462,12 +4577,24 @@ void dispatch_grouped_rrr(grouped_layout_globals g) {
     if (g.M_total <= 0 || g.n <= 0 || g.k <= 0 || g.G <= 0) return;
 
     const bool n_aligned = (g.bpc * BLOCK_SIZE == g.n);
+    const int K_rem_for_fuse = g.k - g.fast_k;
+    const bool fuse_ktail_active =
+        (g.bpc > 0) && (g.ki > 0) && (K_rem_for_fuse == 64) &&
+        (g.m_per_group >= HB) && ((g.m_per_group % HB) == 0);
     if (g.bpc > 0 && g.ki > 0) {
-        if (n_aligned) {
-            grouped_rrr_kernel<0, false>
+        if (fuse_ktail_active) {
+            if (n_aligned) {
+                grouped_rrr_kernel<0, false, true>
+                    <<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
+            } else {
+                grouped_rrr_kernel<0, true, true>
+                    <<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
+            }
+        } else if (n_aligned) {
+            grouped_rrr_kernel<0, false, false>
                 <<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
         } else {
-            grouped_rrr_kernel<0, true>
+            grouped_rrr_kernel<0, true, false>
                 <<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
         }
     } else {
@@ -4479,9 +4606,9 @@ void dispatch_grouped_rrr(grouped_layout_globals g) {
         g.ki = 0;
     }
 
-    if (g.fast_k != g.k) {
-        // K-tail correction (RMW). N-tail is now handled by the main
-        // kernel via N_MASKED_STORE, so we only need K-tail launches.
+    if (g.fast_k != g.k && !fuse_ktail_active) {
+        // K-tail correction (RMW). When FUSED_KTAIL handled it inside the
+        // main kernel, skip these launches (they'd double-add).
         const bool lds_k_tail_safe = (g.m_per_group >= TAIL_BLOCK_M) &&
                                      ((g.m_per_group % TAIL_BLOCK_M) == 0);
         const int K_rem = g.k - g.fast_k;
