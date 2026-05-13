@@ -2588,8 +2588,9 @@ __global__ void grouped_tail_kernel(const grouped_layout_globals g) {
         const bool block_in_group =
             (row_block_base + TAIL_BLOCK_M <= s_offs[group_idx + 1]);
         const bool lds_k_rem_match = ((g.k - g.fast_k) == 64);
-        // Skip cells the LDS K-tail kernel already corrected (interior N).
-        if (needs_k_tail && col < g.fast_n &&
+        // LDS K-tail kernel now covers FULL N (interior + N-tail), so skip
+        // any cell it already corrected.
+        if (needs_k_tail &&
             lds_k_tail_safe && lds_k_rem_match && block_in_group) {
             return;
         }
@@ -4484,13 +4485,13 @@ void dispatch_grouped_rrr(grouped_layout_globals g) {
         const bool lds_k_tail_safe = (g.m_per_group >= TAIL_BLOCK_M) &&
                                      ((g.m_per_group % TAIL_BLOCK_M) == 0);
         const int K_rem = g.k - g.fast_k;
-        if (K_rem == 64 && lds_k_tail_safe && g.fast_n > 0) {
-            // Fast LDS K-tail kernel: only covers the aligned-N interior
-            // [0, fast_n). Cells in [fast_n, n) get K-tail correction
-            // from the scalar tail kernel below.
+        if (K_rem == 64 && lds_k_tail_safe) {
+            // LDS K-tail kernel covers FULL N (interior + N-tail). The
+            // kernel's per-cell guards (col >= g.n) and zero-pad cooperative
+            // load handle the N-tail strip [fast_n, n) safely.
             dim3 lds_block(TAIL_BLOCK_N, TAIL_BLOCK_M);
             dim3 lds_grid(
-                kittens::ceil_div(g.fast_n, TAIL_BLOCK_N),
+                kittens::ceil_div(g.n, TAIL_BLOCK_N),
                 kittens::ceil_div(g.M_total, TAIL_BLOCK_M)
             );
             grouped_ktail_kernel_lds_rrr<64>
@@ -4498,9 +4499,7 @@ void dispatch_grouped_rrr(grouped_layout_globals g) {
         }
 
         // Scalar K-tail RMW for cells the LDS kernel didn't cover
-        // (cross-group blocks, m_per_group misalign, K-tail != 64) AND
-        // for the N-tail region [fast_n, n) where main kernel wrote a
-        // value missing the K-tail contribution.
+        // (cross-group blocks, m_per_group misalign, K-tail != 64).
         dim3 tail_block(TAIL_BLOCK_N, TAIL_BLOCK_M);
         dim3 tail_grid(
             kittens::ceil_div(g.n, TAIL_BLOCK_N),
