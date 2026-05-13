@@ -4560,7 +4560,35 @@ void dispatch_grouped_rcr_fused_act(grouped_layout_globals_fused_act g) {
 // Per-group M_g must still be a BLOCK_SIZE multiple (the persistent
 // loop derives ``bpr_g = M_g / BLOCK_SIZE`` and steps in HB units);
 // other invariants are identical to the RCR path.
-// =============================================================================
+//
+// =========================================================================
+// Perf ceiling: dgrad ~1.03x of Triton (overall avg, B={4,16}, M={2K,4K}).
+// rocprofv3 PMC on os-DN-16-4096 (slowest shape):
+//   VALUBusy           ~5.79%   <- kernel mostly idle, memory-stalled
+//   MfmaUtil           ~0.00%   <- (counter unreliable for f8f6f4 mfma)
+//   LDSBankConflict    0
+//   TCC (L2) HIT       310,416 / call
+//   TCC (L2) MISS      299,346 / call
+//   L2 hit rate        51%      <- POOR; B's [G,K,N] K-stride access
+//                                  pattern misses L1/L2 every K-iter on
+//                                  short-K shapes (N_inner=2880).
+//
+// Path to 1.25x (per BF16 grouped_kernel comment line ~3325-3373):
+// deeper B double-buffer Bs[2][2] -> Bs[3][2] so the main loop has
+// 2 K-iters of compute (~512 cyc) to overlap each L2-miss latency vs
+// current 1-iter (~256 cyc). LDS accounting (FP8):
+//   Bs[3][2]   = 6 slots × 17KB = 102 KB
+//   As[1][2]   = 2 slots × 17KB =  34 KB  (single-K-pair, sacrifices A prefetch)
+//   s_offs etc =                 ~520 B
+//   Total      =                  136 KB    (within 160 KB MI355X limit)
+// Estimated cost of losing A prefetch: +6% per K-iter (A loads block,
+// but A is L1-friendly so impact bounded). Estimated benefit of deep B:
+// +20-50% if L2 miss latency hides successfully. Net: +14-44%.
+//
+// Implementation effort: ~200 lines new code (separate kernel function
+// or DEEP_LDS template arm) + 3-stage pipeline + correctness validation.
+// Profile script: scripts/_profile_fp8_rrr.py.
+// =========================================================================
 void dispatch_grouped_rrr(grouped_layout_globals g) {
     g.n = static_cast<int>(g.c.cols());
     g.M_total = static_cast<int>(g.c.rows());
