@@ -1615,189 +1615,6 @@ template __global__ void gemm_tail_kernel<Layout::RCR>(const layout_globals);
 template __global__ void gemm_tail_kernel<Layout::RRR>(const layout_globals);
 template __global__ void gemm_tail_kernel<Layout::CRR>(const layout_globals);
 
-namespace fused_act_round4_compile_test {
-// Definition inlined here (was forward-declared previously) so -fgpu-rdc
-// builds (Primus-Turbo csrc integration) link cleanly without relying on
-// late-defined hidden symbols.
-__device__ __forceinline__ uint32_t cvt_bf16x4_to_fp8x4(
-    bf16_2 lo, bf16_2 hi, float scale)
-{
-    float2 lo_f = __bfloat1622float2(lo);
-    float2 hi_f = __bfloat1622float2(hi);
-    lo_f.x *= scale; lo_f.y *= scale;
-    hi_f.x *= scale; hi_f.y *= scale;
-    int dummy_old;
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wuninitialized"
-    uint32_t packed = __builtin_amdgcn_cvt_pk_fp8_f32(
-        lo_f.x, lo_f.y, dummy_old, /*sel=*/false);
-    packed = __builtin_amdgcn_cvt_pk_fp8_f32(
-        hi_f.x, hi_f.y, packed, /*sel=*/true);
-#pragma clang diagnostic pop
-    return packed;
-}
-}  // namespace fused_act_round4_compile_test
-
-struct grouped_layout_globals_fused_act {
-    _gl_bf16 a;
-    _gl_fp8 b;
-    _gl_bf16 c;
-    float scale_a, scale_b;
-    const float* dscale_a;
-    const float* dscale_b;
-    const int64_t* group_offs;
-    hipStream_t stream;
-    int G;
-    int n;
-    int k;
-    int ki;
-    int bpc;
-    int group_m;
-    int num_xcds;
-    int M_total;
-    int fast_n, fast_k;
-    int m_per_group;
-    int chunk_size;              // Round-14 (gpt_oss FP8 kernel-only ceiling,
-    dim3 block() { return dim3(_NUM_THREADS); }
-    size_t dynamic_shared_memory() { return 0; }
-};
-
-namespace fused_act_round5_compile_test {
-
-template<int N_THREADS,
-         ducks::st::all ST_DST,
-         ducks::gl::all GL_SRC,
-         ducks::coord::tile COORD = coord<ST_DST>>
-__device__ __forceinline__ void rcr_8w_load_hoist_fused_act(
-    ST_DST& dst,
-    const GL_SRC& src,
-    const COORD& idx,
-    const uint32_t* __restrict__ swizzled_offsets,
-    float scale)
-{
-    using T_DST = typename ST_DST::dtype;
-    using T_SRC = typename GL_SRC::dtype;
-    static_assert(sizeof(T_SRC) == 2, "fused-act expects BF16 src");
-    static_assert(sizeof(T_DST) == 1, "fused-act expects FP8 dst");
-
-    constexpr int dst_bytes_per_thread =
-        ST_DST::underlying_subtile_bytes_per_thread;
-    constexpr int dst_bytes_per_warp =
-        dst_bytes_per_thread * kittens::WARP_THREADS;
-    constexpr int memcpy_per_tile =
-        ST_DST::rows * ST_DST::cols * sizeof(T_DST) /
-        (dst_bytes_per_thread * N_THREADS);
-    static_assert(
-        ST_DST::rows * ST_DST::cols * sizeof(T_DST) >= dst_bytes_per_warp,
-        "shared tile must be at least 1024 bytes"
-    );
-
-    constexpr int num_warps = N_THREADS / kittens::WARP_THREADS;
-    const int warpid = kittens::warpid() % num_warps;
-    const int laneid = kittens::laneid();
-
-    coord<> unit_coord = idx.template unit_coord<2, 3>();
-    T_SRC* tensor_base = (T_SRC*)src.raw_ptr;
-    T_SRC* global_ptr  = (T_SRC*)&src[unit_coord];
-    const uint32_t total_bytes = static_cast<uint32_t>(
-        size_t(src.batch()) * size_t(src.depth()) *
-        size_t(src.rows())  * size_t(src.cols())  * sizeof(T_SRC));
-    i32x4 srsrc = make_srsrc(tensor_base, total_bytes);
-    const uint32_t tile_byte_offset = __builtin_amdgcn_readfirstlane(
-        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(global_ptr) -
-                              reinterpret_cast<uintptr_t>(tensor_base)));
-
-    const uintptr_t lds_tile_base =
-        reinterpret_cast<uintptr_t>(&dst.data[0]);
-
-    uint32_t lds_addrs[memcpy_per_tile + 1];
-    #pragma unroll
-    for (int i = 0; i < memcpy_per_tile; ++i) {
-        const int warp_linear_offset =
-            (warpid * dst_bytes_per_warp) + (i * num_warps * dst_bytes_per_warp);
-        const int lds_subtile_id =
-            warp_linear_offset / ST_DST::underlying_subtile_bytes;
-        const uint32_t off32 = static_cast<uint32_t>(
-            lds_tile_base + warp_linear_offset +
-            lds_subtile_id * ST_DST::subtile_padding);
-        lds_addrs[i] = __builtin_amdgcn_readfirstlane(off32);
-    }
-
-    const uint32_t lds_lane_off = static_cast<uint32_t>(laneid) * 16u;
-
-    #pragma unroll
-    for (int i = 0; i < memcpy_per_tile; ++i) {
-        const uint32_t voff_lo = swizzled_offsets[i] * 2u;
-        const uint32_t voff_hi = voff_lo + 16u;
-
-        __uint128_t v_lo = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
-            srsrc, voff_lo, tile_byte_offset, 0);
-        __uint128_t v_hi = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
-            srsrc, voff_hi, tile_byte_offset, 0);
-
-        bf16_2* bf_lo = reinterpret_cast<bf16_2*>(&v_lo);
-        bf16_2* bf_hi = reinterpret_cast<bf16_2*>(&v_hi);
-
-        u32x4 fp8_pack = {
-            fused_act_round4_compile_test::cvt_bf16x4_to_fp8x4(
-                bf_lo[0], bf_lo[1], scale),
-            fused_act_round4_compile_test::cvt_bf16x4_to_fp8x4(
-                bf_lo[2], bf_lo[3], scale),
-            fused_act_round4_compile_test::cvt_bf16x4_to_fp8x4(
-                bf_hi[0], bf_hi[1], scale),
-            fused_act_round4_compile_test::cvt_bf16x4_to_fp8x4(
-                bf_hi[2], bf_hi[3], scale),
-        };
-
-        const uint32_t lds_addr = lds_addrs[i] + lds_lane_off;
-        ::kittens::macros::ds_write_b128(fp8_pack, lds_addr, /*i_offset=*/0);
-    }
-
-    if constexpr (memcpy_per_tile * (dst_bytes_per_thread * N_THREADS) !=
-                  ST_DST::rows * ST_DST::cols * sizeof(T_DST)) {
-        constexpr int leftover_bytes =
-            ST_DST::rows * ST_DST::cols * sizeof(T_DST) -
-            memcpy_per_tile * (dst_bytes_per_thread * N_THREADS);
-        constexpr int leftover_threads = leftover_bytes / dst_bytes_per_thread;
-        constexpr int leftover_warps   = leftover_threads / kittens::WARP_THREADS;
-        if (warpid < leftover_warps) {
-            const int warp_linear_offset =
-                (warpid * dst_bytes_per_warp) +
-                (memcpy_per_tile * num_warps * dst_bytes_per_warp);
-            const int lds_subtile_id =
-                warp_linear_offset / ST_DST::underlying_subtile_bytes;
-            const uint32_t off32 = static_cast<uint32_t>(
-                lds_tile_base + warp_linear_offset +
-                lds_subtile_id * ST_DST::subtile_padding);
-            const uint32_t lds_warp_addr = __builtin_amdgcn_readfirstlane(off32);
-            const uint32_t voff_lo = swizzled_offsets[memcpy_per_tile] * 2u;
-            const uint32_t voff_hi = voff_lo + 16u;
-
-            __uint128_t v_lo = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
-                srsrc, voff_lo, tile_byte_offset, 0);
-            __uint128_t v_hi = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
-                srsrc, voff_hi, tile_byte_offset, 0);
-
-            bf16_2* bf_lo = reinterpret_cast<bf16_2*>(&v_lo);
-            bf16_2* bf_hi = reinterpret_cast<bf16_2*>(&v_hi);
-            u32x4 fp8_pack = {
-                fused_act_round4_compile_test::cvt_bf16x4_to_fp8x4(
-                    bf_lo[0], bf_lo[1], scale),
-                fused_act_round4_compile_test::cvt_bf16x4_to_fp8x4(
-                    bf_lo[2], bf_lo[3], scale),
-                fused_act_round4_compile_test::cvt_bf16x4_to_fp8x4(
-                    bf_hi[0], bf_hi[1], scale),
-                fused_act_round4_compile_test::cvt_bf16x4_to_fp8x4(
-                    bf_hi[2], bf_hi[3], scale),
-            };
-
-            const uint32_t lds_addr = lds_warp_addr + lds_lane_off;
-            ::kittens::macros::ds_write_b128(fp8_pack, lds_addr, /*i_offset=*/0);
-        }
-    }
-}
-
-}  // namespace fused_act_round5_compile_test
 
 struct grouped_layout_globals {
     _gl_fp8 a;                   // [M_total, K]
@@ -1837,30 +1654,16 @@ struct grouped_layout_globals {
     size_t dynamic_shared_memory() { return 0; }
 };
 
-template<bool FUSE_ACT = false, typename GL>
+template<typename GL>
 __device__ __forceinline__ float resolve_combined_scale_grp(const GL &g) {
     const float sa_dev = g.dscale_a ? *g.dscale_a : g.scale_a;
     const float sb_dev = g.dscale_b ? *g.dscale_b : g.scale_b;
-    if constexpr (FUSE_ACT) {
-        // ``g.dscale_a`` for fused-act stores the FORWARD scale (output of
-        // the R1 ``max_abs_bf16_to_fp8_scale`` binding). Invert to recover
-        // the dequant scale that the FP8 epilog multiplies by.
-        const float sa = (sa_dev > 0.0f) ? (1.0f / sa_dev) : 0.0f;
-        return sa * sb_dev;
-    } else {
-        return sa_dev * sb_dev;
-    }
+    return sa_dev * sb_dev;
 }
 
-template<int KI_HINT = 0, bool N_MASKED_STORE = false, bool FUSED_KTAIL = false,
-         bool FUSE_ACT = false>
+template<int KI_HINT = 0, bool N_MASKED_STORE = false, bool FUSED_KTAIL = false>
 __global__ __launch_bounds__(_NUM_THREADS, 1)
-void grouped_rcr_kernel(
-    const std::conditional_t<FUSE_ACT,
-                             grouped_layout_globals_fused_act,
-                             grouped_layout_globals> g) {
-    static_assert(!(FUSE_ACT && FUSED_KTAIL),
-                  "FUSE_ACT=true requires FUSED_KTAIL=false");
+void grouped_rcr_kernel(const grouped_layout_globals g) {
     using ST_rcr = ST_v2;
     // [kyle-L1 single-buf DEBUG] As/Bs decl LEFT AS [2][2] for now; loop
     // body single-buffered (always reads [0]) to isolate loop-structure
@@ -1922,11 +1725,6 @@ void grouped_rcr_kernel(
     uint32_t soA[mpt], soB[mpt];
     G::prefill_swizzled_offsets(As[0][0], g.a, soA);
     G::prefill_swizzled_offsets(Bs[0][0], g.b, soB);
-
-    float scale_a_inv = 0.0f;
-    if constexpr (FUSE_ACT) {
-        scale_a_inv = (g.dscale_a != nullptr) ? *g.dscale_a : 0.0f;
-    }
 
     for (int gt = pid; gt < total_tiles; gt += slots_eff) {
         // [grouped] 6-step branch-free binary search over LDS-cached cumsum
@@ -1992,9 +1790,6 @@ void grouped_rcr_kernel(
         // (= 64) for the row_stride pointer arithmetic to stay element-aligned;
         // unbalanced shapes with arbitrary byte-level m_start_g are a
         // follow-up (mirrors the bf16 byte-level addressing work).
-        // raw_ptr type is dtype-dependent (fp8e4m3* in the un-fused path,
-        // bf16* in FUSE_ACT=true). Use decltype so the cast tracks the
-        // gl<>'s declared element type for both template instantiations.
         using a_ptr_t = decltype(g.a.raw_ptr);
         using c_ptr_t = decltype(g.c.raw_ptr);
         const auto* a_byte_base = reinterpret_cast<const uint8_t*>(g.a.raw_ptr);
@@ -2039,19 +1834,16 @@ void grouped_rcr_kernel(
         int tic = 0, toc = 1;
         // Prologue: load tile-0 + tile-1 (mirrors gemm_kernel<RCR> 1040-1054).
         rcr_8w_load_hoist<_NUM_THREADS>(b_tile(tic, 0), g.b, b_co(bc*2,   0), soB);
-        if constexpr (FUSE_ACT) fused_act_round5_compile_test::rcr_8w_load_hoist_fused_act<_NUM_THREADS>(As[tic][0], a_gl_g, a_co(br*2,   0), soA, scale_a_inv);
-        else                    rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0],    a_gl_g, a_co(br*2,   0), soA);
+        rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0], a_gl_g, a_co(br*2,   0), soA);
         rcr_8w_load_hoist<_NUM_THREADS>(b_tile(tic, 1), g.b, b_co(bc*2+1, 0), soB);
-        if constexpr (FUSE_ACT) fused_act_round5_compile_test::rcr_8w_load_hoist_fused_act<_NUM_THREADS>(As[tic][1], a_gl_g, a_co(br*2+1, 0), soA, scale_a_inv);
-        else                    rcr_8w_load_hoist<_NUM_THREADS>(As[tic][1],    a_gl_g, a_co(br*2+1, 0), soA);
+        rcr_8w_load_hoist<_NUM_THREADS>(As[tic][1], a_gl_g, a_co(br*2+1, 0), soA);
 
         if (wm == 1) __builtin_amdgcn_s_barrier();
         TK_WAIT_VMCNT(RCR_INIT0_VMCNT);
         __builtin_amdgcn_s_barrier();
 
         rcr_8w_load_hoist<_NUM_THREADS>(b_tile(toc, 0), g.b, b_co(bc*2,   1), soB);
-        if constexpr (FUSE_ACT) fused_act_round5_compile_test::rcr_8w_load_hoist_fused_act<_NUM_THREADS>(As[toc][0], a_gl_g, a_co(br*2,   1), soA, scale_a_inv);
-        else                    rcr_8w_load_hoist<_NUM_THREADS>(As[toc][0],    a_gl_g, a_co(br*2,   1), soA);
+        rcr_8w_load_hoist<_NUM_THREADS>(As[toc][0], a_gl_g, a_co(br*2,   1), soA);
         rcr_8w_load_hoist<_NUM_THREADS>(b_tile(toc, 1), g.b, b_co(bc*2+1, 1), soB);
 
         TK_WAIT_VMCNT(RCR_INIT1_VMCNT);
@@ -2061,8 +1853,7 @@ void grouped_rcr_kernel(
         for (int k = 0; k < ki_dyn - 2; k++, tic ^= 1, toc ^= 1) {
             load_b(b0, b_tile(tic, 0), wn);
             load_a(a, As[tic][0], wm);
-            if constexpr (FUSE_ACT) fused_act_round5_compile_test::rcr_8w_load_hoist_fused_act<_NUM_THREADS>(As[toc][1], a_gl_g, a_co(br*2+1, k+1), soA, scale_a_inv);
-            else                    rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], a_gl_g, a_co(br*2+1, k+1), soA);
+            rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], a_gl_g, a_co(br*2+1, k+1), soA);
             TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); rcr_mma_agpr_t<!FUSED_KTAIL>(cA, a, b0); __builtin_amdgcn_s_setprio(0);
@@ -2076,8 +1867,7 @@ void grouped_rcr_kernel(
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
-            if constexpr (FUSE_ACT) fused_act_round5_compile_test::rcr_8w_load_hoist_fused_act<_NUM_THREADS>(As[tic][0], a_gl_g, a_co(br*2, k+2), soA, scale_a_inv);
-            else                    rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0], a_gl_g, a_co(br*2, k+2), soA);
+            rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0], a_gl_g, a_co(br*2, k+2), soA);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); rcr_mma_agpr_t<!FUSED_KTAIL>(cC, a, b0); __builtin_amdgcn_s_setprio(0);
@@ -2093,8 +1883,7 @@ void grouped_rcr_kernel(
         {
             load_b(b0, b_tile(tic, 0), wn);
             load_a(a, As[tic][0], wm);
-            if constexpr (FUSE_ACT) fused_act_round5_compile_test::rcr_8w_load_hoist_fused_act<_NUM_THREADS>(As[toc][1], a_gl_g, a_co(br*2+1, ki_dyn-1), soA, scale_a_inv);
-            else                    rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], a_gl_g, a_co(br*2+1, ki_dyn-1), soA);
+            rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], a_gl_g, a_co(br*2+1, ki_dyn-1), soA);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); rcr_mma_agpr_t<!FUSED_KTAIL>(cA, a, b0); __builtin_amdgcn_s_setprio(0);
@@ -2244,7 +2033,7 @@ void grouped_rcr_kernel(
             }
         }
 
-        const float combined_scale = resolve_combined_scale_grp<FUSE_ACT>(g);
+        const float combined_scale = resolve_combined_scale_grp(g);
 
         if (wm == 0) __builtin_amdgcn_s_barrier();
         const int r0 = __builtin_amdgcn_readfirstlane(m_subtile_C + br*WARPS_M*2+wm);
@@ -2592,7 +2381,7 @@ void grouped_rcr_kernel_bn128(const grouped_layout_globals g) {
             }
         }
 
-        const float combined_scale = resolve_combined_scale_grp<false>(g);
+        const float combined_scale = resolve_combined_scale_grp(g);
 
         if (wm == 0) __builtin_amdgcn_s_barrier();
         const int r0 = __builtin_amdgcn_readfirstlane(m_subtile_C + br*WARPS_M*2+wm);
@@ -2903,7 +2692,7 @@ void grouped_rcr_kernel_b128(const grouped_layout_globals g) {
             }
         }
 
-        const float combined_scale = resolve_combined_scale_grp<false>(g);
+        const float combined_scale = resolve_combined_scale_grp(g);
 
         if (wm == 0) __builtin_amdgcn_s_barrier();
         // r0 = m_subtile_C + br*WARPS_M + wm (no slab — single tile per br)
@@ -4500,14 +4289,6 @@ __global__ void grouped_ktail_kernel_mfma32x32_M2N2_fp8(const grouped_layout_glo
 
 template __global__ void grouped_ktail_kernel_mfma32x32_M2N2_fp8<Layout::RCR, 64>(const grouped_layout_globals);
 
-#if 0  // round-61 disabled: regressed metric 752 → 749 (see comment above)
-
-#endif  // M2N4 disabled
-
-#if 0  // M4 kernel definition kept disabled — see comment above
-
-#endif  // M4 kernel disabled
-
 void dispatch_grouped_rcr(grouped_layout_globals g) {
     g.n = static_cast<int>(g.c.cols());
     g.M_total = static_cast<int>(g.c.rows());
@@ -4721,33 +4502,6 @@ void dispatch_grouped_rcr(grouped_layout_globals g) {
 
     if (sk_partial_buf_owned != nullptr) {
         hipFreeAsync(sk_partial_buf_owned, g.stream);
-    }
-}
-
-void dispatch_grouped_rcr_fused_act(grouped_layout_globals_fused_act g) {
-    g.n = static_cast<int>(g.c.cols());
-    g.M_total = static_cast<int>(g.c.rows());
-    g.k = static_cast<int>(g.a.cols());
-
-    g.fast_n = (g.n / BLOCK_SIZE) * BLOCK_SIZE;
-    g.fast_k = (g.k / K_BLOCK)    * K_BLOCK;
-    g.bpc    = kittens::ceil_div(g.n, BLOCK_SIZE);
-    g.ki     = g.fast_k / K_BLOCK;
-
-    if (!(g.bpc > 0 && g.ki > 0 && g.fast_k == g.k)) {
-        // Caller is responsible for falling back to the un-fused path.
-        return;
-    }
-
-    const bool n_aligned = (g.bpc * BLOCK_SIZE == g.n);
-    if (n_aligned) {
-        grouped_rcr_kernel<0, /*N_MASKED_STORE=*/false,
-                           /*FUSED_KTAIL=*/false, /*FUSE_ACT=*/true>
-            <<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
-    } else {
-        grouped_rcr_kernel<0, /*N_MASKED_STORE=*/true,
-                           /*FUSED_KTAIL=*/false, /*FUSE_ACT=*/true>
-            <<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
     }
 }
 
@@ -5449,38 +5203,6 @@ static void grouped_rcr_dscale_fn(
     dispatch_grouped_rcr(g);
 }
 
-static bool grouped_rcr_fused_act_dscale_fn(
-    pybind11::object a, pybind11::object b, pybind11::object c,
-    pybind11::object scale_a_inv_obj, pybind11::object scale_b_obj,
-    pybind11::object group_offs_obj,
-    int group_m,
-    int m_per_group,
-    int num_xcds) {
-    auto sa_ptr = scale_a_inv_obj.attr("data_ptr")().cast<uintptr_t>();
-    auto sb_ptr = scale_b_obj.attr("data_ptr")().cast<uintptr_t>();
-    auto group_offs_ptr = group_offs_obj.attr("data_ptr")().cast<uintptr_t>();
-    int G = group_offs_obj.attr("numel")().cast<int>() - 1;
-    grouped_layout_globals_fused_act g{
-        py::from_object<_gl_bf16>::make(a),
-        py::from_object<_gl_fp8>::make(b),
-        py::from_object<_gl_bf16>::make(c),
-        0.f, 0.f,
-        reinterpret_cast<const float*>(sa_ptr),
-        reinterpret_cast<const float*>(sb_ptr),
-        reinterpret_cast<const int64_t*>(group_offs_ptr),
-        {},
-        G, 0, 0, 0, 0, group_m, num_xcds, 0, 0, 0, m_per_group,
-    };
-
-    const int K = static_cast<int>(g.a.cols());
-    const int N = static_cast<int>(g.c.cols());
-    if ((K % K_BLOCK) != 0 || (N <= 0) || (K <= 0)) {
-        return false;
-    }
-    dispatch_grouped_rcr_fused_act(g);
-    return true;
-}
-
 static void grouped_rrr_fn(pybind11::object a, pybind11::object b, pybind11::object c,
                            pybind11::object scale_a_obj, pybind11::object scale_b_obj,
                            pybind11::object group_offs_obj,
@@ -5585,50 +5307,6 @@ static void grouped_variable_k_crr_dscale_fp8_fn(
 }
 #endif  // !PRIMUS_TURBO_HK_INTEGRATION (close range #1)
 
-namespace fused_act_round4_compile_test {
-
-// (cvt_bf16x4_to_fp8x4 definition relocated to line 1501 above for
-// -fgpu-rdc compatibility; the test kernel below still uses it.)
-
-// Compile-test kernel: round-trips one bf16x4 → fp8x4 cvt. Forces LLVM to
-// emit codegen so any cvt-builtin issue surfaces at build time. Single-thread
-// body keeps the resource-usage report focused on the cvt sequence.
-__global__ __launch_bounds__(64, 1)
-void cvt_bf16x4_to_fp8x4_compile_test(
-    const bf16_2* __restrict__ src,    // length 2: 2 bf16_2 = 4 bf16
-    uint32_t* __restrict__ dst,        // length 1: packed fp8x4
-    float scale)
-{
-    if (threadIdx.x != 0) return;
-    bf16_2 lo = src[0];
-    bf16_2 hi = src[1];
-    *dst = cvt_bf16x4_to_fp8x4(lo, hi, scale);
-}
-
-// Bulk version: each thread cvts its own bf16x4 group → fp8x4. Used by the
-// Python-level numerical probe. Round-up the count to a multiple of 4 BF16.
-__global__ __launch_bounds__(256, 1)
-void cvt_bf16_to_fp8_bulk_compile_test(
-    const bf16* __restrict__ src,
-    fp8e4m3* __restrict__ dst,
-    int64_t N,             // number of bf16 elements (must be multiple of 4)
-    float scale)
-{
-    int64_t tid = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    int64_t stride = (int64_t)gridDim.x * blockDim.x;
-    const int64_t N4 = N / 4;
-    const bf16_2* src2 = reinterpret_cast<const bf16_2*>(src);
-    uint32_t* dst4 = reinterpret_cast<uint32_t*>(dst);
-    #pragma unroll 1
-    for (int64_t i = tid; i < N4; i += stride) {
-        bf16_2 lo = src2[2 * i + 0];
-        bf16_2 hi = src2[2 * i + 1];
-        dst4[i] = cvt_bf16x4_to_fp8x4(lo, hi, scale);
-    }
-}
-
-}  // namespace fused_act_round4_compile_test
-
 #ifndef PRIMUS_TURBO_HK_INTEGRATION
 PYBIND11_MODULE(tk_fp8_layouts, m) {
     m.doc() = "FP8 per-tensor GEMM: C = A op B * scale_a * scale_b";
@@ -5688,13 +5366,6 @@ PYBIND11_MODULE(tk_fp8_layouts, m) {
           pybind11::arg("sk_split_n") = 0,
           // R17: see grouped_rcr m.def above.
           pybind11::arg("sk_workspace_ptr") = uint64_t{0});
-    m.def("grouped_rcr_fused_act_dscale", &grouped_rcr_fused_act_dscale_fn,
-          pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("c"),
-          pybind11::arg("scale_a_inv"), pybind11::arg("scale_b"),
-          pybind11::arg("group_offs"),
-          pybind11::arg("group_m") = DEFAULT_GROUP_M,
-          pybind11::arg("m_per_group") = 0,
-          pybind11::arg("num_xcds") = 0);
     m.def("grouped_rrr", &grouped_rrr_fn,
           pybind11::arg("a"), pybind11::arg("b"), pybind11::arg("c"),
           pybind11::arg("scale_a"), pybind11::arg("scale_b"),
