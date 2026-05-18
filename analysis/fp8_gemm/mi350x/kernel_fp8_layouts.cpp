@@ -54,6 +54,13 @@ constexpr int TAIL_BLOCK_N  = 16;
 #define RRR_INIT1_VMCNT         6
 #define RRR_STEADY_VMCNT        4
 #define RRR_EPILOGUE_VMCNT      2
+// (Tried 2026-05-15: a two-K-tile main loop for RRR mirroring RCR's
+// `main_loop_iter`. SNR check passed but perf was within run-to-run noise
+// at dense 8K (best 2842T two-tile vs 2826-2843T single-tile across 3
+// runs). Conclusion: RRR's bottleneck is LDS read bandwidth — B-load
+// uses ds_read_b64_tr_b8 carrying 8B/lane vs RCR's ds_read_b128 16B/lane.
+// Loop unrolling can't widen a saturated LDS pipe. Code reverted; the
+// LDS-layout change for B (Option B) is the actionable lever.)
 #define CRR_PREFETCH_LGKM       3
 #define CRR_INIT0_VMCNT         2
 #define CRR_INIT1_VMCNT         6
@@ -62,9 +69,9 @@ constexpr int TAIL_BLOCK_N  = 16;
 
 // Per-layout main-loop unroll counts (stringified into #pragma unroll N).
 #define RCR_MAIN_UNROLL 2
-#define RRR_MAIN_UNROLL 4
+#define RRR_MAIN_UNROLL 2
 #define CRR_MAIN_UNROLL 1
-#define VARK_MAIN_UNROLL 1
+#define VARK_MAIN_UNROLL 2
 
 #ifndef VARK_DROP_REDUNDANT_LGKM_DRAIN
 #define VARK_DROP_REDUNDANT_LGKM_DRAIN 0
@@ -166,12 +173,100 @@ __device__ __forceinline__ void rrr_mma(
     mma_AB(acc, a, b, acc);
 }
 
+// AGPR-pinned variant template — selectable per template instantiation.
+// For FUSED_KTAIL=false (8K-relevant), USE_AGPR=true gives spill -40%.
+// For FUSED_KTAIL=true (gpt_oss), USE_AGPR=true gives spill +19% — bad.
+// Caller dispatches: rrr_mma_agpr_t<!FUSED_KTAIL>(...).
+template<bool USE_AGPR>
+__device__ __forceinline__ void rrr_mma_agpr_t(
+    rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
+    const A_row_reg& a,
+    const B_col_reg& b)
+{
+    if constexpr (USE_AGPR) {
+        using D_T = rt_fl<RBM, RBN, col_l, rt_16x16_s>;
+        #pragma unroll
+        for (int n = 0; n < D_T::height; n++) {
+            #pragma unroll
+            for (int m = 0; m < D_T::width; m++) {
+                #pragma unroll
+                for (int k = 0; k < A_row_reg::width; k++) {
+                    mfma1616128_agpr(
+                        acc.tiles[n][m].data,
+                        a.tiles[n][k].data,
+                        b.tiles[k][m].data,
+                        acc.tiles[n][m].data);
+                }
+            }
+        }
+    } else {
+        mma_AB(acc, a, b, acc);
+    }
+}
+
+// Backwards-compatible non-template name (always-AGPR for back-compat with
+// existing main+epi sites).
+__device__ __forceinline__ void rrr_mma_agpr(
+    rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
+    const A_row_reg& a,
+    const B_col_reg& b)
+{
+    rrr_mma_agpr_t<true>(acc, a, b);
+}
+
 __device__ __forceinline__ void rcr_mma(
     rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
     const A_row_reg& a,
     const B_row_reg& b)
 {
     mma_ABt(acc, a, b, acc);
+}
+
+// AGPR-pinned RCR variant — for dense `gemm_kernel<RCR>`. mma_ABt(A, B^T)
+// uses same mfma1616128 underneath as mma_AB → mfma1616128_agpr works.
+// For RCR the B operand is K-major in register (B_row_reg), no transpose
+// at register level — the ABt name reflects mathematical form, not
+// register layout. The asm is the same v_mfma_f32_16x16x128_f8f6f4.
+__device__ __forceinline__ void rcr_mma_agpr(
+    rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
+    const A_row_reg& a,
+    const B_row_reg& b)
+{
+    using D_T = rt_fl<RBM, RBN, col_l, rt_16x16_s>;
+    #pragma unroll
+    for (int n = 0; n < D_T::height; n++) {
+        #pragma unroll
+        for (int m = 0; m < D_T::width; m++) {
+            #pragma unroll
+            for (int k = 0; k < A_row_reg::width; k++) {
+                mfma1616128_agpr(
+                    acc.tiles[n][m].data,
+                    a.tiles[n][k].data,
+                    b.tiles[m][k].data,  // ABt: B's m-axis is OUTPUT N, k-axis matches A
+                    acc.tiles[n][m].data);
+            }
+        }
+    }
+}
+
+// Selectable template variant of rcr_mma_agpr — mirrors rrr_mma_agpr_t.
+// USE_AGPR=true: cd-copy AGPR via mfma1616128_agpr (same as dense uses
+// for gemm_kernel<RCR> with spill=0). USE_AGPR=false: builtin mma_ABt.
+// For grouped_rcr_kernel: use rcr_mma_agpr_t<!FUSED_KTAIL>(...) so the
+// FUSED_KTAIL=true instances stay on builtin (matching the ktail block
+// at line ~2214, which also uses builtin to avoid AGPR/VGPR boundary
+// cost). FUSED_KTAIL=false instances use AGPR throughout main+epi.
+template<bool USE_AGPR>
+__device__ __forceinline__ void rcr_mma_agpr_t(
+    rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
+    const A_row_reg& a,
+    const B_row_reg& b)
+{
+    if constexpr (USE_AGPR) {
+        rcr_mma_agpr(acc, a, b);
+    } else {
+        mma_ABt(acc, a, b, acc);
+    }
 }
 
 __device__ __forceinline__ void rcr_mma_32(
@@ -304,6 +399,34 @@ __device__ __forceinline__ void crr_mma(
     mma_AB(acc, a_row, b, acc);
 }
 
+// In-place AGPR CRR — uses mfma1616128_agpr_inplace where the +a constraint
+// reads/writes D directly. acc is both D and C in crr_mma; the inplace
+// variant avoids the per-call cd-copy at the function boundary that
+// otherwise inserts v_accvgpr_write/read across CRR's barrier-separated
+// call sites. Without this, the compiler picks agpr_count=0 (VGPR-only)
+// → vgpr_spill=24. With it: agpr=128, spill=0, +4–7% perf across 5 shapes.
+__device__ __forceinline__ void crr_mma_agpr_inplace(
+    rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
+    const A_col_reg& a,
+    const B_col_reg& b)
+{
+    const auto& a_row = reinterpret_cast<const A_row_reg&>(a);
+    using D_T = rt_fl<RBM, RBN, col_l, rt_16x16_s>;
+    #pragma unroll
+    for (int n = 0; n < D_T::height; n++) {
+        #pragma unroll
+        for (int m = 0; m < D_T::width; m++) {
+            #pragma unroll
+            for (int k = 0; k < A_row_reg::width; k++) {
+                mfma1616128_agpr_inplace(
+                    acc.tiles[n][m].data,
+                    a_row.tiles[n][k].data,
+                    b.tiles[k][m].data);
+            }
+        }
+    }
+}
+
 __device__ __forceinline__ float load_fp8_scalar(const _gl_fp8& src, int row, int col) {
     const uint32_t buffer_size = src.batch() * src.depth() * src.rows() * src.cols() * sizeof(fp8e4m3);
     const std::uintptr_t as_int = reinterpret_cast<std::uintptr_t>(src.raw_ptr);
@@ -338,7 +461,7 @@ __device__ __forceinline__ void store_bf16_scalar(const _gl_bf16& dst, int row, 
 }
 
 // Per-group scalar FP8 load. ``b`` for grouped FP8 is logically
-// [batch=1, G, N, K]; the 4D coord lets `grouped_tail_kernel` index B at
+// [batch=1, G, N, K]; the 4D coord lets `grouped_tail_kernel_fp8` index B at
 // (group_idx, row, col).
 __device__ __forceinline__ float load_fp8_scalar_grp(const _gl_fp8& src, int g_idx, int row, int col) {
     const uint32_t buffer_size = src.batch() * src.depth() * src.rows() * src.cols() * sizeof(fp8e4m3);
@@ -356,7 +479,7 @@ __device__ __forceinline__ float load_fp8_scalar_grp(const _gl_fp8& src, int g_i
 // HIP compiler emits a single `global_load_dwordx2` for a load through
 // this type when the source pointer is 8-byte aligned, replacing 8
 // separate scalar fp8 loads (8× fewer VMEM transactions). Used by the
-// RCR fast path inside `grouped_tail_kernel` where both operands are
+// RCR fast path inside `grouped_tail_kernel_fp8` where both operands are
 // stride-1 in K. Extraction via ``convertor<float4, fp8e4m3_4>`` gives
 // 8 fp32 accumulator inputs per 8-byte load.
 struct alignas(8) fp8e4m3_8 {
@@ -880,7 +1003,6 @@ __device__ __forceinline__ void store_c_tile_mn_masked_grouped(
     }
 }
 
-
 // Runtime K-specialization: when KI_HINT>0 it matches g.ki exactly, enabling
 // the compiler to fully unroll or uniformly unroll the main loop without
 // branch overhead and with register allocation tuned to the known loop count.
@@ -954,7 +1076,7 @@ void gemm_kernel(const layout_globals g) {
                 TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
 
                 asm volatile("s_waitcnt lgkmcnt(0)");
-                __builtin_amdgcn_s_setprio(1); mma_ABt(cA, a, b0, cA); __builtin_amdgcn_s_setprio(0);
+                __builtin_amdgcn_s_setprio(1); rcr_mma_agpr(cA, a, b0); __builtin_amdgcn_s_setprio(0);
                 __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
 
                 load_b(b1, Bs[0][1], wn);
@@ -962,7 +1084,7 @@ void gemm_kernel(const layout_globals g) {
                 __builtin_amdgcn_s_barrier();
 
                 asm volatile("s_waitcnt lgkmcnt(0)");
-                __builtin_amdgcn_s_setprio(1); mma_ABt(cB, a, b1, cB); __builtin_amdgcn_s_setprio(0);
+                __builtin_amdgcn_s_setprio(1); rcr_mma_agpr(cB, a, b1); __builtin_amdgcn_s_setprio(0);
                 __builtin_amdgcn_s_barrier();
 
                 load_a(a, As[0][1], wm);
@@ -970,14 +1092,14 @@ void gemm_kernel(const layout_globals g) {
                 __builtin_amdgcn_s_barrier();
 
                 asm volatile("s_waitcnt lgkmcnt(0)");
-                __builtin_amdgcn_s_setprio(1); mma_ABt(cC, a, b0, cC); __builtin_amdgcn_s_setprio(0);
+                __builtin_amdgcn_s_setprio(1); rcr_mma_agpr(cC, a, b0); __builtin_amdgcn_s_setprio(0);
                 __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
 
                 load_b(b0, Bs[1][0], wn);
                 rcr_8w_load_hoist<_NUM_THREADS>(Bs[0][1], g.b, b_co(bc*2+1, tile+2), soB);
                 TK_WAIT_VMCNT(RCR_TWO_TILE_MID_VMCNT); __builtin_amdgcn_s_barrier();
 
-                __builtin_amdgcn_s_setprio(1); mma_ABt(cD, a, b1, cD); __builtin_amdgcn_s_setprio(0);
+                __builtin_amdgcn_s_setprio(1); rcr_mma_agpr(cD, a, b1); __builtin_amdgcn_s_setprio(0);
                 __builtin_amdgcn_s_barrier();
 
                 load_a(a, As[1][0], wm);
@@ -985,7 +1107,7 @@ void gemm_kernel(const layout_globals g) {
                 TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
 
                 asm volatile("s_waitcnt lgkmcnt(0)");
-                __builtin_amdgcn_s_setprio(1); mma_ABt(cA, a, b0, cA); __builtin_amdgcn_s_setprio(0);
+                __builtin_amdgcn_s_setprio(1); rcr_mma_agpr(cA, a, b0); __builtin_amdgcn_s_setprio(0);
                 __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
 
                 load_b(b1, Bs[1][1], wn);
@@ -993,7 +1115,7 @@ void gemm_kernel(const layout_globals g) {
                 __builtin_amdgcn_s_barrier();
 
                 asm volatile("s_waitcnt lgkmcnt(0)");
-                __builtin_amdgcn_s_setprio(1); mma_ABt(cB, a, b1, cB); __builtin_amdgcn_s_setprio(0);
+                __builtin_amdgcn_s_setprio(1); rcr_mma_agpr(cB, a, b1); __builtin_amdgcn_s_setprio(0);
                 __builtin_amdgcn_s_barrier();
 
                 load_a(a, As[1][1], wm);
@@ -1001,13 +1123,13 @@ void gemm_kernel(const layout_globals g) {
                 __builtin_amdgcn_s_barrier();
 
                 asm volatile("s_waitcnt lgkmcnt(0)");
-                __builtin_amdgcn_s_setprio(1); mma_ABt(cC, a, b0, cC); __builtin_amdgcn_s_setprio(0);
+                __builtin_amdgcn_s_setprio(1); rcr_mma_agpr(cC, a, b0); __builtin_amdgcn_s_setprio(0);
                 __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
 
                 rcr_8w_load_hoist<_NUM_THREADS>(Bs[1][1], g.b, b_co(bc*2+1, tile+3), soB);
                 TK_WAIT_VMCNT(RCR_TWO_TILE_MID_VMCNT); __builtin_amdgcn_s_barrier();
 
-                __builtin_amdgcn_s_setprio(1); mma_ABt(cD, a, b1, cD); __builtin_amdgcn_s_setprio(0);
+                __builtin_amdgcn_s_setprio(1); rcr_mma_agpr(cD, a, b1); __builtin_amdgcn_s_setprio(0);
                 __builtin_amdgcn_s_barrier();
             };
 
@@ -1026,26 +1148,26 @@ void gemm_kernel(const layout_globals g) {
             rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], g.a, a_co(br*2+1, k+1), soA);
             TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rcr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rcr_mma_agpr(cA, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
 
             load_b(b1, b_tile(tic, 1), wn);
             rcr_8w_load_hoist<_NUM_THREADS>(b_tile(tic, 0), g.b, b_co(bc*2, k+2), soB);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rcr_mma(cB, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rcr_mma_agpr(cB, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
             rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0], g.a, a_co(br*2, k+2), soA);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rcr_mma(cC, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rcr_mma_agpr(cC, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
 
             rcr_8w_load_hoist<_NUM_THREADS>(b_tile(tic, 1), g.b, b_co(bc*2+1, k+2), soB);
             TK_WAIT_VMCNT(RCR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
-            __builtin_amdgcn_s_setprio(1); rcr_mma(cD, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rcr_mma_agpr(cD, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
         }
         }
@@ -1056,25 +1178,25 @@ void gemm_kernel(const layout_globals g) {
             rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], g.a, a_co(br*2+1, ki_dyn-1), soA);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rcr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rcr_mma_agpr(cA, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
 
             load_b(b1, b_tile(tic, 1), wn);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rcr_mma(cB, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rcr_mma_agpr(cB, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
             TK_WAIT_VMCNT(RCR_EPILOGUE_VMCNT); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rcr_mma(cC, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rcr_mma_agpr(cC, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_b(b0, b_tile(toc, 0), wn);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rcr_mma(cD, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rcr_mma_agpr(cD, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
             tic ^= 1; toc ^= 1;
         }
@@ -1083,21 +1205,21 @@ void gemm_kernel(const layout_globals g) {
             load_a(a, As[tic][0], wm);
             asm volatile("s_waitcnt vmcnt(0)"); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rcr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rcr_mma_agpr(cA, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_b(b1, b_tile(tic, 1), wn);
             __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rcr_mma(cB, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rcr_mma_agpr(cB, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1);
-            rcr_mma(cC, a, b0);
-            rcr_mma(cD, a, b1);
+            rcr_mma_agpr(cC, a, b0);
+            rcr_mma_agpr(cD, a, b1);
             __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
         }
@@ -1157,7 +1279,7 @@ void gemm_kernel(const layout_globals g) {
             G::load(As[toc][1], g.a, a_co(br*2+1, k+1), soA);
             TK_WAIT_LGKM(RRR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rrr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr(cA, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier(); RRR_SCHED_BARRIER();
 
             load_b(b1, Bs[tic][1], wn);
@@ -1165,7 +1287,7 @@ void gemm_kernel(const layout_globals g) {
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1);
-            rrr_mma(cB, a, b1);
+            rrr_mma_agpr(cB, a, b1);
             __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
@@ -1173,14 +1295,14 @@ void gemm_kernel(const layout_globals g) {
             G::load(Bs[tic][1], g.b, b_co(bc*2+1, k+2), soB);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rrr_mma(cC, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr(cC, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier(); RRR_SCHED_BARRIER();
 
             G::load(As[tic][0], g.a, a_co(br*2, k+2), soA);
             TK_WAIT_VMCNT(RRR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1);
-            rrr_mma(cD, a, b1);
+            rrr_mma_agpr(cD, a, b1);
             __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
         }
@@ -1191,27 +1313,27 @@ void gemm_kernel(const layout_globals g) {
             G::load(As[toc][1], g.a, a_co(br*2+1, ki_dyn-1), soA);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rrr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr(cA, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier(); RRR_SCHED_BARRIER();
 
             load_b(b1, Bs[tic][1], wn);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1);
-            rrr_mma(cB, a, b1);
+            rrr_mma_agpr(cB, a, b1);
             __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rrr_mma(cC, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr(cC, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_b(b0, Bs[toc][0], wn);
             TK_WAIT_VMCNT(RRR_EPILOGUE_VMCNT); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rrr_mma(cD, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr(cD, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier(); RRR_SCHED_BARRIER();
             tic ^= 1; toc ^= 1;
         }
@@ -1220,14 +1342,14 @@ void gemm_kernel(const layout_globals g) {
             load_a(a, As[tic][0], wm);
             asm volatile("s_waitcnt vmcnt(0)"); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rrr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr(cA, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_b(b1, Bs[tic][1], wn);
             __builtin_amdgcn_s_barrier(); RRR_SCHED_BARRIER();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1);
-            rrr_mma(cB, a, b1);
+            rrr_mma_agpr(cB, a, b1);
             __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
@@ -1235,8 +1357,8 @@ void gemm_kernel(const layout_globals g) {
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1);
-            rrr_mma(cC, a, b0);
-            rrr_mma(cD, a, b1);
+            rrr_mma_agpr(cC, a, b0);
+            rrr_mma_agpr(cD, a, b1);
             __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
         }
@@ -1294,7 +1416,6 @@ void gemm_kernel(const layout_globals g) {
         TK_WAIT_VMCNT(CRR_INIT1_VMCNT);
         __builtin_amdgcn_s_barrier();
 
-
         TK_PRAGMA_UNROLL(CRR_MAIN_UNROLL)
         for (int k = 0; k < ki_dyn - 2; k++, tic ^= 1, toc ^= 1) {
             load_b(b0, Bs[tic][0], wn);
@@ -1304,8 +1425,8 @@ void gemm_kernel(const layout_globals g) {
             TK_WAIT_LGKM(CRR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             CRR_MMA_BEGIN();
-            crr_mma(cA, a, b0);
-            crr_mma(cB, a, b1);
+            crr_mma_agpr_inplace(cA, a, b0);
+            crr_mma_agpr_inplace(cB, a, b1);
             CRR_MMA_END();
             CRR_STEADY_MID_BARRIER();
 
@@ -1315,8 +1436,8 @@ void gemm_kernel(const layout_globals g) {
             TK_WAIT_VMCNT(CRR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             CRR_MMA_BEGIN();
-            crr_mma(cC, a, b0);
-            crr_mma(cD, a, b1);
+            crr_mma_agpr_inplace(cC, a, b0);
+            crr_mma_agpr_inplace(cD, a, b1);
             CRR_MMA_END();
             __builtin_amdgcn_s_barrier();
             global_load_b(Bs[tic][0], bc*2, k+2);
@@ -1330,7 +1451,7 @@ void gemm_kernel(const layout_globals g) {
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             CRR_MMA_BEGIN();
-            crr_mma(cA, a, b0_keep);
+            crr_mma_agpr_inplace(cA, a, b0_keep);
             CRR_MMA_END();
             __builtin_amdgcn_s_barrier();
 
@@ -1339,7 +1460,7 @@ void gemm_kernel(const layout_globals g) {
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             CRR_MMA_BEGIN();
-            crr_mma(cB, a, b1_keep);
+            crr_mma_agpr_inplace(cB, a, b1_keep);
             CRR_MMA_END();
             __builtin_amdgcn_s_barrier();
 
@@ -1347,7 +1468,7 @@ void gemm_kernel(const layout_globals g) {
             TK_WAIT_VMCNT(CRR_EPILOGUE_VMCNT); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             CRR_MMA_BEGIN();
-            crr_mma(cC, a, b0_keep);
+            crr_mma_agpr_inplace(cC, a, b0_keep);
             CRR_MMA_END();
             __builtin_amdgcn_s_barrier();
 
@@ -1355,7 +1476,7 @@ void gemm_kernel(const layout_globals g) {
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             CRR_MMA_BEGIN();
-            crr_mma(cD, a, b1_keep);
+            crr_mma_agpr_inplace(cD, a, b1_keep);
             CRR_MMA_END();
             __builtin_amdgcn_s_barrier();
             tic ^= 1; toc ^= 1;
@@ -1367,7 +1488,7 @@ void gemm_kernel(const layout_globals g) {
             asm volatile("s_waitcnt vmcnt(0)"); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             CRR_MMA_BEGIN();
-            crr_mma(cA, a, b0_keep);
+            crr_mma_agpr_inplace(cA, a, b0_keep);
             CRR_MMA_END();
             __builtin_amdgcn_s_barrier();
 
@@ -1376,7 +1497,7 @@ void gemm_kernel(const layout_globals g) {
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             CRR_MMA_BEGIN();
-            crr_mma(cB, a, b1_keep);
+            crr_mma_agpr_inplace(cB, a, b1_keep);
             CRR_MMA_END();
             __builtin_amdgcn_s_barrier();
 
@@ -1384,8 +1505,8 @@ void gemm_kernel(const layout_globals g) {
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             CRR_MMA_BEGIN();
-            crr_mma(cC, a, b0_keep);
-            crr_mma(cD, a, b1_keep);
+            crr_mma_agpr_inplace(cC, a, b0_keep);
+            crr_mma_agpr_inplace(cD, a, b1_keep);
             CRR_MMA_END();
             __builtin_amdgcn_s_barrier();
         }    }
@@ -1432,7 +1553,7 @@ __global__ void gemm_tail_kernel(const layout_globals g) {
     float acc = 0.0f;
 
     if constexpr (L == Layout::RCR) {
-        // Vec8 fast path for RCR. See ``grouped_tail_kernel`` for the
+        // Vec8 fast path for RCR. See ``grouped_tail_kernel_fp8`` for the
         // rationale; mirror change to keep dense + grouped tail logic
         // in sync. Dense rarely runs the tail (LLM shapes are aligned
         // 4096 / 8192 multiples) so this is mostly a code-symmetry win.
@@ -1700,7 +1821,7 @@ struct grouped_layout_globals {
     // interior:
     //   fast_n = (n / BLOCK_SIZE) * BLOCK_SIZE
     //   fast_k = (k / K_BLOCK) * K_BLOCK
-    // `grouped_tail_kernel` (scalar fp32) handles cells with col >= fast_n
+    // `grouped_tail_kernel_fp8` (scalar fp32) handles cells with col >= fast_n
     // (full-K reduction) plus K-tail correction in [fast_k, k) for interior
     // cells. Per-group M-tail (M_g % BLOCK_SIZE != 0) is NOT handled in this
     // round (caller contract: each group's M is BLOCK_SIZE-aligned).
@@ -1711,6 +1832,7 @@ struct grouped_layout_globals {
     int fuse_ktail_off;
     int sk_split_n;
     int* sk_partial_buf;
+    int bn_block;                 // 0 (default) → 256 ; 128 → use BN=128 variant
     dim3 block() { return dim3(_NUM_THREADS); }
     size_t dynamic_shared_memory() { return 0; }
 };
@@ -1908,14 +2030,14 @@ void grouped_rcr_kernel(
             else                    rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], g.a, a_co(br*2+1, k+1), soA);
             TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rcr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rcr_mma_agpr_t<!FUSED_KTAIL>(cA, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_b(b1, b_tile(tic, 1), wn);
             rcr_8w_load_hoist<_NUM_THREADS>(b_tile(tic, 0), g.b, b_co(bc*2, k+2), soB);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rcr_mma(cB, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rcr_mma_agpr_t<!FUSED_KTAIL>(cB, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
@@ -1923,12 +2045,12 @@ void grouped_rcr_kernel(
             else                    rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0], g.a, a_co(br*2, k+2), soA);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rcr_mma(cC, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rcr_mma_agpr_t<!FUSED_KTAIL>(cC, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             rcr_8w_load_hoist<_NUM_THREADS>(b_tile(tic, 1), g.b, b_co(bc*2+1, k+2), soB);
             TK_WAIT_VMCNT(RCR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
-            __builtin_amdgcn_s_setprio(1); rcr_mma(cD, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rcr_mma_agpr_t<!FUSED_KTAIL>(cD, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
         }
 
@@ -1940,25 +2062,25 @@ void grouped_rcr_kernel(
             else                    rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], g.a, a_co(br*2+1, ki_dyn-1), soA);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rcr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rcr_mma_agpr_t<!FUSED_KTAIL>(cA, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
 
             load_b(b1, b_tile(tic, 1), wn);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rcr_mma(cB, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rcr_mma_agpr_t<!FUSED_KTAIL>(cB, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
             TK_WAIT_VMCNT(RCR_EPILOGUE_VMCNT); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rcr_mma(cC, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rcr_mma_agpr_t<!FUSED_KTAIL>(cC, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_b(b0, b_tile(toc, 0), wn);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rcr_mma(cD, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rcr_mma_agpr_t<!FUSED_KTAIL>(cD, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
             tic ^= 1; toc ^= 1;
         }
@@ -1968,30 +2090,33 @@ void grouped_rcr_kernel(
             load_a(a, As[tic][0], wm);
             asm volatile("s_waitcnt vmcnt(0)"); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rcr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rcr_mma_agpr_t<!FUSED_KTAIL>(cA, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_b(b1, b_tile(tic, 1), wn);
             __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rcr_mma(cB, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rcr_mma_agpr_t<!FUSED_KTAIL>(cB, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1);
-            rcr_mma(cC, a, b0);
-            rcr_mma(cD, a, b1);
+            rcr_mma_agpr_t<!FUSED_KTAIL>(cC, a, b0);
+            rcr_mma_agpr_t<!FUSED_KTAIL>(cD, a, b1);
             __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
         }
 
         if constexpr (FUSED_KTAIL) {
-            // Round-7-dm: scoped A register tile for K-tail M-slab 1
-            // (moved from function-scope; round-3 introduced the reg
-            // to save one ``vmcnt(0)`` wait on K-misaligned shapes).
-            A_row_reg a_kt1;
+            // 2026-05-16 spill-reduction: removed `A_row_reg a_kt1` extra reg.
+            // Reuse `a` for both M-slabs by serializing: load slab 0 → mma cA/cB
+            // → overwrite a with slab 1 → mma cC/cD. Saves ~32 VGPRs of
+            // simultaneous A-reg pressure during ktail block. The extra
+            // vmcnt(0) wait between slab 0 mma and slab 1 load is the same
+            // wait that already existed between cB and cC mma in the old
+            // structure (line 2186 `s_waitcnt vmcnt(0)`).
             if (g.fast_k < g.k) {
                 const int laneid = kittens::laneid();
                 const int row_lane = laneid % 16;
@@ -2071,16 +2196,16 @@ void grouped_rcr_kernel(
                     }
                 };
 
-                load_b_kt(b0,    0);   // 4 buffer_load → b0 (issued FIRST)
-                load_b_kt(b1,    1);   // 4 buffer_load → b1
-                load_a_kt(a,     0);   // 8 buffer_load → a (M slab 0)
-                load_a_kt(a_kt1, 1);   // 8 buffer_load → a_kt1 (M slab 1, LAST)
-                TK_WAIT_VMCNT(RCR_KTAIL_VMCNT);
-                rcr_mma(cA, a,     b0);
-                rcr_mma(cB, a,     b1);
+                load_b_kt(b0, 0);
+                load_b_kt(b1, 1);
+                load_a_kt(a,  0);
                 asm volatile("s_waitcnt vmcnt(0)");
-                rcr_mma(cC, a_kt1, b0);
-                rcr_mma(cD, a_kt1, b1);
+                rcr_mma(cA, a, b0);
+                rcr_mma(cB, a, b1);
+                load_a_kt(a,  1);
+                asm volatile("s_waitcnt vmcnt(0)");
+                rcr_mma(cC, a, b0);
+                rcr_mma(cD, a, b1);
             }
         }
 
@@ -2132,9 +2257,636 @@ template __global__ void grouped_rcr_kernel<0, true , false>(const grouped_layou
 template __global__ void grouped_rcr_kernel<0, false, true >(const grouped_layout_globals);
 template __global__ void grouped_rcr_kernel<0, true , true >(const grouped_layout_globals);
 
+// =============================================================================
+// BLOCK_N=128 RCR variant.
+// Goal: doubled N-tile parallelism for small-B / odd-N shapes where
+// BLOCK_N=256 leaves CUs idle (e.g. Down_B4_M2048 = 1.5 tile/CU at BN=256).
+// Per-tile MFMA work is HALVED (single n-strip instead of 2). Per-tile
+// fixed overhead (binary search, scale mul, store) is unchanged → 2x more
+// total overhead; this only wins if better load balance dominates.
+//
+// Caller contract: host must set g.bpc = ceil_div(g.n, 128).
+// All M-side dims, K-block, accumulator types unchanged from BN=256 kernel.
+// =============================================================================
+template<int KI_HINT = 0, bool N_MASKED_STORE = false, bool FUSED_KTAIL = false>
+__global__ __launch_bounds__(_NUM_THREADS, 1)
+void grouped_rcr_kernel_bn128(const grouped_layout_globals g) {
+    using ST_rcr = ST_v2;
+    __shared__ ST_rcr As[2][2];
+    __shared__ ST_rcr Bs[2][2];          // n-strip 1 unused; matches BN=256 LDS layout
+    constexpr int MAX_G_PLUS_1 = 65;
+    __shared__ int s_offs[MAX_G_PLUS_1];
+    __shared__ int s_cum_tiles[MAX_G_PLUS_1];
+    __shared__ int s_total_tiles;
+    A_row_reg a;
+    B_row_reg b0;
+    rt_fl<RBM, RBN, col_l, rt_16x16_s> cA, cC;
+
+    const int slots_eff = gridDim.x;
+    const int xcds_eff = g.num_xcds > 0 ? g.num_xcds : BLOCK_SWIZZLE_NUM_XCDS;
+    const int chunk_size_eff = g.chunk_size > 0 ? g.chunk_size : 64;
+    int pid = chiplet_transform_chunked(
+        blockIdx.x, slots_eff, xcds_eff, chunk_size_eff);
+
+    int wm = warpid() / WARPS_N;
+    int wn = warpid() % WARPS_N;
+    const int num_pid_n = g.bpc;          // host: ceil_div(g.n, 128)
+    const int ki_dyn   = (KI_HINT > 0) ? KI_HINT : g.ki;
+
+    if (threadIdx.x <= g.G && threadIdx.x < MAX_G_PLUS_1) {
+        s_offs[threadIdx.x] = static_cast<int>(g.group_offs[threadIdx.x]);
+    }
+    if (threadIdx.x > g.G && threadIdx.x < MAX_G_PLUS_1) {
+        s_cum_tiles[threadIdx.x] = 0x7FFFFFFF;
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        int prev = s_offs[0];
+        s_cum_tiles[0] = 0;
+        int t = 0;
+        #pragma unroll 1
+        for (int gi = 0; gi < g.G; ++gi) {
+            const int next = s_offs[gi + 1];
+            t += ((next - prev) / BLOCK_SIZE) * num_pid_n;   // M still 256
+            s_cum_tiles[gi + 1] = t;
+            prev = next;
+        }
+        s_total_tiles = t;
+    }
+    __syncthreads();
+    const int total_tiles = s_total_tiles;
+
+    constexpr int bpt = ST_rcr::underlying_subtile_bytes_per_thread;
+    constexpr int bpm = bpt * _NUM_THREADS;
+    constexpr int mpt = ST_rcr::rows * ST_rcr::cols * sizeof(fp8e4m3) / bpm;
+    uint32_t soA[mpt], soB[mpt];
+    G::prefill_swizzled_offsets(As[0][0], g.a, soA);
+    G::prefill_swizzled_offsets(Bs[0][0], g.b, soB);
+
+    for (int gt = pid; gt < total_tiles; gt += slots_eff) {
+        int lo = 0;
+        int hi = MAX_G_PLUS_1 - 1;
+        #pragma unroll
+        for (int level = 0; level < 6; ++level) {
+            const int mid = (lo + hi + 1) >> 1;
+            if (gt >= s_cum_tiles[mid]) lo = mid;
+            else hi = mid - 1;
+        }
+        const int group_idx = lo;
+        const int tile_start = s_cum_tiles[lo];
+        const int local_tile = gt - tile_start;
+        const int m_start_g = s_offs[group_idx];
+        const int M_g = s_offs[group_idx + 1] - m_start_g;
+        const int bpr_g = M_g / BLOCK_SIZE;
+
+        int br, bc;
+        if (g.bpc > bpr_g) {
+            const int WGN = g.group_m;
+            const int num_wgid_in_group = bpr_g * WGN;
+            int group_id = local_tile / num_wgid_in_group;
+            int first_pid_n = group_id * WGN;
+            int group_size_n = min(num_pid_n - first_pid_n, WGN);
+            if (group_size_n <= 0) continue;
+            bc = first_pid_n + ((local_tile % num_wgid_in_group) % group_size_n);
+            br = (local_tile % num_wgid_in_group) / group_size_n;
+        } else {
+            const int WGM = g.group_m;
+            const int num_wgid_in_group = WGM * num_pid_n;
+            int group_id = local_tile / num_wgid_in_group;
+            int first_pid_m = group_id * WGM;
+            int group_size_m = min(bpr_g - first_pid_m, WGM);
+            if (group_size_m <= 0) continue;
+            br = first_pid_m + ((local_tile % num_wgid_in_group) % group_size_m);
+            bc = (local_tile % num_wgid_in_group) / group_size_m;
+        }
+        if (br >= bpr_g || bc >= num_pid_n) continue;
+
+        const int m_subtile_A = m_start_g / HB;
+        const int m_subtile_C = m_start_g / RBM;
+
+        auto a_co = [&](int s, int k) -> coord<ST_rcr> {
+            return {0, 0, m_subtile_A + s, k};
+        };
+        // BN=128: ST_rcr cols = HB = 128, so bc directly addresses one ST tile
+        // (no *2 factor as in BN=256 which packs 2 strips per BLOCK_N).
+        auto b_co = [&](int s, int k) -> coord<ST_rcr> {
+            return {0, group_idx, s, k};
+        };
+
+        auto load_a = [&](A_row_reg& dst, ST_rcr& tile, int wi) {
+            auto sub = subtile_inplace<RBM, BK>(tile, {wi, 0});
+            load(dst, sub);
+        };
+        auto load_b = [&](B_row_reg& dst, ST_rcr& tile, int wi) {
+            auto sub = subtile_inplace<RBN, BK>(tile, {wi, 0});
+            load(dst, sub);
+        };
+
+        zero(cA); zero(cC);
+
+        int tic = 0, toc = 1;
+        // Prologue.
+        rcr_8w_load_hoist<_NUM_THREADS>(Bs[tic][0], g.b, b_co(bc, 0), soB);
+        rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0], g.a, a_co(br*2,   0), soA);
+        rcr_8w_load_hoist<_NUM_THREADS>(As[tic][1], g.a, a_co(br*2+1, 0), soA);
+
+        if (wm == 1) __builtin_amdgcn_s_barrier();
+        TK_WAIT_VMCNT(0);
+        __builtin_amdgcn_s_barrier();
+
+        rcr_8w_load_hoist<_NUM_THREADS>(Bs[toc][0], g.b, b_co(bc, 1), soB);
+        rcr_8w_load_hoist<_NUM_THREADS>(As[toc][0], g.a, a_co(br*2,   1), soA);
+
+        TK_WAIT_VMCNT(0);
+        __builtin_amdgcn_s_barrier();
+
+        // Main loop (2 MFMAs per iter: cA, cC). Prefetch Bs[tic][0] @ k+2
+        // BEFORE cC mma — this matches original BN=256 ordering where
+        // b_tile(tic, 0) is prefetched between cA and cB mma. The original
+        // pattern is: load b0 → mma cA → prefetch Bs[tic][0]@k+2 → mma cB →
+        // ... → prefetch Bs[tic][1]@k+2 → mma cD. We do (load b0 → mma cA →
+        // prefetch Bs[tic][0]@k+2 → mma cC).
+        TK_PRAGMA_UNROLL(RCR_MAIN_UNROLL)
+        for (int k = 0; k < ki_dyn - 2; k++, tic ^= 1, toc ^= 1) {
+            load_b(b0, Bs[tic][0], wn);
+            load_a(a, As[tic][0], wm);
+            rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], g.a, a_co(br*2+1, k+1), soA);
+            TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            // Prefetch Bs[tic][0] @ k+2 NOW (was at end of iter — moved earlier
+            // to match original BN=256 ordering pattern).
+            rcr_8w_load_hoist<_NUM_THREADS>(Bs[tic][0], g.b, b_co(bc, k+2), soB);
+            __builtin_amdgcn_s_barrier();
+
+            load_a(a, As[tic][1], wm);
+            rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0], g.a, a_co(br*2, k+2), soA);
+            __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cC, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            TK_WAIT_VMCNT(RCR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
+        }
+
+        // Epilog 1: K-iter ki_dyn-2.
+        {
+            load_b(b0, Bs[tic][0], wn);
+            load_a(a, As[tic][0], wm);
+            rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], g.a, a_co(br*2+1, ki_dyn-1), soA);
+            __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_a(a, As[tic][1], wm);
+            TK_WAIT_VMCNT(RCR_EPILOGUE_VMCNT); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cC, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_b(b0, Bs[toc][0], wn);
+            __builtin_amdgcn_s_barrier();
+            tic ^= 1; toc ^= 1;
+        }
+
+        // Epilog 2: last K-tile (k = ki_dyn-1).
+        {
+            load_a(a, As[tic][0], wm);
+            asm volatile("s_waitcnt vmcnt(0)"); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_a(a, As[tic][1], wm);
+            __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1);
+            rcr_mma(cC, a, b0);
+            __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+        }
+
+        if constexpr (FUSED_KTAIL) {
+            A_row_reg a_kt1;
+            if (g.fast_k < g.k) {
+                const int laneid = kittens::laneid();
+                const int row_lane = laneid % 16;
+                const int k_lane_byte = (laneid / 16) * 32;
+                constexpr int KREM = 64;
+                static_assert(KREM == 64,
+                    "FUSED_KTAIL=true K_REM must be 64; see fuse_ktail_eligible");
+                const bool both_valid = (laneid < 32);
+                constexpr uint32_t SENTINEL = 0xFFFF0000u;
+
+                // Mirror original BN=256 SRD setup exactly.
+                const fp8e4m3* a_base_ptr = (const fp8e4m3*)&g.a[{0, 0, 0, 0}];
+                const fp8e4m3* b_base_ptr = (const fp8e4m3*)&g.b[{0, 0, 0, 0}];
+                const int a_row_stride_bytes = g.a.template stride<2>();
+                const int b_row_stride_bytes = g.b.template stride<2>();
+                const uint32_t a_total_bytes =
+                    static_cast<uint32_t>(g.M_total) *
+                    static_cast<uint32_t>(a_row_stride_bytes);
+                const uint32_t b_per_group_bytes =
+                    static_cast<uint32_t>(group_idx + 1) *
+                    static_cast<uint32_t>(g.n) *
+                    static_cast<uint32_t>(b_row_stride_bytes);
+                i32x4 a_srsrc_kt = make_srsrc((const void*)a_base_ptr, a_total_bytes);
+                i32x4 b_srsrc_kt = make_srsrc((const void*)b_base_ptr, b_per_group_bytes);
+
+                const uint32_t K_tail_base_bytes =
+                    static_cast<uint32_t>(g.fast_k);
+                const uint32_t b_group_byte_base =
+                    static_cast<uint32_t>(group_idx) *
+                    static_cast<uint32_t>(g.n) *
+                    static_cast<uint32_t>(b_row_stride_bytes);
+
+                auto load_a_kt = [&](A_row_reg& A_tile, int slab)
+                        __attribute__((always_inline)) {
+                    const int M_warp_base =
+                        (m_subtile_A + br * 2 + slab) * HB + wm * RBM;
+                    #pragma unroll
+                    for (int h = 0; h < A_row_reg::height; ++h) {
+                        const int A_row_idx = M_warp_base + h * 16 + row_lane;
+                        const uint32_t v_base = static_cast<uint32_t>(
+                            A_row_idx * a_row_stride_bytes +
+                            K_tail_base_bytes + k_lane_byte);
+                        const uint32_t v_lo = both_valid ? v_base : SENTINEL;
+                        const uint32_t v_hi = both_valid ? (v_base + 16) : SENTINEL;
+                        __uint128_t v0 = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
+                            a_srsrc_kt, v_lo, 0, 0);
+                        __uint128_t v1 = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
+                            a_srsrc_kt, v_hi, 0, 0);
+                        *reinterpret_cast<__uint128_t*>(&A_tile.tiles[h][0].data[0]) = v0;
+                        *reinterpret_cast<__uint128_t*>(&A_tile.tiles[h][0].data[4]) = v1;
+                    }
+                };
+
+                // Single n-strip (n_strip=0 only). N_warp_base in BN=128:
+                // bc * HB (= bc * 128) + wn * RBN.
+                auto load_b_kt = [&](B_row_reg& B_tile) __attribute__((always_inline)) {
+                    const int N_warp_base = bc * HB + wn * RBN;
+                    #pragma unroll
+                    for (int h_b = 0; h_b < B_row_reg::height; ++h_b) {
+                        const int B_row_idx_in_group = N_warp_base + h_b * 16 + row_lane;
+                        const uint32_t v_base = b_group_byte_base + static_cast<uint32_t>(
+                            B_row_idx_in_group * b_row_stride_bytes +
+                            K_tail_base_bytes + k_lane_byte);
+                        const uint32_t v_lo = both_valid ? v_base : SENTINEL;
+                        const uint32_t v_hi = both_valid ? (v_base + 16) : SENTINEL;
+                        __uint128_t v0 = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
+                            b_srsrc_kt, v_lo, 0, 0);
+                        __uint128_t v1 = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
+                            b_srsrc_kt, v_hi, 0, 0);
+                        *reinterpret_cast<__uint128_t*>(&B_tile.tiles[h_b][0].data[0]) = v0;
+                        *reinterpret_cast<__uint128_t*>(&B_tile.tiles[h_b][0].data[4]) = v1;
+                    }
+                };
+
+                load_b_kt(b0);
+                load_a_kt(a, 0);
+                load_a_kt(a_kt1, 1);
+                asm volatile("s_waitcnt vmcnt(0)");
+                rcr_mma(cA, a, b0);
+                rcr_mma(cC, a_kt1, b0);
+            }
+        }
+
+        const float combined_scale = resolve_combined_scale_grp<false>(g);
+
+        if (wm == 0) __builtin_amdgcn_s_barrier();
+        const int r0 = __builtin_amdgcn_readfirstlane(m_subtile_C + br*WARPS_M*2+wm);
+        const int r1 = __builtin_amdgcn_readfirstlane(m_subtile_C + br*WARPS_M*2+WARPS_M+wm);
+        // BN=128: c0 in RBN units = bc*WARPS_N+wn (was bc*WARPS_N*2+wn for BN=256).
+        const int c0 = __builtin_amdgcn_readfirstlane(bc*WARPS_N+wn);
+        if constexpr (N_MASKED_STORE) {
+            if ((bc + 1) * HB <= g.n) {     // BN=128 = HB
+                mul(cA, cA, combined_scale);
+                store(g.c, cA, {0, 0, r0, c0});
+                mul(cC, cC, combined_scale);
+                store(g.c, cC, {0, 0, r1, c0});
+            } else {
+                mul(cA, cA, combined_scale);
+                store_c_tile_n_masked(g.c, cA, r0, c0, g.n);
+                mul(cC, cC, combined_scale);
+                store_c_tile_n_masked(g.c, cC, r1, c0, g.n);
+            }
+        } else {
+            mul(cA, cA, combined_scale);
+            store(g.c, cA, {0, 0, r0, c0});
+            mul(cC, cC, combined_scale);
+            store(g.c, cC, {0, 0, r1, c0});
+        }
+
+        asm volatile("s_waitcnt lgkmcnt(0)");
+        __builtin_amdgcn_s_barrier();
+    }
+}
+
+template __global__ void grouped_rcr_kernel_bn128<0, false, false>(const grouped_layout_globals);
+template __global__ void grouped_rcr_kernel_bn128<0, true , false>(const grouped_layout_globals);
+template __global__ void grouped_rcr_kernel_bn128<0, false, true >(const grouped_layout_globals);
+template __global__ void grouped_rcr_kernel_bn128<0, true , true >(const grouped_layout_globals);
+
+// =============================================================================
+// BLOCK_M=128 BLOCK_N=128 BLOCK_K=128 RCR variant (b128 = "BLK=128 both M, N").
+// Single tile per (br, bc) covers 128M × 128N — no M-slab, no N-strip
+// subdivision. 1 cA accumulator per warp, 1 mma per K-iter.
+//
+// 8 warps (WARPS_M=2 × WARPS_N=4): wm covers 64-row chunks (RBM=64),
+// wn covers 32-col chunks (RBN=32). Total per tile: 2*64=128M × 4*32=128N.
+//
+// Caller contract: host sets g.bpc = ceil_div(g.n, 128) AND uses tile-count
+// = (M_g/HB) × bpc per group (i.e., bpr_g = M_g/HB instead of M_g/BLOCK_SIZE).
+//
+// Prefetch ordering follows lesson learned from bn128 fix: prefetch is placed
+// INSIDE the load_b/load_a + mma sequence (after load_b/load_a but BEFORE
+// the wait+mma), to avoid end-of-iter overwrite hazard.
+// =============================================================================
+template<int KI_HINT = 0, bool N_MASKED_STORE = false, bool FUSED_KTAIL = false>
+__global__ __launch_bounds__(_NUM_THREADS, 1)
+void grouped_rcr_kernel_b128(const grouped_layout_globals g) {
+    using ST_rcr = ST_v2;             // 128 rows (HB) × 128 cols (BK)
+    __shared__ ST_rcr As[2];          // single M-slab per pipe stage
+    __shared__ ST_rcr Bs[2];          // single N-strip per pipe stage
+    constexpr int MAX_G_PLUS_1 = 65;
+    __shared__ int s_offs[MAX_G_PLUS_1];
+    __shared__ int s_cum_tiles[MAX_G_PLUS_1];
+    __shared__ int s_total_tiles;
+    A_row_reg a;
+    B_row_reg b0;
+    rt_fl<RBM, RBN, col_l, rt_16x16_s> cA;
+
+    const int slots_eff = gridDim.x;
+    const int xcds_eff = g.num_xcds > 0 ? g.num_xcds : BLOCK_SWIZZLE_NUM_XCDS;
+    const int chunk_size_eff = g.chunk_size > 0 ? g.chunk_size : 64;
+    int pid = chiplet_transform_chunked(
+        blockIdx.x, slots_eff, xcds_eff, chunk_size_eff);
+
+    int wm = warpid() / WARPS_N;
+    int wn = warpid() % WARPS_N;
+    const int num_pid_n = g.bpc;          // host: ceil_div(g.n, 128)
+    const int ki_dyn   = (KI_HINT > 0) ? KI_HINT : g.ki;
+
+    if (threadIdx.x <= g.G && threadIdx.x < MAX_G_PLUS_1) {
+        s_offs[threadIdx.x] = static_cast<int>(g.group_offs[threadIdx.x]);
+    }
+    if (threadIdx.x > g.G && threadIdx.x < MAX_G_PLUS_1) {
+        s_cum_tiles[threadIdx.x] = 0x7FFFFFFF;
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        int prev = s_offs[0];
+        s_cum_tiles[0] = 0;
+        int t = 0;
+        #pragma unroll 1
+        for (int gi = 0; gi < g.G; ++gi) {
+            const int next = s_offs[gi + 1];
+            // bpr_g = M_g / HB (= M_g / 128) for b128 variant
+            t += ((next - prev) / HB) * num_pid_n;
+            s_cum_tiles[gi + 1] = t;
+            prev = next;
+        }
+        s_total_tiles = t;
+    }
+    __syncthreads();
+    const int total_tiles = s_total_tiles;
+
+    constexpr int bpt = ST_rcr::underlying_subtile_bytes_per_thread;
+    constexpr int bpm = bpt * _NUM_THREADS;
+    constexpr int mpt = ST_rcr::rows * ST_rcr::cols * sizeof(fp8e4m3) / bpm;
+    uint32_t soA[mpt], soB[mpt];
+    G::prefill_swizzled_offsets(As[0], g.a, soA);
+    G::prefill_swizzled_offsets(Bs[0], g.b, soB);
+
+    for (int gt = pid; gt < total_tiles; gt += slots_eff) {
+        int lo = 0;
+        int hi = MAX_G_PLUS_1 - 1;
+        #pragma unroll
+        for (int level = 0; level < 6; ++level) {
+            const int mid = (lo + hi + 1) >> 1;
+            if (gt >= s_cum_tiles[mid]) lo = mid;
+            else hi = mid - 1;
+        }
+        const int group_idx = lo;
+        const int tile_start = s_cum_tiles[lo];
+        const int local_tile = gt - tile_start;
+        const int m_start_g = s_offs[group_idx];
+        const int M_g = s_offs[group_idx + 1] - m_start_g;
+        const int bpr_g = M_g / HB;       // tiles per group in M dir (HB=128)
+
+        int br, bc;
+        if (g.bpc > bpr_g) {
+            const int WGN = g.group_m;
+            const int num_wgid_in_group = bpr_g * WGN;
+            int group_id = local_tile / num_wgid_in_group;
+            int first_pid_n = group_id * WGN;
+            int group_size_n = min(num_pid_n - first_pid_n, WGN);
+            if (group_size_n <= 0) continue;
+            bc = first_pid_n + ((local_tile % num_wgid_in_group) % group_size_n);
+            br = (local_tile % num_wgid_in_group) / group_size_n;
+        } else {
+            const int WGM = g.group_m;
+            const int num_wgid_in_group = WGM * num_pid_n;
+            int group_id = local_tile / num_wgid_in_group;
+            int first_pid_m = group_id * WGM;
+            int group_size_m = min(bpr_g - first_pid_m, WGM);
+            if (group_size_m <= 0) continue;
+            br = first_pid_m + ((local_tile % num_wgid_in_group) % group_size_m);
+            bc = (local_tile % num_wgid_in_group) / group_size_m;
+        }
+        if (br >= bpr_g || bc >= num_pid_n) continue;
+
+        const int m_subtile_A = m_start_g / HB;
+        const int m_subtile_C = m_start_g / RBM;
+
+        auto a_co = [&](int s, int k) -> coord<ST_rcr> {
+            return {0, 0, m_subtile_A + s, k};
+        };
+        auto b_co = [&](int s, int k) -> coord<ST_rcr> {
+            return {0, group_idx, s, k};
+        };
+
+        auto load_a = [&](A_row_reg& dst, ST_rcr& tile, int wi) {
+            auto sub = subtile_inplace<RBM, BK>(tile, {wi, 0});
+            load(dst, sub);
+        };
+        auto load_b = [&](B_row_reg& dst, ST_rcr& tile, int wi) {
+            auto sub = subtile_inplace<RBN, BK>(tile, {wi, 0});
+            load(dst, sub);
+        };
+
+        zero(cA);
+
+        int tic = 0, toc = 1;
+        // Prologue: load tile-0 + tile-1.
+        rcr_8w_load_hoist<_NUM_THREADS>(Bs[tic], g.b, b_co(bc, 0), soB);
+        rcr_8w_load_hoist<_NUM_THREADS>(As[tic], g.a, a_co(br, 0), soA);
+
+        if (wm == 1) __builtin_amdgcn_s_barrier();
+        TK_WAIT_VMCNT(0);
+        __builtin_amdgcn_s_barrier();
+
+        rcr_8w_load_hoist<_NUM_THREADS>(Bs[toc], g.b, b_co(bc, 1), soB);
+        rcr_8w_load_hoist<_NUM_THREADS>(As[toc], g.a, a_co(br, 1), soA);
+
+        TK_WAIT_VMCNT(0);
+        __builtin_amdgcn_s_barrier();
+
+        // Main loop: parallel of bn128 fixed main loop, with single mma.
+        // Prefetch placement copied from bn128 (which works).
+        TK_PRAGMA_UNROLL(RCR_MAIN_UNROLL)
+        for (int k = 0; k < ki_dyn - 2; k++, tic ^= 1, toc ^= 1) {
+            load_b(b0, Bs[tic], wn);
+            load_a(a, As[tic], wm);
+            // Prefetch As[tic] @ k+2 here (bn128's "As[toc][1] @ k+1" slot)
+            rcr_8w_load_hoist<_NUM_THREADS>(As[tic], g.a, a_co(br, k+2), soA);
+            TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            // Prefetch Bs[tic] @ k+2 here (bn128's "between-mmas" slot)
+            rcr_8w_load_hoist<_NUM_THREADS>(Bs[tic], g.b, b_co(bc, k+2), soB);
+            TK_WAIT_VMCNT(RCR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
+        }
+
+        // Epilog 1: K-iter ki_dyn-2.
+        {
+            load_b(b0, Bs[tic], wn);
+            load_a(a, As[tic], wm);
+            __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+            TK_WAIT_VMCNT(0); __builtin_amdgcn_s_barrier();
+            tic ^= 1; toc ^= 1;
+        }
+
+        // Epilog 2: last K-tile (k = ki_dyn-1).
+        {
+            load_b(b0, Bs[tic], wn);
+            load_a(a, As[tic], wm);
+            __builtin_amdgcn_s_barrier();
+            asm volatile("s_waitcnt lgkmcnt(0)");
+            __builtin_amdgcn_s_setprio(1); rcr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+        }
+
+        if constexpr (FUSED_KTAIL) {
+            if (g.fast_k < g.k) {
+                const int laneid = kittens::laneid();
+                const int row_lane = laneid % 16;
+                const int k_lane_byte = (laneid / 16) * 32;
+                constexpr int KREM = 64;
+                static_assert(KREM == 64,
+                    "FUSED_KTAIL=true K_REM must be 64; see fuse_ktail_eligible");
+                const bool both_valid = (laneid < 32);
+                constexpr uint32_t SENTINEL = 0xFFFF0000u;
+
+                const fp8e4m3* a_base_ptr = (const fp8e4m3*)&g.a[{0, 0, 0, 0}];
+                const fp8e4m3* b_base_ptr = (const fp8e4m3*)&g.b[{0, 0, 0, 0}];
+                const int a_row_stride_bytes = g.a.template stride<2>();
+                const int b_row_stride_bytes = g.b.template stride<2>();
+                const uint32_t a_total_bytes =
+                    static_cast<uint32_t>(g.M_total) *
+                    static_cast<uint32_t>(a_row_stride_bytes);
+                const uint32_t b_per_group_bytes =
+                    static_cast<uint32_t>(group_idx + 1) *
+                    static_cast<uint32_t>(g.n) *
+                    static_cast<uint32_t>(b_row_stride_bytes);
+                i32x4 a_srsrc_kt = make_srsrc((const void*)a_base_ptr, a_total_bytes);
+                i32x4 b_srsrc_kt = make_srsrc((const void*)b_base_ptr, b_per_group_bytes);
+
+                const uint32_t K_tail_base_bytes =
+                    static_cast<uint32_t>(g.fast_k);
+                const uint32_t b_group_byte_base =
+                    static_cast<uint32_t>(group_idx) *
+                    static_cast<uint32_t>(g.n) *
+                    static_cast<uint32_t>(b_row_stride_bytes);
+
+                // Single M-tile (br) and single N-tile (bc) for b128.
+                // M_warp_base = (m_subtile_A + br) * HB + wm * RBM
+                // N_warp_base = bc * HB + wn * RBN
+                auto load_a_kt = [&]() __attribute__((always_inline)) {
+                    const int M_warp_base = (m_subtile_A + br) * HB + wm * RBM;
+                    #pragma unroll
+                    for (int h = 0; h < A_row_reg::height; ++h) {
+                        const int A_row_idx = M_warp_base + h * 16 + row_lane;
+                        const uint32_t v_base = static_cast<uint32_t>(
+                            A_row_idx * a_row_stride_bytes +
+                            K_tail_base_bytes + k_lane_byte);
+                        const uint32_t v_lo = both_valid ? v_base : SENTINEL;
+                        const uint32_t v_hi = both_valid ? (v_base + 16) : SENTINEL;
+                        __uint128_t v0 = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
+                            a_srsrc_kt, v_lo, 0, 0);
+                        __uint128_t v1 = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
+                            a_srsrc_kt, v_hi, 0, 0);
+                        *reinterpret_cast<__uint128_t*>(&a.tiles[h][0].data[0]) = v0;
+                        *reinterpret_cast<__uint128_t*>(&a.tiles[h][0].data[4]) = v1;
+                    }
+                };
+
+                auto load_b_kt = [&]() __attribute__((always_inline)) {
+                    const int N_warp_base = bc * HB + wn * RBN;
+                    #pragma unroll
+                    for (int h_b = 0; h_b < B_row_reg::height; ++h_b) {
+                        const int B_row_idx_in_group = N_warp_base + h_b * 16 + row_lane;
+                        const uint32_t v_base = b_group_byte_base + static_cast<uint32_t>(
+                            B_row_idx_in_group * b_row_stride_bytes +
+                            K_tail_base_bytes + k_lane_byte);
+                        const uint32_t v_lo = both_valid ? v_base : SENTINEL;
+                        const uint32_t v_hi = both_valid ? (v_base + 16) : SENTINEL;
+                        __uint128_t v0 = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
+                            b_srsrc_kt, v_lo, 0, 0);
+                        __uint128_t v1 = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
+                            b_srsrc_kt, v_hi, 0, 0);
+                        *reinterpret_cast<__uint128_t*>(&b0.tiles[h_b][0].data[0]) = v0;
+                        *reinterpret_cast<__uint128_t*>(&b0.tiles[h_b][0].data[4]) = v1;
+                    }
+                };
+
+                load_b_kt();
+                load_a_kt();
+                asm volatile("s_waitcnt vmcnt(0)");
+                rcr_mma(cA, a, b0);
+            }
+        }
+
+        const float combined_scale = resolve_combined_scale_grp<false>(g);
+
+        if (wm == 0) __builtin_amdgcn_s_barrier();
+        // r0 = m_subtile_C + br*WARPS_M + wm (no slab — single tile per br)
+        // c0 = bc*WARPS_N + wn (single strip per bc)
+        const int r0 = __builtin_amdgcn_readfirstlane(m_subtile_C + br*WARPS_M + wm);
+        const int c0 = __builtin_amdgcn_readfirstlane(bc*WARPS_N + wn);
+        if constexpr (N_MASKED_STORE) {
+            if ((bc + 1) * HB <= g.n) {
+                mul(cA, cA, combined_scale);
+                store(g.c, cA, {0, 0, r0, c0});
+            } else {
+                mul(cA, cA, combined_scale);
+                store_c_tile_n_masked(g.c, cA, r0, c0, g.n);
+            }
+        } else {
+            mul(cA, cA, combined_scale);
+            store(g.c, cA, {0, 0, r0, c0});
+        }
+
+        asm volatile("s_waitcnt lgkmcnt(0)");
+        __builtin_amdgcn_s_barrier();
+    }
+}
+
+template __global__ void grouped_rcr_kernel_b128<0, false, false>(const grouped_layout_globals);
+template __global__ void grouped_rcr_kernel_b128<0, true , false>(const grouped_layout_globals);
+template __global__ void grouped_rcr_kernel_b128<0, false, true >(const grouped_layout_globals);
+template __global__ void grouped_rcr_kernel_b128<0, true , true >(const grouped_layout_globals);
+
 // Force-instantiate. Compare resource report against the R57 step-2A
 // baseline (V256 / A256 / Spill 0 / Scratch 0 — placeholder G::load).
-
 
 #ifndef FP8_RRR_FUSE_PROBE
 #define FP8_RRR_FUSE_PROBE 0
@@ -2148,6 +2900,17 @@ void grouped_rrr_kernel(const grouped_layout_globals g) {
     __shared__ int s_offs[MAX_G_PLUS_1];
     __shared__ int s_cum_tiles[MAX_G_PLUS_1];
     __shared__ int s_total_tiles;
+    // Uniform-group fast path (mirror reference at
+    // mxfp8/Primus-Turbo/csrc/kernels/grouped_gemm/turbo/turbo_grouped_gemm_mxfp8_kernel.h).
+    // If all groups have the same M (gpt_oss / DSV3 / most MoE training),
+    // skip the 6-level binary search and use a single division per persistent
+    // iteration to map gt → (group_idx, local_tile).
+    __shared__ int s_uniform_M;     // > 0 iff all groups have same M; else -1
+    __shared__ int s_tiles_per_g;   // (uniform_M / BLOCK_SIZE) * num_pid_n
+    // K-tail cross-lane shuffle scratch (16 KB) — only allocated for
+    // FUSED_KTAIL=true. Moved inside the if-constexpr branch below so
+    // the FUSED_KTAIL=false instantiation can lift launch_bounds 1 → 2
+    // (occupancy parity with dense gemm_kernel<RRR>).
 
     A_row_reg a;
     B_col_reg b0, b1;
@@ -2175,17 +2938,25 @@ void grouped_rrr_kernel(const grouped_layout_globals g) {
         int prev = s_offs[0];
         s_cum_tiles[0] = 0;
         int t = 0;
+        const int M0 = s_offs[1] - prev;
+        bool uniform = (g.G > 0);
         #pragma unroll 1
         for (int gi = 0; gi < g.G; ++gi) {
             const int next = s_offs[gi + 1];
-            t += ((next - prev) / BLOCK_SIZE) * num_pid_n;
+            const int M_g_i = next - prev;
+            if (M_g_i != M0) uniform = false;
+            t += (M_g_i / BLOCK_SIZE) * num_pid_n;
             s_cum_tiles[gi + 1] = t;
             prev = next;
         }
-        s_total_tiles = t;
+        s_total_tiles  = t;
+        s_uniform_M    = uniform ? M0 : -1;
+        s_tiles_per_g  = uniform ? (M0 / BLOCK_SIZE) * num_pid_n : 0;
     }
     __syncthreads();
-    const int total_tiles = s_total_tiles;
+    const int total_tiles  = s_total_tiles;
+    const int uniform_M    = s_uniform_M;
+    const int tiles_per_g  = s_tiles_per_g;
 
     constexpr int bptA = ST_row::underlying_subtile_bytes_per_thread;
     constexpr int bpmA = bptA * _NUM_THREADS;
@@ -2200,17 +2971,26 @@ void grouped_rrr_kernel(const grouped_layout_globals g) {
     G::prefill_swizzled_offsets(Bs[0][0], g.b, soB);
 
     for (int gt = pid; gt < total_tiles; gt += NUM_CUS) {
-        int lo = 0;
-        int hi = MAX_G_PLUS_1 - 1;
-        #pragma unroll
-        for (int level = 0; level < 6; ++level) {
-            const int mid = (lo + hi + 1) >> 1;
-            if (gt >= s_cum_tiles[mid]) lo = mid;
-            else hi = mid - 1;
+        int group_idx, local_tile;
+        if (uniform_M > 0) {
+            // Uniform-group fast path: single division per persistent iter.
+            // tiles_per_g is identical across groups so simple integer
+            // division gives group_idx; remainder gives local_tile.
+            group_idx  = gt / tiles_per_g;
+            local_tile = gt - group_idx * tiles_per_g;
+        } else {
+            // Variable-M fallback: 6-level binary search over s_cum_tiles.
+            int lo = 0;
+            int hi = MAX_G_PLUS_1 - 1;
+            #pragma unroll
+            for (int level = 0; level < 6; ++level) {
+                const int mid = (lo + hi + 1) >> 1;
+                if (gt >= s_cum_tiles[mid]) lo = mid;
+                else hi = mid - 1;
+            }
+            group_idx  = lo;
+            local_tile = gt - s_cum_tiles[lo];
         }
-        const int group_idx = lo;
-        const int tile_start = s_cum_tiles[lo];
-        const int local_tile = gt - tile_start;
         const int m_start_g = s_offs[group_idx];
         const int M_g = s_offs[group_idx + 1] - m_start_g;
         const int bpr_g = M_g / BLOCK_SIZE;
@@ -2281,6 +3061,9 @@ void grouped_rrr_kernel(const grouped_layout_globals g) {
         __builtin_amdgcn_s_barrier();
 
         // Single-tile main loop (mirror dense lines 1437-1470).
+        // 2026-05-15: AGPR variant — only main loop uses _agpr; epilog/ktail
+        // stay on builtin so the cA-cD AGPR ↔ VGPR transition happens once
+        // at end-of-main rather than every call.
         TK_PRAGMA_UNROLL(RRR_MAIN_UNROLL)
         for (int k = 0; k < ki_dyn - 2; k++, tic ^= 1, toc ^= 1) {
             load_b(b0, Bs[tic][0], wn);
@@ -2288,27 +3071,27 @@ void grouped_rrr_kernel(const grouped_layout_globals g) {
             G::load(As[toc][1], g.a, a_co(br*2+1, k+1), soA);
             TK_WAIT_LGKM(RRR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rrr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<!FUSED_KTAIL>(cA, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier(); RRR_SCHED_BARRIER();
 
             load_b(b1, Bs[tic][1], wn);
             G::load(Bs[tic][0], g.b, b_co(bc*2, k+2), soB);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rrr_mma(cB, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<!FUSED_KTAIL>(cB, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
             G::load(Bs[tic][1], g.b, b_co(bc*2+1, k+2), soB);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rrr_mma(cC, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<!FUSED_KTAIL>(cC, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier(); RRR_SCHED_BARRIER();
 
             G::load(As[tic][0], g.a, a_co(br*2, k+2), soA);
             TK_WAIT_VMCNT(RRR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rrr_mma(cD, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<!FUSED_KTAIL>(cD, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
         }
 
@@ -2319,25 +3102,25 @@ void grouped_rrr_kernel(const grouped_layout_globals g) {
             G::load(As[toc][1], g.a, a_co(br*2+1, ki_dyn-1), soA);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rrr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<!FUSED_KTAIL>(cA, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier(); RRR_SCHED_BARRIER();
 
             load_b(b1, Bs[tic][1], wn);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rrr_mma(cB, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<!FUSED_KTAIL>(cB, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rrr_mma(cC, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<!FUSED_KTAIL>(cC, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_b(b0, Bs[toc][0], wn);
             TK_WAIT_VMCNT(RRR_EPILOGUE_VMCNT); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rrr_mma(cD, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<!FUSED_KTAIL>(cD, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier(); RRR_SCHED_BARRIER();
             tic ^= 1; toc ^= 1;
         }
@@ -2347,21 +3130,21 @@ void grouped_rrr_kernel(const grouped_layout_globals g) {
             load_a(a, As[tic][0], wm);
             asm volatile("s_waitcnt vmcnt(0)"); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rrr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<!FUSED_KTAIL>(cA, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_b(b1, Bs[tic][1], wn);
             __builtin_amdgcn_s_barrier(); RRR_SCHED_BARRIER();
             asm volatile("s_waitcnt lgkmcnt(0)");
-            __builtin_amdgcn_s_setprio(1); rrr_mma(cB, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<!FUSED_KTAIL>(cB, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1);
-            rrr_mma(cC, a, b0);
-            rrr_mma(cD, a, b1);
+            rrr_mma_agpr_t<!FUSED_KTAIL>(cC, a, b0);
+            rrr_mma_agpr_t<!FUSED_KTAIL>(cD, a, b1);
             __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
         }
@@ -2375,9 +3158,14 @@ void grouped_rrr_kernel(const grouped_layout_globals g) {
         // K-aligned-to-32 chunks: lane chunks 0,1 carry real data (K=0..64),
         // chunks 2,3 zeroed (K=64..128, mfma's K=128 zero-pad).
         if constexpr (FUSED_KTAIL) {
+            // Per-warp scratch for cross-lane B shuffle (see step-2..4 below).
+            // Layout per warp: 64 K-rows × 16 N-cols × 1 byte = 1024 bytes per
+            // (warp, j); 8 warps × 2 j = 16 KB total. Only allocated for the
+            // FUSED_KTAIL=true template instantiation.
+            __shared__ uint8_t kt_b_scratch[8][2][1024];
+
             if (g.fast_k < g.k) {
                 typedef __attribute__((__vector_size__(8 * sizeof(int)))) int intx8_t;
-                A_row_reg a_kt0, a_kt1;
                 B_col_reg b0_kt, b1_kt;
 
                 const int laneid_fk  = kittens::laneid();
@@ -2430,52 +3218,190 @@ void grouped_rrr_kernel(const grouped_layout_globals g) {
                     }
                 };
 
-                // ---- Custom B K-tail load (direct-to-reg, strided gather) ----
-                // For each base tile j (B_col_reg.tiles[0][j], j=0..1) of one
-                // n-strip, lane (l) holds 32 fp8 along K direction at one N
-                // column (col = col_block_base + n_strip*HB + wn*RBN + j*16 + l%16).
-                // Each fp8 byte lives at byte position
-                //   (K_idx * b_row_stride + N_col)
-                // → 32 strided 1-byte loads per base tile per lane.
+                // ---- B K-tail load: cross-lane shuffle via LDS scratch ----
+                // OLD: 32 strided byte_b8 loads per lane × 16 lanes = 512 ops/warp/(j,strip)
+                // NEW: 1 b128/lane (16 contig N bytes for 1 K row) + LDS write +
+                //      32 byte-reads from LDS column-strided.
+                // Memory traffic same; instruction count cut ~2-3x; LDS bandwidth
+                // is much higher than strided global so net throughput up.
+                //
+                // gfx950 quirk note: ds_read_b64_tr_b8 in mma chain b128(A)+ds_read(B)+mfma
+                // silently zeros mfma. We use NORMAL ds_read (not _tr_b8 transposed)
+                // so quirk should not fire.
+                const int warp_id_fk = kittens::warpid();
                 auto load_b_kt_fk = [&](B_col_reg& B_tile, int n_strip)
                         __attribute__((always_inline)) {
                     const int N_warp_base =
                         (bc * 2 + n_strip) * HB + wn * RBN;
                     #pragma unroll
                     for (int j = 0; j < B_col_reg::width; ++j) {
-                        const int n_col = N_warp_base + j * 16 + row_lane_fk;
-                        // Each lane holds 32 fp8 along K, packed into
-                        // .data[8] of fp8e4m3_4. Layout: data[idx][i] holds
-                        // fp8 at K = K_tail + chunk*32 + idx*4 + i.
+                        // STEP 1: ALL 64 lanes load — lane l loads K=K_tail+l
+                        // (covers K=K_tail+0..63 = the full real K-tail range).
+                        const uint32_t K_pos = K_tail_byte_fk + laneid_fk;
+                        const uint32_t N_col_start =
+                            static_cast<uint32_t>(N_warp_base + j * 16);
+                        const uint32_t voffset =
+                            K_pos * b_row_stride_bytes_fk + N_col_start;
+                        __uint128_t v = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
+                            b_srsrc_fk, voffset, 0, 0);
+                        // STEP 2: write to LDS column-major: byte at (K, N) →
+                        // LDS[N*64 + K]. Each lane scatters its 16 bytes:
+                        // byte i of lane l → LDS[i*64 + l]. This makes per-lane
+                        // strided writes (16 ds_write_b8/lane) but enables 8
+                        // ds_read_b32/lane on read side (32 contig K bytes).
+                        // Net: 24 LDS ops/lane vs 33 in row-major scheme.
+                        uint8_t* v_bytes = (uint8_t*)&v;
+                        uint8_t* lds_base = &kt_b_scratch[warp_id_fk][j][0];
+                        #pragma unroll
+                        for (int i = 0; i < 16; ++i) {
+                            lds_base[i * 64 + laneid_fk] = v_bytes[i];
+                        }
+                        // STEP 3: drain LDS commits.
+                        asm volatile("s_waitcnt vmcnt(0) lgkmcnt(0)");
+
+                        // STEP 4: contiguous 32-byte read per lane.
+                        // Chunk 0/1 lane reads its 32 K bytes for N=row_lane_fk,
+                        // K offset = chunk_fk*32. LDS layout col-major puts
+                        // (K=0..63, N=row_lane_fk) at LDS[row_lane_fk*64..+63].
+                        // Lane reads 32 contig bytes = 8 ds_read_b32.
                         intx8_t b_pack = intx8_t{};
                         if (ab_chunk_valid) {
-                            const uint32_t K_base_byte =
-                                K_tail_byte_fk + k_lane_byte_fk;
-                            uint8_t* bp_out = (uint8_t*)&b_pack;
-                            #pragma unroll
-                            for (int i = 0; i < 32; ++i) {
-                                const uint32_t voffset =
-                                    (K_base_byte + i) * b_row_stride_bytes_fk
-                                    + static_cast<uint32_t>(n_col);
-                                bp_out[i] = ::kittens::llvm_amdgcn_raw_buffer_load_b8(
-                                    b_srsrc_fk, voffset, 0, 0);
-                            }
+                            const int K_offset = chunk_fk * 32;
+                            uint8_t* lds_col_base =
+                                &kt_b_scratch[warp_id_fk][j][row_lane_fk * 64 + K_offset];
+                            // 32 contig bytes = 2 b128 reads.
+                            __uint128_t r0 =
+                                *reinterpret_cast<__uint128_t*>(lds_col_base);
+                            __uint128_t r1 =
+                                *reinterpret_cast<__uint128_t*>(lds_col_base + 16);
+                            uint8_t* bp = (uint8_t*)&b_pack;
+                            *reinterpret_cast<__uint128_t*>(bp) = r0;
+                            *reinterpret_cast<__uint128_t*>(bp + 16) = r1;
                         }
                         *reinterpret_cast<intx8_t*>(
                             &B_tile.tiles[0][j].data[0]) = b_pack;
                     }
                 };
 
-                load_b_kt_fk(b0_kt, 0);
-                load_b_kt_fk(b1_kt, 1);
-                load_a_kt_fk(a_kt0, 0);
-                load_a_kt_fk(a_kt1, 1);
-                asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
-                rrr_mma(cA, a_kt0, b0_kt);
-                rrr_mma(cB, a_kt0, b1_kt);
-                rrr_mma(cC, a_kt1, b0_kt);
-                rrr_mma(cD, a_kt1, b1_kt);
-                __builtin_amdgcn_s_barrier();
+                // ---- Runtime knob: LDS-based B load (avoids 32 byte-loads/lane).
+                // Quirk-free strategy: pre-zero Bs[tic], coop-load B via LDS
+                // with per-group SRD bound = K_REM*N (so K=K_REM..127 voffsets
+                // OOB → no-op → preserve zero), keep A as direct-to-reg b128
+                // (chunks 2,3 may read next-M-row garbage but multiplied by
+                // B=0 in those chunks → harmless). Avoids the b128(A) →
+                // ds_read(B) → mfma quirk because B's chunks 2,3 are zero
+                // (so wrong contribution = 0).
+                // Compile-time gated experiment. Toggle via #define.
+                #ifndef HK_FP8_RRR_FUSED_KTAIL_LDS
+                #define HK_FP8_RRR_FUSED_KTAIL_LDS 0
+                #endif
+                constexpr bool ktail_lds_active = (HK_FP8_RRR_FUSED_KTAIL_LDS != 0);
+
+                if constexpr (ktail_lds_active) {
+                    // ---- Cooperative pre-zero Bs[tic][0/1] ----
+                    constexpr int ST_V2_B128 = (sizeof(ST_v2) / 16);
+                    const int tid_z = threadIdx.x;
+                    __uint128_t* Bs0_ptr = reinterpret_cast<__uint128_t*>(&Bs[tic][0].data[0]);
+                    __uint128_t* Bs1_ptr = reinterpret_cast<__uint128_t*>(&Bs[tic][1].data[0]);
+                    #pragma unroll
+                    for (int idx = tid_z; idx < ST_V2_B128; idx += _NUM_THREADS) {
+                        Bs0_ptr[idx] = 0;
+                        Bs1_ptr[idx] = 0;
+                    }
+                    __syncthreads();
+
+                    // ---- Custom coop load B with per-group SRD ----
+                    // Per-group bound = K_REM * N bytes. Voffsets where K_local
+                    // >= K_REM (chunks 2,3) auto-no-op → preserves zero.
+                    const uint32_t b_row_stride = g.b.template stride<2>();
+                    const uint32_t b_per_group_bound =
+                        static_cast<uint32_t>(g.k - g.fast_k) * b_row_stride;
+
+                    constexpr int bptB_lds = ST_v2::underlying_subtile_bytes_per_thread;
+                    constexpr int bpwB_lds = bptB_lds * kittens::WARP_THREADS;
+                    constexpr int mptB_lds = ST_v2::rows * ST_v2::cols * sizeof(fp8e4m3) / (bptB_lds * _NUM_THREADS);
+                    constexpr int nwarps_lds = _NUM_THREADS / kittens::WARP_THREADS;
+                    const int laneid_lds = kittens::laneid();
+                    const int warpid_lds = kittens::warpid() % nwarps_lds;
+
+                    #pragma unroll
+                    for (int strip = 0; strip < 2; ++strip) {
+                        // global_ptr at K-tail tile origin within this group
+                        coord<ST_v2> tile_idx{0, group_idx, ki_dyn, bc*2+strip};
+                        coord<> unit = tile_idx.template unit_coord<2, 3>();
+                        fp8e4m3* gp = (fp8e4m3*)&g.b[unit];
+                        i32x4 b_srsrc_lds = make_srsrc((const void*)gp, b_per_group_bound);
+
+                        ST_v2& Bs_dst = Bs[tic][strip];
+                        const uintptr_t lds_tile_base = reinterpret_cast<uintptr_t>(&Bs_dst.data[0]);
+
+                        #pragma unroll
+                        for (int i = 0; i < mptB_lds; i++) {
+                            const int lane_byte_offset = (laneid_lds * bptB_lds) + (warpid_lds * bpwB_lds) + (i * nwarps_lds * bpwB_lds);
+                            const int subtile_id = lane_byte_offset / ST_v2::underlying_subtile_bytes;
+                            const int subtile_row = subtile_id / ST_v2::underlying_subtiles_per_row;
+                            const int subtile_col = subtile_id % ST_v2::underlying_subtiles_per_row;
+                            const int subtile_lane_byte_offset = lane_byte_offset % ST_v2::underlying_subtile_bytes;
+
+                            const int row = subtile_lane_byte_offset / ST_v2::underlying_subtile_row_bytes;
+                            const int col = (subtile_lane_byte_offset % ST_v2::underlying_subtile_row_bytes) / sizeof(fp8e4m3);
+
+                            const uint32_t swizzled_shared_byte_offset = Bs_dst.swizzle({row, col});
+
+                            const int swizzled_global_row = (swizzled_shared_byte_offset / ST_v2::underlying_subtile_row_bytes) + subtile_row * ST_v2::underlying_subtile_rows;
+                            const int swizzled_global_col = (swizzled_shared_byte_offset % ST_v2::underlying_subtile_row_bytes) / sizeof(fp8e4m3) + subtile_col * ST_v2::underlying_subtile_cols;
+                            const uint32_t swizzled_global_byte_offset =
+                                (swizzled_global_row * b_row_stride + swizzled_global_col) * sizeof(fp8e4m3);
+
+                            const int warp_linear_offset = (warpid_lds * bpwB_lds) + (i * nwarps_lds * bpwB_lds);
+                            const int lds_subtile_id = warp_linear_offset / ST_v2::underlying_subtile_bytes;
+                            uintptr_t lds_addr = lds_tile_base + warp_linear_offset + lds_subtile_id * ST_v2::subtile_padding;
+                            kittens::as3_uint32_ptr lds_ptr = (kittens::as3_uint32_ptr)(lds_addr);
+
+                            kittens::llvm_amdgcn_raw_buffer_load_lds(
+                                b_srsrc_lds, lds_ptr, bptB_lds,
+                                swizzled_global_byte_offset, 0, 0,
+                                static_cast<int>(kittens::coherency::cache_all));
+                        }
+                    }
+
+                    // A side: keep direct-to-reg b128 (working, fast).
+                    // 2026-05-16 spill fix: serialize slabs to reuse `a`.
+                    load_a_kt_fk(a, 0);
+
+                    // Drain global loads (B coop load + A slab 0)
+                    asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
+                    __syncthreads();
+
+                    // ds_read B from LDS (col-layout via tr_b8)
+                    load_col_from_st(b0_kt, Bs[tic][0], wn * RBN);
+                    load_col_from_st(b1_kt, Bs[tic][1], wn * RBN);
+                    asm volatile("s_waitcnt lgkmcnt(0)");
+
+                    rrr_mma(cA, a, b0_kt);
+                    rrr_mma(cB, a, b1_kt);
+
+                    load_a_kt_fk(a, 1);
+                    asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
+                    rrr_mma(cC, a, b0_kt);
+                    rrr_mma(cD, a, b1_kt);
+                    __builtin_amdgcn_s_barrier();
+                } else {
+                    // Production direct-to-reg byte-load path (slow but quirk-safe).
+                    // 2026-05-16 spill fix: serialize slabs to reuse `a` (saves
+                    // ~32 VGPRs of A_row_reg pressure from a_kt0+a_kt1).
+                    load_b_kt_fk(b0_kt, 0);
+                    load_b_kt_fk(b1_kt, 1);
+                    load_a_kt_fk(a, 0);
+                    asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
+                    rrr_mma(cA, a, b0_kt);
+                    rrr_mma(cB, a, b1_kt);
+                    load_a_kt_fk(a, 1);
+                    asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
+                    rrr_mma(cC, a, b0_kt);
+                    rrr_mma(cD, a, b1_kt);
+                    __builtin_amdgcn_s_barrier();
+                }
             }
         }
 
@@ -2612,7 +3538,7 @@ template __global__ void grouped_rrr_kernel<0, true , true >(const grouped_layou
 // for interior cells. Mirror of `gemm_tail_kernel` (FP8 dense) but with
 // per-group B indexing via `group_offs`. Templated over Layout to support
 // both RCR (forward) and RRR (backward dA) — see also the BF16 mirror in
-// kernel_bf16_dynamic.cpp::grouped_tail_kernel.
+// kernel_bf16_dynamic.cpp::grouped_tail_kernel_fp8.
 //
 // Three cases per cell:
 //   * col <  fast_n  AND fast_k == k  → main covers fully → early-return.
@@ -2627,7 +3553,7 @@ template __global__ void grouped_rrr_kernel<0, true , true >(const grouped_layou
 //   * RRR : g.b is [1, G, K, N]  → B[g_idx, kk, col] (stride-1 in N).
 //           B not vectorisable along K → scalar K-loop only.
 template<Layout L>
-__global__ void grouped_tail_kernel(const grouped_layout_globals g) {
+__global__ void grouped_tail_kernel_fp8(const grouped_layout_globals g) {
     static_assert(L == Layout::RCR || L == Layout::RRR,
                   "FP8 grouped tail kernel: RCR or RRR only.");
     constexpr int MAX_G_PLUS_1 = 65;
@@ -2724,185 +3650,11 @@ __global__ void grouped_tail_kernel(const grouped_layout_globals g) {
     }
 }
 
-template __global__ void grouped_tail_kernel<Layout::RCR>(const grouped_layout_globals);
-template __global__ void grouped_tail_kernel<Layout::RRR>(const grouped_layout_globals);
-
-template<Layout L, int K_REM>
-__global__ void grouped_ktail_kernel_lds(const grouped_layout_globals g) {
-    static_assert(L == Layout::RCR,
-        "grouped_ktail_kernel_lds (FP8): RCR only — RRR/CRR fall back to scalar tail.");
-    constexpr int TBM = TAIL_BLOCK_M;       // 16
-    constexpr int TBN = TAIL_BLOCK_N;       // 16
-    constexpr int NTHR = TBM * TBN;         // 256
-
-    constexpr int K_REM_LDS = K_REM + 8;
-    __shared__ fp8e4m3 A_lds[TBM * K_REM_LDS];
-    __shared__ fp8e4m3 B_lds[TBN * K_REM_LDS];
-    constexpr int MAX_G_PLUS_1 = 65;
-    __shared__ int s_offs[MAX_G_PLUS_1];
-
-    const int rib = threadIdx.y;
-    const int cib = threadIdx.x;
-    const int tid = rib * blockDim.x + cib;
-
-    if (tid < MAX_G_PLUS_1) {
-        s_offs[tid] = (tid <= g.G) ? static_cast<int>(g.group_offs[tid]) : 0;
-    }
-    __syncthreads();
-
-    const int row_block_base = blockIdx.y * TBM;
-    const int col_block_base = blockIdx.x * TBN;
-    if (row_block_base >= g.M_total || col_block_base >= g.n) return;
-
-    int group_idx = 0;
-    #pragma unroll 1
-    for (int gi = 0; gi < g.G; ++gi) {
-        if (row_block_base < s_offs[gi + 1]) { group_idx = gi; break; }
-    }
-
-    const int k0 = g.fast_k;
-    const int K_rem_dyn = g.k - k0;
-    if (K_rem_dyn != K_REM) return;
-
-    // Cross-group fallback: per-thread scalar K-tail RMW correction
-    // (mirror BF16 round-6). Each row uses its own ``row_group`` for B
-    // indexing. Vec8 fast path when k0 and g.k are 8-aligned.
-    const bool cross_boundary = (row_block_base + TBM > s_offs[group_idx + 1]);
-    if (cross_boundary) {
-        const int row = row_block_base + rib;
-        const int col = col_block_base + cib;
-        if (row < g.M_total && col < g.n) {
-            int row_group = 0;
-            #pragma unroll 1
-            for (int gi = 0; gi < g.G; ++gi) {
-                if (row < s_offs[gi + 1]) { row_group = gi; break; }
-            }
-            typedef __attribute__((__vector_size__(2 * sizeof(float)))) float fp32x2_v;
-            auto fp8x4_to_f32x4 = [](const fp8e4m3_4& u) -> float4 {
-                int packed;
-                __builtin_memcpy(&packed, &u, 4);
-                fp32x2_v lo = __builtin_amdgcn_cvt_pk_f32_fp8(packed, false);
-                fp32x2_v hi = __builtin_amdgcn_cvt_pk_f32_fp8(packed, true);
-                return make_float4(lo[0], lo[1], hi[0], hi[1]);
-            };
-            float acc_s0 = 0.0f, acc_s1 = 0.0f, acc_s2 = 0.0f, acc_s3 = 0.0f;
-            const fp8e4m3* a_row = &g.a[coord<>(row, 0)];
-            const fp8e4m3* b_row = &g.b[coord<>{0, row_group, col, 0}];
-            int kk = k0;
-            if ((g.k % 8 == 0) && ((k0 & 7) == 0)) {
-                const fp8e4m3_8* a_v8 = reinterpret_cast<const fp8e4m3_8*>(a_row);
-                const fp8e4m3_8* b_v8 = reinterpret_cast<const fp8e4m3_8*>(b_row);
-                const int j_start = k0 >> 3;
-                const int j_end   = g.k >> 3;
-                for (int j = j_start; j < j_end; ++j) {
-                    fp8e4m3_8 a8 = a_v8[j];
-                    fp8e4m3_8 b8 = b_v8[j];
-                    float4 a_lo = fp8x4_to_f32x4(a8.lo);
-                    float4 a_hi = fp8x4_to_f32x4(a8.hi);
-                    float4 b_lo = fp8x4_to_f32x4(b8.lo);
-                    float4 b_hi = fp8x4_to_f32x4(b8.hi);
-                    acc_s0 += a_lo.x * b_lo.x + a_hi.x * b_hi.x;
-                    acc_s1 += a_lo.y * b_lo.y + a_hi.y * b_hi.y;
-                    acc_s2 += a_lo.z * b_lo.z + a_hi.z * b_hi.z;
-                    acc_s3 += a_lo.w * b_lo.w + a_hi.w * b_hi.w;
-                }
-                kk = j_end << 3;
-            }
-            float acc_s = (acc_s0 + acc_s1) + (acc_s2 + acc_s3);
-            for (; kk < g.k; ++kk) {
-                acc_s += load_fp8_scalar(g.a, row, kk) *
-                         load_fp8_scalar_grp(g.b, row_group, col, kk);
-            }
-            const float scaled_s = acc_s * resolve_combined_scale_grp(g);
-            store_bf16_scalar(g.c, row, col,
-                              load_bf16_scalar(g.c, row, col) + scaled_s);
-        }
-        return;
-    }
-
-    constexpr int VEC = 4;
-    constexpr int VECS_PER_ROW = K_REM / VEC;       // 16
-    static_assert(K_REM % VEC == 0, "K_REM must be vec4-aligned");
-    static_assert(NTHR == TBM * VECS_PER_ROW,
-        "Each thread must own exactly one vec4 of A.");
-    {
-        const int r_in_blk = tid / VECS_PER_ROW;
-        const int kk_v     = tid - r_in_blk * VECS_PER_ROW;
-        const int kk_start = kk_v * VEC;
-        const int r_global = row_block_base + r_in_blk;
-        fp8e4m3_4 va{};
-        if (r_global < g.M_total) {
-            const fp8e4m3* ap = &g.a[coord<>(r_global, k0 + kk_start)];
-            va = *reinterpret_cast<const fp8e4m3_4*>(ap);
-        }
-        *reinterpret_cast<fp8e4m3_4*>(&A_lds[r_in_blk * K_REM_LDS + kk_start]) = va;
-    }
-    {
-        const int c_in_blk = tid / VECS_PER_ROW;
-        const int kk_v     = tid - c_in_blk * VECS_PER_ROW;
-        const int kk_start = kk_v * VEC;
-        const int c_global = col_block_base + c_in_blk;
-        fp8e4m3_4 vb{};
-        if (c_global < g.n) {
-            const fp8e4m3* bp = &g.b[coord<>{0, group_idx, c_global, k0 + kk_start}];
-            vb = *reinterpret_cast<const fp8e4m3_4*>(bp);
-        }
-        *reinterpret_cast<fp8e4m3_4*>(&B_lds[c_in_blk * K_REM_LDS + kk_start]) = vb;
-    }
-    __syncthreads();
-
-    const int row = row_block_base + rib;
-    const int col = col_block_base + cib;
-    if (row >= g.M_total || col >= g.n) return;
-
-    // Vec8 inner fma: K_REM=64 / 8 = 8 vec8 per cell. Each vec8 LDS read
-    // is one ds_read_b64 (8 bytes, 2 banks broadcast). Per vec8: two
-    // fp8e4m3_4 → float4 conversions for both A and B → 8 fma.
-    constexpr int FMA_VEC = 8;
-    constexpr int K_VECS = K_REM / FMA_VEC;          // 8
-    static_assert(K_REM % FMA_VEC == 0, "K_REM must be vec8-aligned for inner fma");
-    float acc = 0.0f;
-    typedef __attribute__((__vector_size__(2 * sizeof(float)))) float fp32x2_v;
-    auto fp8x4_to_f32x4 = [](const fp8e4m3_4& u) -> float4 {
-        int packed;
-        __builtin_memcpy(&packed, &u, 4);
-        fp32x2_v lo = __builtin_amdgcn_cvt_pk_f32_fp8(packed, false);
-        fp32x2_v hi = __builtin_amdgcn_cvt_pk_f32_fp8(packed, true);
-        return make_float4(lo[0], lo[1], hi[0], hi[1]);
-    };
-
-    // Round-15: split into 4 parallel fp32 accumulators to break the
-    // 8-deep dependency chain in the per-thread fma loop.
-    float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
-    #pragma unroll
-    for (int kk_v = 0; kk_v < K_VECS; ++kk_v) {
-        fp8e4m3_8 a8 = *reinterpret_cast<const fp8e4m3_8*>(
-            &A_lds[rib * K_REM_LDS + kk_v * FMA_VEC]);
-        fp8e4m3_8 b8 = *reinterpret_cast<const fp8e4m3_8*>(
-            &B_lds[cib * K_REM_LDS + kk_v * FMA_VEC]);
-        float4 a_lo = fp8x4_to_f32x4(a8.lo);
-        float4 a_hi = fp8x4_to_f32x4(a8.hi);
-        float4 b_lo = fp8x4_to_f32x4(b8.lo);
-        float4 b_hi = fp8x4_to_f32x4(b8.hi);
-        acc0 += a_lo.x * b_lo.x + a_hi.x * b_hi.x;
-        acc1 += a_lo.y * b_lo.y + a_hi.y * b_hi.y;
-        acc2 += a_lo.z * b_lo.z + a_hi.z * b_hi.z;
-        acc3 += a_lo.w * b_lo.w + a_hi.w * b_hi.w;
-    }
-    acc = (acc0 + acc1) + (acc2 + acc3);
-
-    // K-tail RMW correction. Main grouped kernel already wrote
-    // [0, fast_k) × combined_scale at C[row, col]; we add the
-    // [fast_k, k) × combined_scale slice. Mirror BF16 store.
-    const float scaled = acc * resolve_combined_scale_grp(g);
-    store_bf16_scalar(g.c, row, col,
-                      load_bf16_scalar(g.c, row, col) + scaled);
-}
-
-template __global__ void grouped_ktail_kernel_lds<Layout::RCR, 64>(const grouped_layout_globals);
+template __global__ void grouped_tail_kernel_fp8<Layout::RCR>(const grouped_layout_globals);
+template __global__ void grouped_tail_kernel_fp8<Layout::RRR>(const grouped_layout_globals);
 
 template<int K_REM>
-__global__ void grouped_ktail_kernel_lds_rrr(const grouped_layout_globals g) {
+__global__ void grouped_ktail_kernel_lds_rrr_fp8(const grouped_layout_globals g) {
     constexpr int TBM = TAIL_BLOCK_M;       // 16
     constexpr int TBN = TAIL_BLOCK_N;       // 16
     constexpr int NTHR = TBM * TBN;         // 256
@@ -3059,352 +3811,14 @@ __global__ void grouped_ktail_kernel_lds_rrr(const grouped_layout_globals g) {
                       load_bf16_scalar(g.c, row, col) + scaled);
 }
 
-template __global__ void grouped_ktail_kernel_lds_rrr<64>(const grouped_layout_globals);
-
-template<int K_CHUNK>
-__global__ void grouped_ntail_kernel_lds_rrr(const grouped_layout_globals g) {
-    constexpr int TBM = TAIL_BLOCK_M;            // 16
-    constexpr int TBN = TAIL_BLOCK_N;            // 16
-    constexpr int NTHR = TBM * TBN;              // 256
-    constexpr int K_CHUNK_LDS = K_CHUNK + 8;
-    __shared__ fp8e4m3 A_lds[TBM * K_CHUNK_LDS];
-    __shared__ fp8e4m3 B_lds[TBN * K_CHUNK_LDS];
-    constexpr int MAX_G_PLUS_1 = 65;
-    __shared__ int s_offs[MAX_G_PLUS_1];
-
-    const int rib = threadIdx.y;
-    const int cib = threadIdx.x;
-    const int tid = rib * blockDim.x + cib;
-
-    if (tid < MAX_G_PLUS_1) {
-        s_offs[tid] = (tid <= g.G) ? static_cast<int>(g.group_offs[tid]) : 0;
-    }
-    __syncthreads();
-
-    const int row_block_base = blockIdx.y * TBM;
-    const int col_block_base = g.fast_n + blockIdx.x * TBN;
-    if (row_block_base >= g.M_total || col_block_base >= g.n) return;
-
-    int group_idx = 0;
-    #pragma unroll 1
-    for (int gi = 0; gi < g.G; ++gi) {
-        if (row_block_base < s_offs[gi + 1]) { group_idx = gi; break; }
-    }
-
-    const bool cross_boundary = (row_block_base + TBM > s_offs[group_idx + 1]);
-    if (cross_boundary) {
-        const int row_s = row_block_base + rib;
-        const int col_s = col_block_base + cib;
-        if (row_s < g.M_total && col_s < g.n) {
-            int row_group = 0;
-            #pragma unroll 1
-            for (int gi = 0; gi < g.G; ++gi) {
-                if (row_s < s_offs[gi + 1]) { row_group = gi; break; }
-            }
-            float acc_s = 0.0f;
-            for (int kk = 0; kk < g.k; ++kk) {
-                acc_s += load_fp8_scalar(g.a, row_s, kk) *
-                         load_fp8_scalar_grp(g.b, row_group, kk, col_s);
-            }
-            const float scaled_s = acc_s * resolve_combined_scale_grp(g);
-            store_bf16_scalar(g.c, row_s, col_s, scaled_s);
-        }
-        return;
-    }
-
-    const int row = row_block_base + rib;
-    const int col = col_block_base + cib;
-    const bool active_cell = (row < g.M_total) && (col < g.n);
-
-    constexpr int VEC = 4;
-
-    // ---- A coop-load layout: vec4 along K, NTHR = TBM × (K_CHUNK / VEC).
-    constexpr int A_VECS_PER_ROW = K_CHUNK / VEC;        // 16
-    static_assert(K_CHUNK % VEC == 0, "K_CHUNK must be vec4-aligned");
-    static_assert(NTHR == TBM * A_VECS_PER_ROW,
-        "NTHR must equal TBM * (K_CHUNK / VEC) for A coop load");
-    const int r_in_blk_a = tid / A_VECS_PER_ROW;
-    const int kk_v_a = tid - r_in_blk_a * A_VECS_PER_ROW;
-    const int kk_start_a = kk_v_a * VEC;
-
-    // ---- B coop-load layout: vec4 along N at fixed K, scatter to
-    // transposed [TBN, K_CHUNK_LDS] LDS. NTHR = K_CHUNK × (TBN / VEC).
-    constexpr int B_VECS_PER_K = TBN / VEC;              // 4
-    static_assert(NTHR == K_CHUNK * B_VECS_PER_K,
-        "NTHR must equal K_CHUNK * (TBN / VEC) for B coop load");
-    const int kk_in_blk_b = tid / B_VECS_PER_K;
-    const int n_in_blk_b = (tid - kk_in_blk_b * B_VECS_PER_K) * VEC;
-
-    // 4 parallel fp32 accumulators to break the inner-fma dependency
-    // chain (mirror round-15 FP8 RCR LDS K-tail).
-    float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
-
-    typedef __attribute__((__vector_size__(2 * sizeof(float)))) float fp32x2_v;
-    auto fp8x4_to_f32x4 = [](const fp8e4m3_4& u) -> float4 {
-        int packed;
-        __builtin_memcpy(&packed, &u, 4);
-        fp32x2_v lo = __builtin_amdgcn_cvt_pk_f32_fp8(packed, false);
-        fp32x2_v hi = __builtin_amdgcn_cvt_pk_f32_fp8(packed, true);
-        return make_float4(lo[0], lo[1], hi[0], hi[1]);
-    };
-
-    for (int k_chunk_start = 0; k_chunk_start < g.k; k_chunk_start += K_CHUNK) {
-        // Coop-load A (vec4 fp8 = 4 bytes / thread).
-        {
-            const int r_global = row_block_base + r_in_blk_a;
-            const int k_global = k_chunk_start + kk_start_a;
-            fp8e4m3_4 va{};
-            if (r_global < g.M_total && k_global + VEC <= g.k) {
-                const fp8e4m3* ap = &g.a[coord<>(r_global, k_global)];
-                va = *reinterpret_cast<const fp8e4m3_4*>(ap);
-            }
-            *reinterpret_cast<fp8e4m3_4*>(&A_lds[r_in_blk_a * K_CHUNK_LDS + kk_start_a]) = va;
-        }
-        // Coop-load B (vec4 fp8 along N; scatter to transposed LDS).
-        {
-            const int kk_global = k_chunk_start + kk_in_blk_b;
-            const int col_global = col_block_base + n_in_blk_b;
-            fp8e4m3_4 vb{};
-            if (kk_global < g.k && col_global + VEC <= g.n) {
-                const fp8e4m3* bp = &g.b[coord<>{0, group_idx, kk_global, col_global}];
-                vb = *reinterpret_cast<const fp8e4m3_4*>(bp);
-            } else if (kk_global < g.k && col_global < g.n) {
-                #pragma unroll
-                for (int i = 0; i < VEC; ++i) {
-                    const int cg = col_global + i;
-                    if (cg < g.n) {
-                        fp8e4m3 v = g.b[coord<>{0, group_idx, kk_global, cg}];
-                        reinterpret_cast<fp8e4m3*>(&vb)[i] = v;
-                    }
-                }
-            }
-            const fp8e4m3* vb_arr = reinterpret_cast<const fp8e4m3*>(&vb);
-            B_lds[(n_in_blk_b + 0) * K_CHUNK_LDS + kk_in_blk_b] = vb_arr[0];
-            B_lds[(n_in_blk_b + 1) * K_CHUNK_LDS + kk_in_blk_b] = vb_arr[1];
-            B_lds[(n_in_blk_b + 2) * K_CHUNK_LDS + kk_in_blk_b] = vb_arr[2];
-            B_lds[(n_in_blk_b + 3) * K_CHUNK_LDS + kk_in_blk_b] = vb_arr[3];
-        }
-        __syncthreads();
-
-        if (active_cell) {
-            constexpr int FMA_VEC = 8;
-            constexpr int K_CHUNK_VECS = K_CHUNK / FMA_VEC;
-            static_assert(K_CHUNK % FMA_VEC == 0, "K_CHUNK must be vec8-aligned for inner fma");
-            const int k_left = g.k - k_chunk_start;
-            const int k_iters_v = (k_left < K_CHUNK)
-                ? (k_left + FMA_VEC - 1) / FMA_VEC : K_CHUNK_VECS;
-            #pragma unroll
-            for (int kk_v = 0; kk_v < K_CHUNK_VECS; ++kk_v) {
-                if (kk_v >= k_iters_v) break;
-                fp8e4m3_8 a8 = *reinterpret_cast<const fp8e4m3_8*>(
-                    &A_lds[rib * K_CHUNK_LDS + kk_v * FMA_VEC]);
-                fp8e4m3_8 b8 = *reinterpret_cast<const fp8e4m3_8*>(
-                    &B_lds[cib * K_CHUNK_LDS + kk_v * FMA_VEC]);
-                float4 a_lo = fp8x4_to_f32x4(a8.lo);
-                float4 a_hi = fp8x4_to_f32x4(a8.hi);
-                float4 b_lo = fp8x4_to_f32x4(b8.lo);
-                float4 b_hi = fp8x4_to_f32x4(b8.hi);
-                acc0 += a_lo.x * b_lo.x + a_hi.x * b_hi.x;
-                acc1 += a_lo.y * b_lo.y + a_hi.y * b_hi.y;
-                acc2 += a_lo.z * b_lo.z + a_hi.z * b_hi.z;
-                acc3 += a_lo.w * b_lo.w + a_hi.w * b_hi.w;
-            }
-        }
-        __syncthreads();
-    }
-
-    if (active_cell) {
-        const float acc = (acc0 + acc1) + (acc2 + acc3);
-        const float scaled = acc * resolve_combined_scale_grp(g);
-        store_bf16_scalar(g.c, row, col, scaled);
-    }
-}
-
-template __global__ void grouped_ntail_kernel_lds_rrr<64>(const grouped_layout_globals);
-
-// =============================================================================
-// MFMA-based RRR N-tail. Replaces grouped_ntail_kernel_lds_rrr's scalar fp8
-// fma inner loop with mfma_f32_16x16x128_f8f6f4. Big-tile design: 64×64
-// cells per block (4×4 mfma sub-tiles), 4 waves cooperating, A and B both
-// LDS-staged so each (16,16) sub-tile reads its slice from LDS.
-//
-// Layout: A is RRR row-major [M,K]; B is RRR row-major [G,K,N]. Both are
-// staged into LDS each K_TILE iter (A row-major, B transposed to col-major
-// in K so MFMA can b256-load 32 fp8 of B per lane in the right register
-// shape).
-//
-// K-tail (g.k % K_TILE != 0): the last K_TILE iter zero-pads A and B beyond
-// g.k. No downstream RMW.
-//
-// Restrictions (caller verifies):
-//   * m_per_group is a TBM=64 multiple AND >= TBM (no cross-group cell can
-//     straddle an m_per_group boundary on a TBM-aligned grid)
-//   * Output store is OVERWRITE — main kernel does not write [fast_n, n)
-//     for RRR.
-// =============================================================================
-template<int K_TILE = 128>
-__global__ void grouped_ntail_kernel_mfma_rrr(const grouped_layout_globals g) {
-    static_assert(K_TILE == 128, "K_TILE must equal mfma_16x16x128 K dim");
-    constexpr int TBM = 64;
-    constexpr int TBN = 64;
-    constexpr int MFMA_M = 16, MFMA_N = 16;
-    constexpr int M_TILES = TBM / MFMA_M;       // 4
-    constexpr int N_TILES = TBN / MFMA_N;       // 4
-    constexpr int K_PER_LANE = 32;              // 128 / 4 lane-chunks
-    constexpr int K_LDS_PAD  = 8;
-    constexpr int K_LDS      = K_TILE + K_LDS_PAD;
-    constexpr int MAX_G_PLUS_1 = 65;
-    constexpr int NTHR = 256;                   // 4 waves
-    __shared__ fp8e4m3 A_lds[TBM * K_LDS];      // [row][k], row-major
-    __shared__ fp8e4m3 B_lds[TBN * K_LDS];      // [col][k], col-major in K
-    __shared__ int s_offs[MAX_G_PLUS_1];
-
-    typedef __attribute__((__vector_size__(8 * sizeof(int)))) int   intx8_t;
-    typedef __attribute__((__vector_size__(4 * sizeof(float)))) float floatx4_t;
-
-    const int tid = threadIdx.x;
-    if (tid <= g.G && tid < MAX_G_PLUS_1) {
-        s_offs[tid] = static_cast<int>(g.group_offs[tid]);
-    }
-    __syncthreads();
-
-    const int row_block_base = blockIdx.y * TBM;
-    const int col_block_base = g.fast_n + blockIdx.x * TBN;
-    if (row_block_base >= g.M_total || col_block_base >= g.n) return;
-
-    int group_idx = 0;
-    #pragma unroll 1
-    for (int gi = 0; gi < g.G; ++gi) {
-        if (row_block_base < s_offs[gi + 1]) { group_idx = gi; break; }
-    }
-    // Caller guarantees m_per_group % TBM == 0 → blocks lie wholly in one group.
-    // Skip via early return if for any reason block straddles a group; the
-    // scalar tail kernel will fill these cells (its skip predicate excludes
-    // them via the `block_in_group` check).
-    if (row_block_base + TBM > s_offs[group_idx + 1]) return;
-
-    // ---- Persistent per-block state: 4×4 grid of float4 accumulators.
-    floatx4_t acc[M_TILES][N_TILES];
-    #pragma unroll
-    for (int mi = 0; mi < M_TILES; ++mi)
-    #pragma unroll
-    for (int ni = 0; ni < N_TILES; ++ni)
-        acc[mi][ni] = floatx4_t{0.f, 0.f, 0.f, 0.f};
-
-    // Wave layout: 4 waves total. wave_id = tid / 64 ∈ [0,4).
-    // We let wave w handle M-rows [w*16, w*16+16) of the block.
-    // Each wave then iterates over its 4 N-tiles.
-    const int wave_id = tid / 64;
-    const int lane    = tid % 64;
-    const int row_in_mfma = lane % MFMA_M;       // 0..15
-    const int chunk       = lane / MFMA_M;       // 0..3 (K lane-chunk)
-    const bool full_n_block = (col_block_base + TBN <= g.n);
-
-    for (int k_off = 0; k_off < g.k; k_off += K_TILE) {
-        // ---- A coop-load: NTHR=256 lanes, each loads vec-of-8 (intx8_t)
-        // = 32 fp8 from A. 256 × 32 = 8192 fp8 = TBM(64) × K_TILE(128) ✓.
-        // Lane (l) → row = l % 64, chunk_id = l / 64 (∈ 0..3).
-        // Reads A[row_block_base + row, k_off + chunk_id*32 .. +32].
-        {
-            const int a_row = tid % TBM;                 // 0..63
-            const int a_chunk = tid / TBM;               // 0..3
-            const int g_row = row_block_base + a_row;
-            const int k_chunk_off = k_off + a_chunk * K_PER_LANE;
-            intx8_t a_pack = intx8_t{};
-            if (g_row < g.M_total && k_chunk_off + K_PER_LANE <= g.k) {
-                const fp8e4m3* ap = &g.a[coord<>(g_row, k_chunk_off)];
-                a_pack = *reinterpret_cast<const intx8_t*>(ap);
-            } else if (g_row < g.M_total && k_chunk_off < g.k) {
-                const int k_avail = g.k - k_chunk_off;
-                #pragma unroll
-                for (int i = 0; i < K_PER_LANE; ++i) {
-                    if (i < k_avail) {
-                        reinterpret_cast<fp8e4m3*>(&a_pack)[i] =
-                            g.a[coord<>(g_row, k_chunk_off + i)];
-                    }
-                }
-            }
-            *reinterpret_cast<intx8_t*>(&A_lds[a_row * K_LDS + a_chunk * K_PER_LANE]) = a_pack;
-        }
-
-        // ---- B coop-load + scatter: NTHR=256 lanes, each loads 1 b128
-        // (16 fp8) from one K-row (one (k, 16-col strip)). 256 × 16 = 4096
-        // fp8 per pass = 32 K rows × TBN(64). Need 4 passes for K=128.
-        // Lane (l) → col_strip = l % 4, k_in_chunk = l / 4 (∈ 0..63).
-        #pragma unroll
-        for (int pass = 0; pass < 2; ++pass) {
-            const int col_strip = (tid % 4);                        // 0..3
-            const int k_local   = (tid / 4) + pass * 64;            // 0..127
-            const int g_col_strip_base = col_block_base + col_strip * 16;
-            const int k_global = k_off + k_local;
-            int4 vbi = int4{0, 0, 0, 0};
-            if (k_global < g.k) {
-                if (full_n_block || g_col_strip_base + 16 <= g.n) {
-                    const fp8e4m3* bp =
-                        &g.b[coord<>{0, group_idx, k_global, g_col_strip_base}];
-                    vbi = *reinterpret_cast<const int4*>(bp);
-                } else if (g_col_strip_base < g.n) {
-                    fp8e4m3* vbp = reinterpret_cast<fp8e4m3*>(&vbi);
-                    #pragma unroll
-                    for (int c = 0; c < 16; ++c) {
-                        const int cg = g_col_strip_base + c;
-                        if (cg < g.n) {
-                            vbp[c] = g.b[coord<>{0, group_idx, k_global, cg}];
-                        }
-                    }
-                }
-            }
-            const fp8e4m3* vb_arr = reinterpret_cast<const fp8e4m3*>(&vbi);
-            #pragma unroll
-            for (int c = 0; c < 16; ++c) {
-                B_lds[(col_strip * 16 + c) * K_LDS + k_local] = vb_arr[c];
-            }
-        }
-        __syncthreads();
-
-        // ---- 4×4 grid of MFMAs: each wave w handles M-rows [w*16, w*16+16);
-        // iterates over 4 N-tiles (col_strip 0..3).
-        #pragma unroll
-        for (int ni = 0; ni < N_TILES; ++ni) {
-            const int b_lds_col = ni * MFMA_N + row_in_mfma;
-            intx8_t b_pack = *reinterpret_cast<const intx8_t*>(
-                &B_lds[b_lds_col * K_LDS + chunk * K_PER_LANE]);
-            const int a_lds_row = wave_id * MFMA_M + row_in_mfma;
-            intx8_t a_pack = *reinterpret_cast<const intx8_t*>(
-                &A_lds[a_lds_row * K_LDS + chunk * K_PER_LANE]);
-            acc[wave_id][ni] = __builtin_amdgcn_mfma_scale_f32_16x16x128_f8f6f4(
-                a_pack, b_pack, acc[wave_id][ni],
-                /*cbsz=*/0, /*abid=*/0, /*blgp=*/0,
-                /*scale_op_a=*/0, /*scale_op_b=*/0, /*scale_op_d=*/0);
-        }
-        __syncthreads();
-    }
-
-    // ---- Store. Each wave w writes its 16 M-rows × 64 N-cols (4 N-tiles).
-    // Per-tile distribution: lane t in MFMA holds D[(t/16)*4 + 0..3, t%16].
-    const float scale = resolve_combined_scale_grp(g);
-    #pragma unroll
-    for (int ni = 0; ni < N_TILES; ++ni) {
-        const int out_col = col_block_base + ni * MFMA_N + row_in_mfma;
-        if (out_col >= g.n) continue;
-        const int out_row_base = row_block_base + wave_id * MFMA_M + chunk * 4;
-        #pragma unroll
-        for (int i = 0; i < 4; ++i) {
-            const int r = out_row_base + i;
-            if (r >= g.M_total) continue;
-            store_bf16_scalar(g.c, r, out_col, acc[wave_id][ni][i] * scale);
-        }
-    }
-}
-
-template __global__ void grouped_ntail_kernel_mfma_rrr<128>(const grouped_layout_globals);
+template __global__ void grouped_ktail_kernel_lds_rrr_fp8<64>(const grouped_layout_globals);
 
 template<Layout L, int K_REM>
-__global__ void grouped_ktail_kernel_mfma(const grouped_layout_globals g) {
+__global__ void grouped_ktail_kernel_mfma_fp8(const grouped_layout_globals g) {
     static_assert(L == Layout::RCR,
-        "grouped_ktail_kernel_mfma (FP8): RCR only — RRR/CRR fall back to scalar tail.");
+        "grouped_ktail_kernel_mfma_fp8 (FP8): RCR only — RRR/CRR fall back to scalar tail.");
     static_assert(K_REM == 64,
-        "grouped_ktail_kernel_mfma (FP8): K_REM must be 64 (zero-padded to 128).");
+        "grouped_ktail_kernel_mfma_fp8 (FP8): K_REM must be 64 (zero-padded to 128).");
     constexpr int TBM = TAIL_BLOCK_M;       // 16
     constexpr int TBN = TAIL_BLOCK_N;       // 16
     constexpr int K_PER_LANE_CHUNK = 32;    // mfma_16x16x128 distributes K across 4 lane-chunks
@@ -3551,14 +3965,14 @@ __global__ void grouped_ktail_kernel_mfma(const grouped_layout_globals g) {
     }
 }
 
-template __global__ void grouped_ktail_kernel_mfma<Layout::RCR, 64>(const grouped_layout_globals);
+template __global__ void grouped_ktail_kernel_mfma_fp8<Layout::RCR, 64>(const grouped_layout_globals);
 
 template<Layout L, int K_REM>
-__global__ void grouped_ktail_kernel_mfma32x32(const grouped_layout_globals g) {
+__global__ void grouped_ktail_kernel_mfma32x32_fp8(const grouped_layout_globals g) {
     static_assert(L == Layout::RCR,
-        "grouped_ktail_kernel_mfma32x32 (FP8): RCR only.");
+        "grouped_ktail_kernel_mfma32x32_fp8 (FP8): RCR only.");
     static_assert(K_REM == 64,
-        "grouped_ktail_kernel_mfma32x32 (FP8): K_REM must be 64 (native mfma K).");
+        "grouped_ktail_kernel_mfma32x32_fp8 (FP8): K_REM must be 64 (native mfma K).");
     constexpr int TBM = 32;
     constexpr int TBN = 32;
     constexpr int MAX_G_PLUS_1 = 65;
@@ -3703,14 +4117,14 @@ __global__ void grouped_ktail_kernel_mfma32x32(const grouped_layout_globals g) {
     }
 }
 
-template __global__ void grouped_ktail_kernel_mfma32x32<Layout::RCR, 64>(const grouped_layout_globals);
+template __global__ void grouped_ktail_kernel_mfma32x32_fp8<Layout::RCR, 64>(const grouped_layout_globals);
 
 template<Layout L, int K_REM>
-__global__ void grouped_ktail_kernel_mfma32x32_M2(const grouped_layout_globals g) {
+__global__ void grouped_ktail_kernel_mfma32x32_M2_fp8(const grouped_layout_globals g) {
     static_assert(L == Layout::RCR,
-        "grouped_ktail_kernel_mfma32x32_M2 (FP8): RCR only.");
+        "grouped_ktail_kernel_mfma32x32_M2_fp8 (FP8): RCR only.");
     static_assert(K_REM == 64,
-        "grouped_ktail_kernel_mfma32x32_M2 (FP8): K_REM must be 64 (native mfma K).");
+        "grouped_ktail_kernel_mfma32x32_M2_fp8 (FP8): K_REM must be 64 (native mfma K).");
     constexpr int TBM_TOTAL = 64;       // 2 stacked 32×32 sub-blocks
     constexpr int TBM_SUB   = 32;
     constexpr int TBN       = 32;
@@ -3868,14 +4282,14 @@ __global__ void grouped_ktail_kernel_mfma32x32_M2(const grouped_layout_globals g
     }
 }
 
-template __global__ void grouped_ktail_kernel_mfma32x32_M2<Layout::RCR, 64>(const grouped_layout_globals);
+template __global__ void grouped_ktail_kernel_mfma32x32_M2_fp8<Layout::RCR, 64>(const grouped_layout_globals);
 
 template<Layout L, int K_REM>
-__global__ void grouped_ktail_kernel_mfma32x32_M2N2(const grouped_layout_globals g) {
+__global__ void grouped_ktail_kernel_mfma32x32_M2N2_fp8(const grouped_layout_globals g) {
     static_assert(L == Layout::RCR,
-        "grouped_ktail_kernel_mfma32x32_M2N2 (FP8): RCR only.");
+        "grouped_ktail_kernel_mfma32x32_M2N2_fp8 (FP8): RCR only.");
     static_assert(K_REM == 64,
-        "grouped_ktail_kernel_mfma32x32_M2N2 (FP8): K_REM must be 64 (native mfma K).");
+        "grouped_ktail_kernel_mfma32x32_M2N2_fp8 (FP8): K_REM must be 64 (native mfma K).");
     constexpr int TBM_TOTAL = 64;       // 2 stacked 32×32 sub-blocks
     constexpr int TBM_SUB   = 32;
     constexpr int TBN       = 32;
@@ -4035,328 +4449,14 @@ __global__ void grouped_ktail_kernel_mfma32x32_M2N2(const grouped_layout_globals
     }
 }
 
-template __global__ void grouped_ktail_kernel_mfma32x32_M2N2<Layout::RCR, 64>(const grouped_layout_globals);
+template __global__ void grouped_ktail_kernel_mfma32x32_M2N2_fp8<Layout::RCR, 64>(const grouped_layout_globals);
 
 #if 0  // round-61 disabled: regressed metric 752 → 749 (see comment above)
-template<Layout L, int K_REM>
-__global__ void grouped_ktail_kernel_mfma32x32_M2N4(const grouped_layout_globals g) {
-    static_assert(L == Layout::RCR,
-        "grouped_ktail_kernel_mfma32x32_M2N4 (FP8): RCR only.");
-    static_assert(K_REM == 64,
-        "grouped_ktail_kernel_mfma32x32_M2N4 (FP8): K_REM must be 64 (native mfma K).");
-    constexpr int TBM_TOTAL = 64;       // 2 stacked 32×32 sub-blocks
-    constexpr int TBM_SUB   = 32;
-    constexpr int TBN       = 32;
-    constexpr int N_SUB     = 4;
-    constexpr int TBN_TOTAL = TBN * N_SUB;  // 128 cols
-    constexpr int MAX_G_PLUS_1 = 65;
-    __shared__ int s_offs[MAX_G_PLUS_1];
 
-    const int tid = threadIdx.x;            // single-wave block, 64 threads
-    if (tid <= g.G && tid < MAX_G_PLUS_1) {
-        s_offs[tid] = static_cast<int>(g.group_offs[tid]);
-    }
-    __syncthreads();
-
-    const int row_block_base = blockIdx.y * TBM_TOTAL;
-    const int col_block_base = blockIdx.x * TBN_TOTAL;
-    if (row_block_base >= g.M_total || col_block_base >= g.n) return;
-
-    int group_idx = 0;
-    #pragma unroll 1
-    for (int gi = 0; gi < g.G; ++gi) {
-        if (row_block_base < s_offs[gi + 1]) { group_idx = gi; break; }
-    }
-
-    const int K_rem_dyn = g.k - g.fast_k;
-    if (K_rem_dyn != K_REM) return;
-    const int k0 = g.fast_k;
-
-    // Cross-group fallback: same as M2N2 (64-row block straddling a group
-    // boundary). Iterate over ALL FOUR 32-col sub-tiles per row using
-    // scalar fma. Unreachable on uniform group_lens with M_g % 64 == 0.
-    const bool cross_boundary = (row_block_base + TBM_TOTAL > s_offs[group_idx + 1]);
-    if (cross_boundary) {
-        typedef __attribute__((__vector_size__(2 * sizeof(float)))) float fp32x2_v;
-        auto fp8x4_to_f32x4 = [](const fp8e4m3_4& u) -> float4 {
-            int packed;
-            __builtin_memcpy(&packed, &u, 4);
-            fp32x2_v lo = __builtin_amdgcn_cvt_pk_f32_fp8(packed, false);
-            fp32x2_v hi = __builtin_amdgcn_cvt_pk_f32_fp8(packed, true);
-            return make_float4(lo[0], lo[1], hi[0], hi[1]);
-        };
-        const float scale_s = resolve_combined_scale_grp(g);
-        for (int nt = 0; nt < N_SUB; ++nt) {
-            const int col = col_block_base + nt * TBN + (tid % 32);
-            if (col >= g.n) continue;
-            #pragma unroll 1
-            for (int rr = 0; rr < TBM_TOTAL; ++rr) {
-                if ((rr % 2) != ((tid / 32))) continue;
-                const int row = row_block_base + rr;
-                if (row >= g.M_total) break;
-                int row_group = 0;
-                #pragma unroll 1
-                for (int gi = 0; gi < g.G; ++gi) {
-                    if (row < s_offs[gi + 1]) { row_group = gi; break; }
-                }
-                float acc_s0 = 0.f, acc_s1 = 0.f, acc_s2 = 0.f, acc_s3 = 0.f;
-                const fp8e4m3* a_row = &g.a[coord<>(row, 0)];
-                const fp8e4m3* b_row = &g.b[coord<>{0, row_group, col, 0}];
-                int kk = k0;
-                if ((g.k % 8 == 0) && ((k0 & 7) == 0)) {
-                    const fp8e4m3_8* a_v8 = reinterpret_cast<const fp8e4m3_8*>(a_row);
-                    const fp8e4m3_8* b_v8 = reinterpret_cast<const fp8e4m3_8*>(b_row);
-                    const int j_start = k0 >> 3;
-                    const int j_end   = g.k >> 3;
-                    for (int j = j_start; j < j_end; ++j) {
-                        fp8e4m3_8 a8 = a_v8[j];
-                        fp8e4m3_8 b8 = b_v8[j];
-                        float4 a_lo = fp8x4_to_f32x4(a8.lo);
-                        float4 a_hi = fp8x4_to_f32x4(a8.hi);
-                        float4 b_lo = fp8x4_to_f32x4(b8.lo);
-                        float4 b_hi = fp8x4_to_f32x4(b8.hi);
-                        acc_s0 += a_lo.x * b_lo.x + a_hi.x * b_hi.x;
-                        acc_s1 += a_lo.y * b_lo.y + a_hi.y * b_hi.y;
-                        acc_s2 += a_lo.z * b_lo.z + a_hi.z * b_hi.z;
-                        acc_s3 += a_lo.w * b_lo.w + a_hi.w * b_hi.w;
-                    }
-                    kk = j_end << 3;
-                }
-                float acc_s = (acc_s0 + acc_s1) + (acc_s2 + acc_s3);
-                for (; kk < g.k; ++kk) {
-                    acc_s += load_fp8_scalar(g.a, row, kk) *
-                             load_fp8_scalar_grp(g.b, row_group, col, kk);
-                }
-                const float scaled_s = acc_s * scale_s;
-                store_bf16_scalar(g.c, row, col,
-                                  load_bf16_scalar(g.c, row, col) + scaled_s);
-            }
-        }
-        return;
-    }
-
-    // ----- Fast MFMA path: 2 M sub-blocks × 4 N sub-tiles = 8 mfmas/thread.
-    // Single A-pack per M sub-block reused across all 4 N sub-tiles.
-    typedef __attribute__((__vector_size__(8 * sizeof(int)))) int intx8_t;
-    typedef __attribute__((__vector_size__(16 * sizeof(float)))) float floatx16_t;
-
-    const int row_in_blk = tid % 32;
-    const int chunk      = tid / 32;        // 0 or 1
-    const int k_off      = k0 + chunk * 32;
-
-    intx8_t b_pack[N_SUB];
-    #pragma unroll
-    for (int nt = 0; nt < N_SUB; ++nt) {
-        const int g_col = col_block_base + nt * TBN + row_in_blk;
-        if (g_col < g.n) {
-            const fp8e4m3* b_ptr = &g.b[coord<>{0, group_idx, g_col, k_off}];
-            b_pack[nt] = *reinterpret_cast<const intx8_t*>(b_ptr);
-        } else {
-            b_pack[nt] = intx8_t{};
-        }
-    }
-
-    const float scale = resolve_combined_scale_grp(g);
-
-    #pragma unroll
-    for (int sub = 0; sub < 2; ++sub) {
-        const int sub_row_base = row_block_base + sub * TBM_SUB;
-        const int g_row = sub_row_base + row_in_blk;
-
-        intx8_t a_pack;
-        if (g_row < g.M_total) {
-            const fp8e4m3* a_ptr = &g.a[coord<>(g_row, k_off)];
-            a_pack = *reinterpret_cast<const intx8_t*>(a_ptr);
-        } else {
-            a_pack = intx8_t{};
-        }
-
-        #pragma unroll
-        for (int nt = 0; nt < N_SUB; ++nt) {
-            floatx16_t acc{};
-            acc = __builtin_amdgcn_mfma_scale_f32_32x32x64_f8f6f4(
-                a_pack, b_pack[nt], acc, /*cbsz=*/0, /*abid=*/0, /*blgp=*/0,
-                /*scale_op_a=*/0, /*scale_op_b=*/0, /*scale_op_d=*/0);
-
-            const int out_col = col_block_base + nt * TBN + row_in_blk;
-            if (out_col >= g.n) continue;
-
-            #pragma unroll
-            for (int i = 0; i < 16; ++i) {
-                const int row_group     = i >> 2;
-                const int row_in_group  = (i & 3) + chunk * 4;
-                const int local_row     = row_group * 8 + row_in_group;
-                const int r             = sub_row_base + local_row;
-                if (r >= g.M_total) continue;
-                const float existing = load_bf16_scalar(g.c, r, out_col);
-                const float new_val  = existing + acc[i] * scale;
-                store_bf16_scalar(g.c, r, out_col, new_val);
-            }
-        }
-    }
-}
-
-template __global__ void grouped_ktail_kernel_mfma32x32_M2N4<Layout::RCR, 64>(const grouped_layout_globals);
 #endif  // M2N4 disabled
 
 #if 0  // M4 kernel definition kept disabled — see comment above
-template<Layout L, int K_REM>
-__global__ void grouped_ktail_kernel_mfma32x32_M4(const grouped_layout_globals g) {
-    static_assert(L == Layout::RCR,
-        "grouped_ktail_kernel_mfma32x32_M4 (FP8): RCR only.");
-    static_assert(K_REM == 64,
-        "grouped_ktail_kernel_mfma32x32_M4 (FP8): K_REM must be 64 (native mfma K).");
-    constexpr int TBM_TOTAL = 128;      // 4 stacked 32×32 sub-blocks
-    constexpr int TBM_SUB   = 32;
-    constexpr int N_SUB     = 4;
-    constexpr int TBN       = 32;
-    constexpr int MAX_G_PLUS_1 = 65;
-    __shared__ int s_offs[MAX_G_PLUS_1];
 
-    const int tid = threadIdx.x;            // single-wave block, 64 threads
-    if (tid <= g.G && tid < MAX_G_PLUS_1) {
-        s_offs[tid] = static_cast<int>(g.group_offs[tid]);
-    }
-    __syncthreads();
-
-    const int row_block_base = blockIdx.y * TBM_TOTAL;
-    const int col_block_base = blockIdx.x * TBN;
-    if (row_block_base >= g.M_total || col_block_base >= g.n) return;
-
-    int group_idx = 0;
-    #pragma unroll 1
-    for (int gi = 0; gi < g.G; ++gi) {
-        if (row_block_base < s_offs[gi + 1]) { group_idx = gi; break; }
-    }
-
-    const int K_rem_dyn = g.k - g.fast_k;
-    if (K_rem_dyn != K_REM) return;
-    const int k0 = g.fast_k;
-
-    // Cross-group fallback: if the 128-row block straddles a group boundary
-    // (or the M_total tail), fall back to per-row scalar fma over ALL FOUR
-    // sub-blocks. Unreachable on uniform group_lens with M_g % 128 == 0
-    // (gpt_oss M_per ∈ {2048, 4096} both satisfy).
-    const bool cross_boundary = (row_block_base + TBM_TOTAL > s_offs[group_idx + 1]);
-    if (cross_boundary) {
-        typedef __attribute__((__vector_size__(2 * sizeof(float)))) float fp32x2_v;
-        auto fp8x4_to_f32x4 = [](const fp8e4m3_4& u) -> float4 {
-            int packed;
-            __builtin_memcpy(&packed, &u, 4);
-            fp32x2_v lo = __builtin_amdgcn_cvt_pk_f32_fp8(packed, false);
-            fp32x2_v hi = __builtin_amdgcn_cvt_pk_f32_fp8(packed, true);
-            return make_float4(lo[0], lo[1], hi[0], hi[1]);
-        };
-        const int col = col_block_base + (tid % 32);
-        if (col < g.n) {
-            #pragma unroll 1
-            for (int rr = 0; rr < TBM_TOTAL; ++rr) {
-                if ((rr % 2) != ((tid / 32))) continue;
-                const int row = row_block_base + rr;
-                if (row >= g.M_total) break;
-                int row_group = 0;
-                #pragma unroll 1
-                for (int gi = 0; gi < g.G; ++gi) {
-                    if (row < s_offs[gi + 1]) { row_group = gi; break; }
-                }
-                float acc_s0 = 0.f, acc_s1 = 0.f, acc_s2 = 0.f, acc_s3 = 0.f;
-                const fp8e4m3* a_row = &g.a[coord<>(row, 0)];
-                const fp8e4m3* b_row = &g.b[coord<>{0, row_group, col, 0}];
-                int kk = k0;
-                if ((g.k % 8 == 0) && ((k0 & 7) == 0)) {
-                    const fp8e4m3_8* a_v8 = reinterpret_cast<const fp8e4m3_8*>(a_row);
-                    const fp8e4m3_8* b_v8 = reinterpret_cast<const fp8e4m3_8*>(b_row);
-                    const int j_start = k0 >> 3;
-                    const int j_end   = g.k >> 3;
-                    for (int j = j_start; j < j_end; ++j) {
-                        fp8e4m3_8 a8 = a_v8[j];
-                        fp8e4m3_8 b8 = b_v8[j];
-                        float4 a_lo = fp8x4_to_f32x4(a8.lo);
-                        float4 a_hi = fp8x4_to_f32x4(a8.hi);
-                        float4 b_lo = fp8x4_to_f32x4(b8.lo);
-                        float4 b_hi = fp8x4_to_f32x4(b8.hi);
-                        acc_s0 += a_lo.x * b_lo.x + a_hi.x * b_hi.x;
-                        acc_s1 += a_lo.y * b_lo.y + a_hi.y * b_hi.y;
-                        acc_s2 += a_lo.z * b_lo.z + a_hi.z * b_hi.z;
-                        acc_s3 += a_lo.w * b_lo.w + a_hi.w * b_hi.w;
-                    }
-                    kk = j_end << 3;
-                }
-                float acc_s = (acc_s0 + acc_s1) + (acc_s2 + acc_s3);
-                for (; kk < g.k; ++kk) {
-                    acc_s += load_fp8_scalar(g.a, row, kk) *
-                             load_fp8_scalar_grp(g.b, row_group, col, kk);
-                }
-                const float scaled_s = acc_s * resolve_combined_scale_grp(g);
-                store_bf16_scalar(g.c, row, col,
-                                  load_bf16_scalar(g.c, row, col) + scaled_s);
-            }
-        }
-        return;
-    }
-
-    // ----- Fast MFMA path: shared B-pack across FOUR stacked 32×32 sub-blocks
-    typedef __attribute__((__vector_size__(8 * sizeof(int)))) int intx8_t;
-    typedef __attribute__((__vector_size__(16 * sizeof(float)))) float floatx16_t;
-
-    const int row_in_blk = tid % 32;
-    const int chunk      = tid / 32;        // 0 or 1
-    const int k_off      = k0 + chunk * 32;
-
-    const int g_col = col_block_base + row_in_blk;
-
-    // Single B load shared across all four sub-blocks. B is [G, N, K] row-
-    // major and the K-tail slice [k0, k0+K_REM) is the same for sub-blocks
-    // 0..3 (only the A row range differs). 4×reuse of the B-side HBM
-    // bandwidth vs running 4 independent 32×32 M1 blocks; 2× reuse vs M2.
-    intx8_t b_pack;
-    if (g_col < g.n) {
-        const fp8e4m3* b_ptr = &g.b[coord<>{0, group_idx, g_col, k_off}];
-        b_pack = *reinterpret_cast<const intx8_t*>(b_ptr);
-    } else {
-        b_pack = intx8_t{};
-    }
-
-    const float scale = resolve_combined_scale_grp(g);
-    const int out_col = col_block_base + row_in_blk;
-    if (out_col >= g.n) return;
-
-    // Four stacked 32×32 sub-blocks. Same MFMA / lane layout as round-20
-    // M1 / round-53 M2; we shift the row base by +sub*TBM_SUB and re-issue
-    // mfma_scale_f32_32x32x64_f8f6f4 with a fresh accumulator each sub.
-    #pragma unroll
-    for (int sub = 0; sub < N_SUB; ++sub) {
-        const int sub_row_base = row_block_base + sub * TBM_SUB;
-        const int g_row = sub_row_base + row_in_blk;
-
-        intx8_t a_pack;
-        if (g_row < g.M_total) {
-            const fp8e4m3* a_ptr = &g.a[coord<>(g_row, k_off)];
-            a_pack = *reinterpret_cast<const intx8_t*>(a_ptr);
-        } else {
-            a_pack = intx8_t{};
-        }
-
-        floatx16_t acc{};
-        acc = __builtin_amdgcn_mfma_scale_f32_32x32x64_f8f6f4(
-            a_pack, b_pack, acc, /*cbsz=*/0, /*abid=*/0, /*blgp=*/0,
-            /*scale_op_a=*/0, /*scale_op_b=*/0, /*scale_op_d=*/0);
-
-        #pragma unroll
-        for (int i = 0; i < 16; ++i) {
-            const int row_group     = i >> 2;
-            const int row_in_group  = (i & 3) + chunk * 4;
-            const int local_row     = row_group * 8 + row_in_group;
-            const int r             = sub_row_base + local_row;
-            if (r >= g.M_total) continue;
-            const float existing = load_bf16_scalar(g.c, r, out_col);
-            const float new_val  = existing + acc[i] * scale;
-            store_bf16_scalar(g.c, r, out_col, new_val);
-        }
-    }
-}
-
-template __global__ void grouped_ktail_kernel_mfma32x32_M4<Layout::RCR, 64>(const grouped_layout_globals);
 #endif  // M4 kernel disabled
 
 void dispatch_grouped_rcr(grouped_layout_globals g) {
@@ -4399,7 +4499,30 @@ void dispatch_grouped_rcr(grouped_layout_globals g) {
     }
 
     if (g.bpc > 0 && g.ki > 0) {
-        const bool n_aligned = (g.bpc * BLOCK_SIZE == g.n);
+        // Round 2026-05-14: 3-way block-size autotune.
+        //   g.bn_block = 0   (default) → BLK_M=BLK_N=256 (original kernel)
+        //   g.bn_block = 128            → BN=128, BM=256 (bn128 variant)
+        //   g.bn_block = -128           → BLK_M=BLK_N=128 (b128 variant)
+        // Env knob TK_RCR_BN128 still works as a fallback override.
+        static const int rcr_bn128_env = []() {
+            if (const char* e = std::getenv("TK_RCR_BN128")) return std::atoi(e);
+            return 0;
+        }();
+        int block_choice = g.bn_block;
+        if (block_choice == 0 && rcr_bn128_env != 0) {
+            // env: 1/128 → bn128 (256x128); -1/-128 → b128 (128x128)
+            if (rcr_bn128_env == -1 || rcr_bn128_env == -128) block_choice = -128;
+            else if (rcr_bn128_env == 1 || rcr_bn128_env == 128) block_choice = 128;
+        }
+
+        if (block_choice == 128) {
+            g.bpc = kittens::ceil_div(g.n, 128);
+        } else if (block_choice == -128) {
+            g.bpc = kittens::ceil_div(g.n, 128);
+        }
+
+        const int N_BLK_eff = (block_choice == 128 || block_choice == -128) ? 128 : BLOCK_SIZE;
+        const bool n_aligned = (g.bpc * N_BLK_eff == g.n);
 
         static const int rcr_slots_env = []() {
             if (const char* e = std::getenv("TK_RCR_NUM_CUS")) {
@@ -4417,12 +4540,42 @@ void dispatch_grouped_rcr(grouped_layout_globals g) {
                     const int v = std::atoi(e);
                     if (v >= 1 && v <= 256) return v;
                 }
-                return 0;  // 0 → kernel uses default 64
+                return 0;
             }();
             g.chunk_size = env_chunk_size;
         }
 
-        if (fuse_ktail_active) {
+        if (block_choice == -128) {
+            // BLK_M=BLK_N=128 (b128 — single-mma per K-iter)
+            if (fuse_ktail_active) {
+                if (n_aligned) {
+                    grouped_rcr_kernel_b128<0, false, true><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+                } else {
+                    grouped_rcr_kernel_b128<0, true , true><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+                }
+            } else {
+                if (n_aligned) {
+                    grouped_rcr_kernel_b128<0, false, false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+                } else {
+                    grouped_rcr_kernel_b128<0, true , false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+                }
+            }
+        } else if (block_choice == 128) {
+            // BN=128, BM=256 (bn128)
+            if (fuse_ktail_active) {
+                if (n_aligned) {
+                    grouped_rcr_kernel_bn128<0, false, true><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+                } else {
+                    grouped_rcr_kernel_bn128<0, true , true><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+                }
+            } else {
+                if (n_aligned) {
+                    grouped_rcr_kernel_bn128<0, false, false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+                } else {
+                    grouped_rcr_kernel_bn128<0, true , false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+                }
+            }
+        } else if (fuse_ktail_active) {
             if (n_aligned) {
                 grouped_rcr_kernel<0, false, true><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
             } else {
@@ -4479,7 +4632,7 @@ void dispatch_grouped_rcr(grouped_layout_globals g) {
                 kittens::ceil_div(g.n, TBN_M2N2),
                 kittens::ceil_div(g.M_total, TBM_M2)
             );
-            grouped_ktail_kernel_mfma32x32_M2N2<Layout::RCR, 64>
+            grouped_ktail_kernel_mfma32x32_M2N2_fp8<Layout::RCR, 64>
                 <<<mfma_grid, mfma_block, 0, g.stream>>>(g);
         } else if (mfma32_m2_handles_all) {
             dim3 mfma_block(64);
@@ -4487,7 +4640,7 @@ void dispatch_grouped_rcr(grouped_layout_globals g) {
                 kittens::ceil_div(g.n, TBM_32x32),
                 kittens::ceil_div(g.M_total, TBM_M2)
             );
-            grouped_ktail_kernel_mfma32x32_M2<Layout::RCR, 64>
+            grouped_ktail_kernel_mfma32x32_M2_fp8<Layout::RCR, 64>
                 <<<mfma_grid, mfma_block, 0, g.stream>>>(g);
         } else if (mfma32_handles_all) {
             dim3 mfma_block(64);
@@ -4495,7 +4648,7 @@ void dispatch_grouped_rcr(grouped_layout_globals g) {
                 kittens::ceil_div(g.n, TBM_32x32),
                 kittens::ceil_div(g.M_total, TBM_32x32)
             );
-            grouped_ktail_kernel_mfma32x32<Layout::RCR, 64>
+            grouped_ktail_kernel_mfma32x32_fp8<Layout::RCR, 64>
                 <<<mfma_grid, mfma_block, 0, g.stream>>>(g);
         } else if (mfma16_handles_all) {
             // Round-18: 16x16x128 mfma kernel (50 % util via zero-pad).
@@ -4504,7 +4657,7 @@ void dispatch_grouped_rcr(grouped_layout_globals g) {
                 kittens::ceil_div(g.n, TAIL_BLOCK_N),
                 kittens::ceil_div(g.M_total, TAIL_BLOCK_M)
             );
-            grouped_ktail_kernel_mfma<Layout::RCR, 64>
+            grouped_ktail_kernel_mfma_fp8<Layout::RCR, 64>
                 <<<mfma_grid, mfma_block, 0, g.stream>>>(g);
         } else {
             dim3 tail_block(TAIL_BLOCK_N, TAIL_BLOCK_M);
@@ -4512,7 +4665,7 @@ void dispatch_grouped_rcr(grouped_layout_globals g) {
                 kittens::ceil_div(g.n, TAIL_BLOCK_N),
                 kittens::ceil_div(g.M_total, TAIL_BLOCK_M)
             );
-            grouped_tail_kernel<Layout::RCR>
+            grouped_tail_kernel_fp8<Layout::RCR>
                 <<<tail_grid, tail_block, 0, g.stream>>>(g);
         }
     }
@@ -4554,7 +4707,7 @@ void dispatch_grouped_rcr_fused_act(grouped_layout_globals_fused_act g) {
 //
 // Mirror of ``dispatch_grouped_rcr``: aligned interior swept by the
 // persistent main kernel (``grouped_rrr_kernel``), cells outside go
-// through ``grouped_tail_kernel<Layout::RRR>`` (scalar fp32 with the
+// through ``grouped_tail_kernel_fp8<Layout::RRR>`` (scalar fp32 with the
 // same N-tail / K-tail correction logic as RCR — see template body).
 //
 // Per-group M_g must still be a BLOCK_SIZE multiple (the persistent
@@ -4649,7 +4802,7 @@ void dispatch_grouped_rrr(grouped_layout_globals g) {
                 kittens::ceil_div(g.n, TAIL_BLOCK_N),
                 kittens::ceil_div(g.M_total, TAIL_BLOCK_M)
             );
-            grouped_ktail_kernel_lds_rrr<64>
+            grouped_ktail_kernel_lds_rrr_fp8<64>
                 <<<lds_grid, lds_block, 0, g.stream>>>(g);
         }
 
@@ -4660,7 +4813,7 @@ void dispatch_grouped_rrr(grouped_layout_globals g) {
             kittens::ceil_div(g.n, TAIL_BLOCK_N),
             kittens::ceil_div(g.M_total, TAIL_BLOCK_M)
         );
-        grouped_tail_kernel<Layout::RRR>
+        grouped_tail_kernel_fp8<Layout::RRR>
             <<<tail_grid, tail_block, 0, g.stream>>>(g);
     }
 }

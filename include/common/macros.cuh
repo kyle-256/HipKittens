@@ -790,6 +790,43 @@ __device__ __forceinline__ void mfma_f32_16x16x32_fp8_fp8() {
   }
 }
 
+// Pinned-AGPR / VGPR f8f6f4 16x16x128 mma (gfx950 scaled form, scales = 0).
+// 2026-05-15 building block for grouped_rrr_kernel spill-removal architecture
+// rewrite (see memory feedback_hk_agpr_deadend.md). Mirrors the existing
+// `mfma_f32_16x16x32_fp8_fp8` AGPR/VGPR template above.
+//
+// Encoding notes:
+//  - A: 8 dwords (32 fp8 per lane); B: 8 dwords; C: 4 dwords; D: 4 dwords
+//  - Scales for f8f6f4 must be VGPRs (immediate 0 fails at assembler).
+//  - The 4-operand short form `v_mfma_f32_16x16x128_f8f6f4 D, A, B, C` IS
+//    the no-scale form (assembler-shorthand for scaled form with implicit
+//    zero scales); it is what the BUILTIN emits and was numerically
+//    verified correct in the dense GEMM unit test.
+//
+// CALLER MUST manually pin GPR_START_* to specific physical register indices
+// (>= 256 = AGPR, < 256 = VGPR) AND ensure no compiler-managed values use
+// those positions. This requires the full pinned-VGPR architecture.
+template<int GPR_START_A, int GPR_START_B, int GPR_START_C, int GPR_START_D>
+__device__ __forceinline__ void mfma_f32_16x16x128_f8f6f4() {
+  if constexpr (GPR_START_D >= 256 && GPR_START_A >= 256 && GPR_START_B >= 256 && GPR_START_C >= 256) {
+    asm volatile("v_mfma_f32_16x16x128_f8f6f4 a[%0:%1], a[%2:%3], a[%4:%5], a[%6:%7]"
+      :
+      : "n"(GPR_START_D - 256), "n"(GPR_START_D + 3 - 256), "n"(GPR_START_A - 256), "n"(GPR_START_A + 7 - 256), "n"(GPR_START_B - 256), "n"(GPR_START_B + 7 - 256), "n"(GPR_START_C - 256), "n"(GPR_START_C + 3 - 256));
+  } else if constexpr (GPR_START_D >= 256 && GPR_START_A < 256 && GPR_START_B < 256 && GPR_START_C >= 256) {
+    // Most useful variant: A/B from VGPR (ds_read), D/C in AGPR (free V pool)
+    asm volatile("v_mfma_f32_16x16x128_f8f6f4 a[%0:%1], v[%2:%3], v[%4:%5], a[%6:%7]"
+      :
+      : "n"(GPR_START_D - 256), "n"(GPR_START_D + 3 - 256), "n"(GPR_START_A), "n"(GPR_START_A + 7), "n"(GPR_START_B), "n"(GPR_START_B + 7), "n"(GPR_START_C - 256), "n"(GPR_START_C + 3 - 256));
+  } else if constexpr (GPR_START_D < 256 && GPR_START_A < 256 && GPR_START_B < 256 && GPR_START_C < 256) {
+    // All-VGPR fallback (matches the BUILTIN's default emission).
+    asm volatile("v_mfma_f32_16x16x128_f8f6f4 v[%0:%1], v[%2:%3], v[%4:%5], v[%6:%7]"
+      :
+      : "n"(GPR_START_D), "n"(GPR_START_D + 3), "n"(GPR_START_A), "n"(GPR_START_A + 7), "n"(GPR_START_B), "n"(GPR_START_B + 7), "n"(GPR_START_C), "n"(GPR_START_C + 3));
+  } else {
+    static_assert(GPR_START_A < 0, "Add the missing AGPR/VGPR combination — only D=A V/V/V/V, A=V B=V C=A D=A, and all-AGPR are wired.");
+  }
+}
+
 template<int GPR_START_A, int GPR_START_B, int GPR_START_D>
 __device__ __forceinline__ void mfma_f32_16x16x32_bf16_zero_accum() {
   if constexpr (GPR_START_D >= 256 && GPR_START_A >= 256 && GPR_START_B >= 256) {

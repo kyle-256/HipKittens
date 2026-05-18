@@ -109,6 +109,25 @@ __device__ static inline void mfma323264(      float2 (&D)[8],
     )};
 }
 
+// AGPR-pinned 32x32x64 — for dense gemm_kernel<CRR>. Same `+a` constraint
+// as 16x16x128 variant; D operand is 16 dwords (vs 4) so AGPR pressure is
+// 4× higher per call. Numerical correctness verified via builtin parity.
+__device__ static inline void mfma323264_agpr(
+        float2 (&D)[8],
+        const fp8e4m3_4 (&A)[8],
+        const fp8e4m3_4 (&B)[8],
+        const float2 (&C)[8]) {
+    typedef __attribute__((__vector_size__(8 * sizeof(int)))) int intx8_t;
+    typedef __attribute__((__vector_size__(16 * sizeof(float)))) float floatx16_t;
+    floatx16_t cd = *(floatx16_t*)C;
+    asm volatile(
+        "v_mfma_f32_32x32x64_f8f6f4 %0, %1, %2, %0"
+        : "+a"(cd)
+        : "v"(*(intx8_t*)A), "v"(*(intx8_t*)B)
+    );
+    *(floatx16_t*)D = cd;
+}
+
 __device__ static inline void mfma1616128(      float2 (&D)[2],
                                          const fp8e4m3_4 (&A)[8],
                                          const fp8e4m3_4 (&B)[8],
@@ -122,6 +141,41 @@ __device__ static inline void mfma1616128(      float2 (&D)[2],
         *(floatx4_t*)C,
         0, 0, 0, 0, 0, 0
     )};
+}
+
+// AGPR-pinned variant — read-modify-write `+a` on shared D/C AGPR.
+// Numerically verified via 4-mma chain test (0/256 mismatches).
+__device__ static inline void mfma1616128_agpr(      float2 (&D)[2],
+                                               const fp8e4m3_4 (&A)[8],
+                                               const fp8e4m3_4 (&B)[8],
+                                               const float2 (&C)[2]) {
+    typedef __attribute__((__vector_size__(8 * sizeof(int)))) int intx8_t;
+    typedef __attribute__((__vector_size__(4 * sizeof(float)))) float floatx4_t;
+
+    floatx4_t cd = *(floatx4_t*)C;
+    asm volatile(
+        "v_mfma_f32_16x16x128_f8f6f4 %0, %1, %2, %0"
+        : "+a"(cd)
+        : "v"(*(intx8_t*)A), "v"(*(intx8_t*)B)
+    );
+    *(floatx4_t*)D = cd;
+}
+
+// Direct in-place AGPR variant — caller guarantees D and C alias same
+// memory. Eliminates the cd-copy at function boundary so the compiler
+// can keep D in AGPR across back-to-back mma calls without per-call
+// v_accvgpr_write/read overhead. Verified numerically equivalent.
+__device__ static inline void mfma1616128_agpr_inplace(
+        float2 (&D)[2],
+        const fp8e4m3_4 (&A)[8],
+        const fp8e4m3_4 (&B)[8]) {
+    typedef __attribute__((__vector_size__(8 * sizeof(int)))) int intx8_t;
+    typedef __attribute__((__vector_size__(4 * sizeof(float)))) float floatx4_t;
+    asm volatile(
+        "v_mfma_f32_16x16x128_f8f6f4 %0, %1, %2, %0"
+        : "+a"(*(floatx4_t*)D)
+        : "v"(*(intx8_t*)A), "v"(*(intx8_t*)B)
+    );
 }
 
 template<int opsel_a, int opsel_b, int cbsz = 0, int blgp = 0>
