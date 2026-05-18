@@ -28,7 +28,6 @@ constexpr int K_TWO_TILE       = 2 * K_STEP;
 #define NUM_WARPS (WARPS_M * WARPS_N)
 #define NUM_THREADS (kittens::WARP_THREADS * NUM_WARPS)
 
-
 using _gl = gl<bf16, -1, -1, -1, -1>;
 using G = kittens::group<NUM_WARPS>;
 
@@ -170,7 +169,7 @@ __device__ __forceinline__ void store_bf16_scalar(const _gl& dst, int row, int c
 
 // Scalar bf16 load for a 3D-grouped tensor (B in grouped GEMM is laid out
 // as `[1, G, *, *]`, where the 2nd axis indexes the group). Used by
-// `grouped_tail_kernel` to read B at `(group_idx, row, col)`.
+// `grouped_tail_kernel_bf16` to read B at `(group_idx, row, col)`.
 __device__ __forceinline__ float load_bf16_scalar_grp(const _gl& src, int g_idx, int row, int col) {
     const uint32_t buffer_size = src.batch() * src.depth() * src.rows() * src.cols() * sizeof(bf16);
     const std::uintptr_t as_int = reinterpret_cast<std::uintptr_t>(src.raw_ptr);
@@ -187,7 +186,7 @@ __device__ __forceinline__ float load_bf16_scalar_grp(const _gl& src, int g_idx,
 // compiler emits a single `global_load_dwordx2` for a load through this
 // type when the source pointer is 8-byte aligned, replacing 4 separate
 // scalar bf16 loads (4× fewer VMEM transactions). Used by the RCR fast
-// path inside `gemm_tail_kernel` / `grouped_tail_kernel` where both
+// path inside `gemm_tail_kernel` / `grouped_tail_kernel_bf16` where both
 // operands are stride-1 in K.
 struct alignas(8) bf16x4 {
     bf16_2 lo, hi;
@@ -270,11 +269,14 @@ __device__ __forceinline__ void store_c_tile_mn_masked_grouped(
     const int n1 = n0 + C_rt_accum_t::cols;
 
     if (m0 >= m_limit || n0 >= n_limit) return;
-    if (m1 <= m_limit && n1 <= n_limit) {
-        store(g_c, src, {0, group_idx, r_tile, c_tile});
-        return;
-    }
-
+    // NOTE: deliberately NOT taking kittens::store fast path even when the
+    // tile is fully in-bounds (m1 <= m_limit && n1 <= n_limit). Reason:
+    // kittens::store builds its SRD with bound = full gl<> tensor_size from
+    // dst_ptr, which over-reaches past the actual allocated memory when
+    // g_c is a per-group SHIFTED VIEW (rows_internal == M_g < M_total). The
+    // per-element path below shrinks the SRD to (tensor_end - dst_ptr) so
+    // OOB writes hardware-clamp. Cost: ~10% slower than fast path on
+    // aligned tiles; correctness is non-negotiable.
     constexpr int axis = 2;
     U* dst_ptr = (U*)&g_c[(coord<C_rt_accum_t>{0, group_idx, r_tile, c_tile}
                             .template unit_coord<axis, 3>())];
@@ -344,8 +346,8 @@ __device__ __forceinline__ void store_c_tile_mn_masked_grouped(
 // =============================================================================
 // device_gemm_tile_body — shared GEMM main-loop body (Phase 2 refactor).
 //
-// The dense `gemm_kernel<L, KI_HINT>` and the persistent grouped
-// `grouped_kernel<L, KI_HINT>` previously contained two byte-identical
+// The dense `gemm_kernel<L>` and the persistent grouped
+// `grouped_gemm_bf16_kernel<L>` previously contained two byte-identical
 // copies of: subtile-load lambdas + DO_MMA macro + prologue (4 G::load) +
 // main_loop_iter (~85 line lambda over a two-tile schedule) + epilog 1 +
 // epilog 2. This single `__forceinline__` device function is the shared
@@ -369,10 +371,10 @@ __device__ __forceinline__ void store_c_tile_mn_masked_grouped(
 //     shift for grouped) and, for grouped, drain in-flight ops before
 //     the next persistent iteration.
 //
-// `num_tiles_dyn` is only consulted when KI_HINT == 0 (dynamic K). For
-// KI_HINT > 0 the loop bound is constant-folded.
+// `num_tiles_dyn` is the dynamic K-tile count (= g.fast_k / K_STEP),
+// always the loop bound since KI_HINT specializations were removed.
 // =============================================================================
-template<Layout L, int KI_HINT,
+template<Layout L,
          typename ST_A_T, typename ST_B_T,
          typename A_reg_t, typename B_reg_t,
          bool FUSED_KTAIL = false>
@@ -391,7 +393,8 @@ __device__ __forceinline__ void device_gemm_tile_body(
     int row, int col,
     int warp_row, int warp_col,
     int num_tiles_dyn,
-    rt_fl<HALF_REG_BLOCK_M, HALF_REG_BLOCK_N, col_l, rt_16x16_s> (&C_accum)[2][2])
+    rt_fl<HALF_REG_BLOCK_M, HALF_REG_BLOCK_N, col_l, rt_16x16_s> (&C_accum)[2][2],
+    bool has_k_tail = false)
 {
     A_reg_t A_tile;
     B_reg_t B_tile_0, B_tile_1;
@@ -432,6 +435,25 @@ __device__ __forceinline__ void device_gemm_tile_body(
             const int spatial_safe = (spatial_abs <= last_safe) ? spatial_abs : last_safe;
             return a_coord(spatial_safe - m_subtile_A, k);
         } else {
+            // Grouped path: a_gl is the per-group shifted view with
+            // rows_internal = M_g. The spatial dim addresses sub-tiles of
+            // HALF_BLOCK_SIZE rows each; the kernel's main-loop schedule
+            // always issues spatial=0 AND spatial=1 loads. Two failure modes:
+            //  (a) spatial completely past the last record (record_id_first
+            //      >= num_records, i.e. spatial * HALF_BLOCK_SIZE >= M_g):
+            //      swizzled SRD's record-index clamp is unreliable on gfx950
+            //      → real OOB read fault. Must clamp.
+            //  (b) spatial partially in-bounds (M_g not a HALF_BLOCK_SIZE
+            //      multiple): byte-level SRD clamp on individual voffsets
+            //      handles the OOB rows correctly, no clamp needed.
+            // Use ceil_div so partial-last-subtile is treated as in-bounds.
+            // Also floor at 0 — without the floor, M_g < HALF_BLOCK_SIZE
+            // gave last_safe=-1 → negative SOFF → uint32 wrap to ~4GB fault.
+            // Per-group A SRD uses non-swizzled bound (see make_srsrc call
+            // at the group-transition block). Non-swizzled SRD HW-clamps
+            // byte-level OOB voffsets to 0. So spatial fully-OOB or
+            // partial-OOB both safe to load (OOB lanes return 0, the
+            // store-side m_limit mask drops invalid rows).
             return a_coord(spatial, k);
         }
     };
@@ -567,9 +589,7 @@ __device__ __forceinline__ void device_gemm_tile_body(
         __builtin_amdgcn_sched_barrier(0);
 
         load_b_subtile(B_tile_1, Bs[1][1], warp_col);
-        if (tile + 4 < num_tiles_dyn) {
-            G::load(Bs[1][0], b_gl, b_coord(col*2, tile+3), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_10);
-        }
+        G::load(Bs[1][0], b_gl, b_coord(col*2, tile+3), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_10);
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
@@ -580,9 +600,7 @@ __device__ __forceinline__ void device_gemm_tile_body(
         __builtin_amdgcn_sched_barrier(0);
 
         load_a_subtile(A_tile, As[1][1], warp_row);
-        if (tile + 4 < num_tiles_dyn) {
-            G::load(As[1][0], a_gl, a_coord(row*2, tile+3), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_10);
-        }
+        G::load(As[1][0], a_gl, a_coord(row*2, tile+3), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_10);
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
@@ -599,9 +617,7 @@ __device__ __forceinline__ void device_gemm_tile_body(
         // shapes. The prefetched tile is K=tile+3 = ki_g-1 (already loaded
         // by the main loop's prior iter's tile+1 prefetch path or used by
         // Epilog 1 directly), so dropping it on the last iter is safe.
-        if (tile + 4 < num_tiles_dyn) {
-            G::load(Bs[1][1], b_gl, b_coord_safe(col*2+1, tile+3), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_11);
-        }
+        G::load(Bs[1][1], b_gl, b_coord_safe(col*2+1, tile+3), swizzled_offsets_B, b_srsrc_base, b_base, b_lds_11);
         asm volatile("s_waitcnt vmcnt(6)");
         __builtin_amdgcn_s_barrier();
 
@@ -612,16 +628,7 @@ __device__ __forceinline__ void device_gemm_tile_body(
         __builtin_amdgcn_sched_barrier(0);
     };
 
-    if constexpr (KI_HINT > 0) {
-        constexpr int num_tiles = KI_HINT;
-        if constexpr (L == Layout::CRR) {
-            #pragma unroll 2
-            for (int tile = 0; tile < num_tiles - 2; tile += 2) main_loop_iter(tile);
-        } else {
-            #pragma unroll
-            for (int tile = 0; tile < num_tiles - 2; tile += 2) main_loop_iter(tile);
-        }
-    } else {
+    {
         const int num_tiles = num_tiles_dyn;
         #pragma unroll 2
         for (int tile = 0; tile < num_tiles - 2; tile += 2) main_loop_iter(tile);
@@ -629,7 +636,7 @@ __device__ __forceinline__ void device_gemm_tile_body(
 
     /********** Epilog 1: second-to-last K-tile pair **********/
     {
-        const int tile = (KI_HINT > 0) ? (KI_HINT - 2) : (num_tiles_dyn - 2);
+        const int tile = num_tiles_dyn - 2;
         load_b_subtile(B_tile_0, Bs[tic][0], warp_col);
         load_a_subtile(A_tile, As[tic][0], warp_row);
         G::load(As[toc][1], a_gl, a_coord_safe(row*2+1, tile+1), swizzled_offsets_A, a_srsrc_base, a_base, a_lds_11);
@@ -703,11 +710,14 @@ __device__ __forceinline__ void device_gemm_tile_body(
         __builtin_amdgcn_sched_barrier(0);
     }
 
-    /********** Round-4 path A: fused K-tail epilog (RCR only) **********/
+    /********** Round-4 path A: fused K-tail epilog (RCR/RRR). When
+     * `has_k_tail` is false at runtime, the entire block is no-op'd —
+     * we still compile the code so a single template instance can serve
+     * both K_rem==0 and K_rem==K_STEP shapes. **********/
     if constexpr (FUSED_KTAIL) {
+        if (has_k_tail) {
         if constexpr (L == Layout::RCR) {
-            const int k_tail_tile =
-                (KI_HINT > 0) ? KI_HINT : num_tiles_dyn;
+            const int k_tail_tile = num_tiles_dyn;
             const int laneid = ::kittens::laneid();
             const int row_lane = laneid % 16;
             const int k_lane_bytes =
@@ -779,8 +789,7 @@ __device__ __forceinline__ void device_gemm_tile_body(
             DO_MMA(C_accum[1][0], A_tile, B_tile_0, C_accum[1][0]);
             DO_MMA(C_accum[1][1], A_tile, B_tile_1, C_accum[1][1]);
         } else if constexpr (L == Layout::RRR) {
-            const int k_tail_tile =
-                (KI_HINT > 0) ? KI_HINT : num_tiles_dyn;
+            const int k_tail_tile = num_tiles_dyn;
             const int laneid = ::kittens::laneid();
 
             // ---- A: direct HBM → register (mirror RCR path B) ----
@@ -902,14 +911,14 @@ __device__ __forceinline__ void device_gemm_tile_body(
             DO_MMA(C_accum[1][1], A_tile, B_tile_1, C_accum[1][1]);
 #endif
         }
+        }  // end if (has_k_tail)
     }
 
     #undef DO_MMA
 }
 
-// KI_HINT > 0: compile-time num_tiles (K / K_STEP) -> full #pragma unroll
-// KI_HINT == 0: dynamic num_tiles from g.ki, #pragma unroll 2
-template<Layout L, int KI_HINT>
+// Dynamic K only — num_tiles read from g.ki, `#pragma unroll 2`.
+template<Layout L>
 __global__ __launch_bounds__(NUM_THREADS, 2)
 void gemm_kernel(const layout_globals g) {
     extern __shared__ alignment_dummy __shm[];
@@ -1007,8 +1016,7 @@ void gemm_kernel(const layout_globals g) {
     const int warp_col = warp_id % 4;
 
     // K-specialization: compile-time vs dynamic.
-    // For the KI_HINT>0 path the helper sees constexpr KI_HINT so the
-    // main loop can unroll fully. For the KI_HINT==0 path we forward
+    // The helper forwards g.ki as `num_tiles_dyn`; the main loop runs
     // g.ki via num_tiles_dyn and the helper uses #pragma unroll 2.
 
     /********** SRD setup **********/
@@ -1053,7 +1061,7 @@ void gemm_kernel(const layout_globals g) {
     // + epilog 1/2. Dense passes m_subtile_A=0 and group_idx=0; the
     // compiler folds those constants and emits the same code as the
     // pre-refactor kernel.
-    device_gemm_tile_body<L, KI_HINT, ST_A, ST_B, A_reg_t, B_reg_t>(
+    device_gemm_tile_body<L, ST_A, ST_B, A_reg_t, B_reg_t>(
         g.a, g.b,
         /*m_subtile_A=*/0, /*group_idx=*/0, /*k_offset_tiles=*/0,
         As, Bs,
@@ -1133,7 +1141,7 @@ __global__ void gemm_tail_kernel(const layout_globals g) {
     if constexpr (L == Layout::RCR) {
         // Vec4 fast path (8-byte loads = 4 bf16) for RCR's stride-1 K
         // axis on both A and B. Mirrors the grouped-tail optimisation;
-        // see ``grouped_tail_kernel`` for the rationale + bench (~4×
+        // see ``grouped_tail_kernel_bf16`` for the rationale + bench (~4×
         // fewer VMEM transactions per K element on the K-tail / N-tail
         // paths). Falls back to scalar when k0 or g.k isn't multiple
         // of 4. Dense rarely runs the tail (host-aligned LLM shapes are
@@ -1183,41 +1191,22 @@ template __global__ void gemm_tail_kernel<Layout::RCR>(const layout_globals);
 template __global__ void gemm_tail_kernel<Layout::RRR>(const layout_globals);
 template __global__ void gemm_tail_kernel<Layout::CRR>(const layout_globals);
 
-// KI_HINT = 0 dynamic fallback
-template __global__ void gemm_kernel<Layout::RCR, 0>(const layout_globals);
-template __global__ void gemm_kernel<Layout::RRR, 0>(const layout_globals);
-template __global__ void gemm_kernel<Layout::CRR, 0>(const layout_globals);
-// KI_HINT > 0: specialized for common LLM K values (K / K_STEP).
-// K values: 3584, 4096, 8192, 11008, 14336, 16384, 18944, 28672, 29568, 53248
-// -> ki = 56, 64, 128, 172, 224, 256, 296, 448, 462, 832
-#define INSTANTIATE_K(KI) \
-    template __global__ void gemm_kernel<Layout::RCR, KI>(const layout_globals); \
-    template __global__ void gemm_kernel<Layout::RRR, KI>(const layout_globals); \
-    template __global__ void gemm_kernel<Layout::CRR, KI>(const layout_globals)
-INSTANTIATE_K(56);
-INSTANTIATE_K(64);
-INSTANTIATE_K(128);
-INSTANTIATE_K(172);
-INSTANTIATE_K(224);
-INSTANTIATE_K(256);
-INSTANTIATE_K(296);
-INSTANTIATE_K(448);
-INSTANTIATE_K(462);
-INSTANTIATE_K(832);
-#undef INSTANTIATE_K
+template __global__ void gemm_kernel<Layout::RCR>(const layout_globals);
+template __global__ void gemm_kernel<Layout::RRR>(const layout_globals);
+template __global__ void gemm_kernel<Layout::CRR>(const layout_globals);
 
-template<Layout L, int KI>
+template<Layout L>
 static inline void launch_one(layout_globals& g) {
     unsigned long mem_size = g.dynamic_shared_memory();
     // Set shared-mem attribute once per (L, KI) function pointer: idempotent,
     // avoids per-launch HIP runtime overhead.
     static bool attr_set = false;
     if (!attr_set) {
-        hipFuncSetAttribute((void*)gemm_kernel<L, KI>, hipFuncAttributeMaxDynamicSharedMemorySize, mem_size);
+        hipFuncSetAttribute((void*)gemm_kernel<L>, hipFuncAttributeMaxDynamicSharedMemorySize, mem_size);
         attr_set = true;
     }
     int total_blocks = g.bpr * g.bpc;
-    gemm_kernel<L, KI><<<dim3(total_blocks), g.block(), mem_size, g.stream>>>(g);
+    gemm_kernel<L><<<dim3(total_blocks), g.block(), mem_size, g.stream>>>(g);
 }
 
 template<Layout L>
@@ -1250,7 +1239,7 @@ void dispatch_gemm(layout_globals g) {
     // aligned (fast_k == k). When BOTH N and K are misaligned, the partial
     // col-tile interacts with the K-tail correction in a way that triggers
     // a memory fault on certain shape combinations (e.g., N=K=2880 with
-    // M>=1024 in KI_HINT=0 dynamic kernel). In that case we fall back to
+    // M>=1024 in the dynamic kernel). In that case we fall back to
     // bpc = fast_n / BLOCK_SIZE and the scalar tail kernel covers cols
     // [fast_n, n).
     g.bpc = (g.fast_k == g.k)
@@ -1259,19 +1248,7 @@ void dispatch_gemm(layout_globals g) {
     g.ki  = g.fast_k / K_STEP;
 
     if (g.bpr > 0 && g.bpc > 0 && g.ki >= 2) {
-        switch (g.ki) {
-            case 56:  launch_one<L, 56> (g); break;
-            case 64:  launch_one<L, 64> (g); break;
-            case 128: launch_one<L, 128>(g); break;
-            case 172: launch_one<L, 172>(g); break;
-            case 224: launch_one<L, 224>(g); break;
-            case 256: launch_one<L, 256>(g); break;
-            case 296: launch_one<L, 296>(g); break;
-            case 448: launch_one<L, 448>(g); break;
-            case 462: launch_one<L, 462>(g); break;
-            case 832: launch_one<L, 832>(g); break;
-            default:  launch_one<L, 0>  (g); break;
-        }
+        launch_one<L>(g);
     } else {
         // Fast region empty (M < BLOCK_SIZE or N < BLOCK_SIZE or K < K_TWO_TILE)
         // — let the tail kernel compute the entire output. Reset fast_* so
@@ -1370,7 +1347,7 @@ struct grouped_layout_globals {
     //   fast_n = (n / BLOCK_SIZE) * BLOCK_SIZE
     //   fast_k = (k / K_TWO_TILE) * K_TWO_TILE
     // Per-group M tail (M_g % BLOCK_SIZE != 0) is detected on-device by
-    // `grouped_tail_kernel` reading `group_offs`. Cells outside
+    // `grouped_tail_kernel_bf16` reading `group_offs`. Cells outside
     // [0, fast_m_g) × [0, fast_n) (per group) plus the K-tail in
     // [fast_k, k) are handled by the tail kernel (scalar fp32).
     int fast_n, fast_k;
@@ -1390,1573 +1367,12 @@ struct grouped_layout_globals {
     size_t dynamic_shared_memory() { return MAX_SHARED_MEMORY; }
 };
 
-// Scalar fp32 tail kernel for grouped GEMM — one (row, col) per thread.
-//
-// Mirror of dense `gemm_tail_kernel<L>` but with B 3D-grouped (per-thread
-// O(G) LDS scan to recover `group_idx` for B indexing).
-//
-// Caller contract (Phase 3): each group's M_g is a BLOCK_SIZE multiple,
-// so the main kernel covers full rows of every group. This tail kernel
-// only handles N-tail (col >= fast_n) and the K-tail correction
-// (fast_k < k for interior cells). Per-group M-tail is a Phase ≥ 4
-// concern that requires reworking the main kernel's tile addressing
-// (m_subtile_A is in HALF_BLOCK_SIZE=128 units, so non-128-aligned
-// m_start_g of a subsequent group truncates and silently corrupts that
-// group's tiles — the fix is non-trivial and beyond Phase 3 scope).
-//
-// Three cases per cell:
-//   * col < fast_n  AND fast_k == k  → main covers fully → early-return.
-//   * col < fast_n  AND fast_k <  k  → main wrote partial; add K-tail.
-//   * col >= fast_n                  → main did not run; full-K reduction.
+// Single template — FUSED_KTAIL compile-time gate folded into a runtime
+// `has_k_tail` check inside device_gemm_tile_body, so one kernel binary
+// handles both K_rem==0 and K_rem==K_STEP shapes.
 template<Layout L>
-__global__ void grouped_tail_kernel(const grouped_layout_globals g) {
-    constexpr int MAX_G_PLUS_1 = 65;
-    __shared__ int s_offs[MAX_G_PLUS_1];
-
-    if (threadIdx.x == 0 && threadIdx.y == 0) {
-        #pragma unroll 1
-        for (int gi = 0; gi <= g.G; ++gi) {
-            s_offs[gi] = static_cast<int>(g.group_offs[gi]);
-        }
-    }
-    __syncthreads();
-
-    constexpr bool layout_supports_main_n = (L == Layout::RCR);
-    const bool main_covers_n =
-        layout_supports_main_n && (g.fast_k > 0);
-    const bool needs_k_tail = g.fast_k < g.k;
-    const bool needs_n_tail = !main_covers_n && (g.fast_n < g.n);
-    if (!needs_k_tail && !needs_n_tail) return;
-
-    const int row = blockIdx.y * blockDim.y + threadIdx.y;
-    const int col = blockIdx.x * blockDim.x + threadIdx.x;
-    if (row >= g.M_total || col >= g.n) return;
-
-    // Locate the group that contains `row` (needed to index B).
-    int group_idx = 0;
-    #pragma unroll 1
-    for (int gi = 0; gi < g.G; ++gi) {
-        if (row < s_offs[gi + 1]) { group_idx = gi; break; }
-    }
-
-    // ``interior_n``: column lies inside the region the main kernel covered.
-    //   * main_covers_n (ceil_div bpc + masked store): main wrote [0, g.n).
-    //   * otherwise (bpc = fast_n / BLOCK_SIZE): main wrote [0, fast_n).
-    const bool interior_n       = main_covers_n
-                                      ? (col < g.n)
-                                      : (col < g.fast_n);
-    const bool fast_covers_cell = interior_n && g.fast_k > 0;
-    if (fast_covers_cell && !needs_k_tail) return;
-    if constexpr (L == Layout::RCR) {
-        const bool lds_k_tail_safe = (g.m_per_group >= TAIL_BLOCK_M) &&
-                                     ((g.m_per_group % TAIL_BLOCK_M) == 0);
-        const bool lds_k_rem_match = ((g.k - g.fast_k) == 64);
-        const int row_block_base = (row / TAIL_BLOCK_M) * TAIL_BLOCK_M;
-        const bool block_in_group =
-            (row_block_base + TAIL_BLOCK_M <= s_offs[group_idx + 1]);
-        if (fast_covers_cell && needs_k_tail && lds_k_tail_safe &&
-            lds_k_rem_match && block_in_group) {
-            return;  // LDS K-tail kernel already wrote the corrected value.
-        }
-        if (!main_covers_n && col >= g.fast_n && lds_k_tail_safe &&
-            block_in_group) {
-            return;  // LDS N-tail kernel already wrote the absolute value.
-        }
-    } else if constexpr (L == Layout::RRR) {
-        const bool lds_k_tail_safe = (g.m_per_group >= TAIL_BLOCK_M) &&
-                                     ((g.m_per_group % TAIL_BLOCK_M) == 0);
-        const bool lds_k_rem_match = ((g.k - g.fast_k) == 64);
-        const int row_block_base = (row / TAIL_BLOCK_M) * TAIL_BLOCK_M;
-        const bool block_in_group =
-            (row_block_base + TAIL_BLOCK_M <= s_offs[group_idx + 1]);
-        if (fast_covers_cell && needs_k_tail && lds_k_tail_safe &&
-            lds_k_rem_match && block_in_group) {
-            return;  // LDS K-tail (RRR) already wrote the corrected value.
-        }
-        if (col >= g.fast_n && lds_k_tail_safe && block_in_group) {
-            return;  // LDS N-tail (RRR) already wrote the absolute value.
-        }
-    }
-
-    const int k0 = fast_covers_cell ? g.fast_k : 0;
-    float acc = 0.0f;
-
-    if constexpr (L == Layout::RCR) {
-        const bf16* a_row = &g.a[coord<>(row, 0)];
-        const bf16* b_row = &g.b[coord<>{0, group_idx, col, 0}];
-        int kk = k0;
-        if ((g.k % 4 == 0) && ((k0 & 3) == 0)) {
-            const bf16x4* a_v4 = reinterpret_cast<const bf16x4*>(a_row);
-            const bf16x4* b_v4 = reinterpret_cast<const bf16x4*>(b_row);
-            const int j_start = k0 >> 2;
-            const int j_end   = g.k >> 2;
-            #pragma unroll 4
-            for (int j = j_start; j < j_end; ++j) {
-                bf16x4 a4 = a_v4[j];
-                bf16x4 b4 = b_v4[j];
-                acc += float(a4.lo.x) * float(b4.lo.x)
-                     + float(a4.lo.y) * float(b4.lo.y)
-                     + float(a4.hi.x) * float(b4.hi.x)
-                     + float(a4.hi.y) * float(b4.hi.y);
-            }
-            kk = j_end << 2;
-        }
-        for (; kk < g.k; ++kk) {
-            acc += load_bf16_scalar(g.a, row, kk) *
-                   load_bf16_scalar_grp(g.b, group_idx, col, kk);
-        }
-    } else if constexpr (L == Layout::RRR) {
-        // RRR: A stride-1 in K, B[group_idx, kk, col] stride-N in K — B
-        // not vectorisable. Stay scalar (RRR is grad-X path; not in any
-        // current grouped metric shape).
-        for (int kk = k0; kk < g.k; ++kk) {
-            acc += load_bf16_scalar(g.a, row, kk) *
-                   load_bf16_scalar_grp(g.b, group_idx, kk, col);
-        }
-    } else {
-        // CRR: A stride-M in K, B stride-N in K — neither vectorisable.
-        // Stay scalar (CRR is dB grouped variable-K; not used in current
-        // grouped metric).
-        for (int kk = k0; kk < g.k; ++kk) {
-            acc += load_bf16_scalar(g.a, kk, row) *
-                   load_bf16_scalar_grp(g.b, group_idx, kk, col);
-        }
-    }
-
-    if (fast_covers_cell && needs_k_tail) {
-        store_bf16_scalar(g.c, row, col,
-                          load_bf16_scalar(g.c, row, col) + acc);
-    } else {
-        store_bf16_scalar(g.c, row, col, acc);
-    }
-}
-
-template __global__ void grouped_tail_kernel<Layout::RCR>(const grouped_layout_globals);
-template __global__ void grouped_tail_kernel<Layout::RRR>(const grouped_layout_globals);
-template __global__ void grouped_tail_kernel<Layout::CRR>(const grouped_layout_globals);
-
-template<Layout L, int K_REM>
-__global__ void grouped_ktail_kernel_lds(const grouped_layout_globals g) {
-    static_assert(L == Layout::RCR,
-        "grouped_ktail_kernel_lds: RCR only — RRR/CRR fall back to scalar tail.");
-    constexpr int TBM = TAIL_BLOCK_M;
-    constexpr int TBN = TAIL_BLOCK_N;
-    constexpr int NTHR = TBM * TBN;          // 256
-    constexpr int A_TOTAL = TBM * K_REM;     // 1024 for K_REM=64
-    constexpr int A_PER_THR = (A_TOTAL + NTHR - 1) / NTHR;
-    constexpr int B_TOTAL = TBN * K_REM;
-    constexpr int B_PER_THR = (B_TOTAL + NTHR - 1) / NTHR;
-
-    constexpr int K_REM_LDS = K_REM + 4;     // 68 bf16 / 136 bytes / 34 banks
-    __shared__ bf16 A_lds[TBM * K_REM_LDS];
-    __shared__ bf16 B_lds[TBN * K_REM_LDS];
-    constexpr int MAX_G_PLUS_1 = 65;
-    __shared__ int s_offs[MAX_G_PLUS_1];
-
-    const int rib = threadIdx.y;
-    const int cib = threadIdx.x;
-    const int tid = rib * blockDim.x + cib;
-
-    // Cooperative G+1 offsets prefill (once per block).
-    if (tid < MAX_G_PLUS_1) {
-        s_offs[tid] = (tid <= g.G) ? static_cast<int>(g.group_offs[tid]) : 0;
-    }
-    __syncthreads();
-
-    const int row_block_base = blockIdx.y * TBM;
-    const int col_block_base = blockIdx.x * TBN;
-    if (row_block_base >= g.M_total || col_block_base >= g.n) return;
-
-    // Pick a single group_idx for the entire block (assumes block within one
-    // group — see caller assumptions above). Use the FIRST row of the block.
-    int group_idx = 0;
-    #pragma unroll 1
-    for (int gi = 0; gi < g.G; ++gi) {
-        if (row_block_base < s_offs[gi + 1]) { group_idx = gi; break; }
-    }
-
-    const int k0 = g.fast_k;
-    const int K_rem_dyn = g.k - k0;
-    // K_rem_dyn must equal K_REM for this template instantiation (callers
-    // dispatch by g.k - g.fast_k). Guard against accidental mismatch (e.g.,
-    // dispatch bug) — fall back to early-exit, scalar tail will fix things.
-    if (K_rem_dyn != K_REM) return;
-
-    const bool cross_boundary = (row_block_base + TBM > s_offs[group_idx + 1]);
-    if (cross_boundary) {
-        const int row = row_block_base + rib;
-        const int col = col_block_base + cib;
-        if (row < g.M_total && col < g.n) {
-            int row_group = 0;
-            #pragma unroll 1
-            for (int gi = 0; gi < g.G; ++gi) {
-                if (row < s_offs[gi + 1]) { row_group = gi; break; }
-            }
-            typedef __attribute__((__vector_size__(2 * sizeof(__bf16)))) __bf16 bf16x2_v;
-            float acc_s_lo = 0.0f, acc_s_hi = 0.0f;
-            const bf16* a_row = &g.a[coord<>(row, 0)];
-            const bf16* b_row = &g.b[coord<>{0, row_group, col, 0}];
-            int kk = k0;
-            if ((g.k % 4 == 0) && ((k0 & 3) == 0)) {
-                const bf16x4* a_v4 = reinterpret_cast<const bf16x4*>(a_row);
-                const bf16x4* b_v4 = reinterpret_cast<const bf16x4*>(b_row);
-                const int j_start = k0 >> 2;
-                const int j_end   = g.k >> 2;
-                for (int j = j_start; j < j_end; ++j) {
-                    bf16x4 a4 = a_v4[j];
-                    bf16x4 b4 = b_v4[j];
-                    acc_s_lo = __builtin_amdgcn_fdot2_f32_bf16(
-                        *reinterpret_cast<const bf16x2_v*>(&a4.lo),
-                        *reinterpret_cast<const bf16x2_v*>(&b4.lo),
-                        acc_s_lo, false);
-                    acc_s_hi = __builtin_amdgcn_fdot2_f32_bf16(
-                        *reinterpret_cast<const bf16x2_v*>(&a4.hi),
-                        *reinterpret_cast<const bf16x2_v*>(&b4.hi),
-                        acc_s_hi, false);
-                }
-                kk = j_end << 2;
-            }
-            float acc_s = acc_s_lo + acc_s_hi;
-            for (; kk < g.k; ++kk) {
-                acc_s += load_bf16_scalar(g.a, row, kk) *
-                         load_bf16_scalar_grp(g.b, row_group, col, kk);
-            }
-            store_bf16_scalar(g.c, row, col,
-                              load_bf16_scalar(g.c, row, col) + acc_s);
-        }
-        return;
-    }
-
-    constexpr int VEC = 4;
-    constexpr int VECS_PER_ROW = K_REM / VEC;
-    static_assert(K_REM % VEC == 0, "K_REM must be vec4-aligned");
-    static_assert(NTHR == TBM * VECS_PER_ROW,
-        "Each thread must own exactly one vec4 of A.");
-    {
-        const int r_in_blk = tid / VECS_PER_ROW;
-        const int kk_v = tid - r_in_blk * VECS_PER_ROW;
-        const int kk_start = kk_v * VEC;
-        const int r_global = row_block_base + r_in_blk;
-        bf16x4 va{};
-        if (r_global < g.M_total) {
-            const bf16* ap = &g.a[coord<>(r_global, k0 + kk_start)];
-            va = *reinterpret_cast<const bf16x4*>(ap);
-        }
-        *reinterpret_cast<bf16x4*>(&A_lds[r_in_blk * K_REM_LDS + kk_start]) = va;
-    }
-    {
-        const int c_in_blk = tid / VECS_PER_ROW;
-        const int kk_v = tid - c_in_blk * VECS_PER_ROW;
-        const int kk_start = kk_v * VEC;
-        const int c_global = col_block_base + c_in_blk;
-        bf16x4 vb{};
-        if (c_global < g.n) {
-            const bf16* bp = &g.b[coord<>{0, group_idx, c_global, k0 + kk_start}];
-            vb = *reinterpret_cast<const bf16x4*>(bp);
-        }
-        *reinterpret_cast<bf16x4*>(&B_lds[c_in_blk * K_REM_LDS + kk_start]) = vb;
-    }
-    __syncthreads();
-
-    const int row = row_block_base + rib;
-    const int col = col_block_base + cib;
-    // Round-11: skip cells whose col is beyond the real ``g.n`` (the
-    // partial last col-tile). Main kernel did NOT write those cells
-    // (column-masked C store), and we must not RMW them.
-    if (row >= g.M_total || col >= g.n) return;
-
-    typedef __attribute__((__vector_size__(2 * sizeof(__bf16)))) __bf16 bf16x2_v;
-    constexpr int FMA_VEC = 4;
-    constexpr int K_VECS = K_REM / FMA_VEC;
-    static_assert(K_REM % FMA_VEC == 0, "K_REM must be vec4-aligned for inner fma");
-    float acc = 0.0f;
-    #pragma unroll
-    for (int kk_v = 0; kk_v < K_VECS; ++kk_v) {
-        bf16x4 a4 = *reinterpret_cast<const bf16x4*>(
-            &A_lds[rib * K_REM_LDS + kk_v * FMA_VEC]);
-        bf16x4 b4 = *reinterpret_cast<const bf16x4*>(
-            &B_lds[cib * K_REM_LDS + kk_v * FMA_VEC]);
-        acc = __builtin_amdgcn_fdot2_f32_bf16(
-            *reinterpret_cast<const bf16x2_v*>(&a4.lo),
-            *reinterpret_cast<const bf16x2_v*>(&b4.lo),
-            acc, false);
-        acc = __builtin_amdgcn_fdot2_f32_bf16(
-            *reinterpret_cast<const bf16x2_v*>(&a4.hi),
-            *reinterpret_cast<const bf16x2_v*>(&b4.hi),
-            acc, false);
-    }
-
-    // K-tail correction add. Main grouped kernel already stored the
-    // [0, fast_k) reduction at C[row, col]; we add the [fast_k, k) part.
-    store_bf16_scalar(g.c, row, col,
-                      load_bf16_scalar(g.c, row, col) + acc);
-}
-
-template __global__ void grouped_ktail_kernel_lds<Layout::RCR, 64>(const grouped_layout_globals);
-
-template<int K_REM>
-__global__ void grouped_ktail_kernel_lds_rrr(const grouped_layout_globals g) {
-    constexpr int TBM = TAIL_BLOCK_M;
-    constexpr int TBN = TAIL_BLOCK_N;
-    constexpr int NTHR = TBM * TBN;          // 256
-
-    constexpr int K_REM_LDS = K_REM + 4;
-    __shared__ bf16 A_lds[TBM * K_REM_LDS];
-    __shared__ bf16 B_lds[TBN * K_REM_LDS];
-    constexpr int MAX_G_PLUS_1 = 65;
-    __shared__ int s_offs[MAX_G_PLUS_1];
-
-    const int rib = threadIdx.y;
-    const int cib = threadIdx.x;
-    const int tid = rib * blockDim.x + cib;
-
-    if (tid < MAX_G_PLUS_1) {
-        s_offs[tid] = (tid <= g.G) ? static_cast<int>(g.group_offs[tid]) : 0;
-    }
-    __syncthreads();
-
-    const int row_block_base = blockIdx.y * TBM;
-    const int col_block_base = blockIdx.x * TBN;
-    if (row_block_base >= g.M_total || col_block_base >= g.n) return;
-
-    int group_idx = 0;
-    #pragma unroll 1
-    for (int gi = 0; gi < g.G; ++gi) {
-        if (row_block_base < s_offs[gi + 1]) { group_idx = gi; break; }
-    }
-
-    const int k0 = g.fast_k;
-    const int K_rem_dyn = g.k - k0;
-    if (K_rem_dyn != K_REM) return;
-
-    const bool cross_boundary = (row_block_base + TBM > s_offs[group_idx + 1]);
-    if (cross_boundary) {
-        // Mirror RCR cross_boundary fallback. Each row uses its own group_idx
-        // for B indexing. Vec4 fdot2_f32_bf16 along K is safe on RRR ONLY
-        // for the A operand (stride-1); B is stride-N in K so we keep its
-        // path scalar (matches the legacy ``grouped_tail_kernel<RRR>`` body).
-        const int row = row_block_base + rib;
-        const int col = col_block_base + cib;
-        if (row < g.M_total && col < g.n) {
-            int row_group = 0;
-            #pragma unroll 1
-            for (int gi = 0; gi < g.G; ++gi) {
-                if (row < s_offs[gi + 1]) { row_group = gi; break; }
-            }
-            float acc_s = 0.0f;
-            for (int kk = k0; kk < g.k; ++kk) {
-                acc_s += load_bf16_scalar(g.a, row, kk) *
-                         load_bf16_scalar_grp(g.b, row_group, kk, col);
-            }
-            store_bf16_scalar(g.c, row, col,
-                              load_bf16_scalar(g.c, row, col) + acc_s);
-        }
-        return;
-    }
-
-    // ---- Coop load A: [TBM, K_REM] bf16 from A[r_global, k0..k0+K_REM).
-    // Same pattern as round-9 RCR (A is stride-1 in K for both layouts).
-    constexpr int VEC = 4;
-    constexpr int A_VECS_PER_ROW = K_REM / VEC;       // 16
-    static_assert(NTHR == TBM * A_VECS_PER_ROW,
-        "NTHR must equal TBM * (K_REM / VEC) for vec4 coop load of A");
-    {
-        const int r_in_blk = tid / A_VECS_PER_ROW;
-        const int kk_v = tid - r_in_blk * A_VECS_PER_ROW;
-        const int kk_start = kk_v * VEC;
-        const int r_global = row_block_base + r_in_blk;
-        bf16x4 va{};
-        if (r_global < g.M_total) {
-            const bf16* ap = &g.a[coord<>(r_global, k0 + kk_start)];
-            va = *reinterpret_cast<const bf16x4*>(ap);
-        }
-        *reinterpret_cast<bf16x4*>(&A_lds[r_in_blk * K_REM_LDS + kk_start]) = va;
-    }
-
-    // ---- Coop load B (RRR): [K_REM, TBN] bf16 from B[group, k0+kk, col_base..+TBN).
-    // HBM is [G, K, N] row-major: 4 contiguous N cols at fixed K is a vec4
-    // (8-byte) HBM load. We then SCATTER into B_lds in transposed [TBN,
-    // K_REM_LDS] layout so the inner loop reads vec4 along K (stride-1).
-    //
-    // Pattern: NTHR=256 threads cover K_REM=64 K rows × TBN=16 N cols.
-    //   B_VECS_PER_K = TBN / VEC = 4 (4 vec4 loads per K row).
-    //   Thread tid → kk_in_blk = tid / 4, n_offset = (tid % 4) * 4.
-    //   Each thread does 1 vec4 HBM load + 4 scalar LDS stores.
-    constexpr int B_VECS_PER_K = TBN / VEC;           // 4
-    static_assert(NTHR == K_REM * B_VECS_PER_K,
-        "NTHR must equal K_REM * (TBN / VEC) for vec4 coop load of B");
-    {
-        const int kk_in_blk = tid / B_VECS_PER_K;
-        const int n_in_blk = (tid - kk_in_blk * B_VECS_PER_K) * VEC;
-        const int kk_global = k0 + kk_in_blk;
-        const int col_global = col_block_base + n_in_blk;
-        bf16x4 vb{};
-        if (col_global + VEC <= g.n) {
-            const bf16* bp = &g.b[coord<>{0, group_idx, kk_global, col_global}];
-            vb = *reinterpret_cast<const bf16x4*>(bp);
-        } else if (col_global < g.n) {
-            #pragma unroll
-            for (int i = 0; i < VEC; ++i) {
-                const int cg = col_global + i;
-                if (cg < g.n) {
-                    bf16 v = g.b[coord<>{0, group_idx, kk_global, cg}];
-                    if      (i == 0) vb.lo.x = v;
-                    else if (i == 1) vb.lo.y = v;
-                    else if (i == 2) vb.hi.x = v;
-                    else             vb.hi.y = v;
-                }
-            }
-        }
-        // Scatter to B_lds in [TBN, K_REM_LDS] transposed layout: each of
-        // the 4 N elements goes to its own LDS row (= n_in_blk + i), at
-        // LDS col = kk_in_blk.
-        B_lds[(n_in_blk + 0) * K_REM_LDS + kk_in_blk] = vb.lo.x;
-        B_lds[(n_in_blk + 1) * K_REM_LDS + kk_in_blk] = vb.lo.y;
-        B_lds[(n_in_blk + 2) * K_REM_LDS + kk_in_blk] = vb.hi.x;
-        B_lds[(n_in_blk + 3) * K_REM_LDS + kk_in_blk] = vb.hi.y;
-    }
-    __syncthreads();
-
-    const int row = row_block_base + rib;
-    const int col = col_block_base + cib;
-    if (row >= g.M_total || col >= g.n) return;
-
-    // Inner loop: identical to RCR LDS K-tail (round-15) — both A_lds and
-    // B_lds present K stride-1 here (B_lds is transposed for that purpose).
-    typedef __attribute__((__vector_size__(2 * sizeof(__bf16)))) __bf16 bf16x2_v;
-    constexpr int FMA_VEC = 4;
-    constexpr int K_VECS = K_REM / FMA_VEC;           // 16
-    static_assert(K_REM % FMA_VEC == 0, "K_REM must be vec4-aligned for inner fma");
-    float acc = 0.0f;
-    #pragma unroll
-    for (int kk_v = 0; kk_v < K_VECS; ++kk_v) {
-        bf16x4 a4 = *reinterpret_cast<const bf16x4*>(
-            &A_lds[rib * K_REM_LDS + kk_v * FMA_VEC]);
-        bf16x4 b4 = *reinterpret_cast<const bf16x4*>(
-            &B_lds[cib * K_REM_LDS + kk_v * FMA_VEC]);
-        acc = __builtin_amdgcn_fdot2_f32_bf16(
-            *reinterpret_cast<const bf16x2_v*>(&a4.lo),
-            *reinterpret_cast<const bf16x2_v*>(&b4.lo),
-            acc, false);
-        acc = __builtin_amdgcn_fdot2_f32_bf16(
-            *reinterpret_cast<const bf16x2_v*>(&a4.hi),
-            *reinterpret_cast<const bf16x2_v*>(&b4.hi),
-            acc, false);
-    }
-
-    // K-tail correction add: main RRR kernel wrote [0, fast_k) at C[row, col].
-    store_bf16_scalar(g.c, row, col,
-                      load_bf16_scalar(g.c, row, col) + acc);
-}
-
-template __global__ void grouped_ktail_kernel_lds_rrr<64>(const grouped_layout_globals);
-
-template<Layout L, int K_REM>
-__global__ void grouped_ktail_kernel_mfma(const grouped_layout_globals g) {
-    static_assert(L == Layout::RCR,
-        "grouped_ktail_kernel_mfma (BF16): RCR only — RRR/CRR fall back to scalar tail.");
-    static_assert(K_REM == 64,
-        "grouped_ktail_kernel_mfma (BF16): K_REM must be 64 (= 2 × mfma_16x16x32_bf16).");
-    constexpr int TBM = TAIL_BLOCK_M;       // 16
-    constexpr int TBN = TAIL_BLOCK_N;       // 16
-    constexpr int K_PER_LANE_CHUNK = 8;     // mfma_16x16x32_bf16: 8 bf16/lane per call
-    constexpr int K_PER_MFMA = 32;          // K dim per mfma call
-    constexpr int N_MFMA = K_REM / K_PER_MFMA;  // = 2 calls
-    constexpr int MAX_G_PLUS_1 = 65;
-    __shared__ int s_offs[MAX_G_PLUS_1];
-
-    const int tid = threadIdx.x;            // single-wave block, 64 threads
-    if (tid <= g.G && tid < MAX_G_PLUS_1) {
-        s_offs[tid] = static_cast<int>(g.group_offs[tid]);
-    }
-    __syncthreads();
-
-    const int row_block_base = blockIdx.y * TBM;
-    const int col_block_base = blockIdx.x * TBN;
-    if (row_block_base >= g.M_total || col_block_base >= g.n) return;
-
-    int group_idx = 0;
-    #pragma unroll 1
-    for (int gi = 0; gi < g.G; ++gi) {
-        if (row_block_base < s_offs[gi + 1]) { group_idx = gi; break; }
-    }
-
-    const int K_rem_dyn = g.k - g.fast_k;
-    if (K_rem_dyn != K_REM) return;
-    const int k0 = g.fast_k;
-
-    // Cross-group fallback (per-row vec4 fdot2_f32_bf16 + 2-way ILP).
-    // Mirror ``grouped_ktail_kernel_lds`` cross_boundary path. Single
-    // wave: 64 lanes cover the 256 cells in 4 passes (4 cells/lane).
-    const bool cross_boundary = (row_block_base + TBM > s_offs[group_idx + 1]);
-    if (cross_boundary) {
-        typedef __attribute__((__vector_size__(2 * sizeof(__bf16)))) __bf16 bf16x2_v;
-        #pragma unroll
-        for (int slot = 0; slot < 4; ++slot) {
-            const int rib = (slot * 16) + (tid / TBN);
-            const int cib = tid % TBN;
-            const int row = row_block_base + rib;
-            const int col = col_block_base + cib;
-            if (row >= g.M_total || col >= g.n) continue;
-            int row_group = 0;
-            #pragma unroll 1
-            for (int gi = 0; gi < g.G; ++gi) {
-                if (row < s_offs[gi + 1]) { row_group = gi; break; }
-            }
-            float acc_s_lo = 0.f, acc_s_hi = 0.f;
-            const bf16* a_row = &g.a[coord<>(row, 0)];
-            const bf16* b_row = &g.b[coord<>{0, row_group, col, 0}];
-            int kk = k0;
-            if ((g.k % 4 == 0) && ((k0 & 3) == 0)) {
-                const bf16x4* a_v4 = reinterpret_cast<const bf16x4*>(a_row);
-                const bf16x4* b_v4 = reinterpret_cast<const bf16x4*>(b_row);
-                const int j_start = k0 >> 2;
-                const int j_end   = g.k >> 2;
-                for (int j = j_start; j < j_end; ++j) {
-                    bf16x4 a4 = a_v4[j];
-                    bf16x4 b4 = b_v4[j];
-                    acc_s_lo = __builtin_amdgcn_fdot2_f32_bf16(
-                        *reinterpret_cast<const bf16x2_v*>(&a4.lo),
-                        *reinterpret_cast<const bf16x2_v*>(&b4.lo),
-                        acc_s_lo, false);
-                    acc_s_hi = __builtin_amdgcn_fdot2_f32_bf16(
-                        *reinterpret_cast<const bf16x2_v*>(&a4.hi),
-                        *reinterpret_cast<const bf16x2_v*>(&b4.hi),
-                        acc_s_hi, false);
-                }
-                kk = j_end << 2;
-            }
-            float acc_s = acc_s_lo + acc_s_hi;
-            for (; kk < g.k; ++kk) {
-                acc_s += load_bf16_scalar(g.a, row, kk) *
-                         load_bf16_scalar_grp(g.b, row_group, col, kk);
-            }
-            store_bf16_scalar(g.c, row, col,
-                              load_bf16_scalar(g.c, row, col) + acc_s);
-        }
-        return;
-    }
-
-    // ----- Fast MFMA path ------------------------------------------------
-    // Lane (t):  row_in_blk = t % 16,  k_chunk = t / 16  (0..3).
-    //   For mfma_16x16x32_bf16 (K=32 per call):
-    //     A operand: lane t holds A[t%16, k_off + (t/16)*8 .. (t/16)*8+7]
-    //                = bf16x8 = 8 bf16 = 16 bytes.
-    //     B operand (RCR ABt): lane t holds B[t%16, k_off + (t/16)*8 ..]
-    //                          = same layout, B treated as [N, K] row-major.
-    //   Two calls cover K=64: k_off = k0 (first), k_off = k0+32 (second).
-    typedef __attribute__((__vector_size__(8 * sizeof(__bf16)))) __bf16 bf16x8_t;
-    typedef __attribute__((__vector_size__(4 * sizeof(float)))) float floatx4_t;
-
-    const int row_in_blk = tid % TBM;
-    const int chunk      = tid / TBM;       // 0..3
-
-    const int g_row = row_block_base + row_in_blk;
-    const int g_col = col_block_base + row_in_blk;
-
-    const int k_lane_offset = chunk * K_PER_LANE_CHUNK;  // 0, 8, 16, 24
-
-    bf16x8_t a_pack0, a_pack1;
-    bf16x8_t b_pack0, b_pack1;
-    if (g_row < g.M_total) {
-        const bf16* a_ptr0 = &g.a[coord<>(g_row, k0 + k_lane_offset)];
-        const bf16* a_ptr1 = &g.a[coord<>(g_row, k0 + K_PER_MFMA + k_lane_offset)];
-        a_pack0 = *reinterpret_cast<const bf16x8_t*>(a_ptr0);
-        a_pack1 = *reinterpret_cast<const bf16x8_t*>(a_ptr1);
-    } else {
-        a_pack0 = bf16x8_t{};
-        a_pack1 = bf16x8_t{};
-    }
-    if (g_col < g.n) {
-        const bf16* b_ptr0 = &g.b[coord<>{0, group_idx, g_col, k0 + k_lane_offset}];
-        const bf16* b_ptr1 = &g.b[coord<>{0, group_idx, g_col, k0 + K_PER_MFMA + k_lane_offset}];
-        b_pack0 = *reinterpret_cast<const bf16x8_t*>(b_ptr0);
-        b_pack1 = *reinterpret_cast<const bf16x8_t*>(b_ptr1);
-    } else {
-        b_pack0 = bf16x8_t{};
-        b_pack1 = bf16x8_t{};
-    }
-
-    // Two mfma_f32_16x16x32_bf16 calls accumulating over K=64.
-    floatx4_t acc = floatx4_t{0.f, 0.f, 0.f, 0.f};
-    acc = __builtin_amdgcn_mfma_f32_16x16x32_bf16(a_pack0, b_pack0, acc, 0, 0, 0);
-    acc = __builtin_amdgcn_mfma_f32_16x16x32_bf16(a_pack1, b_pack1, acc, 0, 0, 0);
-
-    // Output: lane t → cells C[(t/16)*4 + (0..3), t%16].
-    const int out_row_base = row_block_base + chunk * 4;
-    const int out_col      = col_block_base + row_in_blk;
-    if (out_col >= g.n) return;
-    #pragma unroll
-    for (int i = 0; i < 4; ++i) {
-        const int r = out_row_base + i;
-        if (r >= g.M_total) break;
-        const float existing = load_bf16_scalar(g.c, r, out_col);
-        const float new_val  = existing + acc[i];
-        store_bf16_scalar(g.c, r, out_col, new_val);
-    }
-}
-
-template __global__ void grouped_ktail_kernel_mfma<Layout::RCR, 64>(const grouped_layout_globals);
-
-template<Layout L, int K_REM>
-__global__ void grouped_ktail_kernel_mfma32x32(const grouped_layout_globals g) {
-    static_assert(L == Layout::RCR,
-        "grouped_ktail_kernel_mfma32x32 (BF16): RCR only.");
-    static_assert(K_REM == 64,
-        "grouped_ktail_kernel_mfma32x32 (BF16): K_REM must be 64 (= 4 × mfma_32x32x16_bf16).");
-    constexpr int TBM = 32;
-    constexpr int TBN = 32;
-    constexpr int K_PER_MFMA      = 16;                  // mfma_32x32x16_bf16 K dim
-    constexpr int N_MFMA          = K_REM / K_PER_MFMA;  // 4 calls
-    constexpr int K_PER_LANE_CHUNK = 8;                  // 8 bf16/lane per mfma call
-    constexpr int MAX_G_PLUS_1 = 65;
-    __shared__ int s_offs[MAX_G_PLUS_1];
-
-    const int tid = threadIdx.x;            // single-wave block, 64 threads
-    if (tid <= g.G && tid < MAX_G_PLUS_1) {
-        s_offs[tid] = static_cast<int>(g.group_offs[tid]);
-    }
-    __syncthreads();
-
-    const int row_block_base = blockIdx.y * TBM;
-    const int col_block_base = blockIdx.x * TBN;
-    if (row_block_base >= g.M_total || col_block_base >= g.n) return;
-
-    int group_idx = 0;
-    #pragma unroll 1
-    for (int gi = 0; gi < g.G; ++gi) {
-        if (row_block_base < s_offs[gi + 1]) { group_idx = gi; break; }
-    }
-
-    const int K_rem_dyn = g.k - g.fast_k;
-    if (K_rem_dyn != K_REM) return;
-    const int k0 = g.fast_k;
-
-    // Cross-group fallback (block straddles a group boundary in M, or hits
-    // M_total tail). 64 lanes × 16 cells = 1024 cells covered via per-row
-    // vec4 fdot2_f32_bf16 + 2-way ILP scalar dot loop. Unreachable on
-    // uniform group_lens with M_g % 32 == 0 (the metric path).
-    const bool cross_boundary = (row_block_base + TBM > s_offs[group_idx + 1]);
-    if (cross_boundary) {
-        typedef __attribute__((__vector_size__(2 * sizeof(__bf16)))) __bf16 bf16x2_v;
-        const int col = col_block_base + (tid % 32);
-        if (col < g.n) {
-            #pragma unroll
-            for (int rr = 0; rr < TBM; ++rr) {
-                if ((rr % 2) != (tid / 32)) continue;
-                const int row = row_block_base + rr;
-                if (row >= g.M_total) break;
-                int row_group = 0;
-                #pragma unroll 1
-                for (int gi = 0; gi < g.G; ++gi) {
-                    if (row < s_offs[gi + 1]) { row_group = gi; break; }
-                }
-                float acc_s_lo = 0.f, acc_s_hi = 0.f;
-                const bf16* a_row = &g.a[coord<>(row, 0)];
-                const bf16* b_row = &g.b[coord<>{0, row_group, col, 0}];
-                int kk = k0;
-                if ((g.k % 4 == 0) && ((k0 & 3) == 0)) {
-                    const bf16x4* a_v4 = reinterpret_cast<const bf16x4*>(a_row);
-                    const bf16x4* b_v4 = reinterpret_cast<const bf16x4*>(b_row);
-                    const int j_start = k0 >> 2;
-                    const int j_end   = g.k >> 2;
-                    for (int j = j_start; j < j_end; ++j) {
-                        bf16x4 a4 = a_v4[j];
-                        bf16x4 b4 = b_v4[j];
-                        acc_s_lo = __builtin_amdgcn_fdot2_f32_bf16(
-                            *reinterpret_cast<const bf16x2_v*>(&a4.lo),
-                            *reinterpret_cast<const bf16x2_v*>(&b4.lo),
-                            acc_s_lo, false);
-                        acc_s_hi = __builtin_amdgcn_fdot2_f32_bf16(
-                            *reinterpret_cast<const bf16x2_v*>(&a4.hi),
-                            *reinterpret_cast<const bf16x2_v*>(&b4.hi),
-                            acc_s_hi, false);
-                    }
-                    kk = j_end << 2;
-                }
-                float acc_s = acc_s_lo + acc_s_hi;
-                for (; kk < g.k; ++kk) {
-                    acc_s += load_bf16_scalar(g.a, row, kk) *
-                             load_bf16_scalar_grp(g.b, row_group, col, kk);
-                }
-                store_bf16_scalar(g.c, row, col,
-                                  load_bf16_scalar(g.c, row, col) + acc_s);
-            }
-        }
-        return;
-    }
-
-    // ----- Fast MFMA path ------------------------------------------------
-    // 4× mfma_f32_32x32x16_bf16 over K=64 → 100 % util, 2× cell-tile vs
-    // round-19 → halved per-cell mem traffic.
-    typedef __attribute__((__vector_size__(8 * sizeof(__bf16)))) __bf16 bf16x8_t;
-    typedef __attribute__((__vector_size__(16 * sizeof(float)))) float floatx16_t;
-
-    const int row_in_blk = tid % 32;
-    const int chunk      = tid / 32;        // 0 or 1
-    const int k_lane_offset = chunk * K_PER_LANE_CHUNK;  // 0 or 8
-
-    const int g_row = row_block_base + row_in_blk;
-    const int g_col = col_block_base + row_in_blk;
-
-    bf16x8_t a_pack[N_MFMA];
-    bf16x8_t b_pack[N_MFMA];
-    if (g_row < g.M_total) {
-        #pragma unroll
-        for (int j = 0; j < N_MFMA; ++j) {
-            const int k_off = k0 + j * K_PER_MFMA + k_lane_offset;
-            const bf16* a_ptr = &g.a[coord<>(g_row, k_off)];
-            a_pack[j] = *reinterpret_cast<const bf16x8_t*>(a_ptr);
-        }
-    } else {
-        #pragma unroll
-        for (int j = 0; j < N_MFMA; ++j) a_pack[j] = bf16x8_t{};
-    }
-    if (g_col < g.n) {
-        #pragma unroll
-        for (int j = 0; j < N_MFMA; ++j) {
-            const int k_off = k0 + j * K_PER_MFMA + k_lane_offset;
-            const bf16* b_ptr = &g.b[coord<>{0, group_idx, g_col, k_off}];
-            b_pack[j] = *reinterpret_cast<const bf16x8_t*>(b_ptr);
-        }
-    } else {
-        #pragma unroll
-        for (int j = 0; j < N_MFMA; ++j) b_pack[j] = bf16x8_t{};
-    }
-
-    // 4 mfma calls accumulate K=[0,16), [16,32), [32,48), [48,64).
-    floatx16_t acc{};
-    #pragma unroll
-    for (int j = 0; j < N_MFMA; ++j) {
-        acc = __builtin_amdgcn_mfma_f32_32x32x16_bf16(
-            a_pack[j], b_pack[j], acc, 0, 0, 0);
-    }
-
-    // Output: lane t → cells C[r, t%32] for 16 r's via the standard
-    // CDNA 32x32 fp32 layout (verified on gfx950, see header comment).
-    const int out_col = col_block_base + row_in_blk;
-    if (out_col >= g.n) return;
-    #pragma unroll
-    for (int i = 0; i < 16; ++i) {
-        const int row_group     = i >> 2;
-        const int row_in_group  = (i & 3) + chunk * 4;
-        const int local_row     = row_group * 8 + row_in_group;
-        const int r             = row_block_base + local_row;
-        if (r >= g.M_total) continue;
-        const float existing = load_bf16_scalar(g.c, r, out_col);
-        const float new_val  = existing + acc[i];
-        store_bf16_scalar(g.c, r, out_col, new_val);
-    }
-}
-
-template __global__ void grouped_ktail_kernel_mfma32x32<Layout::RCR, 64>(const grouped_layout_globals);
-
-template<Layout L, int K_REM>
-__global__ void grouped_ktail_kernel_mfma32x32_M2(const grouped_layout_globals g) {
-    static_assert(L == Layout::RCR,
-        "grouped_ktail_kernel_mfma32x32_M2 (BF16): RCR only.");
-    static_assert(K_REM == 64,
-        "grouped_ktail_kernel_mfma32x32_M2 (BF16): K_REM must be 64 (= 4 × mfma_32x32x16_bf16).");
-    constexpr int TBM_TOTAL = 64;       // 2 stacked 32×32 sub-blocks
-    constexpr int TBM_SUB   = 32;
-    constexpr int TBN       = 32;
-    constexpr int K_PER_MFMA       = 16;                  // mfma_32x32x16_bf16 K dim
-    constexpr int N_MFMA           = K_REM / K_PER_MFMA;  // 4 calls per sub-block
-    constexpr int K_PER_LANE_CHUNK = 8;                   // 8 bf16/lane per mfma call
-    constexpr int MAX_G_PLUS_1 = 65;
-    __shared__ int s_offs[MAX_G_PLUS_1];
-
-    const int tid = threadIdx.x;            // single-wave block, 64 threads
-    if (tid <= g.G && tid < MAX_G_PLUS_1) {
-        s_offs[tid] = static_cast<int>(g.group_offs[tid]);
-    }
-    __syncthreads();
-
-    const int row_block_base = blockIdx.y * TBM_TOTAL;
-    const int col_block_base = blockIdx.x * TBN;
-    if (row_block_base >= g.M_total || col_block_base >= g.n) return;
-
-    int group_idx = 0;
-    #pragma unroll 1
-    for (int gi = 0; gi < g.G; ++gi) {
-        if (row_block_base < s_offs[gi + 1]) { group_idx = gi; break; }
-    }
-
-    const int K_rem_dyn = g.k - g.fast_k;
-    if (K_rem_dyn != K_REM) return;
-    const int k0 = g.fast_k;
-
-    // Cross-group fallback: if the 64-row block straddles a group boundary
-    // (or the M_total tail), fall back to per-row scalar fdot2_f32_bf16
-    // over BOTH sub-blocks. Unreachable on uniform group_lens with M_g % 64
-    // == 0 (gpt_oss M_per ∈ {2048, 4096} both satisfy).
-    const bool cross_boundary = (row_block_base + TBM_TOTAL > s_offs[group_idx + 1]);
-    if (cross_boundary) {
-        typedef __attribute__((__vector_size__(2 * sizeof(__bf16)))) __bf16 bf16x2_v;
-        const int col = col_block_base + (tid % 32);
-        if (col < g.n) {
-            #pragma unroll 1
-            for (int rr = 0; rr < TBM_TOTAL; ++rr) {
-                if ((rr % 2) != (tid / 32)) continue;
-                const int row = row_block_base + rr;
-                if (row >= g.M_total) break;
-                int row_group = 0;
-                #pragma unroll 1
-                for (int gi = 0; gi < g.G; ++gi) {
-                    if (row < s_offs[gi + 1]) { row_group = gi; break; }
-                }
-                float acc_s_lo = 0.f, acc_s_hi = 0.f;
-                const bf16* a_row = &g.a[coord<>(row, 0)];
-                const bf16* b_row = &g.b[coord<>{0, row_group, col, 0}];
-                int kk = k0;
-                if ((g.k % 4 == 0) && ((k0 & 3) == 0)) {
-                    const bf16x4* a_v4 = reinterpret_cast<const bf16x4*>(a_row);
-                    const bf16x4* b_v4 = reinterpret_cast<const bf16x4*>(b_row);
-                    const int j_start = k0 >> 2;
-                    const int j_end   = g.k >> 2;
-                    for (int j = j_start; j < j_end; ++j) {
-                        bf16x4 a4 = a_v4[j];
-                        bf16x4 b4 = b_v4[j];
-                        acc_s_lo = __builtin_amdgcn_fdot2_f32_bf16(
-                            *reinterpret_cast<const bf16x2_v*>(&a4.lo),
-                            *reinterpret_cast<const bf16x2_v*>(&b4.lo),
-                            acc_s_lo, false);
-                        acc_s_hi = __builtin_amdgcn_fdot2_f32_bf16(
-                            *reinterpret_cast<const bf16x2_v*>(&a4.hi),
-                            *reinterpret_cast<const bf16x2_v*>(&b4.hi),
-                            acc_s_hi, false);
-                    }
-                    kk = j_end << 2;
-                }
-                float acc_s = acc_s_lo + acc_s_hi;
-                for (; kk < g.k; ++kk) {
-                    acc_s += load_bf16_scalar(g.a, row, kk) *
-                             load_bf16_scalar_grp(g.b, row_group, col, kk);
-                }
-                store_bf16_scalar(g.c, row, col,
-                                  load_bf16_scalar(g.c, row, col) + acc_s);
-            }
-        }
-        return;
-    }
-
-    // ----- Fast MFMA path: shared B-packs across two stacked 32×32 sub-blocks
-    typedef __attribute__((__vector_size__(8 * sizeof(__bf16)))) __bf16 bf16x8_t;
-    typedef __attribute__((__vector_size__(16 * sizeof(float)))) float floatx16_t;
-
-    const int row_in_blk = tid % 32;
-    const int chunk      = tid / 32;        // 0 or 1
-    const int k_lane_offset = chunk * K_PER_LANE_CHUNK;  // 0 or 8
-
-    const int g_col = col_block_base + row_in_blk;
-
-    // Single set of B packs shared across both sub-blocks. B is [G, N, K]
-    // and the K-tail slice [k0, k0+K_REM) is the same for sub-block 0 and
-    // sub-block 1 (only the A row range differs). Halves the B-side HBM
-    // bandwidth vs running two independent 32×32 M1 blocks.
-    bf16x8_t b_pack[N_MFMA];
-    if (g_col < g.n) {
-        #pragma unroll
-        for (int j = 0; j < N_MFMA; ++j) {
-            const int k_off = k0 + j * K_PER_MFMA + k_lane_offset;
-            const bf16* b_ptr = &g.b[coord<>{0, group_idx, g_col, k_off}];
-            b_pack[j] = *reinterpret_cast<const bf16x8_t*>(b_ptr);
-        }
-    } else {
-        #pragma unroll
-        for (int j = 0; j < N_MFMA; ++j) b_pack[j] = bf16x8_t{};
-    }
-
-    const int out_col = col_block_base + row_in_blk;
-    if (out_col >= g.n) return;
-
-    // Two stacked 32×32 sub-blocks. Same MFMA / lane layout as round-21
-    // M1; we just shift the row base by +TBM_SUB on sub-block 1.
-    #pragma unroll
-    for (int sub = 0; sub < 2; ++sub) {
-        const int sub_row_base = row_block_base + sub * TBM_SUB;
-        const int g_row = sub_row_base + row_in_blk;
-
-        bf16x8_t a_pack[N_MFMA];
-        if (g_row < g.M_total) {
-            #pragma unroll
-            for (int j = 0; j < N_MFMA; ++j) {
-                const int k_off = k0 + j * K_PER_MFMA + k_lane_offset;
-                const bf16* a_ptr = &g.a[coord<>(g_row, k_off)];
-                a_pack[j] = *reinterpret_cast<const bf16x8_t*>(a_ptr);
-            }
-        } else {
-            #pragma unroll
-            for (int j = 0; j < N_MFMA; ++j) a_pack[j] = bf16x8_t{};
-        }
-
-        floatx16_t acc{};
-        #pragma unroll
-        for (int j = 0; j < N_MFMA; ++j) {
-            acc = __builtin_amdgcn_mfma_f32_32x32x16_bf16(
-                a_pack[j], b_pack[j], acc, 0, 0, 0);
-        }
-
-        #pragma unroll
-        for (int i = 0; i < 16; ++i) {
-            const int row_group     = i >> 2;
-            const int row_in_group  = (i & 3) + chunk * 4;
-            const int local_row     = row_group * 8 + row_in_group;
-            const int r             = sub_row_base + local_row;
-            if (r >= g.M_total) continue;
-            const float existing = load_bf16_scalar(g.c, r, out_col);
-            const float new_val  = existing + acc[i];
-            store_bf16_scalar(g.c, r, out_col, new_val);
-        }
-    }
-}
-
-template __global__ void grouped_ktail_kernel_mfma32x32_M2<Layout::RCR, 64>(const grouped_layout_globals);
-
-#if 0  // round-61 disabled: M4 wins for M_per_group >= 128 (gpt_oss path)
-template<Layout L, int K_REM>
-__global__ void grouped_ktail_kernel_mfma32x32_M2N2(const grouped_layout_globals g) {
-    static_assert(L == Layout::RCR,
-        "grouped_ktail_kernel_mfma32x32_M2N2 (BF16): RCR only.");
-    static_assert(K_REM == 64,
-        "grouped_ktail_kernel_mfma32x32_M2N2 (BF16): K_REM must be 64.");
-    constexpr int TBM_TOTAL = 64;       // 2 stacked 32×32 sub-blocks
-    constexpr int TBM_SUB   = 32;
-    constexpr int TBN       = 32;
-    constexpr int N_SUB     = 2;
-    constexpr int TBN_TOTAL = TBN * N_SUB;  // 64 cols
-    constexpr int K_PER_MFMA       = 16;
-    constexpr int N_MFMA           = K_REM / K_PER_MFMA;  // 4 calls
-    constexpr int K_PER_LANE_CHUNK = 8;
-    constexpr int MAX_G_PLUS_1 = 65;
-    __shared__ int s_offs[MAX_G_PLUS_1];
-
-    const int tid = threadIdx.x;            // 64 threads
-    if (tid <= g.G && tid < MAX_G_PLUS_1) {
-        s_offs[tid] = static_cast<int>(g.group_offs[tid]);
-    }
-    __syncthreads();
-
-    const int row_block_base = blockIdx.y * TBM_TOTAL;
-    const int col_block_base = blockIdx.x * TBN_TOTAL;
-    if (row_block_base >= g.M_total || col_block_base >= g.n) return;
-
-    int group_idx = 0;
-    #pragma unroll 1
-    for (int gi = 0; gi < g.G; ++gi) {
-        if (row_block_base < s_offs[gi + 1]) { group_idx = gi; break; }
-    }
-
-    const int K_rem_dyn = g.k - g.fast_k;
-    if (K_rem_dyn != K_REM) return;
-    const int k0 = g.fast_k;
-
-    // Cross-group fallback: same as M2 but iterates BOTH N sub-tiles.
-    const bool cross_boundary = (row_block_base + TBM_TOTAL > s_offs[group_idx + 1]);
-    if (cross_boundary) {
-        typedef __attribute__((__vector_size__(2 * sizeof(__bf16)))) __bf16 bf16x2_v;
-        for (int nt = 0; nt < N_SUB; ++nt) {
-            const int col = col_block_base + nt * TBN + (tid % 32);
-            if (col >= g.n) continue;
-            #pragma unroll 1
-            for (int rr = 0; rr < TBM_TOTAL; ++rr) {
-                if ((rr % 2) != (tid / 32)) continue;
-                const int row = row_block_base + rr;
-                if (row >= g.M_total) break;
-                int row_group = 0;
-                #pragma unroll 1
-                for (int gi = 0; gi < g.G; ++gi) {
-                    if (row < s_offs[gi + 1]) { row_group = gi; break; }
-                }
-                float acc_s_lo = 0.f, acc_s_hi = 0.f;
-                const bf16* a_row = &g.a[coord<>(row, 0)];
-                const bf16* b_row = &g.b[coord<>{0, row_group, col, 0}];
-                int kk = k0;
-                if ((g.k % 4 == 0) && ((k0 & 3) == 0)) {
-                    const bf16x4* a_v4 = reinterpret_cast<const bf16x4*>(a_row);
-                    const bf16x4* b_v4 = reinterpret_cast<const bf16x4*>(b_row);
-                    const int j_start = k0 >> 2;
-                    const int j_end   = g.k >> 2;
-                    for (int j = j_start; j < j_end; ++j) {
-                        bf16x4 a4 = a_v4[j];
-                        bf16x4 b4 = b_v4[j];
-                        acc_s_lo = __builtin_amdgcn_fdot2_f32_bf16(
-                            *reinterpret_cast<const bf16x2_v*>(&a4.lo),
-                            *reinterpret_cast<const bf16x2_v*>(&b4.lo),
-                            acc_s_lo, false);
-                        acc_s_hi = __builtin_amdgcn_fdot2_f32_bf16(
-                            *reinterpret_cast<const bf16x2_v*>(&a4.hi),
-                            *reinterpret_cast<const bf16x2_v*>(&b4.hi),
-                            acc_s_hi, false);
-                    }
-                    kk = j_end << 2;
-                }
-                float acc_s = acc_s_lo + acc_s_hi;
-                for (; kk < g.k; ++kk) {
-                    acc_s += load_bf16_scalar(g.a, row, kk) *
-                             load_bf16_scalar_grp(g.b, row_group, col, kk);
-                }
-                store_bf16_scalar(g.c, row, col,
-                                  load_bf16_scalar(g.c, row, col) + acc_s);
-            }
-        }
-        return;
-    }
-
-    // ----- Fast MFMA path: 2 M sub-blocks × 2 N sub-tiles = 8 mfmas/thread.
-    typedef __attribute__((__vector_size__(8 * sizeof(__bf16)))) __bf16 bf16x8_t;
-    typedef __attribute__((__vector_size__(16 * sizeof(float)))) float floatx16_t;
-
-    const int row_in_blk = tid % 32;
-    const int chunk      = tid / 32;
-    const int k_lane_offset = chunk * K_PER_LANE_CHUNK;
-
-    // Two B-pack sets, one per N sub-tile, each holding the N_MFMA=4 packs
-    // for the K-tail slice [k0, k0+K_REM). Same K slice for both sets;
-    // A-pack set is shared between them via the inner mfma loop.
-    bf16x8_t b_pack[N_SUB][N_MFMA];
-    #pragma unroll
-    for (int nt = 0; nt < N_SUB; ++nt) {
-        const int g_col = col_block_base + nt * TBN + row_in_blk;
-        if (g_col < g.n) {
-            #pragma unroll
-            for (int j = 0; j < N_MFMA; ++j) {
-                const int k_off = k0 + j * K_PER_MFMA + k_lane_offset;
-                const bf16* b_ptr = &g.b[coord<>{0, group_idx, g_col, k_off}];
-                b_pack[nt][j] = *reinterpret_cast<const bf16x8_t*>(b_ptr);
-            }
-        } else {
-            #pragma unroll
-            for (int j = 0; j < N_MFMA; ++j) b_pack[nt][j] = bf16x8_t{};
-        }
-    }
-
-    #pragma unroll
-    for (int sub = 0; sub < 2; ++sub) {
-        const int sub_row_base = row_block_base + sub * TBM_SUB;
-        const int g_row = sub_row_base + row_in_blk;
-
-        bf16x8_t a_pack[N_MFMA];
-        if (g_row < g.M_total) {
-            #pragma unroll
-            for (int j = 0; j < N_MFMA; ++j) {
-                const int k_off = k0 + j * K_PER_MFMA + k_lane_offset;
-                const bf16* a_ptr = &g.a[coord<>(g_row, k_off)];
-                a_pack[j] = *reinterpret_cast<const bf16x8_t*>(a_ptr);
-            }
-        } else {
-            #pragma unroll
-            for (int j = 0; j < N_MFMA; ++j) a_pack[j] = bf16x8_t{};
-        }
-
-        #pragma unroll
-        for (int nt = 0; nt < N_SUB; ++nt) {
-            floatx16_t acc{};
-            #pragma unroll
-            for (int j = 0; j < N_MFMA; ++j) {
-                acc = __builtin_amdgcn_mfma_f32_32x32x16_bf16(
-                    a_pack[j], b_pack[nt][j], acc, 0, 0, 0);
-            }
-
-            const int out_col = col_block_base + nt * TBN + row_in_blk;
-            if (out_col >= g.n) continue;
-
-            #pragma unroll
-            for (int i = 0; i < 16; ++i) {
-                const int row_group     = i >> 2;
-                const int row_in_group  = (i & 3) + chunk * 4;
-                const int local_row     = row_group * 8 + row_in_group;
-                const int r             = sub_row_base + local_row;
-                if (r >= g.M_total) continue;
-                const float existing = load_bf16_scalar(g.c, r, out_col);
-                const float new_val  = existing + acc[i];
-                store_bf16_scalar(g.c, r, out_col, new_val);
-            }
-        }
-    }
-}
-
-template __global__ void grouped_ktail_kernel_mfma32x32_M2N2<Layout::RCR, 64>(const grouped_layout_globals);
-#endif  // BF16 M2N2 disabled
-
-template<Layout L, int K_REM>
-__global__ void grouped_ktail_kernel_mfma32x32_M4(const grouped_layout_globals g) {
-    static_assert(L == Layout::RCR,
-        "grouped_ktail_kernel_mfma32x32_M4 (BF16): RCR only.");
-    static_assert(K_REM == 64,
-        "grouped_ktail_kernel_mfma32x32_M4 (BF16): K_REM must be 64 (= 4 × mfma_32x32x16_bf16).");
-    constexpr int TBM_TOTAL = 128;      // 4 stacked 32×32 sub-blocks
-    constexpr int TBM_SUB   = 32;
-    constexpr int N_SUB     = 4;
-    constexpr int TBN       = 32;
-    constexpr int K_PER_MFMA       = 16;                  // mfma_32x32x16_bf16 K dim
-    constexpr int N_MFMA           = K_REM / K_PER_MFMA;  // 4 calls per sub-block
-    constexpr int K_PER_LANE_CHUNK = 8;                   // 8 bf16/lane per mfma call
-    constexpr int MAX_G_PLUS_1 = 65;
-    __shared__ int s_offs[MAX_G_PLUS_1];
-
-    const int tid = threadIdx.x;            // single-wave block, 64 threads
-    if (tid <= g.G && tid < MAX_G_PLUS_1) {
-        s_offs[tid] = static_cast<int>(g.group_offs[tid]);
-    }
-    __syncthreads();
-
-    const int row_block_base = blockIdx.y * TBM_TOTAL;
-    const int col_block_base = blockIdx.x * TBN;
-    if (row_block_base >= g.M_total || col_block_base >= g.n) return;
-
-    int group_idx = 0;
-    #pragma unroll 1
-    for (int gi = 0; gi < g.G; ++gi) {
-        if (row_block_base < s_offs[gi + 1]) { group_idx = gi; break; }
-    }
-
-    const int K_rem_dyn = g.k - g.fast_k;
-    if (K_rem_dyn != K_REM) return;
-    const int k0 = g.fast_k;
-
-    // Cross-group fallback: if the 128-row block straddles a group boundary
-    // (or the M_total tail), fall back to per-row scalar fdot2_f32_bf16
-    // over ALL FOUR sub-blocks. Unreachable on uniform group_lens with M_g
-    // % 128 == 0 (gpt_oss M_per ∈ {2048, 4096} both satisfy).
-    const bool cross_boundary = (row_block_base + TBM_TOTAL > s_offs[group_idx + 1]);
-    if (cross_boundary) {
-        typedef __attribute__((__vector_size__(2 * sizeof(__bf16)))) __bf16 bf16x2_v;
-        const int col = col_block_base + (tid % 32);
-        if (col < g.n) {
-            #pragma unroll 1
-            for (int rr = 0; rr < TBM_TOTAL; ++rr) {
-                if ((rr % 2) != (tid / 32)) continue;
-                const int row = row_block_base + rr;
-                if (row >= g.M_total) break;
-                int row_group = 0;
-                #pragma unroll 1
-                for (int gi = 0; gi < g.G; ++gi) {
-                    if (row < s_offs[gi + 1]) { row_group = gi; break; }
-                }
-                float acc_s_lo = 0.f, acc_s_hi = 0.f;
-                const bf16* a_row = &g.a[coord<>(row, 0)];
-                const bf16* b_row = &g.b[coord<>{0, row_group, col, 0}];
-                int kk = k0;
-                if ((g.k % 4 == 0) && ((k0 & 3) == 0)) {
-                    const bf16x4* a_v4 = reinterpret_cast<const bf16x4*>(a_row);
-                    const bf16x4* b_v4 = reinterpret_cast<const bf16x4*>(b_row);
-                    const int j_start = k0 >> 2;
-                    const int j_end   = g.k >> 2;
-                    for (int j = j_start; j < j_end; ++j) {
-                        bf16x4 a4 = a_v4[j];
-                        bf16x4 b4 = b_v4[j];
-                        acc_s_lo = __builtin_amdgcn_fdot2_f32_bf16(
-                            *reinterpret_cast<const bf16x2_v*>(&a4.lo),
-                            *reinterpret_cast<const bf16x2_v*>(&b4.lo),
-                            acc_s_lo, false);
-                        acc_s_hi = __builtin_amdgcn_fdot2_f32_bf16(
-                            *reinterpret_cast<const bf16x2_v*>(&a4.hi),
-                            *reinterpret_cast<const bf16x2_v*>(&b4.hi),
-                            acc_s_hi, false);
-                    }
-                    kk = j_end << 2;
-                }
-                float acc_s = acc_s_lo + acc_s_hi;
-                for (; kk < g.k; ++kk) {
-                    acc_s += load_bf16_scalar(g.a, row, kk) *
-                             load_bf16_scalar_grp(g.b, row_group, col, kk);
-                }
-                store_bf16_scalar(g.c, row, col,
-                                  load_bf16_scalar(g.c, row, col) + acc_s);
-            }
-        }
-        return;
-    }
-
-    // ----- Fast MFMA path: shared B-pack across FOUR stacked 32×32 sub-blocks
-    typedef __attribute__((__vector_size__(8 * sizeof(__bf16)))) __bf16 bf16x8_t;
-    typedef __attribute__((__vector_size__(16 * sizeof(float)))) float floatx16_t;
-
-    const int row_in_blk = tid % 32;
-    const int chunk      = tid / 32;        // 0 or 1
-    const int k_lane_offset = chunk * K_PER_LANE_CHUNK;  // 0 or 8
-
-    const int g_col = col_block_base + row_in_blk;
-
-    bf16x8_t b_pack[N_MFMA];
-    if (g_col < g.n) {
-        #pragma unroll
-        for (int j = 0; j < N_MFMA; ++j) {
-            const int k_off = k0 + j * K_PER_MFMA + k_lane_offset;
-            const bf16* b_ptr = &g.b[coord<>{0, group_idx, g_col, k_off}];
-            b_pack[j] = *reinterpret_cast<const bf16x8_t*>(b_ptr);
-        }
-    } else {
-        #pragma unroll
-        for (int j = 0; j < N_MFMA; ++j) b_pack[j] = bf16x8_t{};
-    }
-
-    const int out_col = col_block_base + row_in_blk;
-    if (out_col >= g.n) return;
-
-    // Four stacked 32×32 sub-blocks. Same MFMA / lane layout as round-21
-    // M1 / round-53 M2; we shift the row base by +sub*TBM_SUB and re-issue
-    // 4× mfma_f32_32x32x16_bf16 with a fresh accumulator each sub.
-    #pragma unroll
-    for (int sub = 0; sub < N_SUB; ++sub) {
-        const int sub_row_base = row_block_base + sub * TBM_SUB;
-        const int g_row = sub_row_base + row_in_blk;
-
-        bf16x8_t a_pack[N_MFMA];
-        if (g_row < g.M_total) {
-            #pragma unroll
-            for (int j = 0; j < N_MFMA; ++j) {
-                const int k_off = k0 + j * K_PER_MFMA + k_lane_offset;
-                const bf16* a_ptr = &g.a[coord<>(g_row, k_off)];
-                a_pack[j] = *reinterpret_cast<const bf16x8_t*>(a_ptr);
-            }
-        } else {
-            #pragma unroll
-            for (int j = 0; j < N_MFMA; ++j) a_pack[j] = bf16x8_t{};
-        }
-
-        floatx16_t acc{};
-        #pragma unroll
-        for (int j = 0; j < N_MFMA; ++j) {
-            acc = __builtin_amdgcn_mfma_f32_32x32x16_bf16(
-                a_pack[j], b_pack[j], acc, 0, 0, 0);
-        }
-
-        #pragma unroll
-        for (int i = 0; i < 16; ++i) {
-            const int row_group     = i >> 2;
-            const int row_in_group  = (i & 3) + chunk * 4;
-            const int local_row     = row_group * 8 + row_in_group;
-            const int r             = sub_row_base + local_row;
-            if (r >= g.M_total) continue;
-            const float existing = load_bf16_scalar(g.c, r, out_col);
-            const float new_val  = existing + acc[i];
-            store_bf16_scalar(g.c, r, out_col, new_val);
-        }
-    }
-}
-
-template __global__ void grouped_ktail_kernel_mfma32x32_M4<Layout::RCR, 64>(const grouped_layout_globals);
-
-template<Layout L, int K_CHUNK>
-__global__ void grouped_ntail_kernel_lds(const grouped_layout_globals g) {
-    static_assert(L == Layout::RCR,
-        "grouped_ntail_kernel_lds: RCR only — RRR/CRR fall back to scalar tail.");
-    constexpr int TBM = TAIL_BLOCK_M;        // 16
-    constexpr int TBN = TAIL_BLOCK_N;        // 16
-    constexpr int NTHR = TBM * TBN;           // 256
-    constexpr int A_CHUNK = TBM * K_CHUNK;    // 16 * 64 = 1024 elements
-    constexpr int B_CHUNK = TBN * K_CHUNK;    // 16 * 64 = 1024 elements
-    constexpr int A_PER_THR = (A_CHUNK + NTHR - 1) / NTHR;
-    constexpr int B_PER_THR = (B_CHUNK + NTHR - 1) / NTHR;
-
-    __shared__ bf16 A_lds[A_CHUNK];
-    __shared__ bf16 B_lds[B_CHUNK];
-    constexpr int MAX_G_PLUS_1 = 65;
-    __shared__ int s_offs[MAX_G_PLUS_1];
-
-    const int rib = threadIdx.y;
-    const int cib = threadIdx.x;
-    const int tid = rib * blockDim.x + cib;
-
-    if (tid < MAX_G_PLUS_1) {
-        s_offs[tid] = (tid <= g.G) ? static_cast<int>(g.group_offs[tid]) : 0;
-    }
-    __syncthreads();
-
-    const int row_block_base = blockIdx.y * TBM;
-    // grid.x indexes the n-tail region [fast_n, n); shift by fast_n.
-    const int col_block_base = g.fast_n + blockIdx.x * TBN;
-    if (row_block_base >= g.M_total || col_block_base >= g.n) return;
-
-    int group_idx = 0;
-    #pragma unroll 1
-    for (int gi = 0; gi < g.G; ++gi) {
-        if (row_block_base < s_offs[gi + 1]) { group_idx = gi; break; }
-    }
-
-    const bool cross_boundary = (row_block_base + TBM > s_offs[group_idx + 1]);
-    if (cross_boundary) {
-        const int row_s = row_block_base + rib;
-        const int col_s = col_block_base + cib;
-        if (row_s < g.M_total && col_s < g.n) {
-            int row_group = 0;
-            #pragma unroll 1
-            for (int gi = 0; gi < g.G; ++gi) {
-                if (row_s < s_offs[gi + 1]) { row_group = gi; break; }
-            }
-            float acc_s = 0.0f;
-            const bf16* a_row = &g.a[coord<>(row_s, 0)];
-            const bf16* b_row = &g.b[coord<>{0, row_group, col_s, 0}];
-            int kk = 0;
-            if (g.k % 4 == 0) {
-                const bf16x4* a_v4 = reinterpret_cast<const bf16x4*>(a_row);
-                const bf16x4* b_v4 = reinterpret_cast<const bf16x4*>(b_row);
-                const int j_end = g.k >> 2;
-                for (int j = 0; j < j_end; ++j) {
-                    bf16x4 a4 = a_v4[j];
-                    bf16x4 b4 = b_v4[j];
-                    acc_s += float(a4.lo.x) * float(b4.lo.x)
-                           + float(a4.lo.y) * float(b4.lo.y)
-                           + float(a4.hi.x) * float(b4.hi.x)
-                           + float(a4.hi.y) * float(b4.hi.y);
-                }
-                kk = j_end << 2;
-            }
-            for (; kk < g.k; ++kk) {
-                acc_s += load_bf16_scalar(g.a, row_s, kk) *
-                         load_bf16_scalar_grp(g.b, row_group, col_s, kk);
-            }
-            store_bf16_scalar(g.c, row_s, col_s, acc_s);
-        }
-        return;
-    }
-
-    const int row = row_block_base + rib;
-    const int col = col_block_base + cib;
-    const bool active_cell = (row < g.M_total) && (col < g.n);
-
-    float acc = 0.0f;
-
-    // [round-9] Vec4 cooperative load (1 dwordx2 / thread / chunk). With
-    // K_CHUNK=64 and TBM=16: 1024 bf16 / chunk / operand = 256 vec4 / chunk
-    // / operand. NTHR=256 -> exactly 1 vec4 per thread per chunk per operand.
-    constexpr int VEC = 4;
-    constexpr int VECS_PER_ROW = K_CHUNK / VEC;
-    static_assert(K_CHUNK % VEC == 0, "K_CHUNK must be vec4-aligned");
-    static_assert(NTHR == TBM * VECS_PER_ROW,
-        "Each thread must own exactly one vec4 of A per chunk.");
-    const int r_in_blk_a = tid / VECS_PER_ROW;
-    const int kk_v_a = tid - r_in_blk_a * VECS_PER_ROW;
-    const int kk_start_a = kk_v_a * VEC;
-    const int c_in_blk_b = r_in_blk_a;
-    const int kk_start_b = kk_start_a;
-
-    // Loop K in K_CHUNK slices. The compile-time partial loop over K_CHUNK
-    // unrolls fully (kk in [0, K_CHUNK)). The runtime outer loop iterates
-    // ceil_div(g.k, K_CHUNK) times (e.g. K=2880, K_CHUNK=64 -> 45 chunks).
-    for (int k_chunk_start = 0; k_chunk_start < g.k; k_chunk_start += K_CHUNK) {
-        {
-            const int r_global = row_block_base + r_in_blk_a;
-            const int k_global = k_chunk_start + kk_start_a;
-            bf16x4 va{};
-            if (r_global < g.M_total && k_global + VEC <= g.k) {
-                const bf16* ap = &g.a[coord<>(r_global, k_global)];
-                va = *reinterpret_cast<const bf16x4*>(ap);
-            }
-            *reinterpret_cast<bf16x4*>(&A_lds[r_in_blk_a * K_CHUNK + kk_start_a]) = va;
-        }
-        {
-            const int c_global = col_block_base + c_in_blk_b;
-            const int k_global = k_chunk_start + kk_start_b;
-            bf16x4 vb{};
-            if (c_global < g.n && k_global + VEC <= g.k) {
-                const bf16* bp = &g.b[coord<>{0, group_idx, c_global, k_global}];
-                vb = *reinterpret_cast<const bf16x4*>(bp);
-            }
-            *reinterpret_cast<bf16x4*>(&B_lds[c_in_blk_b * K_CHUNK + kk_start_b]) = vb;
-        }
-        __syncthreads();
-
-        if (active_cell) {
-            constexpr int FMA_VEC = 4;
-            constexpr int K_CHUNK_VECS = K_CHUNK / FMA_VEC;
-            static_assert(K_CHUNK % FMA_VEC == 0,
-                "K_CHUNK must be vec4-aligned for inner fma");
-            const int k_left = g.k - k_chunk_start;
-            const int k_iters_v = (k_left < K_CHUNK)
-                ? (k_left + FMA_VEC - 1) / FMA_VEC : K_CHUNK_VECS;
-            #pragma unroll
-            for (int kk_v = 0; kk_v < K_CHUNK_VECS; ++kk_v) {
-                if (kk_v >= k_iters_v) break;
-                bf16x4 a4 = *reinterpret_cast<const bf16x4*>(
-                    &A_lds[rib * K_CHUNK + kk_v * FMA_VEC]);
-                bf16x4 b4 = *reinterpret_cast<const bf16x4*>(
-                    &B_lds[cib * K_CHUNK + kk_v * FMA_VEC]);
-                acc += float(a4.lo.x) * float(b4.lo.x)
-                     + float(a4.lo.y) * float(b4.lo.y)
-                     + float(a4.hi.x) * float(b4.hi.x)
-                     + float(a4.hi.y) * float(b4.hi.y);
-            }
-        }
-        __syncthreads();  // before next chunk overwrites LDS
-    }
-
-    // Store ABSOLUTE value (main kernel did NOT write [fast_n, n) when
-    // bpc = fast_n / BLOCK_SIZE; this kernel is the sole contributor).
-    if (active_cell) {
-        store_bf16_scalar(g.c, row, col, acc);
-    }
-}
-
-template __global__ void grouped_ntail_kernel_lds<Layout::RCR, 64>(const grouped_layout_globals);
-
-template<int K_CHUNK>
-__global__ void grouped_ntail_kernel_lds_rrr(const grouped_layout_globals g) {
-    constexpr int TBM = TAIL_BLOCK_M;            // 16
-    constexpr int TBN = TAIL_BLOCK_N;            // 16
-    constexpr int NTHR = TBM * TBN;              // 256
-    // K_CHUNK_LDS pad: same as round-55 K-tail (K_CHUNK + 4 bf16 = 68
-    // bf16 = 136 bytes = 34 banks (mod 32 = 2)) — distributes 16 cib
-    // lanes across distinct even banks for the inner ds_read_b64.
-    constexpr int K_CHUNK_LDS = K_CHUNK + 4;
-    __shared__ bf16 A_lds[TBM * K_CHUNK_LDS];
-    __shared__ bf16 B_lds[TBN * K_CHUNK_LDS];
-    constexpr int MAX_G_PLUS_1 = 65;
-    __shared__ int s_offs[MAX_G_PLUS_1];
-
-    const int rib = threadIdx.y;
-    const int cib = threadIdx.x;
-    const int tid = rib * blockDim.x + cib;
-
-    if (tid < MAX_G_PLUS_1) {
-        s_offs[tid] = (tid <= g.G) ? static_cast<int>(g.group_offs[tid]) : 0;
-    }
-    __syncthreads();
-
-    const int row_block_base = blockIdx.y * TBM;
-    // grid.x indexes the n-tail region [fast_n, n); shift by fast_n.
-    const int col_block_base = g.fast_n + blockIdx.x * TBN;
-    if (row_block_base >= g.M_total || col_block_base >= g.n) return;
-
-    int group_idx = 0;
-    #pragma unroll 1
-    for (int gi = 0; gi < g.G; ++gi) {
-        if (row_block_base < s_offs[gi + 1]) { group_idx = gi; break; }
-    }
-
-    const bool cross_boundary = (row_block_base + TBM > s_offs[group_idx + 1]);
-    if (cross_boundary) {
-        // Per-row scalar full-K reduction (B stride-N in K → no vec
-        // along K under RRR).
-        const int row_s = row_block_base + rib;
-        const int col_s = col_block_base + cib;
-        if (row_s < g.M_total && col_s < g.n) {
-            int row_group = 0;
-            #pragma unroll 1
-            for (int gi = 0; gi < g.G; ++gi) {
-                if (row_s < s_offs[gi + 1]) { row_group = gi; break; }
-            }
-            float acc_s = 0.0f;
-            for (int kk = 0; kk < g.k; ++kk) {
-                acc_s += load_bf16_scalar(g.a, row_s, kk) *
-                         load_bf16_scalar_grp(g.b, row_group, kk, col_s);
-            }
-            store_bf16_scalar(g.c, row_s, col_s, acc_s);
-        }
-        return;
-    }
-
-    const int row = row_block_base + rib;
-    const int col = col_block_base + cib;
-    const bool active_cell = (row < g.M_total) && (col < g.n);
-
-    float acc = 0.0f;
-
-    constexpr int VEC = 4;
-
-    // ---- A coop-load layout (mirror RCR / K-tail RRR variant): each
-    // thread owns 1 vec4 along K. NTHR = TBM × (K_CHUNK / VEC).
-    constexpr int A_VECS_PER_ROW = K_CHUNK / VEC;        // 16
-    static_assert(K_CHUNK % VEC == 0, "K_CHUNK must be vec4-aligned");
-    static_assert(NTHR == TBM * A_VECS_PER_ROW,
-        "NTHR must equal TBM * (K_CHUNK / VEC) for A coop load");
-    const int r_in_blk_a = tid / A_VECS_PER_ROW;
-    const int kk_v_a = tid - r_in_blk_a * A_VECS_PER_ROW;
-    const int kk_start_a = kk_v_a * VEC;
-
-    // ---- B coop-load layout (mirror K-tail RRR variant): vec4 along N
-    // at fixed K; scatter to transposed LDS [TBN, K_CHUNK_LDS]. NTHR =
-    // K_CHUNK × (TBN / VEC).
-    constexpr int B_VECS_PER_K = TBN / VEC;              // 4
-    static_assert(NTHR == K_CHUNK * B_VECS_PER_K,
-        "NTHR must equal K_CHUNK * (TBN / VEC) for B coop load");
-    const int kk_in_blk_b = tid / B_VECS_PER_K;
-    const int n_in_blk_b = (tid - kk_in_blk_b * B_VECS_PER_K) * VEC;
-
-    // Loop K in K_CHUNK slices.
-    for (int k_chunk_start = 0; k_chunk_start < g.k; k_chunk_start += K_CHUNK) {
-        // Coop-load A.
-        {
-            const int r_global = row_block_base + r_in_blk_a;
-            const int k_global = k_chunk_start + kk_start_a;
-            bf16x4 va{};
-            if (r_global < g.M_total && k_global + VEC <= g.k) {
-                const bf16* ap = &g.a[coord<>(r_global, k_global)];
-                va = *reinterpret_cast<const bf16x4*>(ap);
-            }
-            *reinterpret_cast<bf16x4*>(&A_lds[r_in_blk_a * K_CHUNK_LDS + kk_start_a]) = va;
-        }
-        // Coop-load B (scatter to transposed LDS).
-        {
-            const int kk_global = k_chunk_start + kk_in_blk_b;
-            const int col_global = col_block_base + n_in_blk_b;
-            bf16x4 vb{};
-            if (kk_global < g.k && col_global + VEC <= g.n) {
-                const bf16* bp = &g.b[coord<>{0, group_idx, kk_global, col_global}];
-                vb = *reinterpret_cast<const bf16x4*>(bp);
-            } else if (kk_global < g.k && col_global < g.n) {
-                #pragma unroll
-                for (int i = 0; i < VEC; ++i) {
-                    const int cg = col_global + i;
-                    if (cg < g.n) {
-                        bf16 v = g.b[coord<>{0, group_idx, kk_global, cg}];
-                        if      (i == 0) vb.lo.x = v;
-                        else if (i == 1) vb.lo.y = v;
-                        else if (i == 2) vb.hi.x = v;
-                        else             vb.hi.y = v;
-                    }
-                }
-            }
-            B_lds[(n_in_blk_b + 0) * K_CHUNK_LDS + kk_in_blk_b] = vb.lo.x;
-            B_lds[(n_in_blk_b + 1) * K_CHUNK_LDS + kk_in_blk_b] = vb.lo.y;
-            B_lds[(n_in_blk_b + 2) * K_CHUNK_LDS + kk_in_blk_b] = vb.hi.x;
-            B_lds[(n_in_blk_b + 3) * K_CHUNK_LDS + kk_in_blk_b] = vb.hi.y;
-        }
-        __syncthreads();
-
-        if (active_cell) {
-            // Inner: K_CHUNK / 4 v_dot2c_f32_bf16 per cell per chunk.
-            // Mirror round-15 RCR LDS K-tail / round-55 RRR K-tail.
-            typedef __attribute__((__vector_size__(2 * sizeof(__bf16)))) __bf16 bf16x2_v;
-            constexpr int FMA_VEC = 4;
-            constexpr int K_CHUNK_VECS = K_CHUNK / FMA_VEC;
-            static_assert(K_CHUNK % FMA_VEC == 0, "K_CHUNK must be vec4-aligned for inner fma");
-            const int k_left = g.k - k_chunk_start;
-            const int k_iters_v = (k_left < K_CHUNK)
-                ? (k_left + FMA_VEC - 1) / FMA_VEC : K_CHUNK_VECS;
-            #pragma unroll
-            for (int kk_v = 0; kk_v < K_CHUNK_VECS; ++kk_v) {
-                if (kk_v >= k_iters_v) break;
-                bf16x4 a4 = *reinterpret_cast<const bf16x4*>(
-                    &A_lds[rib * K_CHUNK_LDS + kk_v * FMA_VEC]);
-                bf16x4 b4 = *reinterpret_cast<const bf16x4*>(
-                    &B_lds[cib * K_CHUNK_LDS + kk_v * FMA_VEC]);
-                acc = __builtin_amdgcn_fdot2_f32_bf16(
-                    *reinterpret_cast<const bf16x2_v*>(&a4.lo),
-                    *reinterpret_cast<const bf16x2_v*>(&b4.lo),
-                    acc, false);
-                acc = __builtin_amdgcn_fdot2_f32_bf16(
-                    *reinterpret_cast<const bf16x2_v*>(&a4.hi),
-                    *reinterpret_cast<const bf16x2_v*>(&b4.hi),
-                    acc, false);
-            }
-        }
-        __syncthreads();  // before next chunk overwrites LDS
-    }
-
-    // OVERWRITE store (main kernel did not write [fast_n, n) for RRR).
-    if (active_cell) {
-        store_bf16_scalar(g.c, row, col, acc);
-    }
-}
-
-template __global__ void grouped_ntail_kernel_lds_rrr<64>(const grouped_layout_globals);
-
-template<Layout L, int KI_HINT, bool FUSED_KTAIL = false>
 __global__ __launch_bounds__(NUM_THREADS, 1)
-void grouped_kernel(const grouped_layout_globals g) {
+void grouped_gemm_bf16_kernel(const grouped_layout_globals g) {
     extern __shared__ alignment_dummy __shm[];
     shared_allocator al((int*)&__shm[0]);
 
@@ -3014,7 +1430,9 @@ void grouped_kernel(const grouped_layout_globals g) {
         for (int gi = 0; gi < g.G; ++gi) {
             const int next = static_cast<int>(g.group_offs[gi + 1]);
             s_offs[gi + 1] = next;
-            t += ((next - prev) / BLOCK_SIZE) * num_pid_n;
+            // ceil_div: include the partial-M tile when M_g % BLOCK_SIZE != 0
+            // so the main kernel covers every group's M_g rows itself.
+            t += kittens::ceil_div(next - prev, BLOCK_SIZE) * num_pid_n;
             s_cum_tiles[gi + 1] = t;
             prev = next;
         }
@@ -3035,6 +1453,8 @@ void grouped_kernel(const grouped_layout_globals g) {
     // drops the OOB cells from the write-back.
     const bf16* a_base = (bf16*)&g.a[{0, 0, 0, 0}];
     const bf16* b_base = (bf16*)&g.b[{0, 0, 0, 0}];
+    const bf16* c_base = (bf16*)&g.c[{0, 0, 0, 0}];
+    (void)c_base;  // only referenced when per-group rebuild fires below
     const int a_row_stride = g.a.template stride<2>() * sizeof(bf16);
     const int b_row_stride = g.b.template stride<2>() * sizeof(bf16);
     // For "normal" A layout (M×K): A_total_rows = M_total. For CRR A (K×M_total):
@@ -3079,7 +1499,14 @@ void grouped_kernel(const grouped_layout_globals g) {
     const int warp_col = warp_id % 4;
 
     int last_group_idx = -1;
+    i32x4 a_srsrc_curr = a_srsrc_base;
     i32x4 b_srsrc_curr = make_srsrc(b_base, b_inner_rows * b_row_stride, /*row_stride_bytes=*/0);
+    // Per-group shifted base pointers; rebuilt on group_idx transitions.
+    // Shifting a_base / c_base to m_start_g lets the kernel address the
+    // current group's data via coord row = 0..bpr_g (no need for m_subtile_*
+    // integer division — m_start_g can be arbitrary byte-level value).
+    const bf16* a_base_g = a_base;
+    const bf16* c_base_g = c_base;
 
     int gt = pid;
     while (gt < total_tiles) {
@@ -3102,7 +1529,10 @@ void grouped_kernel(const grouped_layout_globals g) {
         const int local_tile = gt - tile_start;
         const int m_start_g = s_offs[group_idx];
         const int M_g = s_offs[group_idx + 1] - m_start_g;
-        const int bpr_g = M_g / BLOCK_SIZE;
+        // ceil_div so the final partial M-block (M_g % BLOCK_SIZE != 0) gets
+        // its own pid_m; the store path masks OOB rows via m_limit, and the
+        // per-group A SRD clamps OOB row loads to 0.
+        const int bpr_g = kittens::ceil_div(M_g, BLOCK_SIZE);
 
         // Group-by-M / group-by-N swizzle (matches dense kernel's tile mapping).
         int pid_m, pid_n;
@@ -3129,34 +1559,12 @@ void grouped_kernel(const grouped_layout_globals g) {
         const int row = pid_m;
         const int col = pid_n;
 
-        // [grouped] m_start_g is always BLOCK_SIZE-aligned (callers guarantee
-        // group_lens are multiples of 256), so these divisions are exact.
-        //
-        // Unit derivations (verified against gemm_kernel store coords + the
-        // ``unit_coord<row_axis=2, col_axis=3>`` definition in
-        // ``include/types/global/util.cuh:51``):
-        //
-        //   * ST_A non-CRR : st_bf<HALF_BLOCK_SIZE=128, K_STEP=64, st_16x32_s>
-        //                    → BASE::rows = 128 → r-coord unit = 128 elements
-        //                    → m_subtile_A = m_start_g / HALF_BLOCK_SIZE
-        //
-        //   * ST_A CRR     : st_bf<K_STEP=64, HALF_BLOCK_SIZE=128, st_32x16_s>
-        //                    A is laid out [K, M_total]; m sits on the COLUMN
-        //                    axis. unit_coord uses BASE::cols = 128, so the
-        //                    same divisor (128) maps element-row offset to
-        //                    coord-col offset. (m_subtile_A reused as a c-coord.)
-        //
-        //   * C (RT store) : rt_fl<HALF_REG_BLOCK_M=64, HALF_REG_BLOCK_N=32, ...>
-        //                    BASE::rows = 64 (RT::rows = full register-tile
-        //                    height, NOT base_tile_rows=16). r-coord unit = 64
-        //                    elements ⇒ m_subtile_C = m_start_g / HALF_REG_BLOCK_M.
-        //                    The previous ``/16`` (assuming the 16-row base
-        //                    tile was the unit) was off by 4× and produced
-        //                    out-of-bounds writes for B≥2 (SNR=3 dB on B=2 /
-        //                    GPU memory fault on B=2 M_g=512; see
-        //                    ``_PERSISTENT_GROUPED_WIP_NOTES.md``).
-        const int m_subtile_A = m_start_g / HALF_BLOCK_SIZE;
-        const int m_subtile_C = m_start_g / HALF_REG_BLOCK_M;
+        // Element-level addressing via per-group shifted GL views (below)
+        // means m_subtile_A / m_subtile_C are always 0 — the shifted base
+        // already locates the group's rows. Supports arbitrary byte-level
+        // m_start_g (callers no longer need group_lens % HALF_BLOCK_SIZE).
+        constexpr int m_subtile_A = 0;
+        constexpr int m_subtile_C = 0;
 
         // Reset accumulators for this tile.
         zero(C_accum[0][0]); zero(C_accum[0][1]);
@@ -3170,43 +1578,69 @@ void grouped_kernel(const grouped_layout_globals g) {
         // NEXT group. Rebuilt only on ``group_idx`` transitions to avoid
         // 4-SGPR-op overhead on every persistent iteration.
         if (group_idx != last_group_idx) {
+            // Shift A/C base pointers to m_start_g (byte-level OK — pointer
+            // arithmetic doesn't care about alignment). A SRD then bounds
+            // [a_base_g, a_base_g + M_g*row_stride), so partial-tile OOB
+            // row loads (M_g % BLOCK_SIZE != 0) hardware-clamp to 0.
+            a_base_g = (const bf16*)&g.a[{0, 0, m_start_g, 0}];
+            c_base_g = (const bf16*)&g.c[{0, 0, m_start_g, 0}];
+            // NO swizzle on per-group A SRD: with swizzle, gfx950's
+            // raw_buffer_load_lds doesn't reliably clamp OOB voffsets
+            // (record_id >= num_records pass-through → fault on partial
+            // last-tile loads). Non-swizzled SRD uses byte-level OOB
+            // check, HW-clamps voffset>=range to 0 → safe.
+            a_srsrc_curr = make_srsrc(
+                a_base_g, M_g * a_row_stride, /*row_stride_bytes=*/0);
             const int b_grp_total_rows = (group_idx + 1) * b_inner_rows;
             b_srsrc_curr = make_srsrc(
                 b_base, b_grp_total_rows * b_row_stride,
                 /*row_stride_bytes=*/0);
             last_group_idx = group_idx;
         }
+        // Per-tile shifted GL views: copy g.a / g.c then patch raw_ptr +
+        // rows_internal to point at the group's slice. (gl<>'s host-only
+        // constructor sets up TMA descriptors we don't use; copy-then-
+        // mutate is the device-safe path.) Lets coord (0,*,*,*) inside
+        // device_gemm_tile_body and store_c_tile_mn_masked_grouped resolve
+        // to absolute row m_start_g + (coord_row * unit) without needing
+        // m_start_g to be a multiple of any block size.
+        _gl a_gl_g = g.a;
+        a_gl_g.raw_ptr = (bf16*)a_base_g;
+        a_gl_g.rows_internal = M_g;
+        _gl c_gl_g = g.c;
+        c_gl_g.raw_ptr = (bf16*)c_base_g;
+        c_gl_g.rows_internal = M_g;
 
-        device_gemm_tile_body<L, KI_HINT, ST_A, ST_B, A_reg_t, B_reg_t, FUSED_KTAIL>(
-            g.a, g.b,
+        device_gemm_tile_body<L, ST_A, ST_B, A_reg_t, B_reg_t, /*FUSED_KTAIL=*/true>(
+            a_gl_g, g.b,
             m_subtile_A, group_idx, /*k_offset_tiles=*/0,
             As, Bs,
             swizzled_offsets_A, swizzled_offsets_B,
-            a_srsrc_base, b_srsrc_curr,
-            a_base, b_base,
+            a_srsrc_curr, b_srsrc_curr,
+            a_base_g, b_base,
             a_lds_00, a_lds_01, a_lds_10, a_lds_11,
             b_lds_00, b_lds_01, b_lds_10, b_lds_11,
             row, col, warp_row, warp_col,
             g.ki,
-            C_accum);
+            C_accum,
+            /*has_k_tail=*/ (g.k - g.fast_k == K_STEP));
 
         if (warp_row == 0) { __builtin_amdgcn_s_barrier(); }
 
-        const int r0 = m_subtile_C + (row * 2) * WARPS_M + warp_row;
-        const int r1 = m_subtile_C + (row * 2) * WARPS_M + WARPS_M + warp_row;
+        // m_subtile_C = 0 (shifted c_gl_g base). r0/r1 in HALF_REG_BLOCK_M=64
+        // unit relative to m_start_g. m_limit = M_g (group-relative element
+        // count) — store_c_tile_mn_masked_grouped masks per-cell so partial
+        // last-tile OOB rows + partial N-cols are skipped.
+        const int r0 = (row * 2) * WARPS_M + warp_row;
+        const int r1 = (row * 2) * WARPS_M + WARPS_M + warp_row;
         const int c0 = col * 2 * WARPS_N + warp_col;
         const int c1 = col * 2 * WARPS_N + WARPS_N + warp_col;
-        if ((g.n % BLOCK_SIZE) == 0) {
-            store(g.c, C_accum[0][0], {0, 0, r0, c0});
-            store(g.c, C_accum[0][1], {0, 0, r0, c1});
-            store(g.c, C_accum[1][0], {0, 0, r1, c0});
-            store(g.c, C_accum[1][1], {0, 0, r1, c1});
-        } else {
-            store_c_tile_n_masked(g.c, C_accum[0][0], r0, c0, g.n);
-            store_c_tile_n_masked(g.c, C_accum[0][1], r0, c1, g.n);
-            store_c_tile_n_masked(g.c, C_accum[1][0], r1, c0, g.n);
-            store_c_tile_n_masked(g.c, C_accum[1][1], r1, c1, g.n);
-        }
+        const int m_limit = M_g;
+        const int n_limit = g.n;
+        store_c_tile_mn_masked_grouped(c_gl_g, C_accum[0][0], 0, r0, c0, m_limit, n_limit);
+        store_c_tile_mn_masked_grouped(c_gl_g, C_accum[0][1], 0, r0, c1, m_limit, n_limit);
+        store_c_tile_mn_masked_grouped(c_gl_g, C_accum[1][0], 0, r1, c0, m_limit, n_limit);
+        store_c_tile_mn_masked_grouped(c_gl_g, C_accum[1][1], 0, r1, c1, m_limit, n_limit);
 
         // [grouped] Drain in-flight ops before the next persistent iteration so
         // the next tile's prologue starts from a clean state.
@@ -3225,35 +1659,10 @@ void grouped_kernel(const grouped_layout_globals g) {
     }
 }
 
-// Explicit instantiations — same KI specialization set as gemm_kernel.
-template __global__ void grouped_kernel<Layout::RCR, 0>(const grouped_layout_globals);
-template __global__ void grouped_kernel<Layout::RRR, 0>(const grouped_layout_globals);
-template __global__ void grouped_kernel<Layout::CRR, 0>(const grouped_layout_globals);
-
-// Round-3 path A: fused-K-tail RCR variant (KI_HINT=0 dynamic K only —
-// K=2880 / 2944 / 3008 etc. fall through to KI_HINT=0 because K_TWO_TILE
-// alignment + odd K_TWO_TILE count don't hit any compile-time KI case).
-template __global__ void grouped_kernel<Layout::RCR, 0, true>(const grouped_layout_globals);
-// Round-4 path A: fused-K-tail RRR variant (BF16 dA backward path).
-template __global__ void grouped_kernel<Layout::RRR, 0, true>(const grouped_layout_globals);
-#define INSTANTIATE_K_GRP(KI) \
-    template __global__ void grouped_kernel<Layout::RCR, KI>(const grouped_layout_globals); \
-    template __global__ void grouped_kernel<Layout::RRR, KI>(const grouped_layout_globals); \
-    template __global__ void grouped_kernel<Layout::CRR, KI>(const grouped_layout_globals)
-template __global__ void grouped_kernel<Layout::RCR, 48>(const grouped_layout_globals);
-INSTANTIATE_K_GRP(56);
-INSTANTIATE_K_GRP(64);
-INSTANTIATE_K_GRP(88);
-INSTANTIATE_K_GRP(112);
-INSTANTIATE_K_GRP(128);
-INSTANTIATE_K_GRP(172);
-INSTANTIATE_K_GRP(224);
-INSTANTIATE_K_GRP(256);
-INSTANTIATE_K_GRP(296);
-INSTANTIATE_K_GRP(448);
-INSTANTIATE_K_GRP(462);
-INSTANTIATE_K_GRP(832);
-#undef INSTANTIATE_K_GRP
+// Explicit instantiations: single instance per layout. FUSED_KTAIL is folded
+// into a runtime `has_k_tail` check inside the kernel.
+template __global__ void grouped_gemm_bf16_kernel<Layout::RCR>(const grouped_layout_globals);
+template __global__ void grouped_gemm_bf16_kernel<Layout::RRR>(const grouped_layout_globals);
 
 static int* grouped_tile_counter_buffer() {
     static int* d_counter = nullptr;
@@ -3279,28 +1688,16 @@ static inline void prime_grouped_tile_counter(grouped_layout_globals& g) {
     hipMemsetAsync(counter, 0, sizeof(int), g.stream);
 }
 
-template<Layout L, int KI>
+template<Layout L>
 static inline void launch_one_grouped(grouped_layout_globals& g) {
     unsigned long mem_size = g.dynamic_shared_memory();
     static bool attr_set = false;
     if (!attr_set) {
-        hipFuncSetAttribute((void*)grouped_kernel<L, KI>, hipFuncAttributeMaxDynamicSharedMemorySize, mem_size);
+        hipFuncSetAttribute((void*)grouped_gemm_bf16_kernel<L>, hipFuncAttributeMaxDynamicSharedMemorySize, mem_size);
         attr_set = true;
     }
     prime_grouped_tile_counter(g);
-    grouped_kernel<L, KI><<<dim3(NUM_CUS), g.block(), mem_size, g.stream>>>(g);
-}
-
-template<Layout L>
-static inline void launch_one_grouped_fuse(grouped_layout_globals& g) {
-    unsigned long mem_size = g.dynamic_shared_memory();
-    static bool attr_set = false;
-    if (!attr_set) {
-        hipFuncSetAttribute((void*)grouped_kernel<L, 0, true>, hipFuncAttributeMaxDynamicSharedMemorySize, mem_size);
-        attr_set = true;
-    }
-    prime_grouped_tile_counter(g);
-    grouped_kernel<L, 0, true><<<dim3(NUM_CUS), g.block(), mem_size, g.stream>>>(g);
+    grouped_gemm_bf16_kernel<L><<<dim3(NUM_CUS), g.block(), mem_size, g.stream>>>(g);
 }
 
 template<Layout L>
@@ -3320,107 +1717,15 @@ void dispatch_grouped(grouped_layout_globals g) {
     g.ki     = g.fast_k / K_STEP;
 
     const int K_rem_for_fuse = g.k - g.fast_k;
-    const bool lds_k_tail_safe_for_fuse = (g.m_per_group >= TAIL_BLOCK_M) &&
-                                          ((g.m_per_group % TAIL_BLOCK_M) == 0);
-#ifndef BF16_RRR_FUSE_PROBE
-// Force-enable RRR K-tail fuse when included under the Primus-Turbo
-// csrc embed: the fuse code was added in upstream HK as a "probe" but
-// gating-disabled by default. Enabling avoids the bf16→fp32→bf16 RMW
-// in the tail kernel that was breaking check_allclose on dgrad
-// (RRR-via-trans_b=False), which had forced the Python backend to
-// reroute through a costly bf16_transpose_3d → RCR fast path. With
-// fuse enabled here AND fuse_handles_all_cells extended to RRR
-// (see below), the tail launch is skipped entirely on aligned shapes.
-//
-// =========================================================================
-// TODO(upstream): RRR small-N perf cliff
-// =========================================================================
-// RRR direct (with this fuse enabled) is correct (SNR 45 dB on K=2880)
-// but exhibits a hard performance ceiling on small N due to B's HBM
-// access pattern. Measured on MI355X for gpt_oss-20B Balanced shapes:
-//
-//   shape          BLOCK_N tiles  HK-RRR-direct  HK-RCR-via-H4
-//   -----------------------------------------------------------
-//   GateUP N=5760     23          1300+ TF       880-1300 TF   ← RRR wins
-//   Down   N=2880     12          470-540 TF     700-1050 TF   ← RCR wins
-//
-// Root cause: B is stored [G, K, N] with N as the inner (stride-1) dim.
-// The main K-loop reads a [K_STEP=64, BLOCK_N=128] tile per iter; each
-// successive K-iter reads new K-rows whose addresses are N*sizeof(bf16)
-// apart (= 5760 B for N=2880 → 11520 B for stride). For small N this
-// puts each K-row in a different L1 cache line with NO temporal reuse
-// across K-iters within an output tile. RCR (B as [N, K]) iterates K
-// along the inner dim where L1 cache-line spatial locality holds.
-//
-// Sweep across (group_m, num_xcds) ∈ {(1,4),(2,4),(2,32),(4,4),(4,8),
-// (4,32),(8,4),(16,4),(24,2)} confirmed 470-540 TF flat plateau on
-// Down — not a scheduling issue, fundamental memory-pattern bound.
-// HBM-bandwidth lower bound for the shape is ~68us; actual run is
-// ~258us, a ~4× gap pointing at L1/L2 cache-miss latency rather than
-// raw bandwidth.
-//
-// Candidate fix: deepen B's LDS double-buffer to 3 K-pairs (Bs[3][2]
-// instead of Bs[2][2]) so the main loop has 2 iters of compute (~512
-// cycles) to overlap each L2-miss latency vs the current 1 iter (~256
-// cycles). Blocked by LDS budget: Bs[3][2] = 96 KB + As[2][2] = 64 KB
-// + static {s_offs, s_cum_tiles} = ~528 B totals 160.5 KB > the 160 KB
-// per-CU LDS limit on gfx950. Either trim MAX_G_PLUS_1 to 33 entries
-// (saves 256 B, still 256 B short) or move {s_offs, s_cum_tiles} into
-// the dynamic shared pool. Workaround in Primus-Turbo: dispatch by N
-// — RRR direct for N ≥ 4096, H4 reroute (transpose then RCR) for
-// smaller N. See primus_turbo/pytorch/kernels/grouped_gemm/
-// grouped_gemm_impl.py::GroupedGEMMHipKittenBackend.execute.
-// =========================================================================
-#  ifdef PRIMUS_TURBO_HK_INTEGRATION
-#    define BF16_RRR_FUSE_PROBE 1
-#  else
-#    define BF16_RRR_FUSE_PROBE 0
-#  endif
-#endif
-    static const bool fuse_disable_probe = []() {
-        const char* env = std::getenv("BF16_FUSE_DISABLE");
-        return env != nullptr && env[0] == '1';
-    }();
+    // Single kernel binary per layout. FUSED_KTAIL is folded into a runtime
+    // `has_k_tail` check inside grouped_gemm_bf16_kernel; the dispatcher just
+    // computes whether fuse would actually run (used below by the scalar tail
+    // launch gate). K_rem==K_STEP is the only condition that triggers fuse.
     const bool fuse_ktail_eligible =
-        ((L == Layout::RCR)
-#if BF16_RRR_FUSE_PROBE
-         || (L == Layout::RRR)
-#endif
-         ) &&
-        (g.bpc > 0) && (g.ki >= 2) &&
-        (K_rem_for_fuse == K_STEP) && lds_k_tail_safe_for_fuse &&
-        !fuse_disable_probe;
+        (g.bpc > 0) && (g.ki >= 2) && (K_rem_for_fuse == K_STEP);
 
     if (g.bpc > 0 && g.ki >= 2) {
-        if (fuse_ktail_eligible) {
-            if constexpr (L == Layout::RCR || L == Layout::RRR) {
-                launch_one_grouped_fuse<L>(g);
-            }
-        } else {
-            switch (g.ki) {
-                case 48:
-                    // R53: RCR-only spec (RRR/CRR spill 16-20 VGPRs at KI=48).
-                    if constexpr (L == Layout::RCR) {
-                        launch_one_grouped<L, 48>(g);
-                    } else {
-                        launch_one_grouped<L, 0>(g);
-                    }
-                    break;
-                case 56:  launch_one_grouped<L, 56> (g); break;
-                case 64:  launch_one_grouped<L, 64> (g); break;
-                case 88:  launch_one_grouped<L, 88> (g); break;
-                case 112: launch_one_grouped<L, 112>(g); break;
-                case 128: launch_one_grouped<L, 128>(g); break;
-                case 172: launch_one_grouped<L, 172>(g); break;
-                case 224: launch_one_grouped<L, 224>(g); break;
-                case 256: launch_one_grouped<L, 256>(g); break;
-                case 296: launch_one_grouped<L, 296>(g); break;
-                case 448: launch_one_grouped<L, 448>(g); break;
-                case 462: launch_one_grouped<L, 462>(g); break;
-                case 832: launch_one_grouped<L, 832>(g); break;
-                default:  launch_one_grouped<L, 0>  (g); break;
-            }
-        }
+        launch_one_grouped<L>(g);
     } else {
         // Main kernel can't run (N < BLOCK_SIZE or K < K_TWO_TILE). Reset
         // fast_* so the tail kernel treats every cell as "kernel never
@@ -3431,95 +1736,14 @@ void dispatch_grouped(grouped_layout_globals g) {
         g.ki     = 0;
     }
 
-    constexpr bool layout_supports_main_n =
-        (L == Layout::RCR) || (L == Layout::RRR);
-    const bool main_covers_n = layout_supports_main_n;
-    const bool need_tail_run =
-        (g.fast_k != g.k) ||
-        (!main_covers_n && g.fast_n != g.n);
-    // RRR fuse landed (BF16_RRR_FUSE_PROBE) — the main kernel writes the
-    // full K reduction including K-tail, so the tail kernel must NOT
-    // run for those cells (it would RMW-double-count the K-tail).
-    const bool fuse_handles_all_cells =
-        fuse_ktail_eligible && (L == Layout::RCR || L == Layout::RRR);
-    if (need_tail_run && !fuse_handles_all_cells) {
-        const int K_rem = g.k - g.fast_k;
-        const bool lds_k_tail_safe = (g.m_per_group >= TAIL_BLOCK_M) &&
-                                     ((g.m_per_group % TAIL_BLOCK_M) == 0);
-        if constexpr (L == Layout::RCR) {
-            if (K_rem == 64 && lds_k_tail_safe) {
-                constexpr int TBM_M4    = 128;
-                constexpr int TBM_M2    = 64;
-                constexpr int TBM_32x32 = 32;
-                const bool mfma32_m4_safe = (g.m_per_group >= TBM_M4) &&
-                                            ((g.m_per_group % TBM_M4) == 0);
-                const bool mfma32_m2_safe = (g.m_per_group >= TBM_M2) &&
-                                            ((g.m_per_group % TBM_M2) == 0);
-                const bool mfma32_safe = (g.m_per_group >= TBM_32x32) &&
-                                         ((g.m_per_group % TBM_32x32) == 0);
-                if (mfma32_m4_safe) {
-                    dim3 mfma_block(64);
-                    dim3 mfma_grid(
-                        kittens::ceil_div(g.n, TBM_32x32),
-                        kittens::ceil_div(g.M_total, TBM_M4)
-                    );
-                    grouped_ktail_kernel_mfma32x32_M4<Layout::RCR, 64>
-                        <<<mfma_grid, mfma_block, 0, g.stream>>>(g);
-                } else if (mfma32_m2_safe) {
-                    dim3 mfma_block(64);
-                    dim3 mfma_grid(
-                        kittens::ceil_div(g.n, TBM_32x32),
-                        kittens::ceil_div(g.M_total, TBM_M2)
-                    );
-                    grouped_ktail_kernel_mfma32x32_M2<Layout::RCR, 64>
-                        <<<mfma_grid, mfma_block, 0, g.stream>>>(g);
-                } else if (mfma32_safe) {
-                    dim3 mfma_block(64);
-                    dim3 mfma_grid(
-                        kittens::ceil_div(g.n, TBM_32x32),
-                        kittens::ceil_div(g.M_total, TBM_32x32)
-                    );
-                    grouped_ktail_kernel_mfma32x32<Layout::RCR, 64>
-                        <<<mfma_grid, mfma_block, 0, g.stream>>>(g);
-                } else {
-                    // Round-19: 16x16x32 mfma kernel (still 100 % util).
-                    dim3 mfma_block(64);
-                    dim3 mfma_grid(
-                        kittens::ceil_div(g.n, TAIL_BLOCK_N),
-                        kittens::ceil_div(g.M_total, TAIL_BLOCK_M)
-                    );
-                    grouped_ktail_kernel_mfma<Layout::RCR, 64>
-                        <<<mfma_grid, mfma_block, 0, g.stream>>>(g);
-                }
-            }
-        }
-
-        if constexpr (L == Layout::RRR) {
-            if (K_rem == 64 && lds_k_tail_safe && g.bpc > 0
-                && !fuse_ktail_eligible) {
-                dim3 lds_block(TAIL_BLOCK_N, TAIL_BLOCK_M);
-                dim3 lds_grid(
-                    kittens::ceil_div(g.n, TAIL_BLOCK_N),
-                    kittens::ceil_div(g.M_total, TAIL_BLOCK_M)
-                );
-                grouped_ktail_kernel_lds_rrr<64>
-                    <<<lds_grid, lds_block, 0, g.stream>>>(g);
-            }
-        }
-
-        const bool lds_handles_all =
-            ((L == Layout::RCR) || (L == Layout::RRR)) &&
-            (K_rem == 64) &&
-            lds_k_tail_safe;
-        if (!lds_handles_all) {
-            dim3 tail_block(TAIL_BLOCK_N, TAIL_BLOCK_M);
-            dim3 tail_grid(
-                kittens::ceil_div(g.n, TAIL_BLOCK_N),
-                kittens::ceil_div(g.M_total, TAIL_BLOCK_M)
-            );
-            grouped_tail_kernel<L><<<tail_grid, tail_block, 0, g.stream>>>(g);
-        }
-    }
+    // Single-kernel design: main kernel processes ceil_div(M_g, BLOCK_SIZE)
+    // M-tiles per group (including the partial last tile), uses per-group
+    // A SRD that clips to [0, m_start_g + M_g) so partial-tile OOB rows
+    // hardware-clamp to 0, and stores via store_c_tile_mn_masked_grouped
+    // which drops OOB cells from the write-back. K-tail (K_rem == K_STEP)
+    // is folded in via the FUSED_KTAIL block (runtime has_k_tail check).
+    // No scalar tail kernel — main alone covers every cell of the output.
+    (void)fuse_ktail_eligible;  // computed earlier; unused now
 }
 
 #ifndef PRIMUS_TURBO_HK_INTEGRATION
@@ -3541,8 +1765,9 @@ static void grouped_dispatch(pybind11::object a, pybind11::object b, pybind11::o
     };
 
     if (layout_name[0] == 'r' && layout_name[1] == 'c') dispatch_grouped<Layout::RCR>(g);
-    else if (layout_name[0] == 'r' && layout_name[1] == 'r') dispatch_grouped<Layout::RRR>(g);
-    else dispatch_grouped<Layout::CRR>(g);
+    else dispatch_grouped<Layout::RRR>(g);
+    // CRR not supported for grouped forward (PT routes CRR/wgrad through
+    // grouped_gemm_var_k_bf16_kernel; HK-only test path treats CRR as RRR).
 }
 #endif  // PRIMUS_TURBO_HK_INTEGRATION
 
@@ -3560,7 +1785,6 @@ struct grouped_var_k_layout_globals {
     int num_xcds;
     int bpr;        // n / BLOCK_SIZE — output row tiles
     int bpc;        // k / BLOCK_SIZE — output col tiles
-    int ki_max;     // upper bound on per-group ki (for KI_HINT specialization)
     // Aligned-region dims. v0 only: aligned-only. fast_{n,k} == n,k and
     // m_aligned == M_total are required by ``can_handle`` on the Python
     // side; the dispatcher otherwise falls back to the per-group loop.
@@ -3579,8 +1803,9 @@ struct var_k_group_lookup_t {
     int group_idx;
     int local_tile;
     int m_start_g;
+    int M_g;
     int ki_g;
-    int valid;  // 0 if M_g/K_STEP < 2 -> skip
+    int valid;  // 0 if ceil_div(M_g, K_STEP) < 2 -> skip
 };
 
 #ifdef PROFILE_VAR_K_NOINLINE
@@ -3626,14 +1851,27 @@ var_k_group_lookup_t compute_var_k_group_lookup(int gt,
     const int local_tile = gt - group_idx * tiles_per_group;
     const int m_start_g = s_offs[group_idx];
     const int M_g = s_offs[group_idx + 1] - m_start_g;
-    const int ki_g = M_g / K_STEP;
-    if (ki_g < 2) return {0, 0, 0, 0, 0};
-    return {group_idx, local_tile, m_start_g, ki_g, 1};
+    // ceil_div so the last partial K-tile (M_g % K_STEP != 0) gets its own
+    // ki iteration. Per-group shifted A/B SRD + non-swizzled bound clamps
+    // OOB rows in that partial tile to 0 (no contribution to accumulator).
+    const int ki_g = kittens::ceil_div(M_g, K_STEP);
+    if (ki_g <= 0) return {0, 0, 0, 0, 0, 0};
+    // ki_g == 1 (M_g <= K_STEP) is allowed: per-group A/B SRDs are
+    // bounded to M_g * row_stride bytes (non-swizzled), so the prologue's
+    // tile-1 load and the main-loop's prefetches reading beyond row M_g
+    // hardware-clamp their voffsets to 0. Main loop range (0..ki_g-2 step 2)
+    // is empty for ki_g <= 2, and epilog 1/2 still complete using the
+    // prefetched tile-0 data (with zeros for OOB tiles contributing
+    // nothing to the accumulator). num_tiles_dyn = ki_g is passed verbatim.
+    // Force ki_g to at least 2 so the K-loop bound covers prologue + epilog;
+    // the second virtual tile is fully-OOB and clamped to 0, so its MMA
+    // contribution is zero.
+    const int ki_g_min = (ki_g < 2) ? 2 : ki_g;
+    return {group_idx, local_tile, m_start_g, M_g, ki_g_min, 1};
 }
 
-template<int KI_HINT>
 __global__ __launch_bounds__(NUM_THREADS, 1)
-void grouped_var_k_kernel(const grouped_var_k_layout_globals g) {
+void grouped_gemm_var_k_bf16_kernel(const grouped_var_k_layout_globals g) {
     extern __shared__ alignment_dummy __shm[];
     shared_allocator al((int*)&__shm[0]);
 
@@ -3669,18 +1907,24 @@ void grouped_var_k_kernel(const grouped_var_k_layout_globals g) {
     const int num_pid_m = g.bpr;
     const int num_pid_n = g.bpc;
 
-    // Full-tensor SRDs (A and B span [M_total, *]; the K-axis shift per
-    // group is delivered to ``device_gemm_tile_body`` via k_offset_tiles).
+    // A and B are CRR-layout K-reduction tensors spanning [M_total, *];
+    // the K-axis is the per-group row range [m_start_g, m_start_g + M_g).
+    // Per-group: shift A/B base pointers to m_start_g (byte-level OK) and
+    // build per-group SRDs bounded to M_g * row_stride. Rebuilt on
+    // group_idx transitions to amortise SGPR build cost across persistent
+    // iters of the same group. Non-swizzled (third arg = 0) so HW
+    // byte-level OOB clamp handles partial last K-tile and any over-read.
     const bf16* a_base = (bf16*)&g.a[{0, 0, 0, 0}];
     const bf16* b_base = (bf16*)&g.b[{0, 0, 0, 0}];
     const int a_row_stride = g.a.template stride<2>() * sizeof(bf16);  // = n * sizeof(bf16)
     const int b_row_stride = g.b.template stride<2>() * sizeof(bf16);  // = k * sizeof(bf16)
-    const int a_total_rows = g.M_total;
-    const int b_total_rows = g.M_total;
-    i32x4 a_srsrc_base = make_srsrc(a_base, a_total_rows * a_row_stride, a_row_stride);
-    i32x4 b_srsrc_base = make_srsrc(b_base, b_total_rows * b_row_stride, b_row_stride);
+    const bf16* a_base_g = a_base;
+    const bf16* b_base_g = b_base;
+    i32x4 a_srsrc_curr = make_srsrc(a_base, g.M_total * a_row_stride, /*row_stride_bytes=*/0);
+    i32x4 b_srsrc_curr = make_srsrc(b_base, g.M_total * b_row_stride, /*row_stride_bytes=*/0);
+    int last_group_idx = -1;
 
-    // LDS double-buffered per-warp slots (mirror grouped_kernel).
+    // LDS double-buffered per-warp slots (mirror grouped_gemm_bf16_kernel).
     const int wid = warpid() % NUM_WARPS;
     constexpr int elem_per_warp = (16 / sizeof(bf16)) * kittens::WARP_THREADS;
     constexpr uint32_t A_TILE_LDS = sizeof(ST_A);
@@ -3718,6 +1962,7 @@ void grouped_var_k_kernel(const grouped_var_k_layout_globals g) {
         const int group_idx = gl.group_idx;
         const int local_tile = gl.local_tile;
         const int m_start_g = gl.m_start_g;
+        const int M_g = gl.M_g;
         const int ki_g = gl.ki_g;
 
         const auto coords = compute_var_k_coords(local_tile, num_pid_m, num_pid_n, g.group_m);
@@ -3727,26 +1972,45 @@ void grouped_var_k_kernel(const grouped_var_k_layout_globals g) {
         const int row = pid_m;
         const int col = pid_n;
 
-        // K-axis offset in K_STEP units. m_start_g is BLK-aligned (256),
-        // K_STEP=64 divides BLK so this is exact.
-        const int k_offset_tiles = m_start_g / K_STEP;
+        // Per-group shifted A/B base + bounded SRD: rebuild only on
+        // group_idx transitions to amortise across this group's tiles.
+        // m_start_g may be ANY byte-level value (not necessarily a K_STEP
+        // multiple) — pointer arithmetic handles that, and non-swizzled
+        // SRD byte-level OOB clamp handles the partial last K-tile when
+        // M_g is not a K_STEP multiple.
+        if (group_idx != last_group_idx) {
+            a_base_g = (const bf16*)&g.a[{0, 0, m_start_g, 0}];
+            b_base_g = (const bf16*)&g.b[{0, 0, m_start_g, 0}];
+            a_srsrc_curr = make_srsrc(a_base_g, M_g * a_row_stride, /*row_stride_bytes=*/0);
+            b_srsrc_curr = make_srsrc(b_base_g, M_g * b_row_stride, /*row_stride_bytes=*/0);
+            last_group_idx = group_idx;
+        }
+        // Per-tile shifted GL views (copy + patch raw_ptr + rows_internal).
+        // CRR a_coord uses row = K-axis (= per-group M_g range); the shifted
+        // view lets coord (0,0,k,*) resolve to absolute byte = a_base_g + k*...
+        // so we can pass k_offset_tiles=0.
+        _gl a_gl_g = g.a;
+        a_gl_g.raw_ptr = (bf16*)a_base_g;
+        a_gl_g.rows_internal = M_g;
+        _gl b_gl_g = g.b;
+        b_gl_g.raw_ptr = (bf16*)b_base_g;
+        b_gl_g.rows_internal = M_g;
 
         // Reset accumulators.
         zero(C_accum[0][0]); zero(C_accum[0][1]);
         zero(C_accum[1][0]); zero(C_accum[1][1]);
 
         // Reuse the shared GEMM body with CRR layout. m_subtile_A=0
-        // (kernel n is group-uniform; row is the M-output tile) and
-        // group_idx=0 (B is 2D, no depth axis). The variable-K piece is
-        // delivered through k_offset_tiles which adds m_start_g/K_STEP
-        // to every a_coord/b_coord K-axis lookup.
-        device_gemm_tile_body<Layout::CRR, KI_HINT, ST_A, ST_B, A_reg_t, B_reg_t>(
-            g.a, g.b,
-            /*m_subtile_A=*/0, /*group_idx=*/0, k_offset_tiles,
+        // (kernel n is group-uniform; row is the M-output tile),
+        // group_idx=0 (B is 2D, no depth axis), k_offset_tiles=0 because
+        // a_gl_g/b_gl_g raw_ptr already point at the group's K-axis start.
+        device_gemm_tile_body<Layout::CRR, ST_A, ST_B, A_reg_t, B_reg_t>(
+            a_gl_g, b_gl_g,
+            /*m_subtile_A=*/0, /*group_idx=*/0, /*k_offset_tiles=*/0,
             As, Bs,
             swizzled_offsets_A, swizzled_offsets_B,
-            a_srsrc_base, b_srsrc_base,
-            a_base, b_base,
+            a_srsrc_curr, b_srsrc_curr,
+            a_base_g, b_base_g,
             a_lds_00, a_lds_01, a_lds_10, a_lds_11,
             b_lds_00, b_lds_01, b_lds_10, b_lds_11,
             row, col, warp_row, warp_col,
@@ -3786,19 +2050,15 @@ void grouped_var_k_kernel(const grouped_var_k_layout_globals g) {
     }
 }
 
-// KI=0 dynamic only for v0; round-2 can add specializations once the
-// numerics are validated and bench data identifies hot ki values.
-template __global__ void grouped_var_k_kernel<0>(const grouped_var_k_layout_globals);
-
 static inline void launch_grouped_var_k(grouped_var_k_layout_globals& g) {
     unsigned long mem_size = g.dynamic_shared_memory();
     static bool attr_set = false;
     if (!attr_set) {
-        hipFuncSetAttribute((void*)grouped_var_k_kernel<0>,
+        hipFuncSetAttribute((void*)grouped_gemm_var_k_bf16_kernel,
                             hipFuncAttributeMaxDynamicSharedMemorySize, mem_size);
         attr_set = true;
     }
-    grouped_var_k_kernel<0><<<dim3(NUM_CUS), g.block(), mem_size, g.stream>>>(g);
+    grouped_gemm_var_k_bf16_kernel<<<dim3(NUM_CUS), g.block(), mem_size, g.stream>>>(g);
 }
 
 void dispatch_grouped_var_k(grouped_var_k_layout_globals g) {
@@ -3828,7 +2088,7 @@ static void grouped_var_k_crr_fn(pybind11::object a, pybind11::object b, pybind1
         py::from_object<_gl>::make(c),
         reinterpret_cast<const int64_t*>(group_offs_ptr),
         {},
-        G, 0, 0, 0, gm, num_xcds, 0, 0, 0,
+        G, 0, 0, 0, gm, num_xcds, 0, 0,
         0, 0,  // fast_n, fast_k populated in dispatch.
     };
     dispatch_grouped_var_k(g);
