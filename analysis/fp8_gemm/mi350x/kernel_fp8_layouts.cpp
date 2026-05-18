@@ -1768,8 +1768,8 @@ __device__ __forceinline__ void patch_per_group_gl_view(
 }
 
 template<bool N_MASKED_STORE = false, bool FUSED_KTAIL = false>
-__global__ __launch_bounds__(_NUM_THREADS, 1)
-void grouped_rcr_kernel(const grouped_layout_globals g) {
+__device__ __forceinline__
+void grouped_rcr_kernel_body(const grouped_layout_globals g) {
     using ST_rcr = ST_v2;
     // [kyle-L1 single-buf DEBUG] As/Bs decl LEFT AS [2][2] for now; loop
     // body single-buffered (always reads [0]) to isolate loop-structure
@@ -2083,10 +2083,6 @@ void grouped_rcr_kernel(const grouped_layout_globals g) {
     }
 }
 
-template __global__ void grouped_rcr_kernel<false, false>(const grouped_layout_globals);
-template __global__ void grouped_rcr_kernel<true , false>(const grouped_layout_globals);
-template __global__ void grouped_rcr_kernel<false, true >(const grouped_layout_globals);
-template __global__ void grouped_rcr_kernel<true , true >(const grouped_layout_globals);
 
 // =============================================================================
 // BLOCK_N=128 RCR variant.
@@ -2100,8 +2096,8 @@ template __global__ void grouped_rcr_kernel<true , true >(const grouped_layout_g
 // All M-side dims, K-block, accumulator types unchanged from BN=256 kernel.
 // =============================================================================
 template<bool N_MASKED_STORE = false, bool FUSED_KTAIL = false>
-__global__ __launch_bounds__(_NUM_THREADS, 1)
-void grouped_rcr_kernel_bn128(const grouped_layout_globals g) {
+__device__ __forceinline__
+void grouped_rcr_kernel_bn128_body(const grouped_layout_globals g) {
     using ST_rcr = ST_v2;
     __shared__ ST_rcr As[2][2];
     __shared__ ST_rcr Bs[2][2];          // n-strip 1 unused; matches BN=256 LDS layout
@@ -2361,10 +2357,6 @@ void grouped_rcr_kernel_bn128(const grouped_layout_globals g) {
     }
 }
 
-template __global__ void grouped_rcr_kernel_bn128<false, false>(const grouped_layout_globals);
-template __global__ void grouped_rcr_kernel_bn128<true , false>(const grouped_layout_globals);
-template __global__ void grouped_rcr_kernel_bn128<false, true >(const grouped_layout_globals);
-template __global__ void grouped_rcr_kernel_bn128<true , true >(const grouped_layout_globals);
 
 // =============================================================================
 // BLOCK_M=128 BLOCK_N=128 BLOCK_K=128 RCR variant (b128 = "BLK=128 both M, N").
@@ -2382,8 +2374,8 @@ template __global__ void grouped_rcr_kernel_bn128<true , true >(const grouped_la
 // the wait+mma), to avoid end-of-iter overwrite hazard.
 // =============================================================================
 template<bool N_MASKED_STORE = false, bool FUSED_KTAIL = false>
-__global__ __launch_bounds__(_NUM_THREADS, 1)
-void grouped_rcr_kernel_b128(const grouped_layout_globals g) {
+__device__ __forceinline__
+void grouped_rcr_kernel_b128_body(const grouped_layout_globals g) {
     using ST_rcr = ST_v2;             // 128 rows (HB) × 128 cols (BK)
     __shared__ ST_rcr As[2];          // single M-slab per pipe stage
     __shared__ ST_rcr Bs[2];          // single N-strip per pipe stage
@@ -2604,10 +2596,6 @@ void grouped_rcr_kernel_b128(const grouped_layout_globals g) {
     }
 }
 
-template __global__ void grouped_rcr_kernel_b128<false, false>(const grouped_layout_globals);
-template __global__ void grouped_rcr_kernel_b128<true , false>(const grouped_layout_globals);
-template __global__ void grouped_rcr_kernel_b128<false, true >(const grouped_layout_globals);
-template __global__ void grouped_rcr_kernel_b128<true , true >(const grouped_layout_globals);
 
 // Force-instantiate. Compare resource report against the R57 step-2A
 // baseline (V256 / A256 / Spill 0 / Scratch 0 — placeholder G::load).
@@ -2616,8 +2604,8 @@ template __global__ void grouped_rcr_kernel_b128<true , true >(const grouped_lay
 #define FP8_RRR_FUSE_PROBE 0
 #endif
 template<bool N_MASKED_STORE = false, bool FUSED_KTAIL = false>
-__global__ __launch_bounds__(_NUM_THREADS, 1)
-void grouped_rrr_kernel(const grouped_layout_globals g) {
+__device__ __forceinline__
+void grouped_rrr_kernel_body(const grouped_layout_globals g) {
     __shared__ ST_row As[2][2];
     __shared__ ST_v2  Bs[2][2];
     constexpr int MAX_G_PLUS_1 = 65;
@@ -3245,10 +3233,48 @@ void grouped_rrr_kernel(const grouped_layout_globals g) {
     }
 }
 
-template __global__ void grouped_rrr_kernel<false, false>(const grouped_layout_globals);
-template __global__ void grouped_rrr_kernel<true , false>(const grouped_layout_globals);
-template __global__ void grouped_rrr_kernel<false, true >(const grouped_layout_globals);
-template __global__ void grouped_rrr_kernel<true , true >(const grouped_layout_globals);
+// =============================================================================
+// Unified persistent grouped FP8 GEMM kernel (mirror of bf16's single
+// ``grouped_gemm_bf16_kernel<Layout L>`` entry point).
+//
+// One ``__global__`` symbol covers all four RCR block-size variants and the
+// RRR layout via compile-time ``if constexpr`` dispatch into the per-shape
+// ``_body`` device functions above:
+//
+//   Layout L | BLOCK_N | body
+//   ---------+---------+--------------------------------
+//   RCR      |    256  | grouped_rcr_kernel_body        (BLK_M = BLK_N = 256)
+//   RCR      |    128  | grouped_rcr_kernel_bn128_body  (BLK_M = 256, BLK_N = 128)
+//   RCR      |   -128  | grouped_rcr_kernel_b128_body   (BLK_M = BLK_N = 128)
+//   RRR      |    256  | grouped_rrr_kernel_body
+//
+// Each ``_body`` is ``__device__ __forceinline__`` so this wrapper produces
+// the identical kernel binary per instantiation that the four prior
+// ``__global__`` definitions did — no codegen change, just a single entry
+// point for the dispatcher (and PT autotune) to instantiate.
+// =============================================================================
+template<Layout L, int BLOCK_N = 256,
+         bool N_MASKED_STORE = false, bool FUSED_KTAIL = false>
+__global__ __launch_bounds__(_NUM_THREADS, 1)
+void grouped_gemm_fp8_kernel(const grouped_layout_globals g) {
+    if constexpr (L == Layout::RCR) {
+        if constexpr (BLOCK_N == 128) {
+            grouped_rcr_kernel_bn128_body<N_MASKED_STORE, FUSED_KTAIL>(g);
+        } else if constexpr (BLOCK_N == -128) {
+            grouped_rcr_kernel_b128_body<N_MASKED_STORE, FUSED_KTAIL>(g);
+        } else {
+            static_assert(BLOCK_N == 256,
+                          "grouped_gemm_fp8_kernel: RCR BLOCK_N must be 256, 128, or -128");
+            grouped_rcr_kernel_body<N_MASKED_STORE, FUSED_KTAIL>(g);
+        }
+    } else {
+        static_assert(L == Layout::RRR,
+                      "grouped_gemm_fp8_kernel: only Layout::RCR and Layout::RRR supported");
+        static_assert(BLOCK_N == 256,
+                      "grouped_gemm_fp8_kernel: RRR only supports BLOCK_N=256");
+        grouped_rrr_kernel_body<N_MASKED_STORE, FUSED_KTAIL>(g);
+    }
+}
 
 void dispatch_grouped_rcr(grouped_layout_globals g) {
     g.n = static_cast<int>(g.c.cols());
@@ -3341,43 +3367,43 @@ void dispatch_grouped_rcr(grouped_layout_globals g) {
             // BLK_M=BLK_N=128 (b128 — single-mma per K-iter)
             if (fuse_ktail_active) {
                 if (n_aligned) {
-                    grouped_rcr_kernel_b128<false, true><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+                    grouped_gemm_fp8_kernel<Layout::RCR, -128, false, true><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
                 } else {
-                    grouped_rcr_kernel_b128<true , true><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+                    grouped_gemm_fp8_kernel<Layout::RCR, -128, true , true><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
                 }
             } else {
                 if (n_aligned) {
-                    grouped_rcr_kernel_b128<false, false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+                    grouped_gemm_fp8_kernel<Layout::RCR, -128, false, false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
                 } else {
-                    grouped_rcr_kernel_b128<true , false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+                    grouped_gemm_fp8_kernel<Layout::RCR, -128, true , false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
                 }
             }
         } else if (block_choice == 128) {
             // BN=128, BM=256 (bn128)
             if (fuse_ktail_active) {
                 if (n_aligned) {
-                    grouped_rcr_kernel_bn128<false, true><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+                    grouped_gemm_fp8_kernel<Layout::RCR, 128, false, true><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
                 } else {
-                    grouped_rcr_kernel_bn128<true , true><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+                    grouped_gemm_fp8_kernel<Layout::RCR, 128, true , true><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
                 }
             } else {
                 if (n_aligned) {
-                    grouped_rcr_kernel_bn128<false, false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+                    grouped_gemm_fp8_kernel<Layout::RCR, 128, false, false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
                 } else {
-                    grouped_rcr_kernel_bn128<true , false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+                    grouped_gemm_fp8_kernel<Layout::RCR, 128, true , false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
                 }
             }
         } else if (fuse_ktail_active) {
             if (n_aligned) {
-                grouped_rcr_kernel<false, true><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+                grouped_gemm_fp8_kernel<Layout::RCR, 256, false, true><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
             } else {
-                grouped_rcr_kernel<true , true><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+                grouped_gemm_fp8_kernel<Layout::RCR, 256, true , true><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
             }
         } else {
             if (n_aligned) {
-                grouped_rcr_kernel<false, false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+                grouped_gemm_fp8_kernel<Layout::RCR, 256, false, false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
             } else {
-                grouped_rcr_kernel<true , false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+                grouped_gemm_fp8_kernel<Layout::RCR, 256, true , false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
             }
         }
     } else {
@@ -3458,14 +3484,14 @@ void dispatch_grouped_rrr(grouped_layout_globals g) {
     // production shape; would need a separate fallback if ever needed).
     const bool has_k_tail = (g.k - g.fast_k) == 64;
     if (has_k_tail) {
-        if (n_aligned) grouped_rrr_kernel<false, true >
+        if (n_aligned) grouped_gemm_fp8_kernel<Layout::RRR, 256, false, true >
             <<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
-        else           grouped_rrr_kernel<true , true >
+        else           grouped_gemm_fp8_kernel<Layout::RRR, 256, true , true >
             <<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
     } else {
-        if (n_aligned) grouped_rrr_kernel<false, false>
+        if (n_aligned) grouped_gemm_fp8_kernel<Layout::RRR, 256, false, false>
             <<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
-        else           grouped_rrr_kernel<true , false>
+        else           grouped_gemm_fp8_kernel<Layout::RRR, 256, true , false>
             <<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
     }
 }
