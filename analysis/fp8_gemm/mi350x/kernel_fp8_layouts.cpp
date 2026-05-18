@@ -449,6 +449,15 @@ __device__ __forceinline__ float load_bf16_scalar(const _gl_bf16& src, int row, 
     return base_types::convertor<float, bf16>::convert(std::bit_cast<bf16>(bits));
 }
 
+// Packed 8 × fp8e4m3 = 8 bytes for vectorised dense tail-kernel K-loop:
+// the HIP compiler emits a single ``global_load_dwordx2`` through this
+// type when the source pointer is 8-byte aligned (8× fewer VMEM ops vs
+// scalar fp8 loads). Extraction via ``convertor<float4, fp8e4m3_4>``
+// gives 8 fp32 accumulator inputs per 8-byte load.
+struct alignas(8) fp8e4m3_8 {
+    fp8e4m3_4 lo, hi;
+};
+
 __device__ __forceinline__ void store_bf16_scalar(const _gl_bf16& dst, int row, int col, float value) {
     const uint32_t buffer_size = dst.batch() * dst.depth() * dst.rows() * dst.cols() * sizeof(bf16);
     const std::uintptr_t as_int = reinterpret_cast<std::uintptr_t>(dst.raw_ptr);
@@ -460,31 +469,6 @@ __device__ __forceinline__ void store_bf16_scalar(const _gl_bf16& dst, int row, 
     llvm_amdgcn_raw_buffer_store_b16(std::bit_cast<uint16_t>(v), srsrc, voffset, 0, 0);
 }
 
-// Per-group scalar FP8 load. ``b`` for grouped FP8 is logically
-// [batch=1, G, N, K]; the 4D coord lets `grouped_tail_kernel_fp8` index B at
-// (group_idx, row, col).
-__device__ __forceinline__ float load_fp8_scalar_grp(const _gl_fp8& src, int g_idx, int row, int col) {
-    const uint32_t buffer_size = src.batch() * src.depth() * src.rows() * src.cols() * sizeof(fp8e4m3);
-    const std::uintptr_t as_int = reinterpret_cast<std::uintptr_t>(src.raw_ptr);
-    const std::uint64_t  as_u64 = static_cast<std::uint64_t>(as_int);
-    const buffer_resource br = make_buffer_resource(as_u64, buffer_size, 0x00020000);
-    const i32x4 srsrc = std::bit_cast<i32x4>(br);
-    const uint32_t idx = ((0 * src.depth() + g_idx) * src.rows() + row) * src.cols() + col;
-    const uint32_t voffset = idx * sizeof(fp8e4m3);
-    const uint8_t bits = llvm_amdgcn_raw_buffer_load_b8(srsrc, voffset, 0, 0);
-    return base_types::convertor<float, fp8e4m3>::convert(std::bit_cast<fp8e4m3>(bits));
-}
-
-// Packed 8 × fp8e4m3 = 8 bytes for vectorised tail-kernel K-loop. The
-// HIP compiler emits a single `global_load_dwordx2` for a load through
-// this type when the source pointer is 8-byte aligned, replacing 8
-// separate scalar fp8 loads (8× fewer VMEM transactions). Used by the
-// RCR fast path inside `grouped_tail_kernel_fp8` where both operands are
-// stride-1 in K. Extraction via ``convertor<float4, fp8e4m3_4>`` gives
-// 8 fp32 accumulator inputs per 8-byte load.
-struct alignas(8) fp8e4m3_8 {
-    fp8e4m3_4 lo, hi;
-};
 
 template<int N_THREADS, ducks::st::all ST, ducks::gl::all GL>
 __device__ __forceinline__ void prefill_transpose_swizzled_offsets(
@@ -1550,10 +1534,9 @@ __global__ void gemm_tail_kernel(const layout_globals g) {
     float acc = 0.0f;
 
     if constexpr (L == Layout::RCR) {
-        // Vec8 fast path for RCR. See ``grouped_tail_kernel_fp8`` for the
-        // rationale; mirror change to keep dense + grouped tail logic
-        // in sync. Dense rarely runs the tail (LLM shapes are aligned
-        // 4096 / 8192 multiples) so this is mostly a code-symmetry win.
+        // Vec8 fast path for RCR: 8× fp8 (64 bits) per load reduces VMEM
+        // ops 8× vs scalar fp8. Dense rarely runs this tail (LLM shapes
+        // align 4096 / 8192) — mostly a code-symmetry win.
         const fp8e4m3* a_row = &g.a[coord<>(row, 0)];
         const fp8e4m3* b_row = &g.b[coord<>(col, 0)];
         int kk = k0;
@@ -1629,13 +1612,15 @@ struct grouped_layout_globals {
     int M_total;                 // sum of group sizes (= a.shape[0])
     // [grouped] Native non-aligned support (mirror of BF16 grouped Phase 3
     // and FP8 dense fast/tail). Main kernel only sweeps the largest aligned
-    // interior:
+    // Aligned interior dims (main kernel coverage):
     //   fast_n = (n / BLOCK_SIZE) * BLOCK_SIZE
-    //   fast_k = (k / K_BLOCK) * K_BLOCK
-    // `grouped_tail_kernel_fp8` (scalar fp32) handles cells with col >= fast_n
-    // (full-K reduction) plus K-tail correction in [fast_k, k) for interior
-    // cells. Per-group M-tail (M_g % BLOCK_SIZE != 0) is NOT handled in this
-    // round (caller contract: each group's M is BLOCK_SIZE-aligned).
+    //   fast_k = (k / K_BLOCK)   * K_BLOCK
+    // N-tail (n > fast_n) is covered by ceil_div(n, BLOCK_SIZE) bpc tiles
+    // with N_MASKED_STORE masking the partial last column tile. K-tail
+    // (K_rem == 64) is fused into the main kernel via FUSED_KTAIL. Other
+    // K_rem values are not supported (no production shape exercises it).
+    // Per-group M-tail (M_g % BLOCK_SIZE != 0) is handled via the per-
+    // group shifted gl view + m_limit masked store.
     int fast_n, fast_k;
     int m_per_group;
     int num_slots;
@@ -3522,14 +3507,12 @@ void dispatch_grouped_rcr(grouped_layout_globals g) {
 // =============================================================================
 // Persistent grouped RRR dispatcher — FP8 (forward-A backward dA path).
 //
-// Mirror of ``dispatch_grouped_rcr``: aligned interior swept by the
-// persistent main kernel (``grouped_rrr_kernel``), cells outside go
-// through ``grouped_tail_kernel_fp8<Layout::RRR>`` (scalar fp32 with the
-// same N-tail / K-tail correction logic as RCR — see template body).
-//
-// Per-group M_g must still be a BLOCK_SIZE multiple (the persistent
-// loop derives ``bpr_g = M_g / BLOCK_SIZE`` and steps in HB units);
-// other invariants are identical to the RCR path.
+// Mirror of ``dispatch_grouped_rcr``: the persistent ``grouped_rrr_kernel``
+// covers the aligned interior; the N-tail partial column tile is captured
+// by ``g.bpc = ceil_div(g.n, BLOCK_SIZE)`` + N_MASKED_STORE; the K-tail
+// (K_rem == 64) folds into the main kernel via FUSED_KTAIL=true. Per-group
+// M_g uses the per-group shifted gl view + m_limit masked store, so any
+// M_g (incl. < BLOCK_SIZE) is supported.
 //
 // =========================================================================
 // Perf ceiling: dgrad ~1.03x of Triton (overall avg, B={4,16}, M={2K,4K}).
