@@ -1003,16 +1003,13 @@ __device__ __forceinline__ void store_c_tile_mn_masked_grouped(
     }
 }
 
-// Runtime K-specialization: when KI_HINT>0 it matches g.ki exactly, enabling
-// the compiler to fully unroll or uniformly unroll the main loop without
-// branch overhead and with register allocation tuned to the known loop count.
-template<Layout L, int KI_HINT = 0>
+template<Layout L>
 __global__ __launch_bounds__(_NUM_THREADS, MIN_BLOCKS_PER_CU)
 void gemm_kernel(const layout_globals g) {
     int bid = blockIdx.x;
     int br, bc;
     gemm_compute_block_coords(bid, g.bpr, g.bpc, g.group_m, br, bc);
-    const int ki_dyn = (KI_HINT > 0) ? KI_HINT : g.ki;
+    const int ki_dyn = g.ki;
     if (br >= g.bpr || bc >= g.bpc || ki_dyn <= 0) {
         return;
     }
@@ -1601,15 +1598,12 @@ __global__ void gemm_tail_kernel(const layout_globals g) {
     }
 }
 
-// Single dynamic K instantiation (KI_HINT=0). Experiments showed that
-// compile-time KI specialization causes VGPR spills (64+ bytes/lane of
-// scratch) because the two-tile main loop body is ~60 lines of asm and,
-// when combined with `#pragma unroll RCR_MAIN_UNROLL` and a constexpr
-// upper bound, the compiler emits many copies that exceed the register
-// budget. The dynamic path holds up at 0 spills across all three layouts.
-template __global__ void gemm_kernel<Layout::RCR, 0>(const layout_globals);
-template __global__ void gemm_kernel<Layout::RRR, 0>(const layout_globals);
-template __global__ void gemm_kernel<Layout::CRR, 0>(const layout_globals);
+// Single dynamic-K instantiation per layout: compile-time KI specialization
+// caused VGPR spills (the unrolled two-tile loop body exceeded the register
+// budget when KI was constexpr); the dynamic path holds at 0 spills.
+template __global__ void gemm_kernel<Layout::RCR>(const layout_globals);
+template __global__ void gemm_kernel<Layout::RRR>(const layout_globals);
+template __global__ void gemm_kernel<Layout::CRR>(const layout_globals);
 
 template __global__ void gemm_tail_kernel<Layout::RCR>(const layout_globals);
 template __global__ void gemm_tail_kernel<Layout::RRR>(const layout_globals);
@@ -1661,7 +1655,7 @@ __device__ __forceinline__ float resolve_combined_scale_grp(const GL &g) {
     return sa_dev * sb_dev;
 }
 
-template<int KI_HINT = 0, bool N_MASKED_STORE = false, bool FUSED_KTAIL = false>
+template<bool N_MASKED_STORE = false, bool FUSED_KTAIL = false>
 __global__ __launch_bounds__(_NUM_THREADS, 1)
 void grouped_rcr_kernel(const grouped_layout_globals g) {
     using ST_rcr = ST_v2;
@@ -1688,7 +1682,7 @@ void grouped_rcr_kernel(const grouped_layout_globals g) {
     int wm = warpid() / WARPS_N;
     int wn = warpid() % WARPS_N;
     const int num_pid_n = g.bpc;
-    const int ki_dyn   = (KI_HINT > 0) ? KI_HINT : g.ki;
+    const int ki_dyn   = g.ki;
 
     if (threadIdx.x <= g.G && threadIdx.x < MAX_G_PLUS_1) {
         s_offs[threadIdx.x] = static_cast<int>(g.group_offs[threadIdx.x]);
@@ -2060,10 +2054,10 @@ void grouped_rcr_kernel(const grouped_layout_globals g) {
     }
 }
 
-template __global__ void grouped_rcr_kernel<0, false, false>(const grouped_layout_globals);
-template __global__ void grouped_rcr_kernel<0, true , false>(const grouped_layout_globals);
-template __global__ void grouped_rcr_kernel<0, false, true >(const grouped_layout_globals);
-template __global__ void grouped_rcr_kernel<0, true , true >(const grouped_layout_globals);
+template __global__ void grouped_rcr_kernel<false, false>(const grouped_layout_globals);
+template __global__ void grouped_rcr_kernel<true , false>(const grouped_layout_globals);
+template __global__ void grouped_rcr_kernel<false, true >(const grouped_layout_globals);
+template __global__ void grouped_rcr_kernel<true , true >(const grouped_layout_globals);
 
 // =============================================================================
 // BLOCK_N=128 RCR variant.
@@ -2076,7 +2070,7 @@ template __global__ void grouped_rcr_kernel<0, true , true >(const grouped_layou
 // Caller contract: host must set g.bpc = ceil_div(g.n, 128).
 // All M-side dims, K-block, accumulator types unchanged from BN=256 kernel.
 // =============================================================================
-template<int KI_HINT = 0, bool N_MASKED_STORE = false, bool FUSED_KTAIL = false>
+template<bool N_MASKED_STORE = false, bool FUSED_KTAIL = false>
 __global__ __launch_bounds__(_NUM_THREADS, 1)
 void grouped_rcr_kernel_bn128(const grouped_layout_globals g) {
     using ST_rcr = ST_v2;
@@ -2099,7 +2093,7 @@ void grouped_rcr_kernel_bn128(const grouped_layout_globals g) {
     int wm = warpid() / WARPS_N;
     int wn = warpid() % WARPS_N;
     const int num_pid_n = g.bpc;          // host: ceil_div(g.n, 128)
-    const int ki_dyn   = (KI_HINT > 0) ? KI_HINT : g.ki;
+    const int ki_dyn   = g.ki;
 
     if (threadIdx.x <= g.G && threadIdx.x < MAX_G_PLUS_1) {
         s_offs[threadIdx.x] = static_cast<int>(g.group_offs[threadIdx.x]);
@@ -2401,10 +2395,10 @@ void grouped_rcr_kernel_bn128(const grouped_layout_globals g) {
     }
 }
 
-template __global__ void grouped_rcr_kernel_bn128<0, false, false>(const grouped_layout_globals);
-template __global__ void grouped_rcr_kernel_bn128<0, true , false>(const grouped_layout_globals);
-template __global__ void grouped_rcr_kernel_bn128<0, false, true >(const grouped_layout_globals);
-template __global__ void grouped_rcr_kernel_bn128<0, true , true >(const grouped_layout_globals);
+template __global__ void grouped_rcr_kernel_bn128<false, false>(const grouped_layout_globals);
+template __global__ void grouped_rcr_kernel_bn128<true , false>(const grouped_layout_globals);
+template __global__ void grouped_rcr_kernel_bn128<false, true >(const grouped_layout_globals);
+template __global__ void grouped_rcr_kernel_bn128<true , true >(const grouped_layout_globals);
 
 // =============================================================================
 // BLOCK_M=128 BLOCK_N=128 BLOCK_K=128 RCR variant (b128 = "BLK=128 both M, N").
@@ -2421,7 +2415,7 @@ template __global__ void grouped_rcr_kernel_bn128<0, true , true >(const grouped
 // INSIDE the load_b/load_a + mma sequence (after load_b/load_a but BEFORE
 // the wait+mma), to avoid end-of-iter overwrite hazard.
 // =============================================================================
-template<int KI_HINT = 0, bool N_MASKED_STORE = false, bool FUSED_KTAIL = false>
+template<bool N_MASKED_STORE = false, bool FUSED_KTAIL = false>
 __global__ __launch_bounds__(_NUM_THREADS, 1)
 void grouped_rcr_kernel_b128(const grouped_layout_globals g) {
     using ST_rcr = ST_v2;             // 128 rows (HB) × 128 cols (BK)
@@ -2444,7 +2438,7 @@ void grouped_rcr_kernel_b128(const grouped_layout_globals g) {
     int wm = warpid() / WARPS_N;
     int wn = warpid() % WARPS_N;
     const int num_pid_n = g.bpc;          // host: ceil_div(g.n, 128)
-    const int ki_dyn   = (KI_HINT > 0) ? KI_HINT : g.ki;
+    const int ki_dyn   = g.ki;
 
     if (threadIdx.x <= g.G && threadIdx.x < MAX_G_PLUS_1) {
         s_offs[threadIdx.x] = static_cast<int>(g.group_offs[threadIdx.x]);
@@ -2709,10 +2703,10 @@ void grouped_rcr_kernel_b128(const grouped_layout_globals g) {
     }
 }
 
-template __global__ void grouped_rcr_kernel_b128<0, false, false>(const grouped_layout_globals);
-template __global__ void grouped_rcr_kernel_b128<0, true , false>(const grouped_layout_globals);
-template __global__ void grouped_rcr_kernel_b128<0, false, true >(const grouped_layout_globals);
-template __global__ void grouped_rcr_kernel_b128<0, true , true >(const grouped_layout_globals);
+template __global__ void grouped_rcr_kernel_b128<false, false>(const grouped_layout_globals);
+template __global__ void grouped_rcr_kernel_b128<true , false>(const grouped_layout_globals);
+template __global__ void grouped_rcr_kernel_b128<false, true >(const grouped_layout_globals);
+template __global__ void grouped_rcr_kernel_b128<true , true >(const grouped_layout_globals);
 
 // Force-instantiate. Compare resource report against the R57 step-2A
 // baseline (V256 / A256 / Spill 0 / Scratch 0 — placeholder G::load).
@@ -2720,7 +2714,7 @@ template __global__ void grouped_rcr_kernel_b128<0, true , true >(const grouped_
 #ifndef FP8_RRR_FUSE_PROBE
 #define FP8_RRR_FUSE_PROBE 0
 #endif
-template<int KI_HINT = 0, bool N_MASKED_STORE = false, bool FUSED_KTAIL = false>
+template<bool N_MASKED_STORE = false, bool FUSED_KTAIL = false>
 __global__ __launch_bounds__(_NUM_THREADS, 1)
 void grouped_rrr_kernel(const grouped_layout_globals g) {
     __shared__ ST_row As[2][2];
@@ -2754,7 +2748,7 @@ void grouped_rrr_kernel(const grouped_layout_globals g) {
     int wm = warpid() / WARPS_N;
     int wn = warpid() % WARPS_N;
     const int num_pid_n = g.bpc;
-    const int ki_dyn   = (KI_HINT > 0) ? KI_HINT : g.ki;
+    const int ki_dyn   = g.ki;
 
     if (threadIdx.x <= g.G && threadIdx.x < MAX_G_PLUS_1) {
         s_offs[threadIdx.x] = static_cast<int>(g.group_offs[threadIdx.x]);
@@ -3365,10 +3359,10 @@ void grouped_rrr_kernel(const grouped_layout_globals g) {
     }
 }
 
-template __global__ void grouped_rrr_kernel<0, false, false>(const grouped_layout_globals);
-template __global__ void grouped_rrr_kernel<0, true , false>(const grouped_layout_globals);
-template __global__ void grouped_rrr_kernel<0, false, true >(const grouped_layout_globals);
-template __global__ void grouped_rrr_kernel<0, true , true >(const grouped_layout_globals);
+template __global__ void grouped_rrr_kernel<false, false>(const grouped_layout_globals);
+template __global__ void grouped_rrr_kernel<true , false>(const grouped_layout_globals);
+template __global__ void grouped_rrr_kernel<false, true >(const grouped_layout_globals);
+template __global__ void grouped_rrr_kernel<true , true >(const grouped_layout_globals);
 
 // =============================================================================
 // Grouped tail kernel — scalar fp32 fixup for cells the main grouped kernel
@@ -4379,43 +4373,43 @@ void dispatch_grouped_rcr(grouped_layout_globals g) {
             // BLK_M=BLK_N=128 (b128 — single-mma per K-iter)
             if (fuse_ktail_active) {
                 if (n_aligned) {
-                    grouped_rcr_kernel_b128<0, false, true><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+                    grouped_rcr_kernel_b128<false, true><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
                 } else {
-                    grouped_rcr_kernel_b128<0, true , true><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+                    grouped_rcr_kernel_b128<true , true><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
                 }
             } else {
                 if (n_aligned) {
-                    grouped_rcr_kernel_b128<0, false, false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+                    grouped_rcr_kernel_b128<false, false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
                 } else {
-                    grouped_rcr_kernel_b128<0, true , false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+                    grouped_rcr_kernel_b128<true , false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
                 }
             }
         } else if (block_choice == 128) {
             // BN=128, BM=256 (bn128)
             if (fuse_ktail_active) {
                 if (n_aligned) {
-                    grouped_rcr_kernel_bn128<0, false, true><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+                    grouped_rcr_kernel_bn128<false, true><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
                 } else {
-                    grouped_rcr_kernel_bn128<0, true , true><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+                    grouped_rcr_kernel_bn128<true , true><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
                 }
             } else {
                 if (n_aligned) {
-                    grouped_rcr_kernel_bn128<0, false, false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+                    grouped_rcr_kernel_bn128<false, false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
                 } else {
-                    grouped_rcr_kernel_bn128<0, true , false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+                    grouped_rcr_kernel_bn128<true , false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
                 }
             }
         } else if (fuse_ktail_active) {
             if (n_aligned) {
-                grouped_rcr_kernel<0, false, true><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+                grouped_rcr_kernel<false, true><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
             } else {
-                grouped_rcr_kernel<0, true , true><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+                grouped_rcr_kernel<true , true><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
             }
         } else {
             if (n_aligned) {
-                grouped_rcr_kernel<0, false, false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+                grouped_rcr_kernel<false, false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
             } else {
-                grouped_rcr_kernel<0, true , false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+                grouped_rcr_kernel<true , false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
             }
         }
     } else {
@@ -4568,17 +4562,17 @@ void dispatch_grouped_rrr(grouped_layout_globals g) {
     if (g.bpc > 0 && g.ki > 0) {
         if (fuse_ktail_active) {
             if (n_aligned) {
-                grouped_rrr_kernel<0, false, true>
+                grouped_rrr_kernel<false, true>
                     <<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
             } else {
-                grouped_rrr_kernel<0, true, true>
+                grouped_rrr_kernel<true, true>
                     <<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
             }
         } else if (n_aligned) {
-            grouped_rrr_kernel<0, false, false>
+            grouped_rrr_kernel<false, false>
                 <<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
         } else {
-            grouped_rrr_kernel<0, true, false>
+            grouped_rrr_kernel<true, false>
                 <<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
         }
     } else {
@@ -4675,7 +4669,6 @@ __device__ __forceinline__ float resolve_combined_scale_var_k_fp8(
     return sa * sb;
 }
 
-template<int KI_HINT = 0>
 __global__ __launch_bounds__(_NUM_THREADS, 1)
 void grouped_var_k_kernel_fp8(const grouped_var_k_layout_globals_fp8 g) {
     using ST_crr_a = ST_v2a;
@@ -4974,9 +4967,6 @@ void grouped_var_k_kernel_fp8(const grouped_var_k_layout_globals_fp8 g) {
     }
 }
 
-template __global__ void grouped_var_k_kernel_fp8<0>(
-    const grouped_var_k_layout_globals_fp8);
-
 void dispatch_grouped_var_k_fp8(grouped_var_k_layout_globals_fp8 g) {
     g.n = static_cast<int>(g.a.cols());
     g.k = static_cast<int>(g.b.cols());
@@ -5014,7 +5004,7 @@ void dispatch_grouped_var_k_fp8(grouped_var_k_layout_globals_fp8 g) {
         g.chunk_size = env_chunk_size;
     }
 
-    grouped_var_k_kernel_fp8<0><<<dim3(slots_dispatch), g.block(), 0, g.stream>>>(g);
+    grouped_var_k_kernel_fp8<<<dim3(slots_dispatch), g.block(), 0, g.stream>>>(g);
 }
 
 template<Layout L>
@@ -5044,7 +5034,7 @@ void dispatch(layout_globals g) {
     // bound rather than faulting on unmapped memory.
     //
     // Conditions to enable ``ceil_div`` bpc (mirror BF16):
-    //   1. The 8-wave generic ``gemm_kernel<L, 0>`` is selected. The
+    //   1. The 8-wave generic ``gemm_kernel<L>`` is selected. The
     //      4-wave RCR fast path uses ``rcr_4w::prepare_g2s`` which still
     //      builds tile-local SRDs and is NOT yet refactored — keep its
     //      ``bpc = fast_n/BLK`` (its kernel is selected only for very
@@ -5059,7 +5049,7 @@ void dispatch(layout_globals g) {
             g.bpc = kittens::ceil_div(g.n, BLK);
             main_covers_n = true;
         }
-        gemm_kernel<L, 0><<<g.grid(), g.block(), 0, g.stream>>>(g);
+        gemm_kernel<L><<<g.grid(), g.block(), 0, g.stream>>>(g);
     } else {
         g.fast_k = 0;
         g.ki = 0;
