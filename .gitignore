@@ -23,3 +23,25 @@ build/
 *.so
 *.amdgcn
 utils/__pycache__/
+*x86_64-unknown-linux-gnu*
+*amdhsa.hipfb
+*amd-amdhsa-gfx950.hipi
+*amd-amdhsa-gfx950.bc
+data_logs/
+*.log
+scripts/.fleet_*_cache.json
+
+
+!CMakeLists.txt
+auto_optimize_logs/
+.claude/
+
+# Compiler temp dumps from --save-temps
+*-hip-amdgcn-amd-amdhsa-*.s
+*-hip-amdgcn-amd-amdhsa-*.bc
+*-hip-amdgcn-amd-amdhsa-*.hipi
+*-hip-amdgcn-amd-amdhsa-*.out
+*-hipspv-amdgcn-amd-amdhsa.bc
+*-hipspv-amdgcn-amd-amdhsa.hipi
+a.out
+scripts/.bench_blockwise_triton_target_shapes_cache.json
