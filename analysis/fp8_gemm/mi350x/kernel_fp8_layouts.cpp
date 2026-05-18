@@ -1901,7 +1901,11 @@ void grouped_rcr_kernel(
         #pragma unroll 1
         for (int gi = 0; gi < g.G; ++gi) {
             const int next = s_offs[gi + 1];
-            t += ((next - prev) / BLOCK_SIZE) * num_pid_n;
+            // ceil_div: partial last M-tile (M_g % BLOCK_SIZE != 0) gets its
+            // own (br, bc) tile so small groups (M_g < BLOCK_SIZE) emit
+            // output via the per-group shifted view + m_limit masked store
+            // below. Floor div silently skipped the entire group → zeros.
+            t += kittens::ceil_div(next - prev, BLOCK_SIZE) * num_pid_n;
             s_cum_tiles[gi + 1] = t;
             prev = next;
         }
@@ -1945,7 +1949,11 @@ void grouped_rcr_kernel(
         const int local_tile = gt - tile_start;
         const int m_start_g = s_offs[group_idx];
         const int M_g = s_offs[group_idx + 1] - m_start_g;
-        const int bpr_g = M_g / BLOCK_SIZE;
+        // ceil_div: partial last M-tile (M_g % BLOCK_SIZE != 0) gets its
+        // own br; store mask drops OOB rows via m_limit below. With floor
+        // division, M_g < BLOCK_SIZE → bpr_g=0 → every br fails the bpr_g
+        // gate → entire group silently produces zeros.
+        const int bpr_g = kittens::ceil_div(M_g, BLOCK_SIZE);
 
         // Group-by-M / group-by-N swizzle (matches dense kernel mapping).
         int br, bc;
@@ -1970,13 +1978,40 @@ void grouped_rcr_kernel(
         }
         if (br >= bpr_g || bc >= num_pid_n) continue;
 
-        // Coord shifts:
-        //   ST_A: st_fp8e4m3<HB=128, BK=128, ...> → row-coord unit = HB = 128.
-        //         m_subtile_A = m_start_g / HB.
-        //   C (RT store): rt_fl<RBM=64, RBN=32, ...> → row-coord unit = RBM=64.
-        //         m_subtile_C = m_start_g / RBM.
-        const int m_subtile_A = m_start_g / HB;
-        const int m_subtile_C = m_start_g / RBM;
+        // Per-group shifted GL views: copy g.a / g.c and patch raw_ptr +
+        // rows_internal so coord (0,*,*,*) resolves relative to the group's
+        // M slice. ``rcr_8w_load_hoist`` builds its SRD from
+        // ``src.batch()*depth()*rows()*cols()`` — with rows_internal=M_g
+        // the bound is group-local, so A sub-tile loads that would otherwise
+        // straddle the next group's M-rows (br*2+1 sub-tile when M_g <=
+        // HB) hardware-clamp to 0 and the accumulator stays clean.
+        // store_c_tile_mn_masked_grouped + n_limit=g.n masks the partial
+        // last M / N tile output cells. Lets m_subtile_A=0 / m_subtile_C=0,
+        // m_limit=M_g (group-local).
+        // NOTE: depends on m_start_g being HB-aligned (= 128) and RBM-aligned
+        // (= 64) for the row_stride pointer arithmetic to stay element-aligned;
+        // unbalanced shapes with arbitrary byte-level m_start_g are a
+        // follow-up (mirrors the bf16 byte-level addressing work).
+        // raw_ptr type is dtype-dependent (fp8e4m3* in the un-fused path,
+        // bf16* in FUSE_ACT=true). Use decltype so the cast tracks the
+        // gl<>'s declared element type for both template instantiations.
+        using a_ptr_t = decltype(g.a.raw_ptr);
+        using c_ptr_t = decltype(g.c.raw_ptr);
+        const auto* a_byte_base = reinterpret_cast<const uint8_t*>(g.a.raw_ptr);
+        const auto* c_byte_base = reinterpret_cast<const uint8_t*>(g.c.raw_ptr);
+        const int a_row_stride_bytes = static_cast<int>(g.a.template stride<2>()) * sizeof(*g.a.raw_ptr);
+        const int c_row_stride_bytes = static_cast<int>(g.c.template stride<2>()) * sizeof(*g.c.raw_ptr);
+        auto a_gl_g = g.a;
+        a_gl_g.raw_ptr = reinterpret_cast<a_ptr_t>(
+            const_cast<uint8_t*>(a_byte_base + m_start_g * a_row_stride_bytes));
+        a_gl_g.rows_internal = M_g;
+        auto c_gl_g = g.c;
+        c_gl_g.raw_ptr = reinterpret_cast<c_ptr_t>(
+            const_cast<uint8_t*>(c_byte_base + m_start_g * c_row_stride_bytes));
+        c_gl_g.rows_internal = M_g;
+        constexpr int m_subtile_A = 0;
+        constexpr int m_subtile_C = 0;
+        const int m_limit = M_g;  // group-local now that c_gl_g is shifted
 
         auto a_co = [&](int s, int k) -> coord<ST_rcr> {
             return {0, 0, m_subtile_A + s, k};
@@ -2004,19 +2039,19 @@ void grouped_rcr_kernel(
         int tic = 0, toc = 1;
         // Prologue: load tile-0 + tile-1 (mirrors gemm_kernel<RCR> 1040-1054).
         rcr_8w_load_hoist<_NUM_THREADS>(b_tile(tic, 0), g.b, b_co(bc*2,   0), soB);
-        if constexpr (FUSE_ACT) fused_act_round5_compile_test::rcr_8w_load_hoist_fused_act<_NUM_THREADS>(As[tic][0], g.a, a_co(br*2,   0), soA, scale_a_inv);
-        else                    rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0],    g.a, a_co(br*2,   0), soA);
+        if constexpr (FUSE_ACT) fused_act_round5_compile_test::rcr_8w_load_hoist_fused_act<_NUM_THREADS>(As[tic][0], a_gl_g, a_co(br*2,   0), soA, scale_a_inv);
+        else                    rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0],    a_gl_g, a_co(br*2,   0), soA);
         rcr_8w_load_hoist<_NUM_THREADS>(b_tile(tic, 1), g.b, b_co(bc*2+1, 0), soB);
-        if constexpr (FUSE_ACT) fused_act_round5_compile_test::rcr_8w_load_hoist_fused_act<_NUM_THREADS>(As[tic][1], g.a, a_co(br*2+1, 0), soA, scale_a_inv);
-        else                    rcr_8w_load_hoist<_NUM_THREADS>(As[tic][1],    g.a, a_co(br*2+1, 0), soA);
+        if constexpr (FUSE_ACT) fused_act_round5_compile_test::rcr_8w_load_hoist_fused_act<_NUM_THREADS>(As[tic][1], a_gl_g, a_co(br*2+1, 0), soA, scale_a_inv);
+        else                    rcr_8w_load_hoist<_NUM_THREADS>(As[tic][1],    a_gl_g, a_co(br*2+1, 0), soA);
 
         if (wm == 1) __builtin_amdgcn_s_barrier();
         TK_WAIT_VMCNT(RCR_INIT0_VMCNT);
         __builtin_amdgcn_s_barrier();
 
         rcr_8w_load_hoist<_NUM_THREADS>(b_tile(toc, 0), g.b, b_co(bc*2,   1), soB);
-        if constexpr (FUSE_ACT) fused_act_round5_compile_test::rcr_8w_load_hoist_fused_act<_NUM_THREADS>(As[toc][0], g.a, a_co(br*2,   1), soA, scale_a_inv);
-        else                    rcr_8w_load_hoist<_NUM_THREADS>(As[toc][0],    g.a, a_co(br*2,   1), soA);
+        if constexpr (FUSE_ACT) fused_act_round5_compile_test::rcr_8w_load_hoist_fused_act<_NUM_THREADS>(As[toc][0], a_gl_g, a_co(br*2,   1), soA, scale_a_inv);
+        else                    rcr_8w_load_hoist<_NUM_THREADS>(As[toc][0],    a_gl_g, a_co(br*2,   1), soA);
         rcr_8w_load_hoist<_NUM_THREADS>(b_tile(toc, 1), g.b, b_co(bc*2+1, 1), soB);
 
         TK_WAIT_VMCNT(RCR_INIT1_VMCNT);
@@ -2026,8 +2061,8 @@ void grouped_rcr_kernel(
         for (int k = 0; k < ki_dyn - 2; k++, tic ^= 1, toc ^= 1) {
             load_b(b0, b_tile(tic, 0), wn);
             load_a(a, As[tic][0], wm);
-            if constexpr (FUSE_ACT) fused_act_round5_compile_test::rcr_8w_load_hoist_fused_act<_NUM_THREADS>(As[toc][1], g.a, a_co(br*2+1, k+1), soA, scale_a_inv);
-            else                    rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], g.a, a_co(br*2+1, k+1), soA);
+            if constexpr (FUSE_ACT) fused_act_round5_compile_test::rcr_8w_load_hoist_fused_act<_NUM_THREADS>(As[toc][1], a_gl_g, a_co(br*2+1, k+1), soA, scale_a_inv);
+            else                    rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], a_gl_g, a_co(br*2+1, k+1), soA);
             TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); rcr_mma_agpr_t<!FUSED_KTAIL>(cA, a, b0); __builtin_amdgcn_s_setprio(0);
@@ -2041,8 +2076,8 @@ void grouped_rcr_kernel(
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
-            if constexpr (FUSE_ACT) fused_act_round5_compile_test::rcr_8w_load_hoist_fused_act<_NUM_THREADS>(As[tic][0], g.a, a_co(br*2, k+2), soA, scale_a_inv);
-            else                    rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0], g.a, a_co(br*2, k+2), soA);
+            if constexpr (FUSE_ACT) fused_act_round5_compile_test::rcr_8w_load_hoist_fused_act<_NUM_THREADS>(As[tic][0], a_gl_g, a_co(br*2, k+2), soA, scale_a_inv);
+            else                    rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0], a_gl_g, a_co(br*2, k+2), soA);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); rcr_mma_agpr_t<!FUSED_KTAIL>(cC, a, b0); __builtin_amdgcn_s_setprio(0);
@@ -2058,8 +2093,8 @@ void grouped_rcr_kernel(
         {
             load_b(b0, b_tile(tic, 0), wn);
             load_a(a, As[tic][0], wm);
-            if constexpr (FUSE_ACT) fused_act_round5_compile_test::rcr_8w_load_hoist_fused_act<_NUM_THREADS>(As[toc][1], g.a, a_co(br*2+1, ki_dyn-1), soA, scale_a_inv);
-            else                    rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], g.a, a_co(br*2+1, ki_dyn-1), soA);
+            if constexpr (FUSE_ACT) fused_act_round5_compile_test::rcr_8w_load_hoist_fused_act<_NUM_THREADS>(As[toc][1], a_gl_g, a_co(br*2+1, ki_dyn-1), soA, scale_a_inv);
+            else                    rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], a_gl_g, a_co(br*2+1, ki_dyn-1), soA);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); rcr_mma_agpr_t<!FUSED_KTAIL>(cA, a, b0); __builtin_amdgcn_s_setprio(0);
@@ -2216,36 +2251,20 @@ void grouped_rcr_kernel(
         const int r1 = __builtin_amdgcn_readfirstlane(m_subtile_C + br*WARPS_M*2+WARPS_M+wm);
         const int c0 = __builtin_amdgcn_readfirstlane(bc*WARPS_N*2+wn);
         const int c1 = __builtin_amdgcn_readfirstlane(bc*WARPS_N*2+WARPS_N+wn);
-        if constexpr (N_MASKED_STORE) {
-            if ((bc + 1) * BLOCK_SIZE <= g.n) {
-                mul(cA, cA, combined_scale);
-                store(g.c, cA, {0, 0, r0, c0});
-                mul(cB, cB, combined_scale);
-                store(g.c, cB, {0, 0, r0, c1});
-                mul(cC, cC, combined_scale);
-                store(g.c, cC, {0, 0, r1, c0});
-                mul(cD, cD, combined_scale);
-                store(g.c, cD, {0, 0, r1, c1});
-            } else {
-                mul(cA, cA, combined_scale);
-                store_c_tile_n_masked(g.c, cA, r0, c0, g.n);
-                mul(cB, cB, combined_scale);
-                store_c_tile_n_masked(g.c, cB, r0, c1, g.n);
-                mul(cC, cC, combined_scale);
-                store_c_tile_n_masked(g.c, cC, r1, c0, g.n);
-                mul(cD, cD, combined_scale);
-                store_c_tile_n_masked(g.c, cD, r1, c1, g.n);
-            }
-        } else {
-            mul(cA, cA, combined_scale);
-            store(g.c, cA, {0, 0, r0, c0});
-            mul(cB, cB, combined_scale);
-            store(g.c, cB, {0, 0, r0, c1});
-            mul(cC, cC, combined_scale);
-            store(g.c, cC, {0, 0, r1, c0});
-            mul(cD, cD, combined_scale);
-            store(g.c, cD, {0, 0, r1, c1});
-        }
+        // Masked store: m_limit drops rows past the partial-last-M-tile
+        // (M_g % BLOCK_SIZE != 0 case introduced by the ceil_div bpr_g
+        // above); n_limit drops cols past the partial-last-N-tile (covered
+        // by N_MASKED_STORE on aligned shapes too). group_idx=0 because
+        // g.c is [1, 1, M_total, N] flat — absolute m_limit + r0/r1
+        // already encode the per-group position via m_subtile_C.
+        mul(cA, cA, combined_scale);
+        store_c_tile_mn_masked_grouped(c_gl_g, cA, /*group_idx=*/0, r0, c0, m_limit, g.n);
+        mul(cB, cB, combined_scale);
+        store_c_tile_mn_masked_grouped(c_gl_g, cB, /*group_idx=*/0, r0, c1, m_limit, g.n);
+        mul(cC, cC, combined_scale);
+        store_c_tile_mn_masked_grouped(c_gl_g, cC, /*group_idx=*/0, r1, c0, m_limit, g.n);
+        mul(cD, cD, combined_scale);
+        store_c_tile_mn_masked_grouped(c_gl_g, cD, /*group_idx=*/0, r1, c1, m_limit, g.n);
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
@@ -2307,7 +2326,9 @@ void grouped_rcr_kernel_bn128(const grouped_layout_globals g) {
         #pragma unroll 1
         for (int gi = 0; gi < g.G; ++gi) {
             const int next = s_offs[gi + 1];
-            t += ((next - prev) / BLOCK_SIZE) * num_pid_n;   // M still 256
+            // ceil_div: partial last M-tile (M_g % BLOCK_SIZE != 0) gets
+            // its own br; store mask drops OOB rows. Mirrors main RCR.
+            t += kittens::ceil_div(next - prev, BLOCK_SIZE) * num_pid_n;
             s_cum_tiles[gi + 1] = t;
             prev = next;
         }
@@ -2337,7 +2358,7 @@ void grouped_rcr_kernel_bn128(const grouped_layout_globals g) {
         const int local_tile = gt - tile_start;
         const int m_start_g = s_offs[group_idx];
         const int M_g = s_offs[group_idx + 1] - m_start_g;
-        const int bpr_g = M_g / BLOCK_SIZE;
+        const int bpr_g = kittens::ceil_div(M_g, BLOCK_SIZE);
 
         int br, bc;
         if (g.bpc > bpr_g) {
@@ -2361,8 +2382,25 @@ void grouped_rcr_kernel_bn128(const grouped_layout_globals g) {
         }
         if (br >= bpr_g || bc >= num_pid_n) continue;
 
-        const int m_subtile_A = m_start_g / HB;
-        const int m_subtile_C = m_start_g / RBM;
+        // Per-group shifted GL views — see grouped_rcr_kernel for full
+        // rationale. Lets m_subtile_A=0 / m_subtile_C=0 + m_limit=M_g.
+        using a_ptr_t = decltype(g.a.raw_ptr);
+        using c_ptr_t = decltype(g.c.raw_ptr);
+        const auto* a_byte_base = reinterpret_cast<const uint8_t*>(g.a.raw_ptr);
+        const auto* c_byte_base = reinterpret_cast<const uint8_t*>(g.c.raw_ptr);
+        const int a_row_stride_bytes = static_cast<int>(g.a.template stride<2>()) * sizeof(*g.a.raw_ptr);
+        const int c_row_stride_bytes = static_cast<int>(g.c.template stride<2>()) * sizeof(*g.c.raw_ptr);
+        auto a_gl_g = g.a;
+        a_gl_g.raw_ptr = reinterpret_cast<a_ptr_t>(
+            const_cast<uint8_t*>(a_byte_base + m_start_g * a_row_stride_bytes));
+        a_gl_g.rows_internal = M_g;
+        auto c_gl_g = g.c;
+        c_gl_g.raw_ptr = reinterpret_cast<c_ptr_t>(
+            const_cast<uint8_t*>(c_byte_base + m_start_g * c_row_stride_bytes));
+        c_gl_g.rows_internal = M_g;
+        constexpr int m_subtile_A = 0;
+        constexpr int m_subtile_C = 0;
+        const int m_limit = M_g;
 
         auto a_co = [&](int s, int k) -> coord<ST_rcr> {
             return {0, 0, m_subtile_A + s, k};
@@ -2387,15 +2425,15 @@ void grouped_rcr_kernel_bn128(const grouped_layout_globals g) {
         int tic = 0, toc = 1;
         // Prologue.
         rcr_8w_load_hoist<_NUM_THREADS>(Bs[tic][0], g.b, b_co(bc, 0), soB);
-        rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0], g.a, a_co(br*2,   0), soA);
-        rcr_8w_load_hoist<_NUM_THREADS>(As[tic][1], g.a, a_co(br*2+1, 0), soA);
+        rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0], a_gl_g, a_co(br*2,   0), soA);
+        rcr_8w_load_hoist<_NUM_THREADS>(As[tic][1], a_gl_g, a_co(br*2+1, 0), soA);
 
         if (wm == 1) __builtin_amdgcn_s_barrier();
         TK_WAIT_VMCNT(0);
         __builtin_amdgcn_s_barrier();
 
         rcr_8w_load_hoist<_NUM_THREADS>(Bs[toc][0], g.b, b_co(bc, 1), soB);
-        rcr_8w_load_hoist<_NUM_THREADS>(As[toc][0], g.a, a_co(br*2,   1), soA);
+        rcr_8w_load_hoist<_NUM_THREADS>(As[toc][0], a_gl_g, a_co(br*2,   1), soA);
 
         TK_WAIT_VMCNT(0);
         __builtin_amdgcn_s_barrier();
@@ -2410,7 +2448,7 @@ void grouped_rcr_kernel_bn128(const grouped_layout_globals g) {
         for (int k = 0; k < ki_dyn - 2; k++, tic ^= 1, toc ^= 1) {
             load_b(b0, Bs[tic][0], wn);
             load_a(a, As[tic][0], wm);
-            rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], g.a, a_co(br*2+1, k+1), soA);
+            rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], a_gl_g, a_co(br*2+1, k+1), soA);
             TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); rcr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
@@ -2422,7 +2460,7 @@ void grouped_rcr_kernel_bn128(const grouped_layout_globals g) {
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
-            rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0], g.a, a_co(br*2, k+2), soA);
+            rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0], a_gl_g, a_co(br*2, k+2), soA);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); rcr_mma(cC, a, b0); __builtin_amdgcn_s_setprio(0);
@@ -2435,7 +2473,7 @@ void grouped_rcr_kernel_bn128(const grouped_layout_globals g) {
         {
             load_b(b0, Bs[tic][0], wn);
             load_a(a, As[tic][0], wm);
-            rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], g.a, a_co(br*2+1, ki_dyn-1), soA);
+            rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], a_gl_g, a_co(br*2+1, ki_dyn-1), soA);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); rcr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
@@ -2561,24 +2599,13 @@ void grouped_rcr_kernel_bn128(const grouped_layout_globals g) {
         const int r1 = __builtin_amdgcn_readfirstlane(m_subtile_C + br*WARPS_M*2+WARPS_M+wm);
         // BN=128: c0 in RBN units = bc*WARPS_N+wn (was bc*WARPS_N*2+wn for BN=256).
         const int c0 = __builtin_amdgcn_readfirstlane(bc*WARPS_N+wn);
-        if constexpr (N_MASKED_STORE) {
-            if ((bc + 1) * HB <= g.n) {     // BN=128 = HB
-                mul(cA, cA, combined_scale);
-                store(g.c, cA, {0, 0, r0, c0});
-                mul(cC, cC, combined_scale);
-                store(g.c, cC, {0, 0, r1, c0});
-            } else {
-                mul(cA, cA, combined_scale);
-                store_c_tile_n_masked(g.c, cA, r0, c0, g.n);
-                mul(cC, cC, combined_scale);
-                store_c_tile_n_masked(g.c, cC, r1, c0, g.n);
-            }
-        } else {
-            mul(cA, cA, combined_scale);
-            store(g.c, cA, {0, 0, r0, c0});
-            mul(cC, cC, combined_scale);
-            store(g.c, cC, {0, 0, r1, c0});
-        }
+        // Masked store via per-group shifted view + m_limit/n_limit; mirrors
+        // main RCR kernel. N_MASKED_STORE template kept for ABI parity but
+        // m_limit/n_limit already cover both partial-M and partial-N cells.
+        mul(cA, cA, combined_scale);
+        store_c_tile_mn_masked_grouped(c_gl_g, cA, /*group_idx=*/0, r0, c0, m_limit, g.n);
+        mul(cC, cC, combined_scale);
+        store_c_tile_mn_masked_grouped(c_gl_g, cC, /*group_idx=*/0, r1, c0, m_limit, g.n);
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
@@ -2644,8 +2671,10 @@ void grouped_rcr_kernel_b128(const grouped_layout_globals g) {
         #pragma unroll 1
         for (int gi = 0; gi < g.G; ++gi) {
             const int next = s_offs[gi + 1];
-            // bpr_g = M_g / HB (= M_g / 128) for b128 variant
-            t += ((next - prev) / HB) * num_pid_n;
+            // ceil_div: partial last M-tile (M_g % HB != 0) gets its own br;
+            // store mask drops OOB rows. Mirrors main RCR — HB instead of
+            // BLOCK_SIZE because b128 has BLK_M = HB = 128.
+            t += kittens::ceil_div(next - prev, HB) * num_pid_n;
             s_cum_tiles[gi + 1] = t;
             prev = next;
         }
@@ -2675,7 +2704,7 @@ void grouped_rcr_kernel_b128(const grouped_layout_globals g) {
         const int local_tile = gt - tile_start;
         const int m_start_g = s_offs[group_idx];
         const int M_g = s_offs[group_idx + 1] - m_start_g;
-        const int bpr_g = M_g / HB;       // tiles per group in M dir (HB=128)
+        const int bpr_g = kittens::ceil_div(M_g, HB);
 
         int br, bc;
         if (g.bpc > bpr_g) {
@@ -2699,8 +2728,27 @@ void grouped_rcr_kernel_b128(const grouped_layout_globals g) {
         }
         if (br >= bpr_g || bc >= num_pid_n) continue;
 
-        const int m_subtile_A = m_start_g / HB;
-        const int m_subtile_C = m_start_g / RBM;
+        // Per-group shifted GL views (mirrors grouped_rcr_kernel) so the
+        // SRD bound is group-local M_g, OOB A loads hardware-clamp, and the
+        // partial-last-M-tile gets a masked store via m_limit. m_subtile_*
+        // collapse to 0 because c_gl_g/a_gl_g already start at row m_start_g.
+        using a_ptr_t = decltype(g.a.raw_ptr);
+        using c_ptr_t = decltype(g.c.raw_ptr);
+        const auto* a_byte_base = reinterpret_cast<const uint8_t*>(g.a.raw_ptr);
+        const auto* c_byte_base = reinterpret_cast<const uint8_t*>(g.c.raw_ptr);
+        const int a_row_stride_bytes = static_cast<int>(g.a.template stride<2>()) * sizeof(*g.a.raw_ptr);
+        const int c_row_stride_bytes = static_cast<int>(g.c.template stride<2>()) * sizeof(*g.c.raw_ptr);
+        auto a_gl_g = g.a;
+        a_gl_g.raw_ptr = reinterpret_cast<a_ptr_t>(
+            const_cast<uint8_t*>(a_byte_base + m_start_g * a_row_stride_bytes));
+        a_gl_g.rows_internal = M_g;
+        auto c_gl_g = g.c;
+        c_gl_g.raw_ptr = reinterpret_cast<c_ptr_t>(
+            const_cast<uint8_t*>(c_byte_base + m_start_g * c_row_stride_bytes));
+        c_gl_g.rows_internal = M_g;
+        constexpr int m_subtile_A = 0;
+        constexpr int m_subtile_C = 0;
+        const int m_limit = M_g;
 
         auto a_co = [&](int s, int k) -> coord<ST_rcr> {
             return {0, 0, m_subtile_A + s, k};
@@ -2723,14 +2771,14 @@ void grouped_rcr_kernel_b128(const grouped_layout_globals g) {
         int tic = 0, toc = 1;
         // Prologue: load tile-0 + tile-1.
         rcr_8w_load_hoist<_NUM_THREADS>(Bs[tic], g.b, b_co(bc, 0), soB);
-        rcr_8w_load_hoist<_NUM_THREADS>(As[tic], g.a, a_co(br, 0), soA);
+        rcr_8w_load_hoist<_NUM_THREADS>(As[tic], a_gl_g, a_co(br, 0), soA);
 
         if (wm == 1) __builtin_amdgcn_s_barrier();
         TK_WAIT_VMCNT(0);
         __builtin_amdgcn_s_barrier();
 
         rcr_8w_load_hoist<_NUM_THREADS>(Bs[toc], g.b, b_co(bc, 1), soB);
-        rcr_8w_load_hoist<_NUM_THREADS>(As[toc], g.a, a_co(br, 1), soA);
+        rcr_8w_load_hoist<_NUM_THREADS>(As[toc], a_gl_g, a_co(br, 1), soA);
 
         TK_WAIT_VMCNT(0);
         __builtin_amdgcn_s_barrier();
@@ -2742,7 +2790,7 @@ void grouped_rcr_kernel_b128(const grouped_layout_globals g) {
             load_b(b0, Bs[tic], wn);
             load_a(a, As[tic], wm);
             // Prefetch As[tic] @ k+2 here (bn128's "As[toc][1] @ k+1" slot)
-            rcr_8w_load_hoist<_NUM_THREADS>(As[tic], g.a, a_co(br, k+2), soA);
+            rcr_8w_load_hoist<_NUM_THREADS>(As[tic], a_gl_g, a_co(br, k+2), soA);
             TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); rcr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
@@ -2862,18 +2910,10 @@ void grouped_rcr_kernel_b128(const grouped_layout_globals g) {
         // c0 = bc*WARPS_N + wn (single strip per bc)
         const int r0 = __builtin_amdgcn_readfirstlane(m_subtile_C + br*WARPS_M + wm);
         const int c0 = __builtin_amdgcn_readfirstlane(bc*WARPS_N + wn);
-        if constexpr (N_MASKED_STORE) {
-            if ((bc + 1) * HB <= g.n) {
-                mul(cA, cA, combined_scale);
-                store(g.c, cA, {0, 0, r0, c0});
-            } else {
-                mul(cA, cA, combined_scale);
-                store_c_tile_n_masked(g.c, cA, r0, c0, g.n);
-            }
-        } else {
-            mul(cA, cA, combined_scale);
-            store(g.c, cA, {0, 0, r0, c0});
-        }
+        // Masked store via per-group shifted view + m_limit/n_limit. Mirrors
+        // main RCR. N_MASKED_STORE template retained for ABI parity.
+        mul(cA, cA, combined_scale);
+        store_c_tile_mn_masked_grouped(c_gl_g, cA, /*group_idx=*/0, r0, c0, m_limit, g.n);
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
@@ -2945,13 +2985,17 @@ void grouped_rrr_kernel(const grouped_layout_globals g) {
             const int next = s_offs[gi + 1];
             const int M_g_i = next - prev;
             if (M_g_i != M0) uniform = false;
-            t += (M_g_i / BLOCK_SIZE) * num_pid_n;
+            // ceil_div: partial last M-tile (M_g % BLOCK_SIZE != 0) gets its
+            // own (br, bc) tile; per-group shifted gl view + m_limit masked
+            // store below handle the OOB rows. Floor div silently skipped
+            // small groups (M_g < BLOCK_SIZE) → garbage / zero output.
+            t += kittens::ceil_div(M_g_i, BLOCK_SIZE) * num_pid_n;
             s_cum_tiles[gi + 1] = t;
             prev = next;
         }
         s_total_tiles  = t;
         s_uniform_M    = uniform ? M0 : -1;
-        s_tiles_per_g  = uniform ? (M0 / BLOCK_SIZE) * num_pid_n : 0;
+        s_tiles_per_g  = uniform ? kittens::ceil_div(M0, BLOCK_SIZE) * num_pid_n : 0;
     }
     __syncthreads();
     const int total_tiles  = s_total_tiles;
@@ -2993,7 +3037,7 @@ void grouped_rrr_kernel(const grouped_layout_globals g) {
         }
         const int m_start_g = s_offs[group_idx];
         const int M_g = s_offs[group_idx + 1] - m_start_g;
-        const int bpr_g = M_g / BLOCK_SIZE;
+        const int bpr_g = kittens::ceil_div(M_g, BLOCK_SIZE);
 
         int br, bc;
         if (g.bpc > bpr_g) {
@@ -3017,8 +3061,29 @@ void grouped_rrr_kernel(const grouped_layout_globals g) {
         }
         if (br >= bpr_g || bc >= num_pid_n) continue;
 
-        const int m_subtile_A = m_start_g / HB;
-        const int m_subtile_C = m_start_g / RBM;
+        // Per-group shifted GL views: same trick as grouped_rcr_kernel —
+        // shift A/C raw_ptr to m_start_g, set rows_internal=M_g so SRDs
+        // bounded by view's total_bytes are group-local. Lets m_subtile_A=0,
+        // m_subtile_C=0; partial last M-tile rows handled by m_limit mask.
+        // NOTE: depends on m_start_g being HB-aligned (= 128) and RBM-aligned
+        // (= 64); arbitrary byte-level m_start_g is a follow-up.
+        using a_ptr_t = decltype(g.a.raw_ptr);
+        using c_ptr_t = decltype(g.c.raw_ptr);
+        const auto* a_byte_base = reinterpret_cast<const uint8_t*>(g.a.raw_ptr);
+        const auto* c_byte_base = reinterpret_cast<const uint8_t*>(g.c.raw_ptr);
+        const int a_row_stride_bytes = static_cast<int>(g.a.template stride<2>()) * sizeof(*g.a.raw_ptr);
+        const int c_row_stride_bytes = static_cast<int>(g.c.template stride<2>()) * sizeof(*g.c.raw_ptr);
+        auto a_gl_g = g.a;
+        a_gl_g.raw_ptr = reinterpret_cast<a_ptr_t>(
+            const_cast<uint8_t*>(a_byte_base + m_start_g * a_row_stride_bytes));
+        a_gl_g.rows_internal = M_g;
+        auto c_gl_g = g.c;
+        c_gl_g.raw_ptr = reinterpret_cast<c_ptr_t>(
+            const_cast<uint8_t*>(c_byte_base + m_start_g * c_row_stride_bytes));
+        c_gl_g.rows_internal = M_g;
+        constexpr int m_subtile_A = 0;
+        constexpr int m_subtile_C = 0;
+        const int m_limit = M_g;
 
         // RRR coord conventions (mirror of dense gemm_kernel<RRR>):
         //   a_co(s, k) : A is [M_total, K]      → row-shift by m_subtile_A.
@@ -3045,16 +3110,16 @@ void grouped_rrr_kernel(const grouped_layout_globals g) {
         // Prologue: tile-0 + tile-1 (mirrors dense gemm_kernel<RRR>
         // lines 1421-1435).
         G::load(Bs[tic][0], g.b, b_co(bc*2,   0), soB);
-        G::load(As[tic][0], g.a, a_co(br*2,   0), soA);
+        G::load(As[tic][0], a_gl_g, a_co(br*2,   0), soA);
         G::load(Bs[tic][1], g.b, b_co(bc*2+1, 0), soB);
-        G::load(As[tic][1], g.a, a_co(br*2+1, 0), soA);
+        G::load(As[tic][1], a_gl_g, a_co(br*2+1, 0), soA);
 
         if (wm == 1) __builtin_amdgcn_s_barrier();
         TK_WAIT_VMCNT(RRR_INIT0_VMCNT);
         __builtin_amdgcn_s_barrier();
 
         G::load(Bs[toc][0], g.b, b_co(bc*2,   1), soB);
-        G::load(As[toc][0], g.a, a_co(br*2,   1), soA);
+        G::load(As[toc][0], a_gl_g, a_co(br*2,   1), soA);
         G::load(Bs[toc][1], g.b, b_co(bc*2+1, 1), soB);
 
         TK_WAIT_VMCNT(RRR_INIT1_VMCNT);
@@ -3068,7 +3133,7 @@ void grouped_rrr_kernel(const grouped_layout_globals g) {
         for (int k = 0; k < ki_dyn - 2; k++, tic ^= 1, toc ^= 1) {
             load_b(b0, Bs[tic][0], wn);
             load_a(a, As[tic][0], wm);
-            G::load(As[toc][1], g.a, a_co(br*2+1, k+1), soA);
+            G::load(As[toc][1], a_gl_g, a_co(br*2+1, k+1), soA);
             TK_WAIT_LGKM(RRR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<!FUSED_KTAIL>(cA, a, b0); __builtin_amdgcn_s_setprio(0);
@@ -3088,7 +3153,7 @@ void grouped_rrr_kernel(const grouped_layout_globals g) {
             __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<!FUSED_KTAIL>(cC, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier(); RRR_SCHED_BARRIER();
 
-            G::load(As[tic][0], g.a, a_co(br*2, k+2), soA);
+            G::load(As[tic][0], a_gl_g, a_co(br*2, k+2), soA);
             TK_WAIT_VMCNT(RRR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<!FUSED_KTAIL>(cD, a, b1); __builtin_amdgcn_s_setprio(0);
@@ -3099,7 +3164,7 @@ void grouped_rrr_kernel(const grouped_layout_globals g) {
         {
             load_b(b0, Bs[tic][0], wn);
             load_a(a, As[tic][0], wm);
-            G::load(As[toc][1], g.a, a_co(br*2+1, ki_dyn-1), soA);
+            G::load(As[toc][1], a_gl_g, a_co(br*2+1, ki_dyn-1), soA);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<!FUSED_KTAIL>(cA, a, b0); __builtin_amdgcn_s_setprio(0);
@@ -3499,28 +3564,12 @@ void grouped_rrr_kernel(const grouped_layout_globals g) {
         const int r1 = __builtin_amdgcn_readfirstlane(m_subtile_C + br*WARPS_M*2+WARPS_M+wm);
         const int c0 = __builtin_amdgcn_readfirstlane(bc*WARPS_N*2+wn);
         const int c1 = __builtin_amdgcn_readfirstlane(bc*WARPS_N*2+WARPS_N+wn);
-        if constexpr (N_MASKED_STORE) {
-            // Mirror RCR: bpc = ceil_div(g.n, BLOCK_SIZE) so the last bc
-            // can extend past g.n; mask its OOB columns at store time.
-            // OOB B reads earlier in the loop returned 0 via raw_buffer_load
-            // OOB-no-op, so MMA contributions for OOB cells are 0.
-            if ((bc + 1) * BLOCK_SIZE <= g.n) {
-                store(g.c, cA, {0, 0, r0, c0});
-                store(g.c, cB, {0, 0, r0, c1});
-                store(g.c, cC, {0, 0, r1, c0});
-                store(g.c, cD, {0, 0, r1, c1});
-            } else {
-                store_c_tile_n_masked(g.c, cA, r0, c0, g.n);
-                store_c_tile_n_masked(g.c, cB, r0, c1, g.n);
-                store_c_tile_n_masked(g.c, cC, r1, c0, g.n);
-                store_c_tile_n_masked(g.c, cD, r1, c1, g.n);
-            }
-        } else {
-            store(g.c, cA, {0, 0, r0, c0});
-            store(g.c, cB, {0, 0, r0, c1});
-            store(g.c, cC, {0, 0, r1, c0});
-            store(g.c, cD, {0, 0, r1, c1});
-        }
+        // Masked grouped store on the per-group shifted c_gl_g: m_limit=M_g
+        // drops partial-last-M-tile OOB rows, n_limit=g.n drops partial-N.
+        store_c_tile_mn_masked_grouped(c_gl_g, cA, /*group_idx=*/0, r0, c0, m_limit, g.n);
+        store_c_tile_mn_masked_grouped(c_gl_g, cB, /*group_idx=*/0, r0, c1, m_limit, g.n);
+        store_c_tile_mn_masked_grouped(c_gl_g, cC, /*group_idx=*/0, r1, c0, m_limit, g.n);
+        store_c_tile_mn_masked_grouped(c_gl_g, cD, /*group_idx=*/0, r1, c1, m_limit, g.n);
 
         asm volatile("s_waitcnt vmcnt(0) lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
@@ -4938,8 +4987,14 @@ void grouped_var_k_kernel_fp8(const grouped_var_k_layout_globals_fp8 g) {
         const int local_tile = gt - tile_start;
         const int m_start_g = s_offs[group_idx];
         const int M_g = s_offs[group_idx + 1] - m_start_g;
-        const int ki_g = M_g / HB;
-        if (ki_g < 2) continue;
+        // ceil_div + floor at 2: partial last K-tile (M_g % HB != 0) and
+        // small groups (M_g <= HB) all get >= 2 K-tile iterations; per-group
+        // shifted A/B view bounds the SRD so the second virtual K-tile load
+        // hardware-clamps to 0 (no MMA contribution). Floor + skip silently
+        // dropped these groups.
+        const int ki_g_raw = kittens::ceil_div(M_g, HB);
+        if (ki_g_raw <= 0) continue;
+        const int ki_g = (ki_g_raw < 2) ? 2 : ki_g_raw;
         const int bpr_g = g.bpr;
 
         int br, bc;
@@ -4964,14 +5019,28 @@ void grouped_var_k_kernel_fp8(const grouped_var_k_layout_globals_fp8 g) {
         }
         if (br >= bpr_g || bc >= num_pid_n) continue;
 
-        // K-axis tile shift for variable-K: each group's K-reduction
-        // starts at row m_start_g of the global flat A/B tensors.
-        // ST_v2a / ST_v2 row dim = HB, so the tile-coord offset is
-        // ``m_start_g / HB``. M_g must be a multiple of HB (= 128) for
-        // the per-group ki_g to be exact (Primus uniform-M >= 256 gate
-        // covers the bench cases; M_g = 2048 / 4096 / 8192 are all
-        // 128-multiples).
-        const int k_offset_tiles = m_start_g / HB;
+        // Per-group shifted A/B views: shift raw_ptr to row m_start_g,
+        // set rows_internal=M_g. Caller-side coord then uses k_offset_tiles=0
+        // and SRDs built inside rcr_8w_load_hoist (= view.batch*depth*rows*cols
+        // bytes) become group-local — second-virtual-tile-OOB byte loads
+        // hardware-clamp to 0 instead of straddling into the next group's A/B.
+        // NOTE: depends on m_start_g being HB-aligned (= 128); arbitrary
+        // byte-level m_start_g is a follow-up.
+        using a_ptr_t = decltype(g.a.raw_ptr);
+        using b_ptr_t = decltype(g.b.raw_ptr);
+        const auto* a_byte_base = reinterpret_cast<const uint8_t*>(g.a.raw_ptr);
+        const auto* b_byte_base = reinterpret_cast<const uint8_t*>(g.b.raw_ptr);
+        const int a_row_stride_bytes = static_cast<int>(g.a.template stride<2>()) * sizeof(*g.a.raw_ptr);
+        const int b_row_stride_bytes = static_cast<int>(g.b.template stride<2>()) * sizeof(*g.b.raw_ptr);
+        auto a_gl_g = g.a;
+        a_gl_g.raw_ptr = reinterpret_cast<a_ptr_t>(
+            const_cast<uint8_t*>(a_byte_base + m_start_g * a_row_stride_bytes));
+        a_gl_g.rows_internal = M_g;
+        auto b_gl_g = g.b;
+        b_gl_g.raw_ptr = reinterpret_cast<b_ptr_t>(
+            const_cast<uint8_t*>(b_byte_base + m_start_g * b_row_stride_bytes));
+        b_gl_g.rows_internal = M_g;
+        constexpr int k_offset_tiles = 0;
 
         auto a_co = [&](int s, int k) -> coord<ST_crr_a> {
             return {0, 0, k_offset_tiles + k, s};
@@ -4986,10 +5055,10 @@ void grouped_var_k_kernel_fp8(const grouped_var_k_layout_globals_fp8 g) {
             load_col_from_st(dst, tile, wi * RBN);
         };
         auto global_load_a = [&](ST_crr_a& tile, int s, int k) {
-            rcr_8w_load_hoist<_NUM_THREADS>(tile, g.a, a_co(s, k), soA);
+            rcr_8w_load_hoist<_NUM_THREADS>(tile, a_gl_g, a_co(s, k), soA);
         };
         auto global_load_b = [&](ST_crr_b& tile, int s, int k) {
-            rcr_8w_load_hoist<_NUM_THREADS>(tile, g.b, b_co(s, k), soB);
+            rcr_8w_load_hoist<_NUM_THREADS>(tile, b_gl_g, b_co(s, k), soB);
         };
 
         zero(cA); zero(cB); zero(cC); zero(cD);
