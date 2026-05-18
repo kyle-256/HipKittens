@@ -1640,6 +1640,133 @@ __device__ __forceinline__ float resolve_combined_scale_grp(const GL &g) {
     return sa_dev * sb_dev;
 }
 
+// =============================================================================
+// Shared persistent-dispatch helpers for the 5 grouped FP8 kernels.
+//
+// init_group_cumsum_smem  : populates s_offs / s_cum_tiles / s_total_tiles
+//                           with ceil_div bpr_g per group (M-tile count per
+//                           group rounded UP to cover partial last M-tile).
+//                           Caller passes M_BLOCK_DIV: BLOCK_SIZE for the
+//                           bn=0 / bn128 kernels (BLK_M = 256), HB for the
+//                           b128 kernel (BLK_M = 128).
+//
+// dispatch_tile_in_group  : 6-level binary search to map persistent tile
+//                           index gt → (group_idx, local_tile, m_start_g,
+//                           M_g, bpr_g). Returns the swizzled (br, bc).
+//                           Returns false when the tile lands in a group-
+//                           size-degenerate corner (continue-skip).
+//
+// make_per_group_gl_view  : copies g.a / g.c, patches raw_ptr + rows_internal
+//                           so the SRD bound is group-local (M_g rows from
+//                           m_start_g). Lets the caller use m_subtile_A=0 +
+//                           m_limit=M_g for the masked store.
+// =============================================================================
+
+template<int MAX_G_PLUS_1>
+__device__ __forceinline__ void init_group_cumsum_smem(
+    const grouped_layout_globals& g,
+    int* __restrict__ s_offs,
+    int* __restrict__ s_cum_tiles,
+    int& s_total_tiles,
+    int  num_pid_n,
+    int  M_BLOCK_DIV) {
+    if (threadIdx.x <= g.G && threadIdx.x < MAX_G_PLUS_1) {
+        s_offs[threadIdx.x] = static_cast<int>(g.group_offs[threadIdx.x]);
+    }
+    if (threadIdx.x > g.G && threadIdx.x < MAX_G_PLUS_1) {
+        s_cum_tiles[threadIdx.x] = 0x7FFFFFFF;
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        int prev = s_offs[0];
+        s_cum_tiles[0] = 0;
+        int t = 0;
+        #pragma unroll 1
+        for (int gi = 0; gi < g.G; ++gi) {
+            const int next = s_offs[gi + 1];
+            t += kittens::ceil_div(next - prev, M_BLOCK_DIV) * num_pid_n;
+            s_cum_tiles[gi + 1] = t;
+            prev = next;
+        }
+        s_total_tiles = t;
+    }
+    __syncthreads();
+}
+
+template<int MAX_G_PLUS_1>
+__device__ __forceinline__ bool dispatch_tile_in_group(
+    int  gt,
+    const int* __restrict__ s_cum_tiles,
+    const int* __restrict__ s_offs,
+    int  num_pid_n,
+    int  group_m,
+    int  M_BLOCK_DIV,
+    int& group_idx,
+    int& m_start_g,
+    int& M_g,
+    int& bpr_g,
+    int& br,
+    int& bc) {
+    int lo = 0;
+    int hi = MAX_G_PLUS_1 - 1;
+    #pragma unroll
+    for (int level = 0; level < 6; ++level) {
+        const int mid = (lo + hi + 1) >> 1;
+        if (gt >= s_cum_tiles[mid]) lo = mid;
+        else hi = mid - 1;
+    }
+    group_idx = lo;
+    const int tile_start = s_cum_tiles[lo];
+    const int local_tile = gt - tile_start;
+    m_start_g = s_offs[group_idx];
+    M_g = s_offs[group_idx + 1] - m_start_g;
+    bpr_g = kittens::ceil_div(M_g, M_BLOCK_DIV);
+
+    if (num_pid_n > bpr_g) {
+        const int WGN = group_m;
+        const int num_wgid_in_group = bpr_g * WGN;
+        int group_id = local_tile / num_wgid_in_group;
+        int first_pid_n = group_id * WGN;
+        int group_size_n = min(num_pid_n - first_pid_n, WGN);
+        if (group_size_n <= 0) return false;
+        bc = first_pid_n + ((local_tile % num_wgid_in_group) % group_size_n);
+        br = (local_tile % num_wgid_in_group) / group_size_n;
+    } else {
+        const int WGM = group_m;
+        const int num_wgid_in_group = WGM * num_pid_n;
+        int group_id = local_tile / num_wgid_in_group;
+        int first_pid_m = group_id * WGM;
+        int group_size_m = min(bpr_g - first_pid_m, WGM);
+        if (group_size_m <= 0) return false;
+        br = first_pid_m + ((local_tile % num_wgid_in_group) % group_size_m);
+        bc = (local_tile % num_wgid_in_group) / group_size_m;
+    }
+    return (br < bpr_g) && (bc < num_pid_n);
+}
+
+// Patches a single gl<> view in place so raw_ptr lands at row m_start
+// and rows_internal = M_rows — i.e. the SRD bound becomes group-local.
+// Caller copies first ( ``auto a_gl = g.a;`` ) because gl<> has no
+// default constructor.
+template<typename GL>
+__device__ __forceinline__ void patch_gl_to_row_slice(
+    GL& gl, int m_start, int M_rows) {
+    using ptr_t = decltype(gl.raw_ptr);
+    const auto* byte_base = reinterpret_cast<const uint8_t*>(gl.raw_ptr);
+    const int row_stride_bytes = static_cast<int>(gl.template stride<2>()) * sizeof(*gl.raw_ptr);
+    gl.raw_ptr = reinterpret_cast<ptr_t>(
+        const_cast<uint8_t*>(byte_base + m_start * row_stride_bytes));
+    gl.rows_internal = M_rows;
+}
+
+template<typename GLA, typename GLC>
+__device__ __forceinline__ void patch_per_group_gl_view(
+    GLA& a_gl, GLC& c_gl,
+    int m_start_g, int M_g) {
+    patch_gl_to_row_slice(a_gl, m_start_g, M_g);
+    patch_gl_to_row_slice(c_gl, m_start_g, M_g);
+}
+
 template<bool N_MASKED_STORE = false, bool FUSED_KTAIL = false>
 __global__ __launch_bounds__(_NUM_THREADS, 1)
 void grouped_rcr_kernel(const grouped_layout_globals g) {
@@ -1669,31 +1796,8 @@ void grouped_rcr_kernel(const grouped_layout_globals g) {
     const int num_pid_n = g.bpc;
     const int ki_dyn   = g.ki;
 
-    if (threadIdx.x <= g.G && threadIdx.x < MAX_G_PLUS_1) {
-        s_offs[threadIdx.x] = static_cast<int>(g.group_offs[threadIdx.x]);
-    }
-    if (threadIdx.x > g.G && threadIdx.x < MAX_G_PLUS_1) {
-        s_cum_tiles[threadIdx.x] = 0x7FFFFFFF;
-    }
-    __syncthreads();
-    if (threadIdx.x == 0) {
-        int prev = s_offs[0];
-        s_cum_tiles[0] = 0;
-        int t = 0;
-        #pragma unroll 1
-        for (int gi = 0; gi < g.G; ++gi) {
-            const int next = s_offs[gi + 1];
-            // ceil_div: partial last M-tile (M_g % BLOCK_SIZE != 0) gets its
-            // own (br, bc) tile so small groups (M_g < BLOCK_SIZE) emit
-            // output via the per-group shifted view + m_limit masked store
-            // below. Floor div silently skipped the entire group → zeros.
-            t += kittens::ceil_div(next - prev, BLOCK_SIZE) * num_pid_n;
-            s_cum_tiles[gi + 1] = t;
-            prev = next;
-        }
-        s_total_tiles = t;
-    }
-    __syncthreads();
+    init_group_cumsum_smem<MAX_G_PLUS_1>(g, s_offs, s_cum_tiles, s_total_tiles,
+                                         num_pid_n, /*M_BLOCK_DIV=*/BLOCK_SIZE);
     const int total_tiles = s_total_tiles;
 
     // Prefill swizzled offsets ONCE (shared across all tiles & all groups —
@@ -1706,86 +1810,23 @@ void grouped_rcr_kernel(const grouped_layout_globals g) {
     G::prefill_swizzled_offsets(Bs[0][0], g.b, soB);
 
     for (int gt = pid; gt < total_tiles; gt += slots_eff) {
-        // [grouped] 6-step branch-free binary search over LDS-cached cumsum
-        // (covers G ∈ [1, 64] since 2^6 = 64 = MAX_G_PLUS_1-1). Sentinel
-        // INT_MAX past g.G keeps the `gt >= s_cum_tiles[mid]` cmp false so
-        // lo never advances past g.G. Compared to the linear O(G) scan,
-        // this collapses ~32 LDS lds + cmp into 6 sequential lookups: ~70
-        // cyc instead of ~320 cyc per outer iter (kernel-only saving ~3-5%
-        // on shapes with low ki / many tiles).
-        int lo = 0;
-        int hi = MAX_G_PLUS_1 - 1;
-        #pragma unroll
-        for (int level = 0; level < 6; ++level) {
-            const int mid = (lo + hi + 1) >> 1;
-            if (gt >= s_cum_tiles[mid]) lo = mid;
-            else hi = mid - 1;
-        }
-        const int group_idx = lo;
-        const int tile_start = s_cum_tiles[lo];
-        const int local_tile = gt - tile_start;
-        const int m_start_g = s_offs[group_idx];
-        const int M_g = s_offs[group_idx + 1] - m_start_g;
-        // ceil_div: partial last M-tile (M_g % BLOCK_SIZE != 0) gets its
-        // own br; store mask drops OOB rows via m_limit below. With floor
-        // division, M_g < BLOCK_SIZE → bpr_g=0 → every br fails the bpr_g
-        // gate → entire group silently produces zeros.
-        const int bpr_g = kittens::ceil_div(M_g, BLOCK_SIZE);
+        int group_idx, m_start_g, M_g, bpr_g, br, bc;
+        if (!dispatch_tile_in_group<MAX_G_PLUS_1>(
+                gt, s_cum_tiles, s_offs, num_pid_n, g.group_m,
+                /*M_BLOCK_DIV=*/BLOCK_SIZE,
+                group_idx, m_start_g, M_g, bpr_g, br, bc)) continue;
 
-        // Group-by-M / group-by-N swizzle (matches dense kernel mapping).
-        int br, bc;
-        if (g.bpc > bpr_g) {
-            const int WGN = g.group_m;
-            const int num_wgid_in_group = bpr_g * WGN;
-            int group_id = local_tile / num_wgid_in_group;
-            int first_pid_n = group_id * WGN;
-            int group_size_n = min(num_pid_n - first_pid_n, WGN);
-            if (group_size_n <= 0) continue;
-            bc = first_pid_n + ((local_tile % num_wgid_in_group) % group_size_n);
-            br = (local_tile % num_wgid_in_group) / group_size_n;
-        } else {
-            const int WGM = g.group_m;
-            const int num_wgid_in_group = WGM * num_pid_n;
-            int group_id = local_tile / num_wgid_in_group;
-            int first_pid_m = group_id * WGM;
-            int group_size_m = min(bpr_g - first_pid_m, WGM);
-            if (group_size_m <= 0) continue;
-            br = first_pid_m + ((local_tile % num_wgid_in_group) % group_size_m);
-            bc = (local_tile % num_wgid_in_group) / group_size_m;
-        }
-        if (br >= bpr_g || bc >= num_pid_n) continue;
-
-        // Per-group shifted GL views: copy g.a / g.c and patch raw_ptr +
-        // rows_internal so coord (0,*,*,*) resolves relative to the group's
-        // M slice. ``rcr_8w_load_hoist`` builds its SRD from
-        // ``src.batch()*depth()*rows()*cols()`` — with rows_internal=M_g
-        // the bound is group-local, so A sub-tile loads that would otherwise
-        // straddle the next group's M-rows (br*2+1 sub-tile when M_g <=
-        // HB) hardware-clamp to 0 and the accumulator stays clean.
-        // store_c_tile_mn_masked_grouped + n_limit=g.n masks the partial
-        // last M / N tile output cells. Lets m_subtile_A=0 / m_subtile_C=0,
-        // m_limit=M_g (group-local).
-        // NOTE: depends on m_start_g being HB-aligned (= 128) and RBM-aligned
-        // (= 64) for the row_stride pointer arithmetic to stay element-aligned;
-        // unbalanced shapes with arbitrary byte-level m_start_g are a
-        // follow-up (mirrors the bf16 byte-level addressing work).
-        using a_ptr_t = decltype(g.a.raw_ptr);
-        using c_ptr_t = decltype(g.c.raw_ptr);
-        const auto* a_byte_base = reinterpret_cast<const uint8_t*>(g.a.raw_ptr);
-        const auto* c_byte_base = reinterpret_cast<const uint8_t*>(g.c.raw_ptr);
-        const int a_row_stride_bytes = static_cast<int>(g.a.template stride<2>()) * sizeof(*g.a.raw_ptr);
-        const int c_row_stride_bytes = static_cast<int>(g.c.template stride<2>()) * sizeof(*g.c.raw_ptr);
+        // Per-group shifted GL views (m_subtile_A=0, m_limit=M_g).
+        // NOTE: m_start_g must be RBM-aligned (= 64) for the row_stride
+        // pointer arithmetic to stay element-aligned; unbalanced shapes
+        // with arbitrary byte-level m_start_g are a follow-up.
         auto a_gl_g = g.a;
-        a_gl_g.raw_ptr = reinterpret_cast<a_ptr_t>(
-            const_cast<uint8_t*>(a_byte_base + m_start_g * a_row_stride_bytes));
-        a_gl_g.rows_internal = M_g;
         auto c_gl_g = g.c;
-        c_gl_g.raw_ptr = reinterpret_cast<c_ptr_t>(
-            const_cast<uint8_t*>(c_byte_base + m_start_g * c_row_stride_bytes));
-        c_gl_g.rows_internal = M_g;
+        patch_per_group_gl_view(a_gl_g, c_gl_g, m_start_g, M_g);
+        const int a_row_stride_bytes = static_cast<int>(g.a.template stride<2>()) * sizeof(*g.a.raw_ptr);
         constexpr int m_subtile_A = 0;
         constexpr int m_subtile_C = 0;
-        const int m_limit = M_g;  // group-local now that c_gl_g is shifted
+        const int m_limit = M_g;
 
         auto a_co = [&](int s, int k) -> coord<ST_rcr> {
             return {0, 0, m_subtile_A + s, k};
@@ -2083,29 +2124,8 @@ void grouped_rcr_kernel_bn128(const grouped_layout_globals g) {
     const int num_pid_n = g.bpc;          // host: ceil_div(g.n, 128)
     const int ki_dyn   = g.ki;
 
-    if (threadIdx.x <= g.G && threadIdx.x < MAX_G_PLUS_1) {
-        s_offs[threadIdx.x] = static_cast<int>(g.group_offs[threadIdx.x]);
-    }
-    if (threadIdx.x > g.G && threadIdx.x < MAX_G_PLUS_1) {
-        s_cum_tiles[threadIdx.x] = 0x7FFFFFFF;
-    }
-    __syncthreads();
-    if (threadIdx.x == 0) {
-        int prev = s_offs[0];
-        s_cum_tiles[0] = 0;
-        int t = 0;
-        #pragma unroll 1
-        for (int gi = 0; gi < g.G; ++gi) {
-            const int next = s_offs[gi + 1];
-            // ceil_div: partial last M-tile (M_g % BLOCK_SIZE != 0) gets
-            // its own br; store mask drops OOB rows. Mirrors main RCR.
-            t += kittens::ceil_div(next - prev, BLOCK_SIZE) * num_pid_n;
-            s_cum_tiles[gi + 1] = t;
-            prev = next;
-        }
-        s_total_tiles = t;
-    }
-    __syncthreads();
+    init_group_cumsum_smem<MAX_G_PLUS_1>(g, s_offs, s_cum_tiles, s_total_tiles,
+                                         num_pid_n, /*M_BLOCK_DIV=*/BLOCK_SIZE);
     const int total_tiles = s_total_tiles;
 
     constexpr int bpt = ST_rcr::underlying_subtile_bytes_per_thread;
@@ -2116,59 +2136,16 @@ void grouped_rcr_kernel_bn128(const grouped_layout_globals g) {
     G::prefill_swizzled_offsets(Bs[0][0], g.b, soB);
 
     for (int gt = pid; gt < total_tiles; gt += slots_eff) {
-        int lo = 0;
-        int hi = MAX_G_PLUS_1 - 1;
-        #pragma unroll
-        for (int level = 0; level < 6; ++level) {
-            const int mid = (lo + hi + 1) >> 1;
-            if (gt >= s_cum_tiles[mid]) lo = mid;
-            else hi = mid - 1;
-        }
-        const int group_idx = lo;
-        const int tile_start = s_cum_tiles[lo];
-        const int local_tile = gt - tile_start;
-        const int m_start_g = s_offs[group_idx];
-        const int M_g = s_offs[group_idx + 1] - m_start_g;
-        const int bpr_g = kittens::ceil_div(M_g, BLOCK_SIZE);
+        int group_idx, m_start_g, M_g, bpr_g, br, bc;
+        if (!dispatch_tile_in_group<MAX_G_PLUS_1>(
+                gt, s_cum_tiles, s_offs, num_pid_n, g.group_m,
+                /*M_BLOCK_DIV=*/BLOCK_SIZE,
+                group_idx, m_start_g, M_g, bpr_g, br, bc)) continue;
 
-        int br, bc;
-        if (g.bpc > bpr_g) {
-            const int WGN = g.group_m;
-            const int num_wgid_in_group = bpr_g * WGN;
-            int group_id = local_tile / num_wgid_in_group;
-            int first_pid_n = group_id * WGN;
-            int group_size_n = min(num_pid_n - first_pid_n, WGN);
-            if (group_size_n <= 0) continue;
-            bc = first_pid_n + ((local_tile % num_wgid_in_group) % group_size_n);
-            br = (local_tile % num_wgid_in_group) / group_size_n;
-        } else {
-            const int WGM = g.group_m;
-            const int num_wgid_in_group = WGM * num_pid_n;
-            int group_id = local_tile / num_wgid_in_group;
-            int first_pid_m = group_id * WGM;
-            int group_size_m = min(bpr_g - first_pid_m, WGM);
-            if (group_size_m <= 0) continue;
-            br = first_pid_m + ((local_tile % num_wgid_in_group) % group_size_m);
-            bc = (local_tile % num_wgid_in_group) / group_size_m;
-        }
-        if (br >= bpr_g || bc >= num_pid_n) continue;
-
-        // Per-group shifted GL views — see grouped_rcr_kernel for full
-        // rationale. Lets m_subtile_A=0 / m_subtile_C=0 + m_limit=M_g.
-        using a_ptr_t = decltype(g.a.raw_ptr);
-        using c_ptr_t = decltype(g.c.raw_ptr);
-        const auto* a_byte_base = reinterpret_cast<const uint8_t*>(g.a.raw_ptr);
-        const auto* c_byte_base = reinterpret_cast<const uint8_t*>(g.c.raw_ptr);
-        const int a_row_stride_bytes = static_cast<int>(g.a.template stride<2>()) * sizeof(*g.a.raw_ptr);
-        const int c_row_stride_bytes = static_cast<int>(g.c.template stride<2>()) * sizeof(*g.c.raw_ptr);
         auto a_gl_g = g.a;
-        a_gl_g.raw_ptr = reinterpret_cast<a_ptr_t>(
-            const_cast<uint8_t*>(a_byte_base + m_start_g * a_row_stride_bytes));
-        a_gl_g.rows_internal = M_g;
         auto c_gl_g = g.c;
-        c_gl_g.raw_ptr = reinterpret_cast<c_ptr_t>(
-            const_cast<uint8_t*>(c_byte_base + m_start_g * c_row_stride_bytes));
-        c_gl_g.rows_internal = M_g;
+        patch_per_group_gl_view(a_gl_g, c_gl_g, m_start_g, M_g);
+        const int a_row_stride_bytes = static_cast<int>(g.a.template stride<2>()) * sizeof(*g.a.raw_ptr);
         constexpr int m_subtile_A = 0;
         constexpr int m_subtile_C = 0;
         const int m_limit = M_g;
@@ -2429,30 +2406,8 @@ void grouped_rcr_kernel_b128(const grouped_layout_globals g) {
     const int num_pid_n = g.bpc;          // host: ceil_div(g.n, 128)
     const int ki_dyn   = g.ki;
 
-    if (threadIdx.x <= g.G && threadIdx.x < MAX_G_PLUS_1) {
-        s_offs[threadIdx.x] = static_cast<int>(g.group_offs[threadIdx.x]);
-    }
-    if (threadIdx.x > g.G && threadIdx.x < MAX_G_PLUS_1) {
-        s_cum_tiles[threadIdx.x] = 0x7FFFFFFF;
-    }
-    __syncthreads();
-    if (threadIdx.x == 0) {
-        int prev = s_offs[0];
-        s_cum_tiles[0] = 0;
-        int t = 0;
-        #pragma unroll 1
-        for (int gi = 0; gi < g.G; ++gi) {
-            const int next = s_offs[gi + 1];
-            // ceil_div: partial last M-tile (M_g % HB != 0) gets its own br;
-            // store mask drops OOB rows. Mirrors main RCR — HB instead of
-            // BLOCK_SIZE because b128 has BLK_M = HB = 128.
-            t += kittens::ceil_div(next - prev, HB) * num_pid_n;
-            s_cum_tiles[gi + 1] = t;
-            prev = next;
-        }
-        s_total_tiles = t;
-    }
-    __syncthreads();
+    init_group_cumsum_smem<MAX_G_PLUS_1>(g, s_offs, s_cum_tiles, s_total_tiles,
+                                         num_pid_n, /*M_BLOCK_DIV=*/HB);
     const int total_tiles = s_total_tiles;
 
     constexpr int bpt = ST_rcr::underlying_subtile_bytes_per_thread;
@@ -2463,61 +2418,16 @@ void grouped_rcr_kernel_b128(const grouped_layout_globals g) {
     G::prefill_swizzled_offsets(Bs[0], g.b, soB);
 
     for (int gt = pid; gt < total_tiles; gt += slots_eff) {
-        int lo = 0;
-        int hi = MAX_G_PLUS_1 - 1;
-        #pragma unroll
-        for (int level = 0; level < 6; ++level) {
-            const int mid = (lo + hi + 1) >> 1;
-            if (gt >= s_cum_tiles[mid]) lo = mid;
-            else hi = mid - 1;
-        }
-        const int group_idx = lo;
-        const int tile_start = s_cum_tiles[lo];
-        const int local_tile = gt - tile_start;
-        const int m_start_g = s_offs[group_idx];
-        const int M_g = s_offs[group_idx + 1] - m_start_g;
-        const int bpr_g = kittens::ceil_div(M_g, HB);
+        int group_idx, m_start_g, M_g, bpr_g, br, bc;
+        if (!dispatch_tile_in_group<MAX_G_PLUS_1>(
+                gt, s_cum_tiles, s_offs, num_pid_n, g.group_m,
+                /*M_BLOCK_DIV=*/HB,
+                group_idx, m_start_g, M_g, bpr_g, br, bc)) continue;
 
-        int br, bc;
-        if (g.bpc > bpr_g) {
-            const int WGN = g.group_m;
-            const int num_wgid_in_group = bpr_g * WGN;
-            int group_id = local_tile / num_wgid_in_group;
-            int first_pid_n = group_id * WGN;
-            int group_size_n = min(num_pid_n - first_pid_n, WGN);
-            if (group_size_n <= 0) continue;
-            bc = first_pid_n + ((local_tile % num_wgid_in_group) % group_size_n);
-            br = (local_tile % num_wgid_in_group) / group_size_n;
-        } else {
-            const int WGM = g.group_m;
-            const int num_wgid_in_group = WGM * num_pid_n;
-            int group_id = local_tile / num_wgid_in_group;
-            int first_pid_m = group_id * WGM;
-            int group_size_m = min(bpr_g - first_pid_m, WGM);
-            if (group_size_m <= 0) continue;
-            br = first_pid_m + ((local_tile % num_wgid_in_group) % group_size_m);
-            bc = (local_tile % num_wgid_in_group) / group_size_m;
-        }
-        if (br >= bpr_g || bc >= num_pid_n) continue;
-
-        // Per-group shifted GL views (mirrors grouped_rcr_kernel) so the
-        // SRD bound is group-local M_g, OOB A loads hardware-clamp, and the
-        // partial-last-M-tile gets a masked store via m_limit. m_subtile_*
-        // collapse to 0 because c_gl_g/a_gl_g already start at row m_start_g.
-        using a_ptr_t = decltype(g.a.raw_ptr);
-        using c_ptr_t = decltype(g.c.raw_ptr);
-        const auto* a_byte_base = reinterpret_cast<const uint8_t*>(g.a.raw_ptr);
-        const auto* c_byte_base = reinterpret_cast<const uint8_t*>(g.c.raw_ptr);
-        const int a_row_stride_bytes = static_cast<int>(g.a.template stride<2>()) * sizeof(*g.a.raw_ptr);
-        const int c_row_stride_bytes = static_cast<int>(g.c.template stride<2>()) * sizeof(*g.c.raw_ptr);
         auto a_gl_g = g.a;
-        a_gl_g.raw_ptr = reinterpret_cast<a_ptr_t>(
-            const_cast<uint8_t*>(a_byte_base + m_start_g * a_row_stride_bytes));
-        a_gl_g.rows_internal = M_g;
         auto c_gl_g = g.c;
-        c_gl_g.raw_ptr = reinterpret_cast<c_ptr_t>(
-            const_cast<uint8_t*>(c_byte_base + m_start_g * c_row_stride_bytes));
-        c_gl_g.rows_internal = M_g;
+        patch_per_group_gl_view(a_gl_g, c_gl_g, m_start_g, M_g);
+        const int a_row_stride_bytes = static_cast<int>(g.a.template stride<2>()) * sizeof(*g.a.raw_ptr);
         constexpr int m_subtile_A = 0;
         constexpr int m_subtile_C = 0;
         const int m_limit = M_g;
@@ -2835,26 +2745,10 @@ void grouped_rrr_kernel(const grouped_layout_globals g) {
         }
         if (br >= bpr_g || bc >= num_pid_n) continue;
 
-        // Per-group shifted GL views: same trick as grouped_rcr_kernel —
-        // shift A/C raw_ptr to m_start_g, set rows_internal=M_g so SRDs
-        // bounded by view's total_bytes are group-local. Lets m_subtile_A=0,
-        // m_subtile_C=0; partial last M-tile rows handled by m_limit mask.
-        // NOTE: depends on m_start_g being HB-aligned (= 128) and RBM-aligned
-        // (= 64); arbitrary byte-level m_start_g is a follow-up.
-        using a_ptr_t = decltype(g.a.raw_ptr);
-        using c_ptr_t = decltype(g.c.raw_ptr);
-        const auto* a_byte_base = reinterpret_cast<const uint8_t*>(g.a.raw_ptr);
-        const auto* c_byte_base = reinterpret_cast<const uint8_t*>(g.c.raw_ptr);
-        const int a_row_stride_bytes = static_cast<int>(g.a.template stride<2>()) * sizeof(*g.a.raw_ptr);
-        const int c_row_stride_bytes = static_cast<int>(g.c.template stride<2>()) * sizeof(*g.c.raw_ptr);
         auto a_gl_g = g.a;
-        a_gl_g.raw_ptr = reinterpret_cast<a_ptr_t>(
-            const_cast<uint8_t*>(a_byte_base + m_start_g * a_row_stride_bytes));
-        a_gl_g.rows_internal = M_g;
         auto c_gl_g = g.c;
-        c_gl_g.raw_ptr = reinterpret_cast<c_ptr_t>(
-            const_cast<uint8_t*>(c_byte_base + m_start_g * c_row_stride_bytes));
-        c_gl_g.rows_internal = M_g;
+        patch_per_group_gl_view(a_gl_g, c_gl_g, m_start_g, M_g);
+        const int a_row_stride_bytes = static_cast<int>(g.a.template stride<2>()) * sizeof(*g.a.raw_ptr);
         constexpr int m_subtile_A = 0;
         constexpr int m_subtile_C = 0;
         const int m_limit = M_g;
@@ -3727,27 +3621,12 @@ void grouped_var_k_kernel_fp8(const grouped_var_k_layout_globals_fp8 g) {
         }
         if (br >= bpr_g || bc >= num_pid_n) continue;
 
-        // Per-group shifted A/B views: shift raw_ptr to row m_start_g,
-        // set rows_internal=M_g. Caller-side coord then uses k_offset_tiles=0
-        // and SRDs built inside rcr_8w_load_hoist (= view.batch*depth*rows*cols
-        // bytes) become group-local — second-virtual-tile-OOB byte loads
-        // hardware-clamp to 0 instead of straddling into the next group's A/B.
-        // NOTE: depends on m_start_g being HB-aligned (= 128); arbitrary
-        // byte-level m_start_g is a follow-up.
-        using a_ptr_t = decltype(g.a.raw_ptr);
-        using b_ptr_t = decltype(g.b.raw_ptr);
-        const auto* a_byte_base = reinterpret_cast<const uint8_t*>(g.a.raw_ptr);
-        const auto* b_byte_base = reinterpret_cast<const uint8_t*>(g.b.raw_ptr);
-        const int a_row_stride_bytes = static_cast<int>(g.a.template stride<2>()) * sizeof(*g.a.raw_ptr);
-        const int b_row_stride_bytes = static_cast<int>(g.b.template stride<2>()) * sizeof(*g.b.raw_ptr);
+        // var_k shifts BOTH A and B (the K-reduction axis is the per-group
+        // M_g segment of [M_total, *]) — see patch_gl_to_row_slice.
         auto a_gl_g = g.a;
-        a_gl_g.raw_ptr = reinterpret_cast<a_ptr_t>(
-            const_cast<uint8_t*>(a_byte_base + m_start_g * a_row_stride_bytes));
-        a_gl_g.rows_internal = M_g;
         auto b_gl_g = g.b;
-        b_gl_g.raw_ptr = reinterpret_cast<b_ptr_t>(
-            const_cast<uint8_t*>(b_byte_base + m_start_g * b_row_stride_bytes));
-        b_gl_g.rows_internal = M_g;
+        patch_gl_to_row_slice(a_gl_g, m_start_g, M_g);
+        patch_gl_to_row_slice(b_gl_g, m_start_g, M_g);
         constexpr int k_offset_tiles = 0;
 
         auto a_co = [&](int s, int k) -> coord<ST_crr_a> {
