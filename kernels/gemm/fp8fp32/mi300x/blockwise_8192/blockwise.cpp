@@ -661,6 +661,11 @@ void dispatch_micro(micro_globals g)       { launch_micro_tk<false>(g); }
 void dispatch_micro_dgrad(micro_globals g) { launch_micro_tk<false>(g); }  // caller pre-transposes B (Python side)
 void dispatch_micro_wgrad(micro_globals g) { launch_micro_tk<true>(g);  }  // per-element B_scale (CRR wgrad)
 
+// Standalone build (default): emit a pybind11 module so test_python.py can load
+// this kernel via importlib. Primus-Turbo integration sets
+// PRIMUS_TURBO_HK_INTEGRATION before `#include`-ing this file from a wrapper
+// .cu, which suppresses the pybind block so the host project owns the binding.
+#ifndef PRIMUS_TURBO_HK_INTEGRATION
 PYBIND11_MODULE(TK_MODULE_NAME, m) {
     m.doc() = "FP8 blockwise GEMM (fwd/dgrad/wgrad) — MI300X gfx942";
     py::bind_function<dispatch_micro>(m, "dispatch_micro",
@@ -673,3 +678,4 @@ PYBIND11_MODULE(TK_MODULE_NAME, m) {
         &micro_globals::A, &micro_globals::B, &micro_globals::C,
         &micro_globals::A_scale, &micro_globals::B_scale);
 }
+#endif  // PRIMUS_TURBO_HK_INTEGRATION

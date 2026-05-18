@@ -355,6 +355,8 @@ void dispatch_micro(micro_globals g) {
     micro_tk<<<g.grid(), g.block(), mem_size, g.stream>>>(g);
 }
 
+// See blockwise_8192/blockwise.cpp header for the PRIMUS_TURBO_HK_INTEGRATION contract.
+#ifndef PRIMUS_TURBO_HK_INTEGRATION
 PYBIND11_MODULE(TK_MODULE_NAME, m) {
     m.doc() = "FP8 blockwise grouped GEMM (fwd) — MI300X gfx942 (persistent)";
     py::bind_function<dispatch_micro>(m, "dispatch_grouped",
@@ -363,3 +365,4 @@ PYBIND11_MODULE(TK_MODULE_NAME, m) {
         &micro_globals::group_offs, &micro_globals::cum_tiles,
         &micro_globals::num_groups, &micro_globals::total_tiles);
 }
+#endif  // PRIMUS_TURBO_HK_INTEGRATION
