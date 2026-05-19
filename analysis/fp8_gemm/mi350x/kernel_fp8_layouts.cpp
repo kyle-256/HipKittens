@@ -2737,7 +2737,18 @@ void grouped_rrr_kernel_body(const grouped_layout_globals g) {
         auto c_gl_g = g.c;
         patch_per_group_gl_view(a_gl_g, c_gl_g, m_start_g, M_g);
         const int a_row_stride_bytes = static_cast<int>(g.a.template stride<2>()) * sizeof(*g.a.raw_ptr);
-        constexpr int m_subtile_A = 0;
+        // 2026-05-19 BUG FIX: g.a (unpatched) + runtime m_subtile_A = m_start_g/HB
+        // for a-side load fixes a cross-group leak that was producing
+        // ~14.8% magnitude pollution in groups 1..G-1 (e.g., gpt_oss down B4
+        // M2048 grad_a SNR=14.8dB pre-existing bug). Root cause: G::load with
+        // patched a_gl_g loaded group 0's a data even for group_idx>0 — the
+        // patched raw_ptr was being optimized away in this code path (whereas
+        // RCR's custom rcr_8w_load_hoist worked correctly with patched view).
+        // Using g.a + unit-coord m_subtile shift bypasses the issue.
+        // Requires m_start_g to be HB-multiple (= 128). Uniform-M groups with
+        // M_g % HB == 0 satisfy this; variable-M with non-HB-aligned offsets
+        // would need a separate fallback.
+        const int m_subtile_A = m_start_g / HB;
         constexpr int m_subtile_C = 0;
         const int m_limit = M_g;
 
@@ -2764,18 +2775,18 @@ void grouped_rrr_kernel_body(const grouped_layout_globals g) {
 
         int tic = 0, toc = 1;
         // Prologue: tile-0 + tile-1 (mirrors dense gemm_kernel<RRR>
-        // lines 1421-1435).
+        // lines 1421-1435). a-load uses g.a (unpatched) per fix above.
         G::load(Bs[tic][0], g.b, b_co(bc*2,   0), soB);
-        G::load(As[tic][0], a_gl_g, a_co(br*2,   0), soA);
+        G::load(As[tic][0], g.a,    a_co(br*2,   0), soA);
         G::load(Bs[tic][1], g.b, b_co(bc*2+1, 0), soB);
-        G::load(As[tic][1], a_gl_g, a_co(br*2+1, 0), soA);
+        G::load(As[tic][1], g.a,    a_co(br*2+1, 0), soA);
 
         if (wm == 1) __builtin_amdgcn_s_barrier();
         TK_WAIT_VMCNT(RRR_INIT0_VMCNT);
         __builtin_amdgcn_s_barrier();
 
         G::load(Bs[toc][0], g.b, b_co(bc*2,   1), soB);
-        G::load(As[toc][0], a_gl_g, a_co(br*2,   1), soA);
+        G::load(As[toc][0], g.a,    a_co(br*2,   1), soA);
         G::load(Bs[toc][1], g.b, b_co(bc*2+1, 1), soB);
 
         TK_WAIT_VMCNT(RRR_INIT1_VMCNT);
@@ -2789,7 +2800,7 @@ void grouped_rrr_kernel_body(const grouped_layout_globals g) {
         for (int k = 0; k < ki_dyn - 2; k++, tic ^= 1, toc ^= 1) {
             load_b(b0, Bs[tic][0], wn);
             load_a(a, As[tic][0], wm);
-            G::load(As[toc][1], a_gl_g, a_co(br*2+1, k+1), soA);
+            G::load(As[toc][1], g.a,    a_co(br*2+1, k+1), soA);
             TK_WAIT_LGKM(RRR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<!FUSED_KTAIL>(cA, a, b0); __builtin_amdgcn_s_setprio(0);
@@ -2809,7 +2820,7 @@ void grouped_rrr_kernel_body(const grouped_layout_globals g) {
             __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<!FUSED_KTAIL>(cC, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier(); RRR_SCHED_BARRIER();
 
-            G::load(As[tic][0], a_gl_g, a_co(br*2, k+2), soA);
+            G::load(As[tic][0], g.a,    a_co(br*2, k+2), soA);
             TK_WAIT_VMCNT(RRR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<!FUSED_KTAIL>(cD, a, b1); __builtin_amdgcn_s_setprio(0);
@@ -2820,7 +2831,7 @@ void grouped_rrr_kernel_body(const grouped_layout_globals g) {
         {
             load_b(b0, Bs[tic][0], wn);
             load_a(a, As[tic][0], wm);
-            G::load(As[toc][1], a_gl_g, a_co(br*2+1, ki_dyn-1), soA);
+            G::load(As[toc][1], g.a,    a_co(br*2+1, ki_dyn-1), soA);
             __builtin_amdgcn_s_barrier();
             asm volatile("s_waitcnt lgkmcnt(0)");
             __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<!FUSED_KTAIL>(cA, a, b0); __builtin_amdgcn_s_setprio(0);
