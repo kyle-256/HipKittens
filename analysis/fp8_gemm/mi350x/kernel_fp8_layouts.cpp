@@ -3266,24 +3266,261 @@ void grouped_rrr_kernel_body(const grouped_layout_globals g) {
 }
 
 // =============================================================================
-// Unified persistent grouped FP8 GEMM kernel (mirror of bf16's single
-// ``grouped_gemm_bf16_kernel<Layout L>`` entry point).
+// BLOCK_N=128 RRR variant (mirror of grouped_rcr_kernel_bn128_body).
+// Output tile: BLK_M=256, BLK_N=128, K_BLOCK=128. Halves the N footprint
+// vs the full RRR body — 2 accumulators (cA, cC) instead of 4 (cA-cD),
+// 1 B-prefetch reg (b0) instead of 2 (b0, b1). Goal: V drop 256→~230,
+// spill 61→0, eliminate 248B/lane scratch.
 //
-// One ``__global__`` symbol covers all four RCR block-size variants and the
-// RRR layout via compile-time ``if constexpr`` dispatch into the per-shape
-// ``_body`` device functions above:
+// Caller contract: host sets g.bpc = ceil_div(g.n, 128) (vs 256 for the
+// full body); 2x more N-tiles per group, same M-tile count.
+//
+// FUSED_KTAIL path is omitted in this variant (template-skipped); revisit
+// if K%128 != 0 shapes need bn128 routing — for now bn128 is gated to
+// K-aligned (fast_k == k) shapes only at the dispatcher.
+// =============================================================================
+template<bool N_MASKED_STORE = false, bool FUSED_KTAIL = false>
+__device__ __forceinline__
+void grouped_rrr_kernel_bn128_body(const grouped_layout_globals g) {
+    __shared__ ST_row As[2][2];
+    __shared__ ST_v2  Bs[2][2];          // n-strip 1 unused; matches BN=256 LDS layout
+    constexpr int MAX_G_PLUS_1 = 65;
+    __shared__ int s_offs[MAX_G_PLUS_1];
+    __shared__ int s_cum_tiles[MAX_G_PLUS_1];
+    __shared__ int s_total_tiles;
+    __shared__ int s_uniform_M;
+    __shared__ int s_tiles_per_g;
+
+    A_row_reg a;
+    B_col_reg b0;
+    rt_fl<RBM, RBN, col_l, rt_16x16_s> cA, cC;
+
+    const int xcds_eff = g.num_xcds > 0 ? g.num_xcds : BLOCK_SWIZZLE_NUM_XCDS;
+    const int slots_eff = gridDim.x;
+    int pid = chiplet_transform_chunked(
+        blockIdx.x, slots_eff, xcds_eff, 64);
+
+    int wm = warpid() / WARPS_N;
+    int wn = warpid() % WARPS_N;
+    const int num_pid_n = g.bpc;     // host: ceil_div(g.n, 128)
+    const int ki_dyn   = g.ki;
+
+    if (threadIdx.x <= g.G && threadIdx.x < MAX_G_PLUS_1) {
+        s_offs[threadIdx.x] = static_cast<int>(g.group_offs[threadIdx.x]);
+    }
+    if (threadIdx.x > g.G && threadIdx.x < MAX_G_PLUS_1) {
+        s_cum_tiles[threadIdx.x] = 0x7FFFFFFF;
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        int prev = s_offs[0];
+        s_cum_tiles[0] = 0;
+        int t = 0;
+        const int M0 = s_offs[1] - prev;
+        bool uniform = (g.G > 0);
+        #pragma unroll 1
+        for (int gi = 0; gi < g.G; ++gi) {
+            const int next = s_offs[gi + 1];
+            const int M_g_i = next - prev;
+            if (M_g_i != M0) uniform = false;
+            t += kittens::ceil_div(M_g_i, BLOCK_SIZE) * num_pid_n;
+            s_cum_tiles[gi + 1] = t;
+            prev = next;
+        }
+        s_total_tiles  = t;
+        s_uniform_M    = uniform ? M0 : -1;
+        s_tiles_per_g  = uniform ? kittens::ceil_div(M0, BLOCK_SIZE) * num_pid_n : 0;
+    }
+    __syncthreads();
+    const int total_tiles  = s_total_tiles;
+    const int uniform_M    = s_uniform_M;
+    const int tiles_per_g  = s_tiles_per_g;
+
+    constexpr int bptA = ST_row::underlying_subtile_bytes_per_thread;
+    constexpr int bpmA = bptA * _NUM_THREADS;
+    constexpr int mptA = ST_row::rows * ST_row::cols * sizeof(fp8e4m3) / bpmA;
+    uint32_t soA[mptA];
+    G::prefill_swizzled_offsets(As[0][0], g.a, soA);
+
+    constexpr int bptB = ST_v2::underlying_subtile_bytes_per_thread;
+    constexpr int bpmB = bptB * _NUM_THREADS;
+    constexpr int mptB = ST_v2::rows * ST_v2::cols * sizeof(fp8e4m3) / bpmB;
+    uint32_t soB[mptB];
+    G::prefill_swizzled_offsets(Bs[0][0], g.b, soB);
+
+    for (int gt = pid; gt < total_tiles; gt += slots_eff) {
+        int group_idx, local_tile;
+        if (uniform_M > 0) {
+            group_idx  = gt / tiles_per_g;
+            local_tile = gt - group_idx * tiles_per_g;
+        } else {
+            int lo = 0;
+            int hi = MAX_G_PLUS_1 - 1;
+            #pragma unroll
+            for (int level = 0; level < 6; ++level) {
+                const int mid = (lo + hi + 1) >> 1;
+                if (gt >= s_cum_tiles[mid]) lo = mid;
+                else hi = mid - 1;
+            }
+            group_idx  = lo;
+            local_tile = gt - s_cum_tiles[lo];
+        }
+        const int m_start_g = s_offs[group_idx];
+        const int M_g = s_offs[group_idx + 1] - m_start_g;
+        const int bpr_g = kittens::ceil_div(M_g, BLOCK_SIZE);
+
+        int br, bc;
+        if (g.bpc > bpr_g) {
+            const int WGN = g.group_m;
+            const int num_wgid_in_group = bpr_g * WGN;
+            int group_id = local_tile / num_wgid_in_group;
+            int first_pid_n = group_id * WGN;
+            int group_size_n = min(num_pid_n - first_pid_n, WGN);
+            if (group_size_n <= 0) continue;
+            bc = first_pid_n + ((local_tile % num_wgid_in_group) % group_size_n);
+            br = (local_tile % num_wgid_in_group) / group_size_n;
+        } else {
+            const int WGM = g.group_m;
+            const int num_wgid_in_group = WGM * num_pid_n;
+            int group_id = local_tile / num_wgid_in_group;
+            int first_pid_m = group_id * WGM;
+            int group_size_m = min(bpr_g - first_pid_m, WGM);
+            if (group_size_m <= 0) continue;
+            br = first_pid_m + ((local_tile % num_wgid_in_group) % group_size_m);
+            bc = (local_tile % num_wgid_in_group) / group_size_m;
+        }
+        if (br >= bpr_g || bc >= num_pid_n) continue;
+
+        auto a_gl_g = g.a;
+        auto c_gl_g = g.c;
+        patch_per_group_gl_view(a_gl_g, c_gl_g, m_start_g, M_g);
+        constexpr int m_subtile_C = 0;
+        const int m_limit = M_g;
+
+        // RRR bn128 coord conventions:
+        //   a_co(s, k) : per-group [M_g, K], unit_coord row (patched view shifts base).
+        //   b_co(s, k) : B is [1, G, K, N]; bc directly indexes 1 N-strip (no *2).
+        auto a_co = [&](int s, int k) -> coord<ST_row> { return {0, 0, s, k}; };
+        auto b_co = [&](int s, int k) -> coord<ST_v2>  { return {0, group_idx, k, s}; };
+
+        auto load_a = [&](A_row_reg& dst, ST_row& tile, int wi) {
+            auto sub = subtile_inplace<RBM, BK>(tile, {wi, 0});
+            load(dst, sub);
+        };
+        auto load_b = [&](B_col_reg& dst, ST_v2& tile, int wi) {
+            load_col_from_st(dst, tile, wi * RBN);
+        };
+
+        zero(cA); zero(cC);
+
+        int tic = 0, toc = 1;
+        // Prologue: tile 0 + tile 1 (1 b strip vs 2 for full body).
+        G::load(Bs[tic][0], g.b, b_co(bc, 0), soB);
+        rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0], a_gl_g, a_co(br*2,   0), soA);
+        rcr_8w_load_hoist<_NUM_THREADS>(As[tic][1], a_gl_g, a_co(br*2+1, 0), soA);
+
+        if (wm == 1) __builtin_amdgcn_s_barrier();
+        TK_WAIT_VMCNT(0);
+        __builtin_amdgcn_s_barrier();
+
+        G::load(Bs[toc][0], g.b, b_co(bc, 1), soB);
+        rcr_8w_load_hoist<_NUM_THREADS>(As[toc][0], a_gl_g, a_co(br*2, 1), soA);
+
+        TK_WAIT_VMCNT(0);
+        __builtin_amdgcn_s_barrier();
+
+        // Main loop (2 mma per iter on cA, cC). Mirror RCR bn128 cadence.
+        TK_PRAGMA_UNROLL(RRR_MAIN_UNROLL)
+        for (int k = 0; k < ki_dyn - 2; k++, tic ^= 1, toc ^= 1) {
+            load_b(b0, Bs[tic][0], wn);
+            load_a(a, As[tic][0], wm);
+            rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], a_gl_g, a_co(br*2+1, k+1), soA);
+            TK_WAIT_LGKM(RRR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
+            MAYBE_DRAIN_LGKM();
+            __builtin_amdgcn_s_setprio(1); rrr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            G::load(Bs[tic][0], g.b, b_co(bc, k+2), soB);
+            __builtin_amdgcn_s_barrier();
+
+            load_a(a, As[tic][1], wm);
+            rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0], a_gl_g, a_co(br*2, k+2), soA);
+            __builtin_amdgcn_s_barrier();
+            MAYBE_DRAIN_LGKM();
+            __builtin_amdgcn_s_setprio(1); rrr_mma(cC, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            TK_WAIT_VMCNT(RRR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
+        }
+
+        // Epilog 1.
+        {
+            load_b(b0, Bs[tic][0], wn);
+            load_a(a, As[tic][0], wm);
+            rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], a_gl_g, a_co(br*2+1, ki_dyn-1), soA);
+            __builtin_amdgcn_s_barrier();
+            MAYBE_DRAIN_LGKM();
+            __builtin_amdgcn_s_setprio(1); rrr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_a(a, As[tic][1], wm);
+            TK_WAIT_VMCNT(RRR_EPILOGUE_VMCNT); __builtin_amdgcn_s_barrier();
+            MAYBE_DRAIN_LGKM();
+            __builtin_amdgcn_s_setprio(1); rrr_mma(cC, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_b(b0, Bs[toc][0], wn);
+            __builtin_amdgcn_s_barrier();
+            tic ^= 1; toc ^= 1;
+        }
+
+        // Epilog 2 (last K-tile).
+        {
+            load_a(a, As[tic][0], wm);
+            asm volatile("s_waitcnt vmcnt(0)"); __builtin_amdgcn_s_barrier();
+            MAYBE_DRAIN_LGKM();
+            __builtin_amdgcn_s_setprio(1); rrr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_a(a, As[tic][1], wm);
+            __builtin_amdgcn_s_barrier();
+            MAYBE_DRAIN_LGKM();
+            __builtin_amdgcn_s_setprio(1);
+            rrr_mma(cC, a, b0);
+            __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+        }
+
+        // FUSED_KTAIL omitted for bn128: bn128 dispatcher gates K%128==0.
+
+        const float combined_scale = resolve_combined_scale_grp(g);
+        mul(cA, cA, combined_scale);
+        mul(cC, cC, combined_scale);
+
+        if (wm == 0) __builtin_amdgcn_s_barrier();
+        const int r0 = __builtin_amdgcn_readfirstlane(m_subtile_C + br*WARPS_M*2+wm);
+        const int r1 = __builtin_amdgcn_readfirstlane(m_subtile_C + br*WARPS_M*2+WARPS_M+wm);
+        // BN=128: c0 in RBN units = bc*WARPS_N+wn (was bc*WARPS_N*2+wn for BN=256).
+        const int c0 = __builtin_amdgcn_readfirstlane(bc*WARPS_N+wn);
+        store_c_tile_mn_masked_grouped(c_gl_g, cA, /*group_idx=*/0, r0, c0, m_limit, g.n);
+        store_c_tile_mn_masked_grouped(c_gl_g, cC, /*group_idx=*/0, r1, c0, m_limit, g.n);
+
+        asm volatile("s_waitcnt vmcnt(0) lgkmcnt(0)");
+        __builtin_amdgcn_s_barrier();
+    }
+}
+
+// =============================================================================
+// Unified persistent grouped FP8 GEMM kernel — single ``__global__`` entry
+// point dispatching to per-shape ``_body`` device functions.
 //
 //   Layout L | BLOCK_N | body
 //   ---------+---------+--------------------------------
 //   RCR      |    256  | grouped_rcr_kernel_body        (BLK_M = BLK_N = 256)
 //   RCR      |    128  | grouped_rcr_kernel_bn128_body  (BLK_M = 256, BLK_N = 128)
 //   RCR      |   -128  | grouped_rcr_kernel_b128_body   (BLK_M = BLK_N = 128)
-//   RRR      |    256  | grouped_rrr_kernel_body
-//
-// Each ``_body`` is ``__device__ __forceinline__`` so this wrapper produces
-// the identical kernel binary per instantiation that the four prior
-// ``__global__`` definitions did — no codegen change, just a single entry
-// point for the dispatcher (and PT autotune) to instantiate.
+//   RRR      |    256  | grouped_rrr_kernel_body        (BLK_M = BLK_N = 256)
+//   RRR      |    128  | grouped_rrr_kernel_bn128_body  (BLK_M = 256, BLK_N = 128)
 // =============================================================================
 template<Layout L, int BLOCK_N = 256,
          bool N_MASKED_STORE = false, bool FUSED_KTAIL = false>
@@ -3302,9 +3539,13 @@ void grouped_gemm_fp8_kernel(const grouped_layout_globals g) {
     } else {
         static_assert(L == Layout::RRR,
                       "grouped_gemm_fp8_kernel: only Layout::RCR and Layout::RRR supported");
-        static_assert(BLOCK_N == 256,
-                      "grouped_gemm_fp8_kernel: RRR only supports BLOCK_N=256");
-        grouped_rrr_kernel_body<N_MASKED_STORE, FUSED_KTAIL>(g);
+        if constexpr (BLOCK_N == 128) {
+            grouped_rrr_kernel_bn128_body<N_MASKED_STORE, FUSED_KTAIL>(g);
+        } else {
+            static_assert(BLOCK_N == 256,
+                          "grouped_gemm_fp8_kernel: RRR BLOCK_N must be 256 or 128");
+            grouped_rrr_kernel_body<N_MASKED_STORE, FUSED_KTAIL>(g);
+        }
     }
 }
 
@@ -3510,11 +3751,36 @@ void dispatch_grouped_rrr(grouped_layout_globals g) {
     if (g.M_total <= 0 || g.n <= 0 || g.k <= 0 || g.G <= 0) return;
     if (g.bpc <= 0 || g.ki <= 0) return;
 
-    const bool n_aligned = (g.bpc * BLOCK_SIZE == g.n);
+    // bn_block routing (mirror RCR): 0 = default 256, 128 = bn128 variant.
+    // 2026-05-20 Phase 2-C: RRR bn128 added to cut V from 256 → ~230 and
+    // eliminate the 248B/lane scratch. FUSED_KTAIL not yet supported in
+    // bn128; gate it to has_k_tail==false.
+    static const int rrr_bn128_env = []() {
+        if (const char* e = std::getenv("TK_RRR_BN128")) return std::atoi(e);
+        return 0;
+    }();
+    int block_choice = g.bn_block;
+    if (block_choice == 0 && (rrr_bn128_env == 1 || rrr_bn128_env == 128)) {
+        block_choice = 128;
+    }
     // FUSED_KTAIL universal: K_rem == 64 fuses into the main kernel via the
     // per-group shifted A SRD. K_rem != 0 && != 64 not supported (no
     // production shape; would need a separate fallback if ever needed).
     const bool has_k_tail = (g.k - g.fast_k) == 64;
+    // bn128 doesn't support FUSED_KTAIL yet — fall back to 256 if K-tail present.
+    if (block_choice == 128 && has_k_tail) block_choice = 0;
+
+    if (block_choice == 128) {
+        g.bpc = kittens::ceil_div(g.n, 128);
+        const bool n_aligned_bn128 = (g.bpc * 128 == g.n);
+        if (n_aligned_bn128) grouped_gemm_fp8_kernel<Layout::RRR, 128, false, false>
+            <<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
+        else                 grouped_gemm_fp8_kernel<Layout::RRR, 128, true , false>
+            <<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
+        return;
+    }
+
+    const bool n_aligned = (g.bpc * BLOCK_SIZE == g.n);
     if (has_k_tail) {
         if (n_aligned) grouped_gemm_fp8_kernel<Layout::RRR, 256, false, true >
             <<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
