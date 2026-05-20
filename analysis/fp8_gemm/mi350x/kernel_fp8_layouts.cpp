@@ -3283,7 +3283,8 @@ template<bool N_MASKED_STORE = false, bool FUSED_KTAIL = false>
 __device__ __forceinline__
 void grouped_rrr_kernel_bn128_body(const grouped_layout_globals g) {
     __shared__ ST_row As[2][2];
-    __shared__ ST_v2  Bs[2][2];          // n-strip 1 unused; matches BN=256 LDS layout
+    __shared__ ST_v2  Bs[2];             // 2026-05-20: shrunk from [2][2]
+                                         // (n-strip 1 dead — saves ~33KB LDS)
     constexpr int MAX_G_PLUS_1 = 65;
     __shared__ int s_offs[MAX_G_PLUS_1];
     __shared__ int s_cum_tiles[MAX_G_PLUS_1];
@@ -3348,7 +3349,7 @@ void grouped_rrr_kernel_bn128_body(const grouped_layout_globals g) {
     constexpr int bpmB = bptB * _NUM_THREADS;
     constexpr int mptB = ST_v2::rows * ST_v2::cols * sizeof(fp8e4m3) / bpmB;
     uint32_t soB[mptB];
-    G::prefill_swizzled_offsets(Bs[0][0], g.b, soB);
+    G::prefill_swizzled_offsets(Bs[0], g.b, soB);
 
     for (int gt = pid; gt < total_tiles; gt += slots_eff) {
         int group_idx, local_tile;
@@ -3417,7 +3418,7 @@ void grouped_rrr_kernel_bn128_body(const grouped_layout_globals g) {
 
         int tic = 0, toc = 1;
         // Prologue: tile 0 + tile 1 (1 b strip vs 2 for full body).
-        G::load(Bs[tic][0], g.b, b_co(bc, 0), soB);
+        G::load(Bs[tic], g.b, b_co(bc, 0), soB);
         rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0], a_gl_g, a_co(br*2,   0), soA);
         rcr_8w_load_hoist<_NUM_THREADS>(As[tic][1], a_gl_g, a_co(br*2+1, 0), soA);
 
@@ -3425,7 +3426,7 @@ void grouped_rrr_kernel_bn128_body(const grouped_layout_globals g) {
         TK_WAIT_VMCNT(0);
         __builtin_amdgcn_s_barrier();
 
-        G::load(Bs[toc][0], g.b, b_co(bc, 1), soB);
+        G::load(Bs[toc], g.b, b_co(bc, 1), soB);
         rcr_8w_load_hoist<_NUM_THREADS>(As[toc][0], a_gl_g, a_co(br*2, 1), soA);
 
         TK_WAIT_VMCNT(0);
@@ -3436,14 +3437,14 @@ void grouped_rrr_kernel_bn128_body(const grouped_layout_globals g) {
         // registers, no LDS — next iter's first LDS write has its own barrier).
         TK_PRAGMA_UNROLL(RRR_MAIN_UNROLL)
         for (int k = 0; k < ki_dyn - 2; k++, tic ^= 1, toc ^= 1) {
-            load_b(b0, Bs[tic][0], wn);
+            load_b(b0, Bs[tic], wn);
             load_a(a, As[tic][0], wm);
             rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], a_gl_g, a_co(br*2+1, k+1), soA);
             TK_WAIT_LGKM(RRR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
             __builtin_amdgcn_s_setprio(1); rrr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
 
-            G::load(Bs[tic][0], g.b, b_co(bc, k+2), soB);
+            G::load(Bs[tic], g.b, b_co(bc, k+2), soB);
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
@@ -3457,7 +3458,7 @@ void grouped_rrr_kernel_bn128_body(const grouped_layout_globals g) {
 
         // Epilog 1.
         {
-            load_b(b0, Bs[tic][0], wn);
+            load_b(b0, Bs[tic], wn);
             load_a(a, As[tic][0], wm);
             rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], a_gl_g, a_co(br*2+1, ki_dyn-1), soA);
             __builtin_amdgcn_s_barrier();
@@ -3471,7 +3472,7 @@ void grouped_rrr_kernel_bn128_body(const grouped_layout_globals g) {
             __builtin_amdgcn_s_setprio(1); rrr_mma(cC, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
-            load_b(b0, Bs[toc][0], wn);
+            load_b(b0, Bs[toc], wn);
             __builtin_amdgcn_s_barrier();
             tic ^= 1; toc ^= 1;
         }
