@@ -3297,8 +3297,10 @@ void grouped_rrr_kernel_bn128_body(const grouped_layout_globals g) {
 
     const int xcds_eff = g.num_xcds > 0 ? g.num_xcds : BLOCK_SWIZZLE_NUM_XCDS;
     const int slots_eff = gridDim.x;
+    // bn128: chunk_size env-tunable to test 32/64/128/256
+    const int chunk_size_eff_bn128 = g.chunk_size > 0 ? g.chunk_size : 64;
     int pid = chiplet_transform_chunked(
-        blockIdx.x, slots_eff, xcds_eff, 64);
+        blockIdx.x, slots_eff, xcds_eff, chunk_size_eff_bn128);
 
     int wm = warpid() / WARPS_N;
     int wn = warpid() % WARPS_N;
@@ -3430,6 +3432,8 @@ void grouped_rrr_kernel_bn128_body(const grouped_layout_globals g) {
         __builtin_amdgcn_s_barrier();
 
         // Main loop (2 mma per iter on cA, cC). Mirror RCR bn128 cadence.
+        // 2026-05-20 Phase 2-C: dropped post-mma barriers (mma writes only
+        // registers, no LDS — next iter's first LDS write has its own barrier).
         TK_PRAGMA_UNROLL(RRR_MAIN_UNROLL)
         for (int k = 0; k < ki_dyn - 2; k++, tic ^= 1, toc ^= 1) {
             load_b(b0, Bs[tic][0], wn);
@@ -3438,7 +3442,6 @@ void grouped_rrr_kernel_bn128_body(const grouped_layout_globals g) {
             TK_WAIT_LGKM(RRR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
             __builtin_amdgcn_s_setprio(1); rrr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
 
             G::load(Bs[tic][0], g.b, b_co(bc, k+2), soB);
             __builtin_amdgcn_s_barrier();
@@ -3448,7 +3451,6 @@ void grouped_rrr_kernel_bn128_body(const grouped_layout_globals g) {
             __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
             __builtin_amdgcn_s_setprio(1); rrr_mma(cC, a, b0); __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier();
 
             TK_WAIT_VMCNT(RRR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
         }
@@ -3773,6 +3775,17 @@ void dispatch_grouped_rrr(grouped_layout_globals g) {
     if (block_choice == 128) {
         g.bpc = kittens::ceil_div(g.n, 128);
         const bool n_aligned_bn128 = (g.bpc * 128 == g.n);
+        // env TK_RRR_BN128_CHUNK — chiplet swizzle chunk size (default 128;
+        // 2026-05-20 sweep: chunk={32,64,128,256} → loss {18.0,20.4,15.2,15.8}%
+        // — 128 best; default 64 had been left over from RCR bn128 mirror).
+        static const int rrr_bn128_chunk = []() {
+            if (const char* e = std::getenv("TK_RRR_BN128_CHUNK")) {
+                const int v = std::atoi(e);
+                if (v >= 16 && v <= 256) return v;
+            }
+            return 128;
+        }();
+        if (g.chunk_size <= 0) g.chunk_size = rrr_bn128_chunk;
         if (n_aligned_bn128) grouped_gemm_fp8_kernel<Layout::RRR, 128, false, false>
             <<<dim3(NUM_CUS), g.block(), 0, g.stream>>>(g);
         else                 grouped_gemm_fp8_kernel<Layout::RRR, 128, true , false>
