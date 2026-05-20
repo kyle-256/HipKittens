@@ -49,7 +49,7 @@ constexpr int TAIL_BLOCK_N  = 16;
 #ifndef RCR_KTAIL_VMCNT
 #define RCR_KTAIL_VMCNT         8
 #endif
-#define RRR_PREFETCH_LGKM       8
+#define RRR_PREFETCH_LGKM       12
 #define RRR_INIT0_VMCNT         4
 #define RRR_INIT1_VMCNT         6
 #define RRR_STEADY_VMCNT        4
