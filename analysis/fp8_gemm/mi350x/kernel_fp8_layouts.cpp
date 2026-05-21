@@ -2752,6 +2752,25 @@ void grouped_rrr_kernel_body(const grouped_layout_globals g) {
         auto c_gl_g = g.c;
         patch_per_group_gl_view(a_gl_g, c_gl_g, m_start_g, M_g);
         const int a_row_stride_bytes = static_cast<int>(g.a.template stride<2>()) * sizeof(*g.a.raw_ptr);
+        // H3 (2026-05-20): outer/inner ptr split for B-tensor — shift the
+        // grouped B SRD base by `group_idx * K * N * sizeof(fp8)` once per
+        // tile, then drop `group_idx` from `b_co` so it matches dense's
+        // `{0, 0, k, s}`. Theory: lets the compiler reuse dense's exact
+        // register/MMA schedule for B-loads, freeing the per-tile slot
+        // currently held by `group_idx` inside the b_co lambda capture.
+        // Safety: SRD bound (full-tensor depth=G*K*N) extends past tensor
+        // end by (G-group_idx-1)*K*N bytes; HW returns 0 for those OOB
+        // reads, and the k/bc loops stay within the current group's K*N
+        // window so no garbage is ever read.
+        auto b_gl_g = g.b;
+        {
+            using ptr_t = decltype(b_gl_g.raw_ptr);
+            const int64_t b_group_stride_bytes =
+                static_cast<int64_t>(g.b.template stride<1>()) * sizeof(*g.b.raw_ptr);
+            auto* base = reinterpret_cast<uint8_t*>(b_gl_g.raw_ptr);
+            b_gl_g.raw_ptr = reinterpret_cast<ptr_t>(
+                base + static_cast<int64_t>(group_idx) * b_group_stride_bytes);
+        }
         // 2026-05-20: a-load switched from G::load(.., g.a, ..) + m_subtile_A
         // shift to rcr_8w_load_hoist(.., a_gl_g, ..) — same loader RCR uses,
         // and the only one that survives the compiler optimizing away a
@@ -2775,13 +2794,13 @@ void grouped_rrr_kernel_body(const grouped_layout_globals g) {
         // RRR coord conventions (mirror of dense gemm_kernel<RRR>):
         //   a_co(s, k) : A is per-group [M_g, K]  → unit_coord row index 0..bpr_g-1.
         //                Pointer-base shift via patched a_gl_g handles m_start_g.
-        //   b_co(s, k) : B is [1, G, K, N]        → K on row, N on col, group
-        //                                           depth = group_idx.
+        //   b_co(s, k) : B is per-group-shifted view (b_gl_g) — drop the
+        //                group_idx dim to match dense's coord (H3 hoist).
         auto a_co = [&](int s, int k) -> coord<ST_row> {
             return {0, 0, s, k};
         };
         auto b_co = [&](int s, int k) -> coord<ST_v2> {
-            return {0, group_idx, k, s};
+            return {0, 0, k, s};
         };
 
         auto load_a = [&](A_row_reg& dst, ST_row& tile, int wi) {
@@ -2797,18 +2816,18 @@ void grouped_rrr_kernel_body(const grouped_layout_globals g) {
         int tic = 0, toc = 1;
         // Prologue: tile-0 + tile-1 (mirrors dense gemm_kernel<RRR>
         // lines 1421-1435). a-load uses g.a (unpatched) per fix above.
-        G::load(Bs[tic][0], g.b, b_co(bc*2,   0), soB);
+        G::load(Bs[tic][0], b_gl_g, b_co(bc*2,   0), soB);
         rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0], a_gl_g, a_co(br*2,   0), soA);
-        G::load(Bs[tic][1], g.b, b_co(bc*2+1, 0), soB);
+        G::load(Bs[tic][1], b_gl_g, b_co(bc*2+1, 0), soB);
         rcr_8w_load_hoist<_NUM_THREADS>(As[tic][1], a_gl_g, a_co(br*2+1, 0), soA);
 
         if (wm == 1) __builtin_amdgcn_s_barrier();
         TK_WAIT_VMCNT(RRR_INIT0_VMCNT);
         __builtin_amdgcn_s_barrier();
 
-        G::load(Bs[toc][0], g.b, b_co(bc*2,   1), soB);
+        G::load(Bs[toc][0], b_gl_g, b_co(bc*2,   1), soB);
         rcr_8w_load_hoist<_NUM_THREADS>(As[toc][0], a_gl_g, a_co(br*2,   1), soA);
-        G::load(Bs[toc][1], g.b, b_co(bc*2+1, 1), soB);
+        G::load(Bs[toc][1], b_gl_g, b_co(bc*2+1, 1), soB);
 
         TK_WAIT_VMCNT(RRR_INIT1_VMCNT);
         __builtin_amdgcn_s_barrier();
@@ -2828,14 +2847,14 @@ void grouped_rrr_kernel_body(const grouped_layout_globals g) {
             __builtin_amdgcn_s_barrier(); RRR_SCHED_BARRIER();
 
             load_b(b1, Bs[tic][1], wn);
-            G::load(Bs[tic][0], g.b, b_co(bc*2, k+2), soB);
+            G::load(Bs[tic][0], b_gl_g, b_co(bc*2, k+2), soB);
             __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
             __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cB, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
-            G::load(Bs[tic][1], g.b, b_co(bc*2+1, k+2), soB);
+            G::load(Bs[tic][1], b_gl_g, b_co(bc*2+1, k+2), soB);
             __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
             __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cC, a, b0); __builtin_amdgcn_s_setprio(0);
