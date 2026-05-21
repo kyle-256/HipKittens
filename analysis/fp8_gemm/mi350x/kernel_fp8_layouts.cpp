@@ -3433,8 +3433,11 @@ template<bool N_MASKED_STORE = false, bool FUSED_KTAIL = false>
 __device__ __forceinline__
 void grouped_rrr_kernel_bn128_body(const grouped_layout_globals g) {
     __shared__ ST_row As[2][2];
-    __shared__ ST_v2  Bs[2];             // 2026-05-20: shrunk from [2][2]
-                                         // (n-strip 1 dead — saves ~33KB LDS)
+    __shared__ ST_v2  Bs[3];             // 2026-05-21: triple-buffer for race fix.
+                                         // gfx950 mfma_f8 source-forwarding races
+                                         // when buffer_load_lds writes to in-flight
+                                         // mfma's source LDS slot. 3-way rotation
+                                         // makes write-slot ≠ read-slot.
     constexpr int MAX_G_PLUS_1 = 65;
     __shared__ int s_offs[MAX_G_PLUS_1];
     __shared__ int s_cum_tiles[MAX_G_PLUS_1];
@@ -3567,8 +3570,11 @@ void grouped_rrr_kernel_bn128_body(const grouped_layout_globals g) {
         zero(cA); zero(cC);
 
         int tic = 0, toc = 1;
+        // B triple-buffer 3-way rotation indices. Initial: slot 0 = k=0, slot 1 = k=1,
+        // slot 2 empty (becomes first write target).
+        int b_cur = 0, b_nxt = 1, b_wrt = 2;
         // Prologue: tile 0 + tile 1 (1 b strip vs 2 for full body).
-        G::load(Bs[tic], g.b, b_co(bc, 0), soB);
+        G::load(Bs[b_cur], g.b, b_co(bc, 0), soB);
         rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0], a_gl_g, a_co(br*2,   0), soA);
         rcr_8w_load_hoist<_NUM_THREADS>(As[tic][1], a_gl_g, a_co(br*2+1, 0), soA);
 
@@ -3576,7 +3582,7 @@ void grouped_rrr_kernel_bn128_body(const grouped_layout_globals g) {
         TK_WAIT_VMCNT(0);
         __builtin_amdgcn_s_barrier();
 
-        G::load(Bs[toc], g.b, b_co(bc, 1), soB);
+        G::load(Bs[b_nxt], g.b, b_co(bc, 1), soB);
         rcr_8w_load_hoist<_NUM_THREADS>(As[toc][0], a_gl_g, a_co(br*2, 1), soA);
 
         TK_WAIT_VMCNT(0);
@@ -3585,16 +3591,19 @@ void grouped_rrr_kernel_bn128_body(const grouped_layout_globals g) {
         // Main loop (2 mma per iter on cA, cC). Mirror RCR bn128 cadence.
         // 2026-05-20 Phase 2-C: dropped post-mma barriers (mma writes only
         // registers, no LDS — next iter's first LDS write has its own barrier).
+        // 2026-05-21 RACE FIX: G::load writes Bs[b_wrt] (rotating, NOT b_cur).
+        // Prevents mfma source-forward refresh from b0's source LDS slot.
         TK_PRAGMA_UNROLL(RRR_MAIN_UNROLL)
         for (int k = 0; k < ki_dyn - 2; k++, tic ^= 1, toc ^= 1) {
-            load_b(b0, Bs[tic], wn);
+            load_b(b0, Bs[b_cur], wn);
             load_a(a, As[tic][0], wm);
             rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], a_gl_g, a_co(br*2+1, k+1), soA);
             TK_WAIT_LGKM(RRR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
             __builtin_amdgcn_s_setprio(1); rrr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
 
-            G::load(Bs[tic], g.b, b_co(bc, k+2), soB);
+            // Write to b_wrt (NOT b_cur). b_wrt ≠ b_cur ≠ b_nxt by rotation invariant.
+            G::load(Bs[b_wrt], g.b, b_co(bc, k+2), soB);
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
@@ -3604,11 +3613,17 @@ void grouped_rrr_kernel_bn128_body(const grouped_layout_globals g) {
             __builtin_amdgcn_s_setprio(1); rrr_mma(cC, a, b0); __builtin_amdgcn_s_setprio(0);
 
             TK_WAIT_VMCNT(RRR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
+
+            // Rotate: cur ← nxt ← wrt ← cur (next iter reads what was nxt)
+            int b_tmp = b_cur;
+            b_cur = b_nxt;
+            b_nxt = b_wrt;
+            b_wrt = b_tmp;
         }
 
-        // Epilog 1.
+        // Epilog 1: reads k=ki_dyn-2 from Bs[b_cur].
         {
-            load_b(b0, Bs[tic], wn);
+            load_b(b0, Bs[b_cur], wn);
             load_a(a, As[tic][0], wm);
             rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], a_gl_g, a_co(br*2+1, ki_dyn-1), soA);
             __builtin_amdgcn_s_barrier();
@@ -3622,7 +3637,7 @@ void grouped_rrr_kernel_bn128_body(const grouped_layout_globals g) {
             __builtin_amdgcn_s_setprio(1); rrr_mma(cC, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
-            load_b(b0, Bs[toc], wn);
+            load_b(b0, Bs[b_nxt], wn);
             __builtin_amdgcn_s_barrier();
             tic ^= 1; toc ^= 1;
         }
