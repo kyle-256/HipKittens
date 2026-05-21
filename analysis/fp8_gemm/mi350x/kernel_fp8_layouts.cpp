@@ -289,6 +289,117 @@ __device__ __forceinline__ void rcr_mma_32(
     mma_ABt(acc, a, b, acc);
 }
 
+// 32×32×64 single-acc analog of rrr_mma_agpr_t (block 2 of 32×32 structural
+// rewrite per [[fp8-rrr-32x32-foundation]]). For RBM=64, RBN=32, BK=128:
+// 2×1×2 = 4 MFMAs/call vs 4×2×1 = 8 MFMAs/call in 16×16×128 wrapper.
+// Same K throughput, half the issue count.
+using A_row_reg_32 = rt_fp8e4m3<RBM, BK, row_l, rt_32x64_s>;
+using B_col_reg_32 = rt_fp8e4m3<BK, RBN, col_l, rt_64x32_s>;
+
+template<bool USE_AGPR>
+__device__ __forceinline__ void rrr_mma_32_agpr_t(
+    rt_fl<RBM, RBN, col_l, rt_32x32_s>& acc,
+    const A_row_reg_32& a,
+    const B_col_reg_32& b)
+{
+    if constexpr (USE_AGPR) {
+        using D_T = rt_fl<RBM, RBN, col_l, rt_32x32_s>;
+        #pragma unroll
+        for (int n = 0; n < D_T::height; n++) {
+            #pragma unroll
+            for (int m = 0; m < D_T::width; m++) {
+                #pragma unroll
+                for (int k = 0; k < A_row_reg_32::width; k++) {
+                    mfma323264_agpr_inplace(
+                        acc.tiles[n][m].data,
+                        a.tiles[n][k].data,
+                        b.tiles[k][m].data);
+                }
+            }
+        }
+    } else {
+        mma_AB(acc, a, b, acc);
+    }
+}
+
+__attribute__((used)) static __device__ void
+__lever_force_instantiate_rrr_mma_32_agpr() {
+    rt_fl<RBM, RBN, col_l, rt_32x32_s> dummy_acc{};
+    A_row_reg_32 dummy_a{};
+    B_col_reg_32 dummy_b{};
+    rrr_mma_32_agpr_t<true>(dummy_acc, dummy_a, dummy_b);
+    rrr_mma_32_agpr_t<false>(dummy_acc, dummy_a, dummy_b);
+}
+
+// Register-cost probe (block 2a per [[fp8-rrr-32x32-foundation]]). Minimal
+// __global__ kernel that loops rrr_mma_32_agpr_t<true>. Because __device__
+// stubs don't appear in gfx950 KD notes, we need a __global__ to surface
+// V/A/spill numbers via clang-offload-bundler + llvm-readobj --notes.
+// Compares register footprint to existing grouped_gemm_fp8_kernel<RRR,256,*,*>
+// baseline (V=256 A=128 spill=61 per [[fp8-rrr-attempt-h5-diag]]).
+template<int LOOP_ITERS>
+__global__ void __probe_rrr_mma_32_agpr(
+    const fp8e4m3 *__restrict__ a_ptr,
+    const fp8e4m3 *__restrict__ b_ptr,
+    float        *__restrict__ d_ptr)
+{
+    rt_fl<RBM, RBN, col_l, rt_32x32_s> acc{};
+
+    A_row_reg_32 a;
+    B_col_reg_32 b;
+
+    // Load A and B from gmem as raw bytes — the test cares about the
+    // mma body's reg cost, not the load path's. One b128 load per lane
+    // fills enough of each operand to keep the compiler honest.
+    const int lane = kittens::laneid();
+    const __uint128_t *a_src = reinterpret_cast<const __uint128_t*>(a_ptr) + lane;
+    const __uint128_t *b_src = reinterpret_cast<const __uint128_t*>(b_ptr) + lane;
+    #pragma unroll
+    for (int n = 0; n < A_row_reg_32::height; ++n) {
+        #pragma unroll
+        for (int k = 0; k < A_row_reg_32::width; ++k) {
+            *reinterpret_cast<__uint128_t*>(&a.tiles[n][k].data[0]) = a_src[n * 2 + k];
+            *reinterpret_cast<__uint128_t*>(&a.tiles[n][k].data[4]) = a_src[(n * 2 + k) + 16];
+        }
+    }
+    #pragma unroll
+    for (int kk = 0; kk < B_col_reg_32::height; ++kk) {
+        #pragma unroll
+        for (int m = 0; m < B_col_reg_32::width; ++m) {
+            *reinterpret_cast<__uint128_t*>(&b.tiles[kk][m].data[0]) = b_src[kk + m];
+            *reinterpret_cast<__uint128_t*>(&b.tiles[kk][m].data[4]) = b_src[(kk + m) + 8];
+        }
+    }
+
+    #pragma unroll 1
+    for (int it = 0; it < LOOP_ITERS; ++it) {
+        rrr_mma_32_agpr_t<true>(acc, a, b);
+    }
+
+    // Store back so acc isn't DCE'd. Strided write per lane.
+    using D_T = rt_fl<RBM, RBN, col_l, rt_32x32_s>;
+    float *d_dst = d_ptr + lane * 16;
+    #pragma unroll
+    for (int n = 0; n < D_T::height; ++n) {
+        #pragma unroll
+        for (int m = 0; m < D_T::width; ++m) {
+            *reinterpret_cast<float2*>(d_dst + 0) = acc.tiles[n][m].data[0];
+            *reinterpret_cast<float2*>(d_dst + 2) = acc.tiles[n][m].data[1];
+            *reinterpret_cast<float2*>(d_dst + 4) = acc.tiles[n][m].data[2];
+            *reinterpret_cast<float2*>(d_dst + 6) = acc.tiles[n][m].data[3];
+            *reinterpret_cast<float2*>(d_dst + 8) = acc.tiles[n][m].data[4];
+            *reinterpret_cast<float2*>(d_dst + 10) = acc.tiles[n][m].data[5];
+            *reinterpret_cast<float2*>(d_dst + 12) = acc.tiles[n][m].data[6];
+            *reinterpret_cast<float2*>(d_dst + 14) = acc.tiles[n][m].data[7];
+            d_dst += 16 * 64;
+        }
+    }
+}
+
+template __global__ void __probe_rrr_mma_32_agpr<1>(const fp8e4m3*, const fp8e4m3*, float*);
+template __global__ void __probe_rrr_mma_32_agpr<4>(const fp8e4m3*, const fp8e4m3*, float*);
+template __global__ void __probe_rrr_mma_32_agpr<16>(const fp8e4m3*, const fp8e4m3*, float*);
+
 template<typename A_RT_32x64>
 __device__ __forceinline__ void load_a_kt_32x64(
     A_RT_32x64& A_tile,
@@ -2637,7 +2748,11 @@ void grouped_rrr_kernel_body(const grouped_layout_globals g) {
     // (occupancy parity with dense gemm_kernel<RRR>).
 
     A_row_reg a;
-    B_col_reg b0, b1;
+    // H6 (2026-05-21, re-applied): b1 eliminated; main loop uses single b0
+    // cycled strip0→strip1→strip0 with mma order cA→cB→cD→cC. Previously
+    // measured spill 58→37 on NMASK=1 (worst-shape dispatch route per H3).
+    // First measurement misread baseline; re-applying with H7 to compose.
+    B_col_reg b0;
     rt_fl<RBM, RBN, col_l, rt_16x16_s> cA, cB, cC, cD;
 
     // Round-2 (FP8 backward unblock): mirror RCR — read host-side
@@ -2836,38 +2951,49 @@ void grouped_rrr_kernel_body(const grouped_layout_globals g) {
         // 2026-05-15: AGPR variant — only main loop uses _agpr; epilog/ktail
         // stay on builtin so the cA-cD AGPR ↔ VGPR transition happens once
         // at end-of-main rather than every call.
+        // H6+H7 (2026-05-21): single-b0 main loop (cA→cB→cD→cC), one
+        // sched_barrier(0) at end-of-iter. H6 alone drops spill 58→37 on
+        // NMASK=1 (worst-shape route). H7 removes redundant mid-iter
+        // sched_barrier(0) drains so scheduler can reorder DS_READ/VMEM
+        // around the mma pipeline.
         TK_PRAGMA_UNROLL(RRR_MAIN_UNROLL)
         for (int k = 0; k < ki_dyn - 2; k++, tic ^= 1, toc ^= 1) {
+            // Phase 1: cA = mma(slab0, strip0)
             load_b(b0, Bs[tic][0], wn);
             load_a(a, As[tic][0], wm);
             rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], a_gl_g, a_co(br*2+1, k+1), soA);
             TK_WAIT_LGKM(RRR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
             __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cA, a, b0); __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier(); RRR_SCHED_BARRIER();
+            __builtin_amdgcn_s_barrier();
 
-            load_b(b1, Bs[tic][1], wn);
-            G::load(Bs[tic][0], b_gl_g, b_co(bc*2, k+2), soB);
+            // Phase 2: cB = mma(slab0, strip1)
+            load_b(b0, Bs[tic][1], wn);
             __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cB, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cB, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
+            // Phase 3: cD = mma(slab1, strip1); prefetch strip1 (last use)
             load_a(a, As[tic][1], wm);
             G::load(Bs[tic][1], b_gl_g, b_co(bc*2+1, k+2), soB);
             __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cC, a, b0); __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier(); RRR_SCHED_BARRIER();
+            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cD, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
 
+            // Phase 4: cC = mma(slab1, strip0 reload); prefetch strip0 (last use)
+            load_b(b0, Bs[tic][0], wn);
+            G::load(Bs[tic][0], b_gl_g, b_co(bc*2, k+2), soB);
             rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0], a_gl_g, a_co(br*2, k+2), soA);
             TK_WAIT_VMCNT(RRR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cD, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cC, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
+            RRR_SCHED_BARRIER();  // end-of-iter fence (CK pattern: 1 per K-iter)
         }
 
-        // Epilog 1 (mirror dense lines 1472-1501).
+        // Epilog 1 (H6 single-b0): mma order cA→cB→cD→cC, single b0 cycled.
         {
             load_b(b0, Bs[tic][0], wn);
             load_a(a, As[tic][0], wm);
@@ -2875,49 +3001,54 @@ void grouped_rrr_kernel_body(const grouped_layout_globals g) {
             __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
             __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cA, a, b0); __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier(); RRR_SCHED_BARRIER();
+            __builtin_amdgcn_s_barrier();
 
-            load_b(b1, Bs[tic][1], wn);
+            load_b(b0, Bs[tic][1], wn);
             __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cB, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cB, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
+            TK_WAIT_VMCNT(RRR_EPILOGUE_VMCNT); __builtin_amdgcn_s_barrier();
+            MAYBE_DRAIN_LGKM();
+            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cD, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_b(b0, Bs[tic][0], wn);
             __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
             __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cC, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
-
-            load_b(b0, Bs[toc][0], wn);
-            TK_WAIT_VMCNT(RRR_EPILOGUE_VMCNT); __builtin_amdgcn_s_barrier();
-            MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cD, a, b1); __builtin_amdgcn_s_setprio(0);
-            __builtin_amdgcn_s_barrier(); RRR_SCHED_BARRIER();
+            RRR_SCHED_BARRIER();
             tic ^= 1; toc ^= 1;
         }
 
-        // Epilog 2 (mirror dense lines 1503-1526).
+        // Epilog 2 (H6 single-b0): mma order cA→cB→cD→cC, single b0 cycled.
         {
+            load_b(b0, Bs[tic][0], wn);
             load_a(a, As[tic][0], wm);
             asm volatile("s_waitcnt vmcnt(0)"); __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
             __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cA, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
-            load_b(b1, Bs[tic][1], wn);
-            __builtin_amdgcn_s_barrier(); RRR_SCHED_BARRIER();
+            load_b(b0, Bs[tic][1], wn);
+            __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cB, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cB, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
             __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1);
-            rrr_mma_agpr_t<true>(cC, a, b0);
-            rrr_mma_agpr_t<true>(cD, a, b1);
-            __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cD, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_b(b0, Bs[tic][0], wn);
+            __builtin_amdgcn_s_barrier();
+            MAYBE_DRAIN_LGKM();
+            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cC, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
         }
 
