@@ -2223,7 +2223,11 @@ __device__ __forceinline__
 void grouped_rcr_kernel_bn128_body(const grouped_layout_globals g) {
     using ST_rcr = ST_v2;
     __shared__ ST_rcr As[2][2];
-    __shared__ ST_rcr Bs[2][2];          // n-strip 1 unused; matches BN=256 LDS layout
+    __shared__ ST_rcr Bs[3];             // 2026-05-21: B triple-buffer to break
+                                         // gfx950 mfma_f8 source-forwarding race
+                                         // (mirror RRR bn128 fix). A side keeps
+                                         // 2-buffer; residual race exists for B≥4
+                                         // M_g≥1024 — see CLAUDE.md for status.
     constexpr int MAX_G_PLUS_1 = 65;
     __shared__ int s_offs[MAX_G_PLUS_1];
     __shared__ int s_cum_tiles[MAX_G_PLUS_1];
@@ -2252,7 +2256,7 @@ void grouped_rcr_kernel_bn128_body(const grouped_layout_globals g) {
     constexpr int mpt = ST_rcr::rows * ST_rcr::cols * sizeof(fp8e4m3) / bpm;
     uint32_t soA[mpt], soB[mpt];
     G::prefill_swizzled_offsets(As[0][0], g.a, soA);
-    G::prefill_swizzled_offsets(Bs[0][0], g.b, soB);
+    G::prefill_swizzled_offsets(Bs[0], g.b, soB);
 
     for (int gt = pid; gt < total_tiles; gt += slots_eff) {
         int group_idx, m_start_g, M_g, bpr_g, br, bc;
@@ -2272,8 +2276,6 @@ void grouped_rcr_kernel_bn128_body(const grouped_layout_globals g) {
         auto a_co = [&](int s, int k) -> coord<ST_rcr> {
             return {0, 0, m_subtile_A + s, k};
         };
-        // BN=128: ST_rcr cols = HB = 128, so bc directly addresses one ST tile
-        // (no *2 factor as in BN=256 which packs 2 strips per BLOCK_N).
         auto b_co = [&](int s, int k) -> coord<ST_rcr> {
             return {0, group_idx, s, k};
         };
@@ -2290,8 +2292,11 @@ void grouped_rcr_kernel_bn128_body(const grouped_layout_globals g) {
         zero(cA); zero(cC);
 
         int tic = 0, toc = 1;
+        // 2026-05-21 RACE FIX: B-side write rotates through 3 slots; never the
+        // slot that current mfma is source-forwarding b0 from. Mirror RRR fix.
+        int b_cur = 0, b_nxt = 1, b_wrt = 2;
         // Prologue.
-        rcr_8w_load_hoist<_NUM_THREADS>(Bs[tic][0], g.b, b_co(bc, 0), soB);
+        G::load(Bs[tic], g.b, b_co(bc, 0), soB);
         rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0], a_gl_g, a_co(br*2,   0), soA);
         rcr_8w_load_hoist<_NUM_THREADS>(As[tic][1], a_gl_g, a_co(br*2+1, 0), soA);
 
@@ -2299,21 +2304,17 @@ void grouped_rcr_kernel_bn128_body(const grouped_layout_globals g) {
         TK_WAIT_VMCNT(0);
         __builtin_amdgcn_s_barrier();
 
-        rcr_8w_load_hoist<_NUM_THREADS>(Bs[toc][0], g.b, b_co(bc, 1), soB);
+        G::load(Bs[toc], g.b, b_co(bc, 1), soB);
         rcr_8w_load_hoist<_NUM_THREADS>(As[toc][0], a_gl_g, a_co(br*2,   1), soA);
 
         TK_WAIT_VMCNT(0);
         __builtin_amdgcn_s_barrier();
 
-        // Main loop (2 MFMAs per iter: cA, cC). Prefetch Bs[tic][0] @ k+2
-        // BEFORE cC mma — this matches original BN=256 ordering where
-        // b_tile(tic, 0) is prefetched between cA and cB mma. The original
-        // pattern is: load b0 → mma cA → prefetch Bs[tic][0]@k+2 → mma cB →
-        // ... → prefetch Bs[tic][1]@k+2 → mma cD. We do (load b0 → mma cA →
-        // prefetch Bs[tic][0]@k+2 → mma cC).
+        // Main loop (2 MFMAs per iter: cA, cC). RACE FIX: B-side write to
+        // triple-buffered b_wrt slot (≠ b_cur where mfma's b0 source-forwards).
         TK_PRAGMA_UNROLL(RCR_MAIN_UNROLL)
         for (int k = 0; k < ki_dyn - 2; k++, tic ^= 1, toc ^= 1) {
-            load_b(b0, Bs[tic][0], wn);
+            load_b(b0, Bs[b_cur], wn);
             load_a(a, As[tic][0], wm);
             rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], a_gl_g, a_co(br*2+1, k+1), soA);
             TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
@@ -2321,9 +2322,7 @@ void grouped_rcr_kernel_bn128_body(const grouped_layout_globals g) {
             __builtin_amdgcn_s_setprio(1); rcr_mma(cA, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
-            // Prefetch Bs[tic][0] @ k+2 NOW (was at end of iter — moved earlier
-            // to match original BN=256 ordering pattern).
-            rcr_8w_load_hoist<_NUM_THREADS>(Bs[tic][0], g.b, b_co(bc, k+2), soB);
+            G::load(Bs[b_wrt], g.b, b_co(bc, k+2), soB);   // RACE FIX: b_wrt
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
@@ -2333,12 +2332,17 @@ void grouped_rcr_kernel_bn128_body(const grouped_layout_globals g) {
             __builtin_amdgcn_s_setprio(1); rcr_mma(cC, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
-            TK_WAIT_VMCNT(RCR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
+            // 2026-05-21 RACE FIX (extra drain): force vmcnt(0)+lgkmcnt(0) at
+            // end-of-iter so cross-iter LDS state is fully committed before
+            // rotation. Empirically reduces residual race for RCR bn128.
+            asm volatile("s_waitcnt vmcnt(0) lgkmcnt(0)"); __builtin_amdgcn_s_barrier();
+
+            int b_tmp = b_cur; b_cur = b_nxt; b_nxt = b_wrt; b_wrt = b_tmp;
         }
 
         // Epilog 1: K-iter ki_dyn-2.
         {
-            load_b(b0, Bs[tic][0], wn);
+            load_b(b0, Bs[b_cur], wn);
             load_a(a, As[tic][0], wm);
             rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], a_gl_g, a_co(br*2+1, ki_dyn-1), soA);
             __builtin_amdgcn_s_barrier();
@@ -2352,7 +2356,7 @@ void grouped_rcr_kernel_bn128_body(const grouped_layout_globals g) {
             __builtin_amdgcn_s_setprio(1); rcr_mma(cC, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
-            load_b(b0, Bs[toc][0], wn);
+            load_b(b0, Bs[b_nxt], wn);
             __builtin_amdgcn_s_barrier();
             tic ^= 1; toc ^= 1;
         }
@@ -3811,19 +3815,15 @@ void dispatch_grouped_rcr(grouped_layout_globals g) {
                 }
             }
         } else if (block_choice == 128) {
-            // BN=128, BM=256 (bn128)
-            if (fuse_ktail_active) {
-                if (n_aligned) {
-                    grouped_gemm_fp8_kernel<Layout::RCR, 128, false, true><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
-                } else {
-                    grouped_gemm_fp8_kernel<Layout::RCR, 128, true , true><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
-                }
+            // BN=128, BM=256 (bn128). 2026-05-21 RACE FIX: force FUSED_KTAIL=false
+            // (mirror RRR bn128 dispatcher line 3946/3948). FUSED_KTAIL=true at
+            // K_rem==0 instantiates dead code but its template expansion affects
+            // VGPR layout and exposes a race trigger on top of the inter-mma
+            // B-write race (which is fixed inside bn128_body via triple-buffer).
+            if (n_aligned) {
+                grouped_gemm_fp8_kernel<Layout::RCR, 128, false, false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
             } else {
-                if (n_aligned) {
-                    grouped_gemm_fp8_kernel<Layout::RCR, 128, false, false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
-                } else {
-                    grouped_gemm_fp8_kernel<Layout::RCR, 128, true , false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
-                }
+                grouped_gemm_fp8_kernel<Layout::RCR, 128, true , false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
             }
         } else if (fuse_ktail_active) {
             if (n_aligned) {
