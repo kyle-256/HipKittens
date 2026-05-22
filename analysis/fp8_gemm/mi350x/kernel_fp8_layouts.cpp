@@ -2963,34 +2963,39 @@ void grouped_rrr_kernel_body(const grouped_layout_globals g) {
             load_b(b0, Bs[tic][0], wn);
             load_a(a, As[tic][0], wm);
             rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], a_gl_g, a_co(br*2+1, k+1), soA);
+            // R17 (2026-05-22): remove s_setprio around mfma. The +1/-1 prio
+            // sequence creates an implicit scheduling barrier in LLVM AMDGPU
+            // backend, preventing instruction interleaving across mfma issue
+            // boundaries. Removing lets scheduler pack more LDS prefetch into
+            // mfma latency cycles.
             TK_WAIT_LGKM(RRR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            rrr_mma_agpr_t<true>(cA, a, b0);
             __builtin_amdgcn_s_barrier();
 
-            // Phase 2: cB = mma(slab0, strip1). Load b1 + B prefetch strip0 (last use).
+            // Phase 2: cB = mma(slab0, strip1).
             load_b(b1, Bs[tic][1], wn);
             G::load(Bs[tic][0], b_gl_g, b_co(bc*2, k+2), soB);
             __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cB, a, b1); __builtin_amdgcn_s_setprio(0);
+            rrr_mma_agpr_t<true>(cB, a, b1);
             __builtin_amdgcn_s_barrier();
 
-            // Phase 3: cC = mma(slab1, strip0). New a + B prefetch strip1 (last use).
+            // Phase 3: cC = mma(slab1, strip0).
             load_a(a, As[tic][1], wm);
             G::load(Bs[tic][1], b_gl_g, b_co(bc*2+1, k+2), soB);
             __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cC, a, b0); __builtin_amdgcn_s_setprio(0);
+            rrr_mma_agpr_t<true>(cC, a, b0);
             __builtin_amdgcn_s_barrier();
 
-            // Phase 4: cD = mma(slab1, strip1). A prefetch.
+            // Phase 4: cD = mma(slab1, strip1).
             rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0], a_gl_g, a_co(br*2, k+2), soA);
             TK_WAIT_VMCNT(RRR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cD, a, b1); __builtin_amdgcn_s_setprio(0);
+            rrr_mma_agpr_t<true>(cD, a, b1);
             __builtin_amdgcn_s_barrier();
-            RRR_SCHED_BARRIER();  // end-of-iter fence (CK pattern: 1 per K-iter)
+            RRR_SCHED_BARRIER();
         }
 
         // Epilog 1 (Round-4: dense-pattern b0 prefetch at end → epilog 2 saves 1 load_b).
