@@ -3812,15 +3812,24 @@ void dispatch_grouped_rcr(grouped_layout_globals g) {
                 }
             }
         } else if (block_choice == 128) {
-            // BN=128, BM=256 (bn128). 2026-05-21 RACE FIX: force FUSED_KTAIL=false
-            // (mirror RRR bn128 dispatcher line 3946/3948). FUSED_KTAIL=true at
-            // K_rem==0 instantiates dead code but its template expansion affects
-            // VGPR layout and exposes a race trigger on top of the inter-mma
-            // B-write race (which is fixed inside bn128_body via triple-buffer).
-            if (n_aligned) {
-                grouped_gemm_fp8_kernel<Layout::RCR, 128, false, false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+            // BN=128, BM=256 (bn128). 2026-05-22 R3: K_rem==64 now allowed via
+            // FUSED_KTAIL=true (bn128 body has the K-tail code at line 2381+).
+            // K_rem==0 keeps FUSED_KTAIL=false to avoid the dead-code race
+            // trigger documented in 2026-05-21 fix (triple-buffer Bs[3] handles
+            // the inter-mma B-write race separately).
+            const bool bn128_fuse_active = fuse_ktail_active && (K_rem_for_fuse == 64);
+            if (bn128_fuse_active) {
+                if (n_aligned) {
+                    grouped_gemm_fp8_kernel<Layout::RCR, 128, false, true ><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+                } else {
+                    grouped_gemm_fp8_kernel<Layout::RCR, 128, true , true ><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+                }
             } else {
-                grouped_gemm_fp8_kernel<Layout::RCR, 128, true , false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+                if (n_aligned) {
+                    grouped_gemm_fp8_kernel<Layout::RCR, 128, false, false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+                } else {
+                    grouped_gemm_fp8_kernel<Layout::RCR, 128, true , false><<<dim3(rcr_slots), g.block(), 0, g.stream>>>(g);
+                }
             }
         } else if (fuse_ktail_active) {
             if (n_aligned) {
