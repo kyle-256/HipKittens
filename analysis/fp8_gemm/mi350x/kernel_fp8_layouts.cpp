@@ -2993,7 +2993,7 @@ void grouped_rrr_kernel_body(const grouped_layout_globals g) {
             RRR_SCHED_BARRIER();  // end-of-iter fence (CK pattern: 1 per K-iter)
         }
 
-        // Epilog 1 (Round-3 b0+b1): mma order cA→cB→cC→cD (mirror dense).
+        // Epilog 1 (Round-4: dense-pattern b0 prefetch at end → epilog 2 saves 1 load_b).
         {
             load_b(b0, Bs[tic][0], wn);
             load_b(b1, Bs[tic][1], wn);
@@ -3014,6 +3014,9 @@ void grouped_rrr_kernel_body(const grouped_layout_globals g) {
             __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cC, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
+            // Dense-pattern prefetch: load b0 for epilog 2 NOW (Bs[toc][0]
+            // post-flip = Bs[new tic][0]). Hides LDS read latency under cD mma.
+            load_b(b0, Bs[toc][0], wn);
             MAYBE_DRAIN_LGKM();
             __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cD, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
@@ -3021,9 +3024,8 @@ void grouped_rrr_kernel_body(const grouped_layout_globals g) {
             tic ^= 1; toc ^= 1;
         }
 
-        // Epilog 2 (Round-3 b0+b1): mma order cA→cB→cC→cD.
+        // Epilog 2 (Round-4: b0 prefetched from epilog 1; only load b1 fresh).
         {
-            load_b(b0, Bs[tic][0], wn);
             load_b(b1, Bs[tic][1], wn);
             load_a(a, As[tic][0], wm);
             asm volatile("s_waitcnt vmcnt(0)"); __builtin_amdgcn_s_barrier();
