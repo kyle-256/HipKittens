@@ -2752,11 +2752,12 @@ void grouped_rrr_kernel_body(const grouped_layout_globals g) {
     // (occupancy parity with dense gemm_kernel<RRR>).
 
     A_row_reg a;
-    // H6 (2026-05-21, re-applied): b1 eliminated; main loop uses single b0
-    // cycled strip0→strip1→strip0 with mma order cA→cB→cD→cC. Previously
-    // measured spill 58→37 on NMASK=1 (worst-shape dispatch route per H3).
-    // First measurement misread baseline; re-applying with H7 to compose.
-    B_col_reg b0;
+    // 2026-05-22 PMC analysis showed H6 single-b0 causes +25% LDS reads
+    // (72 vs dense's 48 ds_read_b64_tr_b8) which stalls mfma issue
+    // (mfma throughput -18% per CU). Reverting to b0+b1 split (dense
+    // pattern) eliminates the redundant Bs[tic][0] reload for cC. Spill
+    // may increase 37→58 but mfma throughput gain dominates.
+    B_col_reg b0, b1;
     rt_fl<RBM, RBN, col_l, rt_16x16_s> cA, cB, cC, cD;
 
     // Round-2 (FP8 backward unblock): mirror RCR — read host-side
@@ -2951,18 +2952,14 @@ void grouped_rrr_kernel_body(const grouped_layout_globals g) {
         TK_WAIT_VMCNT(RRR_INIT1_VMCNT);
         __builtin_amdgcn_s_barrier();
 
-        // Single-tile main loop (mirror dense lines 1437-1470).
-        // 2026-05-15: AGPR variant — only main loop uses _agpr; epilog/ktail
-        // stay on builtin so the cA-cD AGPR ↔ VGPR transition happens once
-        // at end-of-main rather than every call.
-        // H6+H7 (2026-05-21): single-b0 main loop (cA→cB→cD→cC), one
-        // sched_barrier(0) at end-of-iter. H6 alone drops spill 58→37 on
-        // NMASK=1 (worst-shape route). H7 removes redundant mid-iter
-        // sched_barrier(0) drains so scheduler can reorder DS_READ/VMEM
-        // around the mma pipeline.
+        // 2026-05-22 Round-3 PMC-driven: b0+b1 split (dense pattern, mirrors
+        // dense main loop at lines 1380-1412). mma order cA→cB→cC→cD reuses
+        // b0 (Bs[tic][0]) for cA+cC and b1 (Bs[tic][1]) for cB+cD without
+        // reload. Eliminates 1 redundant LDS read per iter (cC's b0 reload
+        // from strip0 in H6+H7). PMC: was 72 ds_read_b64_tr_b8, target ~48.
         TK_PRAGMA_UNROLL(RRR_MAIN_UNROLL)
         for (int k = 0; k < ki_dyn - 2; k++, tic ^= 1, toc ^= 1) {
-            // Phase 1: cA = mma(slab0, strip0)
+            // Phase 1: cA = mma(slab0, strip0). Load both b0 and b1 upfront.
             load_b(b0, Bs[tic][0], wn);
             load_a(a, As[tic][0], wm);
             rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], a_gl_g, a_co(br*2+1, k+1), soA);
@@ -2971,35 +2968,35 @@ void grouped_rrr_kernel_body(const grouped_layout_globals g) {
             __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cA, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
-            // Phase 2: cB = mma(slab0, strip1)
-            load_b(b0, Bs[tic][1], wn);
+            // Phase 2: cB = mma(slab0, strip1). Load b1 + B prefetch strip0 (last use).
+            load_b(b1, Bs[tic][1], wn);
+            G::load(Bs[tic][0], b_gl_g, b_co(bc*2, k+2), soB);
             __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cB, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cB, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
-            // Phase 3: cD = mma(slab1, strip1); prefetch strip1 (last use)
+            // Phase 3: cC = mma(slab1, strip0). New a + B prefetch strip1 (last use).
             load_a(a, As[tic][1], wm);
             G::load(Bs[tic][1], b_gl_g, b_co(bc*2+1, k+2), soB);
             __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cD, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cC, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
-            // Phase 4: cC = mma(slab1, strip0 reload); prefetch strip0 (last use)
-            load_b(b0, Bs[tic][0], wn);
-            G::load(Bs[tic][0], b_gl_g, b_co(bc*2, k+2), soB);
+            // Phase 4: cD = mma(slab1, strip1). A prefetch.
             rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0], a_gl_g, a_co(br*2, k+2), soA);
             TK_WAIT_VMCNT(RRR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cC, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cD, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
             RRR_SCHED_BARRIER();  // end-of-iter fence (CK pattern: 1 per K-iter)
         }
 
-        // Epilog 1 (H6 single-b0): mma order cA→cB→cD→cC, single b0 cycled.
+        // Epilog 1 (Round-3 b0+b1): mma order cA→cB→cC→cD (mirror dense).
         {
             load_b(b0, Bs[tic][0], wn);
+            load_b(b1, Bs[tic][1], wn);
             load_a(a, As[tic][0], wm);
             rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], a_gl_g, a_co(br*2+1, ki_dyn-1), soA);
             __builtin_amdgcn_s_barrier();
@@ -3007,52 +3004,45 @@ void grouped_rrr_kernel_body(const grouped_layout_globals g) {
             __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cA, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
-            load_b(b0, Bs[tic][1], wn);
-            __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cB, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cB, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
             TK_WAIT_VMCNT(RRR_EPILOGUE_VMCNT); __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cD, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cC, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
-            load_b(b0, Bs[tic][0], wn);
-            __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cC, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cD, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
             RRR_SCHED_BARRIER();
             tic ^= 1; toc ^= 1;
         }
 
-        // Epilog 2 (H6 single-b0): mma order cA→cB→cD→cC, single b0 cycled.
+        // Epilog 2 (Round-3 b0+b1): mma order cA→cB→cC→cD.
         {
             load_b(b0, Bs[tic][0], wn);
+            load_b(b1, Bs[tic][1], wn);
             load_a(a, As[tic][0], wm);
             asm volatile("s_waitcnt vmcnt(0)"); __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
             __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cA, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
-            load_b(b0, Bs[tic][1], wn);
-            __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cB, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cB, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
             __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cD, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cC, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
-            load_b(b0, Bs[tic][0], wn);
-            __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cC, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rrr_mma_agpr_t<true>(cD, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
         }
 
