@@ -822,6 +822,43 @@ void __probe_v2_mma_32_isolated(
     }
 }
 
+// R56: 4-acc K-chain probe — production acc count (cA/cB/cC/cD).
+extern "C" __global__ __launch_bounds__(64, 1)
+void __probe_v2_mma_32_4acc_k22(
+        const int4* __restrict__ A,
+        const int4* __restrict__ B,
+        float* __restrict__ C) {
+    const int tid = threadIdx.x;
+    float2 acc0[8], acc1[8], acc2[8], acc3[8];
+    #pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        acc0[i] = {0.f,0.f}; acc1[i] = {0.f,0.f};
+        acc2[i] = {0.f,0.f}; acc3[i] = {0.f,0.f};
+    }
+    #pragma unroll 1
+    for (int k = 0; k < 22; ++k) {
+        int4 a0_lo = A[k * 256 + tid * 2 + 0];
+        int4 a0_hi = A[k * 256 + tid * 2 + 1];
+        int4 a1_lo = A[k * 256 + tid * 2 + 128];
+        int4 a1_hi = A[k * 256 + tid * 2 + 129];
+        int4 b0_lo = B[k * 256 + tid * 2 + 0];
+        int4 b0_hi = B[k * 256 + tid * 2 + 1];
+        int4 b1_lo = B[k * 256 + tid * 2 + 128];
+        int4 b1_hi = B[k * 256 + tid * 2 + 129];
+        v2_pinned::mma_32_int4(acc0, a0_lo, a0_hi, b0_lo, b0_hi);
+        v2_pinned::mma_32_int4(acc1, a0_lo, a0_hi, b1_lo, b1_hi);
+        v2_pinned::mma_32_int4(acc2, a1_lo, a1_hi, b0_lo, b0_hi);
+        v2_pinned::mma_32_int4(acc3, a1_lo, a1_hi, b1_lo, b1_hi);
+    }
+    #pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        C[tid * 64 + i*2 + 0]  = acc0[i].x; C[tid * 64 + i*2 + 1]  = acc0[i].y;
+        C[tid * 64 + i*2 + 16] = acc1[i].x; C[tid * 64 + i*2 + 17] = acc1[i].y;
+        C[tid * 64 + i*2 + 32] = acc2[i].x; C[tid * 64 + i*2 + 33] = acc2[i].y;
+        C[tid * 64 + i*2 + 48] = acc3[i].x; C[tid * 64 + i*2 + 49] = acc3[i].y;
+    }
+}
+
 // R55: 2-acc K-chain probe — does spill stay 0 with 2 acc × 22 iter?
 extern "C" __global__ __launch_bounds__(64, 1)
 void __probe_v2_mma_32_2acc_k22(
