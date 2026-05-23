@@ -184,6 +184,24 @@ __device__ __forceinline__ static void mma_int4(
         : "+a"(*(floatx4_t*)D)
         : "v"(A), "v"(B));
 }
+
+// R12: builtin mfma path — compiler chooses register class for D (typically
+// VGPR-acc when used). Use for cD only to test if spreading acc between
+// AGPR (cA/cB/cC via +a) and VGPR (cD via builtin) reduces overall spill.
+__device__ __forceinline__ static void mma_int4_vacc(
+        float2 (&D)[2],
+        int4 A_lo, int4 A_hi,
+        int4 B_lo, int4 B_hi) {
+    typedef __attribute__((__vector_size__(8 * sizeof(int)))) int intx8_t;
+    typedef __attribute__((__vector_size__(4 * sizeof(float)))) float floatx4_t;
+    intx8_t A = {A_lo.x, A_lo.y, A_lo.z, A_lo.w, A_hi.x, A_hi.y, A_hi.z, A_hi.w};
+    intx8_t B = {B_lo.x, B_lo.y, B_lo.z, B_lo.w, B_hi.x, B_hi.y, B_hi.z, B_hi.w};
+    asm volatile(
+        "v_mfma_f32_16x16x128_f8f6f4 %0, %1, %2, %0"
+        : "+v"(*(floatx4_t*)D)
+        : "v"(A), "v"(B));
+}
+
 }  // namespace v2_pinned
 
 // =============================================================================
@@ -724,6 +742,26 @@ struct grouped_layout_globals_v2 {
 // V2 dispatch — SESSION 1: forwards to v1 body until pinned primitives are
 // integrated into the K-loop (sessions 2-3).
 // =============================================================================
+// R12: wrapper using mma_int4_vacc (builtin path → compiler chooses VGPR for D)
+template<bool USE_AGPR>
+__device__ __forceinline__ void rcr_mma_v2_vacc_wrapper(
+        rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
+        A_row_reg& a, B_row_reg& b) {
+    constexpr int M_TILES = RBM / 16;
+    constexpr int N_TILES = RBN / 16;
+    #pragma unroll
+    for (int m = 0; m < M_TILES; ++m) {
+        #pragma unroll
+        for (int n = 0; n < N_TILES; ++n) {
+            int4* a_p = reinterpret_cast<int4*>(&a.tiles[m][0].data[0]);
+            int4* b_p = reinterpret_cast<int4*>(&b.tiles[n][0].data[0]);
+            v2_pinned::mma_int4_vacc(
+                *reinterpret_cast<float2(*)[2]>(&acc.tiles[m][n].data[0]),
+                a_p[0], a_p[1], b_p[0], b_p[1]);
+        }
+    }
+}
+
 // R6: mma wrapper using mma_int4 (raw int4 pinned pattern) instead of
 // HK's rcr_mma_agpr_t. Reinterprets HK fragment storage as int4 in-register.
 template<bool USE_AGPR>
@@ -847,7 +885,7 @@ void grouped_rcr_kernel_body_pinned(const grouped_layout_globals g) {
             rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], a_gl_g, a_co(br*2+1, k+1), soA);
             TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); /* R10 disabled */ // rcr_mma_v2_wrapper<!FUSED_KTAIL>(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rcr_mma_v2_wrapper<!FUSED_KTAIL>(cA, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_b(b1, b_tile(tic, 1), wn);
@@ -866,7 +904,7 @@ void grouped_rcr_kernel_body_pinned(const grouped_layout_globals g) {
 
             rcr_8w_load_hoist<_NUM_THREADS>(b_tile(tic, 1), g.b, b_co(bc*2+1, k+2), soB);
             TK_WAIT_VMCNT(RCR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
-            __builtin_amdgcn_s_setprio(1); rcr_mma_v2_wrapper<!FUSED_KTAIL>(cD, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rcr_mma_v2_vacc_wrapper<!FUSED_KTAIL>(cD, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
         }
 
@@ -877,7 +915,7 @@ void grouped_rcr_kernel_body_pinned(const grouped_layout_globals g) {
             rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], a_gl_g, a_co(br*2+1, ki_dyn-1), soA);
             __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); /* R10 disabled */ // rcr_mma_v2_wrapper<!FUSED_KTAIL>(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rcr_mma_v2_wrapper<!FUSED_KTAIL>(cA, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
 
             load_b(b1, b_tile(tic, 1), wn);
@@ -895,7 +933,7 @@ void grouped_rcr_kernel_body_pinned(const grouped_layout_globals g) {
             load_b(b0, b_tile(toc, 0), wn);
             __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rcr_mma_v2_wrapper<!FUSED_KTAIL>(cD, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rcr_mma_v2_vacc_wrapper<!FUSED_KTAIL>(cD, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
             tic ^= 1; toc ^= 1;
         }
@@ -905,7 +943,7 @@ void grouped_rcr_kernel_body_pinned(const grouped_layout_globals g) {
             load_a(a, As[tic][0], wm);
             asm volatile("s_waitcnt vmcnt(0)"); __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); /* R10 disabled */ // rcr_mma_v2_wrapper<!FUSED_KTAIL>(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); rcr_mma_v2_wrapper<!FUSED_KTAIL>(cA, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_b(b1, b_tile(tic, 1), wn);
@@ -919,7 +957,7 @@ void grouped_rcr_kernel_body_pinned(const grouped_layout_globals g) {
             MAYBE_DRAIN_LGKM();
             __builtin_amdgcn_s_setprio(1);
             rcr_mma_v2_wrapper<!FUSED_KTAIL>(cC, a, b0);
-            rcr_mma_v2_wrapper<!FUSED_KTAIL>(cD, a, b1);
+            rcr_mma_v2_vacc_wrapper<!FUSED_KTAIL>(cD, a, b1);
             __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
         }
