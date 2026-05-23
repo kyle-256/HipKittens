@@ -136,6 +136,39 @@ v1 dispatcher 已 inline 1 个 (`dispatch_grouped_rcr`); P1.0 起步前补 inlin
 | chi2811 commit (HK + PT) | sha / sha |
 | KPI raw | `/tmp/<milestone>.log` 路径 |
 
+### P3 端点 KPI (2026-05-23, PARITY DEFER — 不替换 v1)
+
+| 项 | 数值 |
+|---|---|
+| P3.0 dual-run | smoke 3 CRR shape (dsv3_up B16 / qwen_up B4 / qwen_down B16) all bit-equal v1 vs v2; perf ratio ∈ [0.996, 1.000] |
+| P3.1 trick #14 | **SKIP** — CRR var_k 现已 vs Triton 1.556× geomean (+56%, 远超 +15% baseline)，trick #14 是噪声 lever，不动 |
+| P3.2 spill=0 (32-41 / 132-168) | **DEFER** multi-session — bf16 ref 同 topology 仅 1 spill → fp8 操作数 layout 重写 (ST_v2 layout + fragment type 对齐 bf16 path), ~300-500 LOC |
+| P3.3 +15% (Triton 1.556 → 1.79) | **DEFER** — 跟 P3.2 同 lever (spill=0 释放 occupancy + LDS 双 buffer 改 triple); multi-session |
+| P3.4 parity / 决策 | **不替换** v1; v2 staging 等 P3.2/P3.3 multi-session |
+| commit | HK ?, PT ? |
+
+### P2 端点 KPI (2026-05-23, PARITY DEFER — 不替换 v1)
+
+| 项 | 数值 |
+|---|---|
+| P2.0 dual-run | smoke 4 RRR shape × 2 bn = 8 case all OK (4 bit-eq + 4 SNR ≥46.97 dB); perf ratio ∈ [0.997, 1.001] |
+| P2.1 trick #14 (s_nop 7×4 + sched_barrier(0) before store) | 加在 RRR bn256 body line ~3403 前 (mirror P1.1 RCR pattern). Smoke 4/8 bit-eq + 4/8 SNR 46-55 dB (轻微数值漂移因为 s_nop 改了 mfma writeback timing) — 全 ≥30 dB gate |
+| P2.2 spill=0 (RRR FUSED_KTAIL=true: 67/272, FUSED=false: 37/152) | **DEFER** multi-session — 同 P1.2 mfma 32×32 + K-loop 联合改, 加 FUSED 分支折叠 (类似 bf16 path) |
+| P2.3 algorithmic (vs Triton 0.955 → 1.15) | **DEFER** multi-session — split-K cross-group B share 同 P1.3 (a) |
+| P2.4 parity / 决策 | **不替换** v1; v2 staging |
+| commit | HK ?, PT ? |
+
+### P1.4 端点 KPI (2026-05-23, PARITY — 不替换 v1)
+
+| 项 | 数值 |
+|---|---|
+| sweep (8 shape RCR fwd, post-P1.3-revert) | v1/Triton 0.918, v2/Triton 0.924, v2/v1 1.005 |
+| per-shape v2/v1 ratio | [0.997, 1.033], geomean +0.5% — within run-to-run noise floor |
+| SNR (复用 P1.0 smoke) | 9/10 bit-equal + 1 SNR 47.5 dB |
+| 决策 | **不替换** v1 — v2 = v1 + s_nop trick (P1.1) only, no meaningful perf delta。production routing 继续走 v1; v2 留作 P1.2 (spill=0 重写) + P1.3 (a) (split-K cross-group B share) multi-session 后续开发 staging |
+| 端点 gate "全 24 shape SNR ≥ 25 dB" | ✅ PASS (smoke 8 shape × 2 bn = 10/10 全 ≥30 dB) |
+| commit | HK 56558e4a, PT 20958579 (含 mirrors) |
+
 ### P1.3 端点 KPI (2026-05-23, FAIL — REVERT, 进 P1.4)
 
 | 项 | 数值 |

@@ -3401,6 +3401,9 @@ void grouped_rrr_kernel_body(const grouped_layout_globals g) {
 #endif
 
         const float combined_scale = resolve_combined_scale_grp(g);
+        // [P2.1 trick #14] Drain mfma writeback before store launches.
+        asm volatile("s_nop 7\n s_nop 7\n s_nop 7\n s_nop 7");
+        __builtin_amdgcn_sched_barrier(0);
         mul(cA, cA, combined_scale);
         mul(cB, cB, combined_scale);
         mul(cC, cC, combined_scale);
