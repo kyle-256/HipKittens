@@ -813,7 +813,7 @@ void grouped_rcr_kernel_body_pinned(const grouped_layout_globals g) {
 
     const int slots_eff = gridDim.x;
     const int xcds_eff = g.num_xcds > 0 ? g.num_xcds : BLOCK_SWIZZLE_NUM_XCDS;
-    const int chunk_size_eff = g.chunk_size > 0 ? g.chunk_size : 64;
+    const int chunk_size_eff = g.chunk_size > 0 ? g.chunk_size : 32;  // R43: Triton match
     int pid = chiplet_transform_chunked(blockIdx.x, slots_eff, xcds_eff, chunk_size_eff);
 
     int wm = warpid() / WARPS_N;
