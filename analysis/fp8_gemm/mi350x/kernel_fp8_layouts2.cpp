@@ -201,6 +201,236 @@ __device__ __forceinline__ static void mma_int4(
 // asm pattern is functional. We can then scale to per-warp 64×32 and
 // integrate into the K-loop.
 // =============================================================================
+// R5: 8-warp WG (512 thread) — production thread config, per-warp same pinned layout
+extern "C" __global__ __launch_bounds__(512, 1)
+void __probe_v2_8warp_pinned(
+        const int4* __restrict__ A_g,
+        const int4* __restrict__ B_g,
+        float4* __restrict__ C,
+        int ki) {
+    __shared__ int4 A_lds[2048];
+    __shared__ int4 B_lds[1024];
+    const int tid = threadIdx.x;
+    const int wid = tid / 64;
+    const int lid = tid % 64;
+
+    register int4 a00 asm("v0");  register int4 a01 asm("v4");
+    register int4 a02 asm("v8");  register int4 a03 asm("v12");
+    register int4 a04 asm("v16"); register int4 a05 asm("v20");
+    register int4 a06 asm("v24"); register int4 a07 asm("v28");
+    register int4 a10 asm("v32"); register int4 a11 asm("v36");
+    register int4 a12 asm("v40"); register int4 a13 asm("v44");
+    register int4 a14 asm("v48"); register int4 a15 asm("v52");
+    register int4 a16 asm("v56"); register int4 a17 asm("v60");
+    register int4 b00 asm("v64"); register int4 b01 asm("v68");
+    register int4 b02 asm("v72"); register int4 b03 asm("v76");
+    register int4 b10 asm("v80"); register int4 b11 asm("v84");
+    register int4 b12 asm("v88"); register int4 b13 asm("v92");
+
+    float2 cA[8][2], cB[8][2], cC[8][2], cD[8][2];
+    #pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        cA[i][0]={0,0}; cA[i][1]={0,0}; cB[i][0]={0,0}; cB[i][1]={0,0};
+        cC[i][0]={0,0}; cC[i][1]={0,0}; cD[i][0]={0,0}; cD[i][1]={0,0};
+    }
+
+    #pragma unroll 1
+    for (int k = 0; k < ki; ++k) {
+        // Cooperative load gmem → smem (512 threads load 2048 int4 + 1024 int4)
+        #pragma unroll
+        for (int i = 0; i < 4; ++i) A_lds[tid + i*512] = A_g[k*2048 + tid + i*512];
+        #pragma unroll
+        for (int i = 0; i < 2; ++i) B_lds[tid + i*512] = B_g[k*1024 + tid + i*512];
+        __syncthreads();
+
+        // Per-warp ds_read using wid offset
+        a00 = A_lds[wid*1024 + lid*16+ 0]; a01 = A_lds[wid*1024 + lid*16+ 1];
+        a02 = A_lds[wid*1024 + lid*16+ 2]; a03 = A_lds[wid*1024 + lid*16+ 3];
+        a04 = A_lds[wid*1024 + lid*16+ 4]; a05 = A_lds[wid*1024 + lid*16+ 5];
+        a06 = A_lds[wid*1024 + lid*16+ 6]; a07 = A_lds[wid*1024 + lid*16+ 7];
+        a10 = A_lds[wid*1024 + lid*16+ 8]; a11 = A_lds[wid*1024 + lid*16+ 9];
+        a12 = A_lds[wid*1024 + lid*16+10]; a13 = A_lds[wid*1024 + lid*16+11];
+        a14 = A_lds[wid*1024 + lid*16+12]; a15 = A_lds[wid*1024 + lid*16+13];
+        a16 = A_lds[wid*1024 + lid*16+14]; a17 = A_lds[wid*1024 + lid*16+15];
+        b00 = B_lds[wid*512 + lid*8+0]; b01 = B_lds[wid*512 + lid*8+1];
+        b02 = B_lds[wid*512 + lid*8+2]; b03 = B_lds[wid*512 + lid*8+3];
+        b10 = B_lds[wid*512 + lid*8+4]; b11 = B_lds[wid*512 + lid*8+5];
+        b12 = B_lds[wid*512 + lid*8+6]; b13 = B_lds[wid*512 + lid*8+7];
+
+        v2_pinned::mma_int4(cA[0], a00, a01, b00, b01);
+        v2_pinned::mma_int4(cA[1], a00, a01, b02, b03);
+        v2_pinned::mma_int4(cA[2], a02, a03, b00, b01);
+        v2_pinned::mma_int4(cA[3], a02, a03, b02, b03);
+        v2_pinned::mma_int4(cA[4], a04, a05, b00, b01);
+        v2_pinned::mma_int4(cA[5], a04, a05, b02, b03);
+        v2_pinned::mma_int4(cA[6], a06, a07, b00, b01);
+        v2_pinned::mma_int4(cA[7], a06, a07, b02, b03);
+        v2_pinned::mma_int4(cB[0], a00, a01, b10, b11);
+        v2_pinned::mma_int4(cB[1], a00, a01, b12, b13);
+        v2_pinned::mma_int4(cB[2], a02, a03, b10, b11);
+        v2_pinned::mma_int4(cB[3], a02, a03, b12, b13);
+        v2_pinned::mma_int4(cB[4], a04, a05, b10, b11);
+        v2_pinned::mma_int4(cB[5], a04, a05, b12, b13);
+        v2_pinned::mma_int4(cB[6], a06, a07, b10, b11);
+        v2_pinned::mma_int4(cB[7], a06, a07, b12, b13);
+        v2_pinned::mma_int4(cC[0], a10, a11, b00, b01);
+        v2_pinned::mma_int4(cC[1], a10, a11, b02, b03);
+        v2_pinned::mma_int4(cC[2], a12, a13, b00, b01);
+        v2_pinned::mma_int4(cC[3], a12, a13, b02, b03);
+        v2_pinned::mma_int4(cC[4], a14, a15, b00, b01);
+        v2_pinned::mma_int4(cC[5], a14, a15, b02, b03);
+        v2_pinned::mma_int4(cC[6], a16, a17, b00, b01);
+        v2_pinned::mma_int4(cC[7], a16, a17, b02, b03);
+        v2_pinned::mma_int4(cD[0], a10, a11, b10, b11);
+        v2_pinned::mma_int4(cD[1], a10, a11, b12, b13);
+        v2_pinned::mma_int4(cD[2], a12, a13, b10, b11);
+        v2_pinned::mma_int4(cD[3], a12, a13, b12, b13);
+        v2_pinned::mma_int4(cD[4], a14, a15, b10, b11);
+        v2_pinned::mma_int4(cD[5], a14, a15, b12, b13);
+        v2_pinned::mma_int4(cD[6], a16, a17, b10, b11);
+        v2_pinned::mma_int4(cD[7], a16, a17, b12, b13);
+        __syncthreads();
+    }
+    #pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        C[tid*32+i   ] = *(float4*)cA[i];
+        C[tid*32+i+ 8] = *(float4*)cB[i];
+        C[tid*32+i+16] = *(float4*)cC[i];
+        C[tid*32+i+24] = *(float4*)cD[i];
+    }
+}
+
+
+// R4: full K-loop + LDS + 4-acc 32-mma per iter (per-warp 128M×64N)
+extern "C" __global__ __launch_bounds__(64, 1)
+void __probe_v2_kloop_pinned(
+        const int4* __restrict__ A_g,
+        const int4* __restrict__ B_g,
+        float4* __restrict__ C,
+        int ki) {
+    __shared__ int4 A_lds[1024];
+    __shared__ int4 B_lds[512];
+    const int tid = threadIdx.x;
+
+    register int4 a00 asm("v0");  register int4 a01 asm("v4");
+    register int4 a02 asm("v8");  register int4 a03 asm("v12");
+    register int4 a04 asm("v16"); register int4 a05 asm("v20");
+    register int4 a06 asm("v24"); register int4 a07 asm("v28");
+    register int4 a10 asm("v32"); register int4 a11 asm("v36");
+    register int4 a12 asm("v40"); register int4 a13 asm("v44");
+    register int4 a14 asm("v48"); register int4 a15 asm("v52");
+    register int4 a16 asm("v56"); register int4 a17 asm("v60");
+    register int4 b00 asm("v64"); register int4 b01 asm("v68");
+    register int4 b02 asm("v72"); register int4 b03 asm("v76");
+    register int4 b10 asm("v80"); register int4 b11 asm("v84");
+    register int4 b12 asm("v88"); register int4 b13 asm("v92");
+
+    float2 cA[8][2], cB[8][2], cC[8][2], cD[8][2];
+    #pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        cA[i][0]={0,0}; cA[i][1]={0,0}; cB[i][0]={0,0}; cB[i][1]={0,0};
+        cC[i][0]={0,0}; cC[i][1]={0,0}; cD[i][0]={0,0}; cD[i][1]={0,0};
+    }
+
+    #pragma unroll 1
+    for (int k = 0; k < ki; ++k) {
+        // Load gmem → LDS
+        #pragma unroll
+        for (int i = 0; i < 16; ++i) A_lds[tid*16+i] = A_g[k*1024+tid*16+i];
+        #pragma unroll
+        for (int i = 0; i < 8;  ++i) B_lds[tid*8+i]  = B_g[k*512+tid*8+i];
+        __syncthreads();
+
+        // ds_read into pinned slots
+        a00 = A_lds[tid*16+ 0]; a01 = A_lds[tid*16+ 1];
+        a02 = A_lds[tid*16+ 2]; a03 = A_lds[tid*16+ 3];
+        a04 = A_lds[tid*16+ 4]; a05 = A_lds[tid*16+ 5];
+        a06 = A_lds[tid*16+ 6]; a07 = A_lds[tid*16+ 7];
+        a10 = A_lds[tid*16+ 8]; a11 = A_lds[tid*16+ 9];
+        a12 = A_lds[tid*16+10]; a13 = A_lds[tid*16+11];
+        a14 = A_lds[tid*16+12]; a15 = A_lds[tid*16+13];
+        a16 = A_lds[tid*16+14]; a17 = A_lds[tid*16+15];
+        b00 = B_lds[tid*8+0]; b01 = B_lds[tid*8+1];
+        b02 = B_lds[tid*8+2]; b03 = B_lds[tid*8+3];
+        b10 = B_lds[tid*8+4]; b11 = B_lds[tid*8+5];
+        b12 = B_lds[tid*8+6]; b13 = B_lds[tid*8+7];
+
+        // 32 mma per K iter
+        v2_pinned::mma_int4(cA[0], a00, a01, b00, b01);
+        v2_pinned::mma_int4(cA[1], a00, a01, b02, b03);
+        v2_pinned::mma_int4(cA[2], a02, a03, b00, b01);
+        v2_pinned::mma_int4(cA[3], a02, a03, b02, b03);
+        v2_pinned::mma_int4(cA[4], a04, a05, b00, b01);
+        v2_pinned::mma_int4(cA[5], a04, a05, b02, b03);
+        v2_pinned::mma_int4(cA[6], a06, a07, b00, b01);
+        v2_pinned::mma_int4(cA[7], a06, a07, b02, b03);
+        v2_pinned::mma_int4(cB[0], a00, a01, b10, b11);
+        v2_pinned::mma_int4(cB[1], a00, a01, b12, b13);
+        v2_pinned::mma_int4(cB[2], a02, a03, b10, b11);
+        v2_pinned::mma_int4(cB[3], a02, a03, b12, b13);
+        v2_pinned::mma_int4(cB[4], a04, a05, b10, b11);
+        v2_pinned::mma_int4(cB[5], a04, a05, b12, b13);
+        v2_pinned::mma_int4(cB[6], a06, a07, b10, b11);
+        v2_pinned::mma_int4(cB[7], a06, a07, b12, b13);
+        v2_pinned::mma_int4(cC[0], a10, a11, b00, b01);
+        v2_pinned::mma_int4(cC[1], a10, a11, b02, b03);
+        v2_pinned::mma_int4(cC[2], a12, a13, b00, b01);
+        v2_pinned::mma_int4(cC[3], a12, a13, b02, b03);
+        v2_pinned::mma_int4(cC[4], a14, a15, b00, b01);
+        v2_pinned::mma_int4(cC[5], a14, a15, b02, b03);
+        v2_pinned::mma_int4(cC[6], a16, a17, b00, b01);
+        v2_pinned::mma_int4(cC[7], a16, a17, b02, b03);
+        v2_pinned::mma_int4(cD[0], a10, a11, b10, b11);
+        v2_pinned::mma_int4(cD[1], a10, a11, b12, b13);
+        v2_pinned::mma_int4(cD[2], a12, a13, b10, b11);
+        v2_pinned::mma_int4(cD[3], a12, a13, b12, b13);
+        v2_pinned::mma_int4(cD[4], a14, a15, b10, b11);
+        v2_pinned::mma_int4(cD[5], a14, a15, b12, b13);
+        v2_pinned::mma_int4(cD[6], a16, a17, b10, b11);
+        v2_pinned::mma_int4(cD[7], a16, a17, b12, b13);
+        __syncthreads();
+    }
+    #pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        C[tid*32+i   ] = *(float4*)cA[i];
+        C[tid*32+i+ 8] = *(float4*)cB[i];
+        C[tid*32+i+16] = *(float4*)cC[i];
+        C[tid*32+i+24] = *(float4*)cD[i];
+    }
+}
+
+
+// R3: per-warp pinned + LDS storage + ds_read intrinsic
+extern "C" __global__ __launch_bounds__(64, 1)
+void __probe_v2_lds_pinned(
+        const int4* __restrict__ A_g,
+        const int4* __restrict__ B_g,
+        float4* __restrict__ C) {
+    __shared__ int4 A_lds[128];  // 128 int4 = 2KB
+    __shared__ int4 B_lds[64];
+    const int tid = threadIdx.x;
+    // cooperative load gmem→smem (just bulk via lane writes — each lane loads 2 A int4 + 1 B int4)
+    A_lds[tid*2  ] = A_g[tid*2  ];
+    A_lds[tid*2+1] = A_g[tid*2+1];
+    B_lds[tid    ] = B_g[tid    ];
+    __syncthreads();
+
+    register int4 a_lo asm("v0");
+    register int4 a_hi asm("v4");
+    register int4 b_lo asm("v8");
+    register int4 b_hi asm("v12");
+    // ds_read from LDS into pinned slots
+    a_lo = A_lds[tid*2  ];
+    a_hi = A_lds[tid*2+1];
+    b_lo = B_lds[tid    ];
+    b_hi = B_lds[tid + 32];
+
+    float2 acc[2] = {{0.f, 0.f}, {0.f, 0.f}};
+    v2_pinned::mma_int4(acc, a_lo, a_hi, b_lo, b_hi);
+    C[tid] = *(float4*)acc;
+}
+
+
 // R2: per-warp 128M×64N (full v1 per-warp area), 4 acc × 8 mma = 32 mma per iter
 extern "C" __global__ __launch_bounds__(64, 1)
 void __probe_v2_4acc_pinned(
