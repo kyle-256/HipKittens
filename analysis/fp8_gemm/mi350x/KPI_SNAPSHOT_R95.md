@@ -43,7 +43,8 @@ Method: 10 warmup + 50 timed iters, single trial
 ## Outliers
 
 - Best win: gpt_oss_up_B4_M2048 +22.4% (chunk_size benefit + gpt_oss K=2880 ki=22 medium)
-- Worst regression: qwen_up_B4_M2048 -7.4% (K=4096, M=2048, B=4 — needs investigation)
+- Worst regression: qwen_up_B4_M2048 -7.4% (K=4096, M=2048, B=4)
+  - **R97 follow-up**: isolated bench shows v2/v1 = 1.030 (v2 faster). R95 result was 24-shape consecutive thermal noise. **No actual regression.**
 
 ## Comparison to Earlier 8-shape Bench (R67)
 
