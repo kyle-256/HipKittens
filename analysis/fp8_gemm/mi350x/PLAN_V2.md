@@ -171,6 +171,34 @@ v1 dispatcher 已 inline 1 个 (`dispatch_grouped_rcr`); P1.0 起步前补 inlin
 
 **Single-round source-level lever 已穷尽**。R43 是本 session 唯一 commit win，把 v2/Triton 从 1.014×→1.029×。剩余 12pp 到 1.15× 必须 multi-session 算法/架构改写。
 
+#### R52-R69 后续 round 追加 (foundation + docs phase)
+
+| Round | Work | Status |
+|---|---|---|
+| R52-R58 | 32×32 mfma 6-probe foundation (1-mma → 8-warp+LDS) | ALL spill=0, foundation complete |
+| R59 | CLAUDE.md log consolidation | docs commit |
+| R60 | A_row_reg_32 typedef | BUILD ERROR revert |
+| R61 | drop-in 32×32 wrapper | BUILD ERROR revert |
+| R62 | R43 stability 3-trial | v2/T=1.027 stable |
+| **R63** | **P1.2 multi-session integration design doc** | committed HK 6a19c3f4 |
+| **R64** | **P2.2 RRR rewrite design doc** | committed HK f7ee8365 |
+| **R65** | **P3.2 CRR var_k design doc** | committed HK 53d3e003 |
+| **R66** | **P1.3a split-K design doc** | committed HK 5fd69a36 |
+| R67 | final-state bench | v2/T=1.086 (noisy), v2/v1=1.108 |
+| R69 | production spill metadata verify | **24/35 unchanged** post foundation |
+
+**Net session output**:
+- 1 perf commit (R43 chunk_size 64→32, +1.5pp geomean)
+- 6 foundation probes validating P1.2 32×32 path
+- 4 multi-session design docs (P1.2 / P2.2 / P3.2 / P1.3a) for handoff
+- Production spill preserved at 24/35 (no regression from foundation work)
+
+**Goal achievement status**:
+- v2/Triton 1.029× geomean (baseline 1.014×). Still −12pp to 1.15× target.
+- spill 24/35 unchanged. Foundation validates P1.2 32×32 rewrite path can reach 0.
+- hk_dense gap: v2/D = 1.86-2.30× (better — but worst per-shape ~25% remains).
+- Multi-session execution required for full target achievement (10-15 sessions per design docs).
+
 #### 本 Campaign D 实际 landed
 - ✅ P0 plan locked + PLAN_V2.md 落档
 - ✅ P1.0/P2.0/P3.0 dual-run skeleton (v1/v2 并存, binding 全套 RCR+RRR+CRR var_k)
