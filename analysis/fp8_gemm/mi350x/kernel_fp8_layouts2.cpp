@@ -168,10 +168,222 @@ struct grouped_layout_globals_v2 {
 // V2 dispatch — SESSION 1: forwards to v1 body until pinned primitives are
 // integrated into the K-loop (sessions 2-3).
 // =============================================================================
+// =============================================================================
+// SESSION 2 — pinned 4-acc K-loop body (in-file copy of v1 with register-asm
+// declarations on HK fragment types `A_row_reg` / `B_row_reg`).
+//
+// Test hypothesis: HIP clang accepts `register T t asm("vNN")` on HK
+// fragment struct types (A_row_reg = rt_fp8e4m3<RBM, BK, row_l, rt_16x128_s>);
+// binding the fragments to specific VGPR slots may give the register
+// allocator a more favorable layout and reduce spill from baseline 37.
+// =============================================================================
+template<bool N_MASKED_STORE = false, bool FUSED_KTAIL = false>
+__device__ __forceinline__
+void grouped_rcr_kernel_body_pinned(const grouped_layout_globals g) {
+    using ST_rcr = ST_v2;
+    __shared__ ST_rcr As[2][2];
+    __shared__ ST_rcr Bs[2][2];
+    constexpr int MAX_G_PLUS_1 = 65;
+    __shared__ int s_offs[MAX_G_PLUS_1];
+    __shared__ int s_cum_tiles[MAX_G_PLUS_1];
+    __shared__ int s_total_tiles;
+
+    // [PINNED] Fragments bound to specific VGPR slots via register-asm.
+    // If HIP clang honors this on HK struct types, the K-loop hot path's
+    // fragment storage lives at fixed VGPRs, freeing compiler from
+    // shuffling fragment data through general-purpose allocation.
+    register A_row_reg a   asm("v32");
+    register B_row_reg b0  asm("v40");
+    register B_row_reg b1  asm("v48");
+    rt_fl<RBM, RBN, col_l, rt_16x16_s> cA, cB, cC, cD;
+
+    const int slots_eff = gridDim.x;
+    const int xcds_eff = g.num_xcds > 0 ? g.num_xcds : BLOCK_SWIZZLE_NUM_XCDS;
+    const int chunk_size_eff = g.chunk_size > 0 ? g.chunk_size : 64;
+    int pid = chiplet_transform_chunked(blockIdx.x, slots_eff, xcds_eff, chunk_size_eff);
+
+    int wm = warpid() / WARPS_N;
+    int wn = warpid() % WARPS_N;
+    const int num_pid_n = g.bpc;
+    const int ki_dyn   = g.ki;
+
+    init_group_cumsum_smem<MAX_G_PLUS_1>(g, s_offs, s_cum_tiles, s_total_tiles,
+                                         num_pid_n, /*M_BLOCK_DIV=*/BLOCK_SIZE);
+    const int total_tiles = s_total_tiles;
+
+    constexpr int bpt = ST_rcr::underlying_subtile_bytes_per_thread;
+    constexpr int bpm = bpt * _NUM_THREADS;
+    constexpr int mpt = ST_rcr::rows * ST_rcr::cols * sizeof(fp8e4m3) / bpm;
+    uint32_t soA[mpt], soB[mpt];
+    G::prefill_swizzled_offsets(As[0][0], g.a, soA);
+    G::prefill_swizzled_offsets(Bs[0][0], g.b, soB);
+
+    for (int gt = pid; gt < total_tiles; gt += slots_eff) {
+        int group_idx, m_start_g, M_g, bpr_g, br, bc;
+        if (!dispatch_tile_in_group<MAX_G_PLUS_1>(
+                gt, s_cum_tiles, s_offs, num_pid_n, g.group_m,
+                /*M_BLOCK_DIV=*/BLOCK_SIZE,
+                group_idx, m_start_g, M_g, bpr_g, br, bc)) continue;
+
+        auto a_gl_g = g.a;
+        auto c_gl_g = g.c;
+        patch_per_group_gl_view(a_gl_g, c_gl_g, m_start_g, M_g);
+        constexpr int m_subtile_A = 0;
+        constexpr int m_subtile_C = 0;
+        const int m_limit = M_g;
+
+        auto a_co = [&](int s, int k) -> coord<ST_rcr> { return {0, 0, m_subtile_A + s, k}; };
+        auto b_co = [&](int s, int k) -> coord<ST_rcr> { return {0, group_idx, s, k}; };
+
+        auto load_a = [&](A_row_reg& dst, ST_rcr& tile, int wi) {
+            auto sub = subtile_inplace<RBM, BK>(tile, {wi, 0});
+            load(dst, sub);
+        };
+        auto load_b = [&](B_row_reg& dst, ST_rcr& tile, int wi) {
+            auto sub = subtile_inplace<RBN, BK>(tile, {wi, 0});
+            load(dst, sub);
+        };
+        auto b_tile = [&](int stage, int which) -> ST_rcr& { return Bs[stage][which]; };
+
+        zero(cA); zero(cB); zero(cC); zero(cD);
+
+        int tic = 0, toc = 1;
+        rcr_8w_load_hoist<_NUM_THREADS>(b_tile(tic, 0), g.b, b_co(bc*2,   0), soB);
+        rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0], a_gl_g, a_co(br*2,   0), soA);
+        rcr_8w_load_hoist<_NUM_THREADS>(b_tile(tic, 1), g.b, b_co(bc*2+1, 0), soB);
+        rcr_8w_load_hoist<_NUM_THREADS>(As[tic][1], a_gl_g, a_co(br*2+1, 0), soA);
+
+        if (wm == 1) __builtin_amdgcn_s_barrier();
+        TK_WAIT_VMCNT(RCR_INIT0_VMCNT);
+        __builtin_amdgcn_s_barrier();
+
+        rcr_8w_load_hoist<_NUM_THREADS>(b_tile(toc, 0), g.b, b_co(bc*2,   1), soB);
+        rcr_8w_load_hoist<_NUM_THREADS>(As[toc][0], a_gl_g, a_co(br*2,   1), soA);
+        rcr_8w_load_hoist<_NUM_THREADS>(b_tile(toc, 1), g.b, b_co(bc*2+1, 1), soB);
+
+        TK_WAIT_VMCNT(RCR_INIT1_VMCNT);
+        __builtin_amdgcn_s_barrier();
+
+        TK_PRAGMA_UNROLL(RCR_MAIN_UNROLL)
+        for (int k = 0; k < ki_dyn - 2; k++, tic ^= 1, toc ^= 1) {
+            load_b(b0, b_tile(tic, 0), wn);
+            load_a(a, As[tic][0], wm);
+            rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], a_gl_g, a_co(br*2+1, k+1), soA);
+            TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
+            MAYBE_DRAIN_LGKM();
+            __builtin_amdgcn_s_setprio(1); rcr_mma_agpr_t<!FUSED_KTAIL>(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_b(b1, b_tile(tic, 1), wn);
+            rcr_8w_load_hoist<_NUM_THREADS>(b_tile(tic, 0), g.b, b_co(bc*2, k+2), soB);
+            __builtin_amdgcn_s_barrier();
+            MAYBE_DRAIN_LGKM();
+            __builtin_amdgcn_s_setprio(1); rcr_mma_agpr_t<!FUSED_KTAIL>(cB, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_a(a, As[tic][1], wm);
+            rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0], a_gl_g, a_co(br*2, k+2), soA);
+            __builtin_amdgcn_s_barrier();
+            MAYBE_DRAIN_LGKM();
+            __builtin_amdgcn_s_setprio(1); rcr_mma_agpr_t<!FUSED_KTAIL>(cC, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            rcr_8w_load_hoist<_NUM_THREADS>(b_tile(tic, 1), g.b, b_co(bc*2+1, k+2), soB);
+            TK_WAIT_VMCNT(RCR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
+            __builtin_amdgcn_s_setprio(1); rcr_mma_agpr_t<!FUSED_KTAIL>(cD, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+        }
+
+        // Epilog 1
+        {
+            load_b(b0, b_tile(tic, 0), wn);
+            load_a(a, As[tic][0], wm);
+            rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], a_gl_g, a_co(br*2+1, ki_dyn-1), soA);
+            __builtin_amdgcn_s_barrier();
+            MAYBE_DRAIN_LGKM();
+            __builtin_amdgcn_s_setprio(1); rcr_mma_agpr_t<!FUSED_KTAIL>(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
+
+            load_b(b1, b_tile(tic, 1), wn);
+            __builtin_amdgcn_s_barrier();
+            MAYBE_DRAIN_LGKM();
+            __builtin_amdgcn_s_setprio(1); rcr_mma_agpr_t<!FUSED_KTAIL>(cB, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_a(a, As[tic][1], wm);
+            TK_WAIT_VMCNT(RCR_EPILOGUE_VMCNT); __builtin_amdgcn_s_barrier();
+            MAYBE_DRAIN_LGKM();
+            __builtin_amdgcn_s_setprio(1); rcr_mma_agpr_t<!FUSED_KTAIL>(cC, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_b(b0, b_tile(toc, 0), wn);
+            __builtin_amdgcn_s_barrier();
+            MAYBE_DRAIN_LGKM();
+            __builtin_amdgcn_s_setprio(1); rcr_mma_agpr_t<!FUSED_KTAIL>(cD, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
+            tic ^= 1; toc ^= 1;
+        }
+
+        // Epilog 2
+        {
+            load_a(a, As[tic][0], wm);
+            asm volatile("s_waitcnt vmcnt(0)"); __builtin_amdgcn_s_barrier();
+            MAYBE_DRAIN_LGKM();
+            __builtin_amdgcn_s_setprio(1); rcr_mma_agpr_t<!FUSED_KTAIL>(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_b(b1, b_tile(tic, 1), wn);
+            __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
+            MAYBE_DRAIN_LGKM();
+            __builtin_amdgcn_s_setprio(1); rcr_mma_agpr_t<!FUSED_KTAIL>(cB, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+
+            load_a(a, As[tic][1], wm);
+            __builtin_amdgcn_s_barrier();
+            MAYBE_DRAIN_LGKM();
+            __builtin_amdgcn_s_setprio(1);
+            rcr_mma_agpr_t<!FUSED_KTAIL>(cC, a, b0);
+            rcr_mma_agpr_t<!FUSED_KTAIL>(cD, a, b1);
+            __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_barrier();
+        }
+
+        // FUSED_KTAIL skipped in this pinned body for session 2; full port in S3.
+        // For K_rem=64 shapes, dispatcher routes to v1 body via FUSED template
+        // until S3 lands.
+
+        const float combined_scale = resolve_combined_scale_grp(g);
+
+        if (wm == 0) __builtin_amdgcn_s_barrier();
+        const int r0 = __builtin_amdgcn_readfirstlane(m_subtile_C + br*WARPS_M*2+wm);
+        const int r1 = __builtin_amdgcn_readfirstlane(m_subtile_C + br*WARPS_M*2+WARPS_M+wm);
+        const int c0 = __builtin_amdgcn_readfirstlane(bc*WARPS_N*2+wn);
+        const int c1 = __builtin_amdgcn_readfirstlane(bc*WARPS_N*2+WARPS_N+wn);
+        mul(cA, cA, combined_scale);
+        store_c_tile_mn_masked_grouped(c_gl_g, cA, /*group_idx=*/0, r0, c0, m_limit, g.n);
+        mul(cB, cB, combined_scale);
+        store_c_tile_mn_masked_grouped(c_gl_g, cB, /*group_idx=*/0, r0, c1, m_limit, g.n);
+        mul(cC, cC, combined_scale);
+        store_c_tile_mn_masked_grouped(c_gl_g, cC, /*group_idx=*/0, r1, c0, m_limit, g.n);
+        mul(cD, cD, combined_scale);
+        store_c_tile_mn_masked_grouped(c_gl_g, cD, /*group_idx=*/0, r1, c1, m_limit, g.n);
+
+        MAYBE_DRAIN_LGKM();
+        __builtin_amdgcn_s_barrier();
+    }
+}
+
+
 template<bool N_MASKED_STORE = false, bool FUSED_KTAIL = false>
 __global__ __launch_bounds__(_NUM_THREADS, 1)
 void grouped_gemm_fp8_kernel_v2(const grouped_layout_globals g) {
-    grouped_rcr_kernel_body<N_MASKED_STORE, FUSED_KTAIL>(g);
+    // Session 2: only K_rem==0 shapes use the pinned body; K_rem=64 (FUSED)
+    // still routes to v1 body until session 3 ports the FUSED block.
+    if constexpr (!FUSED_KTAIL) {
+        grouped_rcr_kernel_body_pinned<N_MASKED_STORE, false>(g);
+    } else {
+        grouped_rcr_kernel_body<N_MASKED_STORE, true>(g);
+    }
 }
 
 
