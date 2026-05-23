@@ -769,9 +769,8 @@ void grouped_rcr_kernel_body_pinned(const grouped_layout_globals g) {
     // If HIP clang honors this on HK struct types, the K-loop hot path's
     // fragment storage lives at fixed VGPRs, freeing compiler from
     // shuffling fragment data through general-purpose allocation.
-    register A_row_reg a   asm("v32");
-    register B_row_reg b0  asm("v40");
-    register B_row_reg b1  asm("v48");
+    A_row_reg a;
+    B_row_reg b0, b1;
     rt_fl<RBM, RBN, col_l, rt_16x16_s> cA, cB, cC, cD;
 
     const int slots_eff = gridDim.x;
@@ -867,7 +866,7 @@ void grouped_rcr_kernel_body_pinned(const grouped_layout_globals g) {
 
             rcr_8w_load_hoist<_NUM_THREADS>(b_tile(tic, 1), g.b, b_co(bc*2+1, k+2), soB);
             TK_WAIT_VMCNT(RCR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
-            __builtin_amdgcn_s_setprio(1); rcr_mma_v2_wrapper<!FUSED_KTAIL>(cD, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); /* R9 disabled */ // rcr_mma_v2_wrapper<!FUSED_KTAIL>(cD, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
         }
 
@@ -896,7 +895,7 @@ void grouped_rcr_kernel_body_pinned(const grouped_layout_globals g) {
             load_b(b0, b_tile(toc, 0), wn);
             __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rcr_mma_v2_wrapper<!FUSED_KTAIL>(cD, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); /* R9 disabled */ // rcr_mma_v2_wrapper<!FUSED_KTAIL>(cD, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
             tic ^= 1; toc ^= 1;
         }
@@ -920,7 +919,7 @@ void grouped_rcr_kernel_body_pinned(const grouped_layout_globals g) {
             MAYBE_DRAIN_LGKM();
             __builtin_amdgcn_s_setprio(1);
             rcr_mma_v2_wrapper<!FUSED_KTAIL>(cC, a, b0);
-            rcr_mma_v2_wrapper<!FUSED_KTAIL>(cD, a, b1);
+            /* R9 disabled */ // rcr_mma_v2_wrapper<!FUSED_KTAIL>(cD, a, b1);
             __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
         }
@@ -953,6 +952,7 @@ void grouped_rcr_kernel_body_pinned(const grouped_layout_globals g) {
 
 template<bool N_MASKED_STORE = false, bool FUSED_KTAIL = false>
 __global__ __launch_bounds__(_NUM_THREADS, 1)
+__attribute__((amdgpu_waves_per_eu(1, 1)))
 void grouped_gemm_fp8_kernel_v2(const grouped_layout_globals g) {
     // Session 2: only K_rem==0 shapes use the pinned body; K_rem=64 (FUSED)
     // still routes to v1 body until session 3 ports the FUSED block.
