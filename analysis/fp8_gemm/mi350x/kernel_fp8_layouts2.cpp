@@ -175,6 +175,83 @@ void grouped_rcr_kernel_body_v2(const grouped_layout_globals g) {
                 tic ^= 1; toc ^= 1;
             }
 
+            // ---- FUSED K-tail (K_rem == 64) — port of v1 FUSED_KTAIL block ----
+            // K_rem must be exactly 64; main K-loop covers K=[0, fast_k);
+            // tail covers K=[fast_k, k). Per-group byte-level SRD with sentinel
+            // OOB masking, mirroring v1's pattern at kernel_fp8_layouts.cpp:2082+.
+            if (g.fast_k < g.k) {
+                const int laneid     = kittens::laneid();
+                const int row_lane   = laneid % 16;
+                const int k_lane_byte = (laneid / 16) * 32;
+                constexpr uint32_t SENTINEL = 0xFFFF0000u;
+                const bool both_valid = (laneid < 32);
+
+                const fp8e4m3* a_base_ptr = (const fp8e4m3*)&g.a[{0, 0, 0, 0}];
+                const fp8e4m3* b_base_ptr = (const fp8e4m3*)&g.b[{0, 0, 0, 0}];
+                const int a_row_stride_bytes = static_cast<int>(g.a.template stride<2>())
+                    * sizeof(*g.a.raw_ptr);
+                const int b_row_stride_bytes = g.b.template stride<2>();
+                const uint32_t a_total_bytes =
+                    static_cast<uint32_t>(g.M_total) * static_cast<uint32_t>(a_row_stride_bytes);
+                const uint32_t b_per_group_bytes =
+                    static_cast<uint32_t>(group_idx + 1) *
+                    static_cast<uint32_t>(g.n) *
+                    static_cast<uint32_t>(b_row_stride_bytes);
+                i32x4 a_srsrc_kt = make_srsrc((const void*)a_base_ptr, a_total_bytes);
+                i32x4 b_srsrc_kt = make_srsrc((const void*)b_base_ptr, b_per_group_bytes);
+                const uint32_t K_tail_base_bytes = static_cast<uint32_t>(g.fast_k);
+                const uint32_t b_group_byte_base =
+                    static_cast<uint32_t>(group_idx) *
+                    static_cast<uint32_t>(g.n) *
+                    static_cast<uint32_t>(b_row_stride_bytes);
+
+                auto load_a_kt = [&](A_row_reg& A_tile, int slab)
+                        __attribute__((always_inline)) {
+                    const int M_warp_base = m_start_g + (br * 2 + slab) * HB + wm * RBM;
+                    #pragma unroll
+                    for (int h = 0; h < A_row_reg::height; ++h) {
+                        const int A_row_idx = M_warp_base + h * 16 + row_lane;
+                        const uint32_t v_base = static_cast<uint32_t>(
+                            A_row_idx * a_row_stride_bytes +
+                            K_tail_base_bytes + k_lane_byte);
+                        const uint32_t v_lo = both_valid ? v_base : SENTINEL;
+                        const uint32_t v_hi = both_valid ? (v_base + 16) : SENTINEL;
+                        __uint128_t v0 = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
+                            a_srsrc_kt, v_lo, 0, 0);
+                        __uint128_t v1 = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
+                            a_srsrc_kt, v_hi, 0, 0);
+                        *reinterpret_cast<__uint128_t*>(&A_tile.tiles[h][0].data[0]) = v0;
+                        *reinterpret_cast<__uint128_t*>(&A_tile.tiles[h][0].data[4]) = v1;
+                    }
+                };
+                auto load_b_kt = [&](B_row_reg& B_tile, int n_strip_kt)
+                        __attribute__((always_inline)) {
+                    const int N_warp_base = (bc * 2 + n_strip_kt) * HB + wn * RBN;
+                    #pragma unroll
+                    for (int h_b = 0; h_b < B_row_reg::height; ++h_b) {
+                        const int B_row_idx_in_group = N_warp_base + h_b * 16 + row_lane;
+                        const uint32_t v_base = b_group_byte_base + static_cast<uint32_t>(
+                            B_row_idx_in_group * b_row_stride_bytes +
+                            K_tail_base_bytes + k_lane_byte);
+                        const uint32_t v_lo = both_valid ? v_base : SENTINEL;
+                        const uint32_t v_hi = both_valid ? (v_base + 16) : SENTINEL;
+                        __uint128_t v0 = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
+                            b_srsrc_kt, v_lo, 0, 0);
+                        __uint128_t v1 = ::kittens::llvm_amdgcn_raw_buffer_load_b128(
+                            b_srsrc_kt, v_hi, 0, 0);
+                        *reinterpret_cast<__uint128_t*>(&B_tile.tiles[h_b][0].data[0]) = v0;
+                        *reinterpret_cast<__uint128_t*>(&B_tile.tiles[h_b][0].data[4]) = v1;
+                    }
+                };
+
+                load_b_kt(b, n_strip);
+                load_a_kt(a0, 0);
+                load_a_kt(a1, 1);
+                asm volatile("s_waitcnt vmcnt(0)");
+                rcr_mma(cA, a0, b);
+                rcr_mma(cC, a1, b);
+            }
+
             // ---- Store the 2 accumulators of this n strip ----
             const float combined_scale = resolve_combined_scale_grp(g);
             asm volatile("s_nop 7\n s_nop 7\n s_nop 7\n s_nop 7");  // trick #14
