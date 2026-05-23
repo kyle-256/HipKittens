@@ -56,6 +56,7 @@
 #include "kernel_fp8_layouts.cpp"  // pull v1 helpers + dispatchers into ns
 
 
+
 // =============================================================================
 // SESSION 1 — Pinned-storage primitives (compile-only at this commit)
 // =============================================================================
@@ -783,6 +784,7 @@ __device__ __forceinline__ void rcr_mma_v2_wrapper(
     }
 }
 
+
 // R52/R53 — P1.2 multi-session building block: 32×32×64 mfma direct wrapper.
 namespace v2_pinned {
 __device__ __forceinline__ static void mma_32_int4(
@@ -1115,7 +1117,7 @@ void grouped_rcr_kernel_body_pinned(const grouped_layout_globals g) {
             load_b(b0, b_tile(tic, 0), wn);
             load_a(a, As[tic][0], wm);
             rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], a_gl_g, a_co(br*2+1, k+1), soA);
-            TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
+            TK_WAIT_LGKM(0); __builtin_amdgcn_s_barrier();  // R115-real: tight drain
             MAYBE_DRAIN_LGKM();
             rcr_mma_v2_vacc_wrapper<!FUSED_KTAIL>(cA, a, b0);
             __builtin_amdgcn_s_barrier();
