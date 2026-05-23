@@ -148,6 +148,97 @@ __global__ void __probe_v2_pinned_mma_one_iter(float2* out) {
 
 
 // =============================================================================
+// SESSION 3 PROBE — full pinned 1-acc K-loop with raw int4 storage
+// =============================================================================
+// Goal: validate that the architectural primitives (register-asm int4
+// pinning + ds_read into pinned slots + mma_one_tile from pinned slots)
+// produce the target register layout — V usage low, no spill — when
+// composed at full per-acc scale.
+//
+// Per-warp 1 acc (64×32) needs 8 mma 16x16x128 calls per K iter.
+// A frag: 32 dwords (8 int4 = 8 × 4 dwords) pinned at v[0:31]
+// B frag: 16 dwords (4 int4) pinned at v[32:47]
+// Acc:    32 floats/lane in AGPR, pinned via mma_one_tile's `+a` constraint
+// =============================================================================
+
+extern "C" __global__ __launch_bounds__(_NUM_THREADS, 1)
+void __probe_v2_pinned_full_kloop(
+        const fp8e4m3* __restrict__ a_lds_ptr,
+        const fp8e4m3* __restrict__ b_lds_ptr,
+        float2* out,
+        int ki) {
+    // Pinned A fragment storage (per-warp 64 M × 128 K = 32 dwords/lane).
+    // 8 int4 vars × 4 dwords each = 32 dwords; bind starting at v0.
+    register int4 a_p0 asm("v0");
+    register int4 a_p1 asm("v4");
+    register int4 a_p2 asm("v8");
+    register int4 a_p3 asm("v12");
+    register int4 a_p4 asm("v16");
+    register int4 a_p5 asm("v20");
+    register int4 a_p6 asm("v24");
+    register int4 a_p7 asm("v28");
+    // Pinned B fragment storage (per-warp 32 N × 128 K = 16 dwords/lane).
+    // 4 int4 vars; bind starting at v32.
+    register int4 b_p0 asm("v32");
+    register int4 b_p1 asm("v36");
+    register int4 b_p2 asm("v40");
+    register int4 b_p3 asm("v44");
+
+    // Acc: 1 per-warp acc covering 64×32 = 8 mma tiles each with
+    // float2[2] = 4 floats per tile. 8 × 4 = 32 floats / lane (AGPR).
+    float2 acc[8][2];
+    #pragma unroll
+    for (int i = 0; i < 8; ++i) { acc[i][0] = {0,0}; acc[i][1] = {0,0}; }
+
+    const uint32_t lds_stride = 128;  // synthetic, for probe only
+    const uint32_t a_off = static_cast<uint32_t>(threadIdx.x * 16);
+    const uint32_t b_off = static_cast<uint32_t>(threadIdx.x * 16 + 4096);
+
+    #pragma unroll 1
+    for (int k = 0; k < ki; ++k) {
+        // ds_read into pinned A slots
+        a_p0 = *reinterpret_cast<const int4*>(a_lds_ptr + a_off + lds_stride * 0);
+        a_p1 = *reinterpret_cast<const int4*>(a_lds_ptr + a_off + lds_stride * 1);
+        a_p2 = *reinterpret_cast<const int4*>(a_lds_ptr + a_off + lds_stride * 2);
+        a_p3 = *reinterpret_cast<const int4*>(a_lds_ptr + a_off + lds_stride * 3);
+        a_p4 = *reinterpret_cast<const int4*>(a_lds_ptr + a_off + lds_stride * 4);
+        a_p5 = *reinterpret_cast<const int4*>(a_lds_ptr + a_off + lds_stride * 5);
+        a_p6 = *reinterpret_cast<const int4*>(a_lds_ptr + a_off + lds_stride * 6);
+        a_p7 = *reinterpret_cast<const int4*>(a_lds_ptr + a_off + lds_stride * 7);
+        // ds_read into pinned B slots
+        b_p0 = *reinterpret_cast<const int4*>(b_lds_ptr + b_off + lds_stride * 0);
+        b_p1 = *reinterpret_cast<const int4*>(b_lds_ptr + b_off + lds_stride * 1);
+        b_p2 = *reinterpret_cast<const int4*>(b_lds_ptr + b_off + lds_stride * 2);
+        b_p3 = *reinterpret_cast<const int4*>(b_lds_ptr + b_off + lds_stride * 3);
+
+        // Pack consecutive int4s into int32_t[8] arrays for mma_one_tile.
+        // Cast through unions in inline scope so compiler still sees the
+        // pinned vars as the storage (SSA chain intact).
+        int32_t A_pack[2][8] = {
+            {a_p0.x, a_p0.y, a_p0.z, a_p0.w, a_p1.x, a_p1.y, a_p1.z, a_p1.w},
+            {a_p2.x, a_p2.y, a_p2.z, a_p2.w, a_p3.x, a_p3.y, a_p3.z, a_p3.w},
+        };
+        int32_t B_pack[8] = {b_p0.x, b_p0.y, b_p0.z, b_p0.w,
+                             b_p1.x, b_p1.y, b_p1.z, b_p1.w};
+
+        // 8 mma per K iter for 1 acc (4 m-tiles × 2 n-tiles).
+        // Synthetic mapping — probe correctness not the point; just validate
+        // codegen + register layout.
+        #pragma unroll
+        for (int t = 0; t < 8; ++t) {
+            v2_pinned::mma_one_tile(acc[t], A_pack[t & 1], B_pack);
+        }
+    }
+    // Store acc to output (keeps SSA chain alive)
+    #pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        out[(threadIdx.x * 8 + i) * 2 + 0] = acc[i][0];
+        out[(threadIdx.x * 8 + i) * 2 + 1] = acc[i][1];
+    }
+}
+
+
+// =============================================================================
 // PT-facing struct.
 // =============================================================================
 struct grouped_layout_globals_v2 {
