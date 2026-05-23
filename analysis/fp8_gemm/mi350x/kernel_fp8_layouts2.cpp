@@ -885,26 +885,26 @@ void grouped_rcr_kernel_body_pinned(const grouped_layout_globals g) {
             rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], a_gl_g, a_co(br*2+1, k+1), soA);
             TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rcr_mma_v2_vacc_wrapper<!FUSED_KTAIL>(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            rcr_mma_v2_vacc_wrapper<!FUSED_KTAIL>(cA, a, b0);
             __builtin_amdgcn_s_barrier();
 
             load_b(b1, b_tile(tic, 1), wn);
             rcr_8w_load_hoist<_NUM_THREADS>(b_tile(tic, 0), g.b, b_co(bc*2, k+2), soB);
             __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rcr_mma_v2_wrapper<!FUSED_KTAIL>(cB, a, b1); __builtin_amdgcn_s_setprio(0);
+            rcr_mma_v2_wrapper<!FUSED_KTAIL>(cB, a, b1);
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
             rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0], a_gl_g, a_co(br*2, k+2), soA);
             __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rcr_mma_v2_wrapper<!FUSED_KTAIL>(cC, a, b0); __builtin_amdgcn_s_setprio(0);
+            rcr_mma_v2_wrapper<!FUSED_KTAIL>(cC, a, b0);
             __builtin_amdgcn_s_barrier();
 
             rcr_8w_load_hoist<_NUM_THREADS>(b_tile(tic, 1), g.b, b_co(bc*2+1, k+2), soB);
             TK_WAIT_VMCNT(RCR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
-            __builtin_amdgcn_s_setprio(1); rcr_mma_v2_wrapper<!FUSED_KTAIL>(cD, a, b1); __builtin_amdgcn_s_setprio(0);
+            rcr_mma_v2_wrapper<!FUSED_KTAIL>(cD, a, b1);
             __builtin_amdgcn_s_barrier();
         }
 
@@ -915,25 +915,25 @@ void grouped_rcr_kernel_body_pinned(const grouped_layout_globals g) {
             rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], a_gl_g, a_co(br*2+1, ki_dyn-1), soA);
             __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rcr_mma_v2_vacc_wrapper<!FUSED_KTAIL>(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            rcr_mma_v2_vacc_wrapper<!FUSED_KTAIL>(cA, a, b0);
             __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
 
             load_b(b1, b_tile(tic, 1), wn);
             __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rcr_mma_v2_wrapper<!FUSED_KTAIL>(cB, a, b1); __builtin_amdgcn_s_setprio(0);
+            rcr_mma_v2_wrapper<!FUSED_KTAIL>(cB, a, b1);
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
             TK_WAIT_VMCNT(RCR_EPILOGUE_VMCNT); __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rcr_mma_v2_wrapper<!FUSED_KTAIL>(cC, a, b0); __builtin_amdgcn_s_setprio(0);
+            rcr_mma_v2_wrapper<!FUSED_KTAIL>(cC, a, b0);
             __builtin_amdgcn_s_barrier();
 
             load_b(b0, b_tile(toc, 0), wn);
             __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rcr_mma_v2_wrapper<!FUSED_KTAIL>(cD, a, b1); __builtin_amdgcn_s_setprio(0);
+            rcr_mma_v2_wrapper<!FUSED_KTAIL>(cD, a, b1);
             __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
             tic ^= 1; toc ^= 1;
         }
@@ -943,13 +943,13 @@ void grouped_rcr_kernel_body_pinned(const grouped_layout_globals g) {
             load_a(a, As[tic][0], wm);
             asm volatile("s_waitcnt vmcnt(0)"); __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rcr_mma_v2_vacc_wrapper<!FUSED_KTAIL>(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            rcr_mma_v2_vacc_wrapper<!FUSED_KTAIL>(cA, a, b0);
             __builtin_amdgcn_s_barrier();
 
             load_b(b1, b_tile(tic, 1), wn);
             __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rcr_mma_v2_wrapper<!FUSED_KTAIL>(cB, a, b1); __builtin_amdgcn_s_setprio(0);
+            rcr_mma_v2_wrapper<!FUSED_KTAIL>(cB, a, b1);
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
