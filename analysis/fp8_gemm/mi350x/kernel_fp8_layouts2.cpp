@@ -783,6 +783,45 @@ __device__ __forceinline__ void rcr_mma_v2_wrapper(
     }
 }
 
+// R52/R53 — P1.2 multi-session building block: 32×32×64 mfma direct wrapper.
+namespace v2_pinned {
+__device__ __forceinline__ static void mma_32_int4(
+        float2 (&D)[8],
+        int4 A_lo, int4 A_hi,
+        int4 B_lo, int4 B_hi) {
+    typedef __attribute__((__vector_size__(8 * sizeof(int)))) int intx8_t;
+    typedef __attribute__((__vector_size__(16 * sizeof(float)))) float floatx16_t;
+    intx8_t A = {A_lo.x, A_lo.y, A_lo.z, A_lo.w, A_hi.x, A_hi.y, A_hi.z, A_hi.w};
+    intx8_t B = {B_lo.x, B_lo.y, B_lo.z, B_lo.w, B_hi.x, B_hi.y, B_hi.z, B_hi.w};
+    asm volatile(
+        "v_mfma_f32_32x32x64_f8f6f4 %0, %1, %2, %0"
+        : "+a"(*(floatx16_t*)D)
+        : "v"(A), "v"(B));
+}
+}  // namespace v2_pinned
+
+// R53: isolation probe. Expect spill=0 with V<128 A=64 (1 mfma acc).
+extern "C" __global__ __launch_bounds__(64, 1)
+void __probe_v2_mma_32_isolated(
+        const int4* __restrict__ A,
+        const int4* __restrict__ B,
+        float* __restrict__ C) {
+    const int tid = threadIdx.x;
+    int4 a_lo = A[tid * 2 + 0];
+    int4 a_hi = A[tid * 2 + 1];
+    int4 b_lo = B[tid * 2 + 0];
+    int4 b_hi = B[tid * 2 + 1];
+    float2 acc[8];
+    #pragma unroll
+    for (int i = 0; i < 8; ++i) { acc[i] = {0.f, 0.f}; }
+    v2_pinned::mma_32_int4(acc, a_lo, a_hi, b_lo, b_hi);
+    #pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        C[tid * 16 + i * 2 + 0] = acc[i].x;
+        C[tid * 16 + i * 2 + 1] = acc[i].y;
+    }
+}
+
 // =============================================================================
 // SESSION 2 — pinned 4-acc K-loop body (in-file copy of v1 with register-asm
 // declarations on HK fragment types `A_row_reg` / `B_row_reg`).
