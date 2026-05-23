@@ -3772,6 +3772,14 @@ inline void dispatch_grouped_rcr(grouped_layout_globals g) {
             if (rcr_bn128_env == -1 || rcr_bn128_env == -128) block_choice = -128;
             else if (rcr_bn128_env == 1 || rcr_bn128_env == 128) block_choice = 128;
         }
+        // [PLAN_V2 P1.3 (b) REVERTED 2026-05-23]
+        // Hypothesis: K<4096 → BN=128 routing matches Triton BLK=128×128 cfg.
+        // Result: -8.7% geomean v2/v1 (gpt_oss B16 K=2880 / dsv3_down / qwen_down
+        // K<4096 cases all regressed 15-22% vs v1 BN=256 baseline). Matches
+        // memory [[bn128-per-warp-area-not-lever]]: bn128 doubles per-tile
+        // fixed overhead (2× store/binary-search/scale-mul) without compute
+        // benefit on short-K bandwidth-bound shapes. P1.3 (a) split-K
+        // cross-group B share (~500-800 LOC) deferred multi-session.
 
         if (block_choice == 128) {
             g.bpc = kittens::ceil_div(g.n, 128);

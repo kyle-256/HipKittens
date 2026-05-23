@@ -136,6 +136,31 @@ v1 dispatcher 已 inline 1 个 (`dispatch_grouped_rcr`); P1.0 起步前补 inlin
 | chi2811 commit (HK + PT) | sha / sha |
 | KPI raw | `/tmp/<milestone>.log` 路径 |
 
+### P1.3 端点 KPI (2026-05-23, FAIL — REVERT, 进 P1.4)
+
+| 项 | 数值 |
+|---|---|
+| (b) 实现 | dispatcher K<4096 → block_choice=128 routing (~10 LOC, autotune-OFF override) |
+| bench (8 shape RCR fwd vs v1+Triton+hk_dense) | **REGRESSION** v2/v1 geomean = 0.913 |
+| 个例 | gpt_oss_up B16 K=2880 0.844; dsv3_down K=2048 0.818; qwen_down K=1536 0.878 — 全 K<4096 routed shape 跌 12-18% |
+| 长 K shape | dsv3_up K=7168 ratio 1.005 / qwen_up K=4096 ratio 0.997 — 未 routed, baseline 不变 |
+| 归因 | `[[bn128-per-warp-area-not-lever]]` 直接命中: BN=128 path 2× per-tile fixed overhead (store/scale/binary-search), 短 K compute 时间短 → fixed overhead 比例反而大; race-fix triple-buffer + vmcnt drain 增 latency |
+| Plan §3.2 (a) split-K cross-group B share | ~500-800 LOC, 改 PT-side group_offs 接口 + 新 launcher, 多 session |
+| 端点决策 | **revert (b) routing**, P1.3 close; (a) defer multi-session, 跟 P1.2 一起留给后续 |
+| commit | HK ?, PT ?  (revert) |
+
+### P1.2 端点 KPI (2026-05-23, DEFERRED — 进 P1.3)
+
+| 项 | 数值 |
+|---|---|
+| 目标 | BN=256 路径 spill=0 (从 37 VGPR / 152B scratch) |
+| 候选 lever | mfma 16×16×128 → 32×32×128 wrapper swap + K-loop body 联合改 |
+| 现有基础 | `[[fp8-rrr-32x32-foundation]]`: HK 已有 `mfma323264_agpr_inplace` + `rrr_mma_32_agpr_t` wrapper (isolated V=84 A=32 spill=0) — 但是 RRR-specific wrapper, RCR 需新 `rcr_mma_32_agpr_t` (A row × B col layout) |
+| 已知阻挡 | `[[fp8-rrr-32x32-flawed-premise]]`: 单 wrapper swap 不降 spill — per-warp output area 64×128 fixed → AGPR 128 floats/lane regardless of base mfma shape。必须 K-loop nest re-architecture (per-tile streaming + LDS pre-cache + acc-resident single tile), 才能真把 acc-reg pressure 释放给 fragment + scratch |
+| 工程量 | 400-600 LOC re-architecture (rcr_mma_32 wrapper ~80 LOC + K-loop rewrite ~300 LOC + LDS layout 调 ~50 LOC + smoke/bench 调试 multi-cycle) — **multi-session**, 单 session 实现风险高且 SNR 调试 cycle 长 |
+| 端点决策 | **DEFERRED**: 不在本 session 落地; spill=0 是 mfma + K-loop + LDS 三处协同, 单 cycle 无法 land 完整改造 + 验证 correctness。本 session 直接进 P1.3 (algorithmic dispatcher routing) — `[[bn128-per-warp-area-not-lever]]` 已证 worst-shape 强制 bn128 也只差 0.3pp, K-loop topology 才是真 lever, 但 K-loop rewrite 跟 spill=0 rewrite 范围相同 → 留给后续 multi-session |
+| 后续 path | (i) 单建 rcr_mma_32 wrapper (~80 LOC, 1 session), (ii) K-loop rewrite + LDS layout (~300 LOC, 1-2 session), (iii) full integration + sweep (1 session) — 共 3-4 session |
+
 ### P1.1 端点 KPI (2026-05-23, SATURATED — 进 P1.2)
 
 | 项 | 数值 |
