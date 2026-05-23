@@ -138,15 +138,38 @@ v1 dispatcher 已 inline 1 个 (`dispatch_grouped_rcr`); P1.0 起步前补 inlin
 
 ### P5 Final Bench (2026-05-23) — Campaign D wrap-up
 
-#### 当前 v2 状态 vs user 目标
+#### 当前 v2 状态 vs user 目标 (2026-05-23 post-R43)
 
 | 目标 | 当前 raw geomean | 是否达成 |
 |---|---|---|
-| fwd ≥ Triton 1.15× | 0.924× (RCR, P1.4 sweep 8 shape, post-P1.3 revert) | NO (-22pp) |
+| fwd ≥ Triton 1.15× | **1.029×** (RCR, post-R43 chunk_size=32, 8-shape bench) | NO (-12pp, but +1.5pp vs P1.4) |
 | dgrad ≥ Triton 1.15× | ~0.955× (RRR, Bench agent baseline, P2 unchanged) | NO (-20pp) |
 | wgrad ≥ 当前 HK ×1.15 → vs Triton 1.79× | 1.556× (CRR var_k, Bench agent baseline, P3 unchanged) | NO (-15pp) |
-| spill=0 (BN=256/128 all paths) | BN=128 全 0; BN=256 RCR/RRR FUSED=false 37 / RRR FUSED=true 67 / CRR 32-41 | NO (主路径仍 spill) |
-| vs hk_dense geomean ≤ 3% | ~28% gap (P1.4 0.72× est) | NO (-25pp) |
+| spill=0 (BN=256/128 all paths) | BN=128 全 0; BN=256 RCR FUSED=false 24 / FUSED=true 35 / RRR FUSED=true 67 / CRR 32-41 | NO (主路径仍 spill) |
+| vs hk_dense geomean ≤ 3% | v2/hk_dense=1.903× (better) — hk_dense baseline 不强, gap 实际从 25% 缩到 ~5-10% on most shapes | NO (qwen_down B16 M2048 worst 0.937 vs hk_dense 1.595×) |
+
+#### R33-R49 round log (in-session, 2026-05-23 session 续)
+| Round | Lever | Verdict |
+|---|---|---|
+| R33 | unroll 4 RCR main loop | REGRESSION correctness (gpt_oss SNR 47→16 dB), REVERT |
+| R34 | ISA-disasm 4-variant metadata | DIAGNOSTIC: spill 全在 FUSED=true (35 vs 24); intermediates not the cause |
+| R35 | FUSED block v0/v1 intermediate elim | 0 effect (compiler SSA store-fwd 已折叠) |
+| R36 | cB → vacc wrapper | REGRESSION spill 24/35 → 40/51 |
+| R37 | cA+cD vacc 对角 | REGRESSION correctness (SNR 10-15 dB全失) |
+| R38 | builtin mfma | BUILD ERROR (gfx950 没有此 builtin) |
+| R39 | drop post-cA s_barrier main loop | REGRESSION correctness (gpt_oss SNR=24 dB) |
+| R40 | noinline scale lambda | BUILD ERROR (device-side lambda noinline link 错) |
+| R41 | revert R27 cA vacc → agpr | 0 effect on spill (cA vacc historical artifact) |
+| R42 | amdgpu_num_vgpr(192) attribute | 0 effect (ignored) |
+| **R43** | **dispatcher chunk_size 64→32** | **WIN +1.5pp v2/Triton geomean, qwen_down -9% best-case; COMMIT HK 56f688fe + PT 796dbc67** |
+| R44 | sched_group_barrier(0x8,4,0) between cB/cC | REGRESSION dsv3 5x slower |
+| R45 | ST_v2 → ST_v2a swizzle | REGRESSION (GPU shared + unstable nums) |
+| R46 | __probe_v2_single_acc_blk128 add | BUILD ERROR (wrapper type mismatch) |
+| R47 | sched_barrier(0) end-of-iter | -1.2pp REGRESSION geomean |
+| R48 | dynamic chunk_size (ki<=16 → 32, else 16) | REGRESSION (long K dsv3 -10/-15pp) |
+| R49 | unroll 2 → 1 | -0.5pp slight regression, noise edge |
+
+**Single-round source-level lever 已穷尽**。R43 是本 session 唯一 commit win，把 v2/Triton 从 1.014×→1.029×。剩余 12pp 到 1.15× 必须 multi-session 算法/架构改写。
 
 #### 本 Campaign D 实际 landed
 - ✅ P0 plan locked + PLAN_V2.md 落档
