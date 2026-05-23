@@ -34,7 +34,7 @@ struct grouped_layout_globals_v2 {
 // forced to give it its own register/stack frame, freeing the K-loop's 4-acc
 // hot path from co-locating these ~10 locals into shared VGPRs.
 // =============================================================================
-__device__ __attribute__((noinline)) void rcr_v2_fused_ktail(
+__device__ __attribute__((always_inline)) inline void rcr_v2_fused_ktail(
         const grouped_layout_globals& g,
         rt_fl<RBM, RBN, col_l, rt_16x16_s>& cA,
         rt_fl<RBM, RBN, col_l, rt_16x16_s>& cB,
@@ -155,6 +155,14 @@ void grouped_rcr_kernel_body_v2(const grouped_layout_globals g) {
                 gt, s_cum_tiles, s_offs, num_pid_n, g.group_m,
                 /*M_BLOCK_DIV=*/BLOCK_SIZE,
                 group_idx, m_start_g, M_g, bpr_g, br, bc)) continue;
+        // [V2 pinned attempt] force these WG-uniform tile-state ints into
+        // SGPR via readfirstlane — frees up ~6 V from the K-loop hot path.
+        group_idx = __builtin_amdgcn_readfirstlane(group_idx);
+        m_start_g = __builtin_amdgcn_readfirstlane(m_start_g);
+        M_g       = __builtin_amdgcn_readfirstlane(M_g);
+        bpr_g     = __builtin_amdgcn_readfirstlane(bpr_g);
+        br        = __builtin_amdgcn_readfirstlane(br);
+        bc        = __builtin_amdgcn_readfirstlane(bc);
 
         // V2 spill attempt #2: NO persistent a_gl_g / c_gl_g view copies.
         // Build a fresh shifted view per-load via macro so the gl<> object
