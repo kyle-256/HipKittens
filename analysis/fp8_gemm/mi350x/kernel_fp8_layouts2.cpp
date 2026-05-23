@@ -201,6 +201,138 @@ __device__ __forceinline__ static void mma_int4(
 // asm pattern is functional. We can then scale to per-warp 64×32 and
 // integrate into the K-loop.
 // =============================================================================
+// R2: per-warp 128M×64N (full v1 per-warp area), 4 acc × 8 mma = 32 mma per iter
+extern "C" __global__ __launch_bounds__(64, 1)
+void __probe_v2_4acc_pinned(
+        const int4* __restrict__ A,   // 128 rows × 128 K = 256 int4 = 16 int4/lane × 16
+        const int4* __restrict__ B,   // 64 cols × 128 K = 128 int4 = 8 int4/lane × 16
+        float4* __restrict__ C) {     // 128×64 = 8192 floats = 32 float4/lane × 64
+    const int tid = threadIdx.x;
+    // A pinned: 16 int4 (2 m_chunks × 8 int4)
+    register int4 a00 asm("v0");  register int4 a01 asm("v4");
+    register int4 a02 asm("v8");  register int4 a03 asm("v12");
+    register int4 a04 asm("v16"); register int4 a05 asm("v20");
+    register int4 a06 asm("v24"); register int4 a07 asm("v28");
+    register int4 a10 asm("v32"); register int4 a11 asm("v36");
+    register int4 a12 asm("v40"); register int4 a13 asm("v44");
+    register int4 a14 asm("v48"); register int4 a15 asm("v52");
+    register int4 a16 asm("v56"); register int4 a17 asm("v60");
+    // B pinned: 8 int4 (2 n_chunks × 4 int4)
+    register int4 b00 asm("v64"); register int4 b01 asm("v68");
+    register int4 b02 asm("v72"); register int4 b03 asm("v76");
+    register int4 b10 asm("v80"); register int4 b11 asm("v84");
+    register int4 b12 asm("v88"); register int4 b13 asm("v92");
+
+    a00 = A[tid*16+ 0]; a01 = A[tid*16+ 1]; a02 = A[tid*16+ 2]; a03 = A[tid*16+ 3];
+    a04 = A[tid*16+ 4]; a05 = A[tid*16+ 5]; a06 = A[tid*16+ 6]; a07 = A[tid*16+ 7];
+    a10 = A[tid*16+ 8]; a11 = A[tid*16+ 9]; a12 = A[tid*16+10]; a13 = A[tid*16+11];
+    a14 = A[tid*16+12]; a15 = A[tid*16+13]; a16 = A[tid*16+14]; a17 = A[tid*16+15];
+    b00 = B[tid*8+0]; b01 = B[tid*8+1]; b02 = B[tid*8+2]; b03 = B[tid*8+3];
+    b10 = B[tid*8+4]; b11 = B[tid*8+5]; b12 = B[tid*8+6]; b13 = B[tid*8+7];
+
+    // 4 acc, each 8 tiles, each tile 4 floats = 32 AGPR/lane per acc; 128 AGPR total
+    float2 cA[8][2], cB[8][2], cC[8][2], cD[8][2];
+    #pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        cA[i][0]={0,0}; cA[i][1]={0,0}; cB[i][0]={0,0}; cB[i][1]={0,0};
+        cC[i][0]={0,0}; cC[i][1]={0,0}; cD[i][0]={0,0}; cD[i][1]={0,0};
+    }
+
+    // cA = m_chunk 0 × n_chunk 0, 8 tiles (4 m × 2 n)
+    v2_pinned::mma_int4(cA[0], a00, a01, b00, b01);
+    v2_pinned::mma_int4(cA[1], a00, a01, b02, b03);
+    v2_pinned::mma_int4(cA[2], a02, a03, b00, b01);
+    v2_pinned::mma_int4(cA[3], a02, a03, b02, b03);
+    v2_pinned::mma_int4(cA[4], a04, a05, b00, b01);
+    v2_pinned::mma_int4(cA[5], a04, a05, b02, b03);
+    v2_pinned::mma_int4(cA[6], a06, a07, b00, b01);
+    v2_pinned::mma_int4(cA[7], a06, a07, b02, b03);
+    // cB = m_chunk 0 × n_chunk 1
+    v2_pinned::mma_int4(cB[0], a00, a01, b10, b11);
+    v2_pinned::mma_int4(cB[1], a00, a01, b12, b13);
+    v2_pinned::mma_int4(cB[2], a02, a03, b10, b11);
+    v2_pinned::mma_int4(cB[3], a02, a03, b12, b13);
+    v2_pinned::mma_int4(cB[4], a04, a05, b10, b11);
+    v2_pinned::mma_int4(cB[5], a04, a05, b12, b13);
+    v2_pinned::mma_int4(cB[6], a06, a07, b10, b11);
+    v2_pinned::mma_int4(cB[7], a06, a07, b12, b13);
+    // cC = m_chunk 1 × n_chunk 0
+    v2_pinned::mma_int4(cC[0], a10, a11, b00, b01);
+    v2_pinned::mma_int4(cC[1], a10, a11, b02, b03);
+    v2_pinned::mma_int4(cC[2], a12, a13, b00, b01);
+    v2_pinned::mma_int4(cC[3], a12, a13, b02, b03);
+    v2_pinned::mma_int4(cC[4], a14, a15, b00, b01);
+    v2_pinned::mma_int4(cC[5], a14, a15, b02, b03);
+    v2_pinned::mma_int4(cC[6], a16, a17, b00, b01);
+    v2_pinned::mma_int4(cC[7], a16, a17, b02, b03);
+    // cD = m_chunk 1 × n_chunk 1
+    v2_pinned::mma_int4(cD[0], a10, a11, b10, b11);
+    v2_pinned::mma_int4(cD[1], a10, a11, b12, b13);
+    v2_pinned::mma_int4(cD[2], a12, a13, b10, b11);
+    v2_pinned::mma_int4(cD[3], a12, a13, b12, b13);
+    v2_pinned::mma_int4(cD[4], a14, a15, b10, b11);
+    v2_pinned::mma_int4(cD[5], a14, a15, b12, b13);
+    v2_pinned::mma_int4(cD[6], a16, a17, b10, b11);
+    v2_pinned::mma_int4(cD[7], a16, a17, b12, b13);
+
+    #pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        C[tid*32 + i     ] = *(float4*)cA[i];
+        C[tid*32 + i + 8 ] = *(float4*)cB[i];
+        C[tid*32 + i + 16] = *(float4*)cC[i];
+        C[tid*32 + i + 24] = *(float4*)cD[i];
+    }
+}
+
+
+// R1: per-warp 64×32 output, 8 mma per K iter, 8 acc tiles (32 AGPR total)
+extern "C" __global__ __launch_bounds__(64, 1)
+void __probe_v2_per_warp_pinned(
+        const int4* __restrict__ A,   // 64 rows × 128 K = 128 int4
+        const int4* __restrict__ B,   // 32 cols × 128 K =  64 int4
+        float4* __restrict__ C) {     // 64×32 = 2048 floats = 512 float4
+    const int tid = threadIdx.x;
+    // Pinned A: 8 int4 per lane = 32 V dwords (4 m-tiles × 8 dwords each)
+    register int4 a0 asm("v0");  register int4 a1 asm("v4");
+    register int4 a2 asm("v8");  register int4 a3 asm("v12");
+    register int4 a4 asm("v16"); register int4 a5 asm("v20");
+    register int4 a6 asm("v24"); register int4 a7 asm("v28");
+    // Pinned B: 4 int4 per lane = 16 V dwords (2 n-tiles × 8 dwords each)
+    register int4 b0 asm("v32"); register int4 b1 asm("v36");
+    register int4 b2 asm("v40"); register int4 b3 asm("v44");
+
+    a0 = A[tid * 8 + 0]; a1 = A[tid * 8 + 1];
+    a2 = A[tid * 8 + 2]; a3 = A[tid * 8 + 3];
+    a4 = A[tid * 8 + 4]; a5 = A[tid * 8 + 5];
+    a6 = A[tid * 8 + 6]; a7 = A[tid * 8 + 7];
+    b0 = B[tid * 4 + 0]; b1 = B[tid * 4 + 1];
+    b2 = B[tid * 4 + 2]; b3 = B[tid * 4 + 3];
+
+    // 8 acc tiles, each float2[2] = 4 floats/lane = 4 AGPR/lane each
+    float2 acc[8][2];
+    #pragma unroll
+    for (int i = 0; i < 8; ++i) { acc[i][0] = {0,0}; acc[i][1] = {0,0}; }
+
+    // m_tile 0..3, n_tile 0..1 -- 8 mma calls
+    // Tile (m=0, n=0): a0,a1 × b0,b1
+    v2_pinned::mma_int4(acc[0], a0, a1, b0, b1);
+    // Tile (m=0, n=1): a0,a1 × b2,b3
+    v2_pinned::mma_int4(acc[1], a0, a1, b2, b3);
+    // Tile (m=1, n=0): a2,a3 × b0,b1
+    v2_pinned::mma_int4(acc[2], a2, a3, b0, b1);
+    v2_pinned::mma_int4(acc[3], a2, a3, b2, b3);
+    v2_pinned::mma_int4(acc[4], a4, a5, b0, b1);
+    v2_pinned::mma_int4(acc[5], a4, a5, b2, b3);
+    v2_pinned::mma_int4(acc[6], a6, a7, b0, b1);
+    v2_pinned::mma_int4(acc[7], a6, a7, b2, b3);
+
+    #pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        C[(tid * 8) + i] = *(float4*)acc[i];
+    }
+}
+
+
 extern "C" __global__ __launch_bounds__(64, 1)
 void __probe_v2_minimal_pinned_gemm(
         const int4* __restrict__ A,   // packed fp8: 16 rows × 128 K = 32 int4 (2 per thread)
