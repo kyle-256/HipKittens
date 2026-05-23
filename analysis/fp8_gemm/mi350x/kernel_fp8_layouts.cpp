@@ -3709,7 +3709,7 @@ void grouped_gemm_fp8_kernel(const grouped_layout_globals g) {
     }
 }
 
-void dispatch_grouped_rcr(grouped_layout_globals g) {
+inline void dispatch_grouped_rcr(grouped_layout_globals g) {
     g.n = static_cast<int>(g.c.cols());
     g.M_total = static_cast<int>(g.c.rows());
     g.k = static_cast<int>(g.a.cols());

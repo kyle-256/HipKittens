@@ -2186,6 +2186,13 @@ void grouped_rcr_kernel_body(const grouped_layout_globals g) {
         const int r1 = __builtin_amdgcn_readfirstlane(m_subtile_C + br*WARPS_M*2+WARPS_M+wm);
         const int c0 = __builtin_amdgcn_readfirstlane(bc*WARPS_N*2+wn);
         const int c1 = __builtin_amdgcn_readfirstlane(bc*WARPS_N*2+WARPS_N+wn);
+        // [P1.1 trick #14] Drain mfma writeback before store launches.
+        // PR #330 dense pattern: s_nop 7×4 + sched_barrier(0) between
+        // last accumulator mma and store. cD writeback latency ~64 cyc;
+        // 28 cyc of s_nop pads the bubble so store launches see settled
+        // VGPRs without compiler reordering loads ahead of mfma exit.
+        asm volatile("s_nop 7\n s_nop 7\n s_nop 7\n s_nop 7");
+        __builtin_amdgcn_sched_barrier(0);
         // Masked store: m_limit drops rows past the partial-last-M-tile
         // (M_g % BLOCK_SIZE != 0 case introduced by the ceil_div bpr_g
         // above); n_limit drops cols past the partial-last-N-tile (covered

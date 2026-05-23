@@ -136,6 +136,22 @@ v1 dispatcher 已 inline 1 个 (`dispatch_grouped_rcr`); P1.0 起步前补 inlin
 | chi2811 commit (HK + PT) | sha / sha |
 | KPI raw | `/tmp/<milestone>.log` 路径 |
 
+### P1.1 端点 KPI (2026-05-23, SATURATED — 进 P1.2)
+
+| 项 | 数值 |
+|---|---|
+| trick #14 (s_nop 7×4 + sched_barrier(0) before store) | 加在 RCR bn256 body line 2195 前 |
+| trick #2 (outer-hoist per-group ptr) | 已 done in v1 baseline (a_gl_g/c_gl_g, m_subtile_A=0 constexpr) |
+| trick #4 (two-step prologue) | 已 done in v1 baseline (prologue 1+2 + double s_barrier) |
+| trick #7 (store-side unpad) | N/A (PT caller C 是 flat [M_total, N], masked store 已覆盖) |
+| trick #12 (vmcnt<3> partial drain) | 跳过 (`[[no-constant-sweep]]` 阻止 RCR_STEADY_VMCNT=8→3 sweep, 需先 ISA 分析) |
+| trick #13 (readfirstlane 显式 pin) | 已 done in v1 baseline (line 2185-2188 已用) |
+| **net delta v2/v1** | **geomean +0.3% (8 shape)**, individual ratio 0.999-1.012, **within noise floor** |
+| 端点 gate (vs Triton ≥ 0.97×) | **FAIL** — P1.0 baseline 0.943×, P1.1 +0.3% → ~0.946×, 仍低于 gate |
+| 归因 | Ref agent 表 6 trick 中 5 个早已 absorbed 入 v1; #14 是唯一未做但收益微弱 (Ref agent estimate 1-3% total, actual <1%) |
+| 决策 | trick 池 saturated — 进 P1.2 spill=0 (mfma 32×32 + K-loop, ~400-600 LOC), 这是 plan §3.1 标识的 real lever |
+| commit | HK ?, PT ? |
+
 ### P1.0 端点 KPI (2026-05-23, PASS)
 
 | 项 | 数值 |
