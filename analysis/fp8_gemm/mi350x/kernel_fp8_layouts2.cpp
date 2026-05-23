@@ -822,6 +822,32 @@ void __probe_v2_mma_32_isolated(
     }
 }
 
+// R54: K-chain probe — accumulate over 22 K-iter validating spill stays 0
+// as K-loop scale grows (production gpt_oss has ki=22).
+extern "C" __global__ __launch_bounds__(64, 1)
+void __probe_v2_mma_32_kchain_22(
+        const int4* __restrict__ A,
+        const int4* __restrict__ B,
+        float* __restrict__ C) {
+    const int tid = threadIdx.x;
+    float2 acc[8];
+    #pragma unroll
+    for (int i = 0; i < 8; ++i) { acc[i] = {0.f, 0.f}; }
+    #pragma unroll 1
+    for (int k = 0; k < 22; ++k) {
+        int4 a_lo = A[k * 128 + tid * 2 + 0];
+        int4 a_hi = A[k * 128 + tid * 2 + 1];
+        int4 b_lo = B[k * 128 + tid * 2 + 0];
+        int4 b_hi = B[k * 128 + tid * 2 + 1];
+        v2_pinned::mma_32_int4(acc, a_lo, a_hi, b_lo, b_hi);
+    }
+    #pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        C[tid * 16 + i * 2 + 0] = acc[i].x;
+        C[tid * 16 + i * 2 + 1] = acc[i].y;
+    }
+}
+
 // =============================================================================
 // SESSION 2 — pinned 4-acc K-loop body (in-file copy of v1 with register-asm
 // declarations on HK fragment types `A_row_reg` / `B_row_reg`).
