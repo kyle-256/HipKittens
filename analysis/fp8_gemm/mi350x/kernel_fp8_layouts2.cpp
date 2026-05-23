@@ -67,14 +67,14 @@ template<bool N_MASKED_STORE = false>
 __device__ __forceinline__
 void grouped_rcr_kernel_body_v2(const grouped_layout_globals g) {
     using ST_rcr = ST_v2;
-    __shared__ ST_rcr As[2][2]; // [ping][m_chunk] — BLK_M=256 splits to 2 HB-row chunks
-    __shared__ ST_rcr Bs[2];    // [ping] — single N-strip per outer pass
+    __shared__ ST_rcr As[2][2]; // [ping][m_chunk]
+    __shared__ ST_rcr Bs[2];    // [ping]
     constexpr int MAX_G_PLUS_1 = 65;
     __shared__ int s_offs[MAX_G_PLUS_1];
     __shared__ int s_cum_tiles[MAX_G_PLUS_1];
     __shared__ int s_total_tiles;
 
-    A_row_reg a;
+    A_row_reg a0, a1;
     B_row_reg b;
     rt_fl<RBM, RBN, col_l, rt_16x16_s> cA, cC;
 
@@ -149,9 +149,7 @@ void grouped_rcr_kernel_body_v2(const grouped_layout_globals g) {
             asm volatile("s_waitcnt vmcnt(0)");
             __builtin_amdgcn_s_barrier();
 
-            // ---- 2-stage pipeline K-loop ----
-            // Each iter: prefetch K=k+1 into [toc], compute K=k from [tic].
-            // Final iter (k=ki-1): no prefetch, compute only.
+            // ---- 2-stage pipeline K-loop, double-issue ds_read ----
             tic = 0; toc = 1;
             #pragma unroll 1
             for (int k = 0; k < ki_dyn; ++k) {
@@ -161,21 +159,15 @@ void grouped_rcr_kernel_body_v2(const grouped_layout_globals g) {
                     rcr_8w_load_hoist<_NUM_THREADS>(As[toc][0], a_gl_g, a_co(br*2,     k+1), soA);
                     rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], a_gl_g, a_co(br*2 + 1, k+1), soA);
                 }
-                // Compute K=k from [tic]
-                load_b_reg(b, Bs[tic],    wn);
-                load_a_reg(a, As[tic][0], wm);
-                asm volatile("s_waitcnt lgkmcnt(0)");
-                __builtin_amdgcn_s_barrier();
-                __builtin_amdgcn_s_setprio(1);
-                rcr_mma_agpr_t<true>(cA, a, b);
-                __builtin_amdgcn_s_setprio(0);
-
-                load_a_reg(a, As[tic][1], wm);
+                load_b_reg(b,  Bs[tic],    wn);
+                load_a_reg(a0, As[tic][0], wm);
+                load_a_reg(a1, As[tic][1], wm);
                 asm volatile("s_waitcnt lgkmcnt(0)");
                 __builtin_amdgcn_s_setprio(1);
-                rcr_mma_agpr_t<true>(cC, a, b);
+                rcr_mma_agpr_t<true>(cA, a0, b);
+                rcr_mma_agpr_t<true>(cC, a1, b);
                 __builtin_amdgcn_s_setprio(0);
-
+                __builtin_amdgcn_sched_barrier(0);
                 if (has_next) {
                     asm volatile("s_waitcnt vmcnt(0)");
                     __builtin_amdgcn_s_barrier();
