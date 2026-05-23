@@ -1117,7 +1117,7 @@ void grouped_rcr_kernel_body_pinned(const grouped_layout_globals g) {
             load_b(b0, b_tile(tic, 0), wn);
             load_a(a, As[tic][0], wm);
             rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], a_gl_g, a_co(br*2+1, k+1), soA);
-            TK_WAIT_LGKM(0); __builtin_amdgcn_s_barrier();  // R115-real: tight drain
+            TK_WAIT_LGKM(RCR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
             rcr_mma_v2_vacc_wrapper<!FUSED_KTAIL>(cA, a, b0);
             __builtin_amdgcn_s_barrier();
