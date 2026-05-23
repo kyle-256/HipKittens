@@ -822,6 +822,36 @@ void __probe_v2_mma_32_isolated(
     }
 }
 
+// R55: 2-acc K-chain probe — does spill stay 0 with 2 acc × 22 iter?
+extern "C" __global__ __launch_bounds__(64, 1)
+void __probe_v2_mma_32_2acc_k22(
+        const int4* __restrict__ A,
+        const int4* __restrict__ B,
+        float* __restrict__ C) {
+    const int tid = threadIdx.x;
+    float2 acc0[8], acc1[8];
+    #pragma unroll
+    for (int i = 0; i < 8; ++i) { acc0[i] = {0.f, 0.f}; acc1[i] = {0.f, 0.f}; }
+    #pragma unroll 1
+    for (int k = 0; k < 22; ++k) {
+        int4 a_lo = A[k * 128 + tid * 2 + 0];
+        int4 a_hi = A[k * 128 + tid * 2 + 1];
+        int4 b0_lo = B[k * 256 + tid * 2 + 0];
+        int4 b0_hi = B[k * 256 + tid * 2 + 1];
+        int4 b1_lo = B[k * 256 + tid * 2 + 128];
+        int4 b1_hi = B[k * 256 + tid * 2 + 129];
+        v2_pinned::mma_32_int4(acc0, a_lo, a_hi, b0_lo, b0_hi);
+        v2_pinned::mma_32_int4(acc1, a_lo, a_hi, b1_lo, b1_hi);
+    }
+    #pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        C[tid * 32 + i * 2 + 0]  = acc0[i].x;
+        C[tid * 32 + i * 2 + 1]  = acc0[i].y;
+        C[tid * 32 + i * 2 + 16] = acc1[i].x;
+        C[tid * 32 + i * 2 + 17] = acc1[i].y;
+    }
+}
+
 // R54: K-chain probe — accumulate over 22 K-iter validating spill stays 0
 // as K-loop scale grows (production gpt_oss has ki=22).
 extern "C" __global__ __launch_bounds__(64, 1)
