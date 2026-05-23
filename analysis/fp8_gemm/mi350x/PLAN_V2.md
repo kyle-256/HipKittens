@@ -136,6 +136,49 @@ v1 dispatcher 已 inline 1 个 (`dispatch_grouped_rcr`); P1.0 起步前补 inlin
 | chi2811 commit (HK + PT) | sha / sha |
 | KPI raw | `/tmp/<milestone>.log` 路径 |
 
+### P5 Final Bench (2026-05-23) — Campaign D wrap-up
+
+#### 当前 v2 状态 vs user 目标
+
+| 目标 | 当前 raw geomean | 是否达成 |
+|---|---|---|
+| fwd ≥ Triton 1.15× | 0.924× (RCR, P1.4 sweep 8 shape, post-P1.3 revert) | NO (-22pp) |
+| dgrad ≥ Triton 1.15× | ~0.955× (RRR, Bench agent baseline, P2 unchanged) | NO (-20pp) |
+| wgrad ≥ 当前 HK ×1.15 → vs Triton 1.79× | 1.556× (CRR var_k, Bench agent baseline, P3 unchanged) | NO (-15pp) |
+| spill=0 (BN=256/128 all paths) | BN=128 全 0; BN=256 RCR/RRR FUSED=false 37 / RRR FUSED=true 67 / CRR 32-41 | NO (主路径仍 spill) |
+| vs hk_dense geomean ≤ 3% | ~28% gap (P1.4 0.72× est) | NO (-25pp) |
+
+#### 本 Campaign D 实际 landed
+- ✅ P0 plan locked + PLAN_V2.md 落档
+- ✅ P1.0/P2.0/P3.0 dual-run skeleton (v1/v2 并存, binding 全套 RCR+RRR+CRR var_k)
+- ✅ P1.1/P2.1 trick #14 (s_nop + sched_barrier before store) — net +0.3-0.5% noise
+- ✅ build orphan 修 (turbo_grouped_gemm_hip.cpp gitignored stale)
+- ✅ Ref-trick 池 evaluation: 6 trick 中 5 已 saturated 在 v1, 仅 #14 novel
+- ✅ P1.3 (b) dispatcher routing 尝试 + revert (短 K BN=128 反而 regression -8.7%)
+- ✅ 9 commit (HK + PT 同步, commit parity ✓)
+
+#### 留给 multi-session 后续
+- ⏳ P1.2 spill=0 mfma 32×32 + K-loop nest 重写 (400-600 LOC, 3-4 session)
+- ⏳ P1.3 (a) split-K cross-group B share (500-800 LOC, 改 PT-side group_offs 接口 + 新 launcher)
+- ⏳ P2.2 RRR FUSED 折叠 + mfma 32×32 (类似 P1.2)
+- ⏳ P3.2 CRR var_k fp8 operand layout 重写 (ST_v2 align bf16 path, 300-500 LOC)
+- ⏳ P4 delete v1 (blocked on above)
+
+#### 最终决策
+- **v2 staging 保留**: kernel_fp8_layouts2.cpp + 6 new bindings (hk_grouped_{rcr,rrr,var_k_crr}_fp8_new), 等 multi-session perf 改造完成
+- **v1 仍为 production**: 不替换, autotune routing 不变
+- **PLAN_V2 §8 全 milestone KPI 落档** 作为 multi-session 起点 reference
+
+### P4 端点 (2026-05-23, BLOCKED on multi-session)
+
+| 项 | 数值 |
+|---|---|
+| 目标 | 删 v1 dispatcher / kernel body / adapter / binding |
+| 前置条件 | P1.2/P1.3/P2.2/P2.3/P3.2/P3.3 全部 multi-session 完成且 v2 真正替换 v1 |
+| 当前状态 | v2 = v1 + trick #14 (RCR/RRR) only, no meaningful perf delta vs v1 |
+| 端点决策 | **BLOCKED** — 不删 v1，保留 production routing；等 multi-session spill=0 / algorithmic 完成后再 enable delete。**v2 文件 (kernel_fp8_layouts2.cpp) + v2 bindings 保留作为 staging** |
+| Risk | Dual-run .so 体积稍大 (multi-MB), 但不挡 P5 |
+
 ### P3 端点 KPI (2026-05-23, PARITY DEFER — 不替换 v1)
 
 | 项 | 数值 |
