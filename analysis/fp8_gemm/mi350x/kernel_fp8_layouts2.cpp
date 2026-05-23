@@ -186,6 +186,51 @@ __device__ __forceinline__ static void mma_int4(
 }
 }  // namespace v2_pinned
 
+// =============================================================================
+// SESSION 5 — MINIMAL REAL PINNED GEMM (16x16x128, single warp, single mma)
+// =============================================================================
+// First end-to-end test that the pinned primitives actually produce mfma
+// codegen (A>0 in amdhsa metadata) when the data path is forced concrete:
+//   - 64-thread (single warp) WG
+//   - Loads 8 fp8e4m3_4 / lane of A (16 rows × 128 K) and B (16 cols × 128 K)
+//     into pinned int4 slots v0:v7 and v8:v15
+//   - One mfma 16x16x128 with `+a` AGPR-bound acc
+//   - Stores acc to HBM as float4/lane
+//
+// If this kernel shows A > 0 + spill = 0 in metadata, the pinned mfma
+// asm pattern is functional. We can then scale to per-warp 64×32 and
+// integrate into the K-loop.
+// =============================================================================
+extern "C" __global__ __launch_bounds__(64, 1)
+void __probe_v2_minimal_pinned_gemm(
+        const int4* __restrict__ A,   // packed fp8: 16 rows × 128 K = 32 int4 (2 per thread)
+        const int4* __restrict__ B,   // 16 cols × 128 K = 32 int4
+        float4* __restrict__ C) {     // 16x16 = 256 floats = 64 float4 (1 per thread)
+    const int tid = threadIdx.x;
+    register int4 a_lo asm("v0");
+    register int4 a_hi asm("v4");
+    register int4 b_lo asm("v8");
+    register int4 b_hi asm("v12");
+    a_lo = A[tid * 2 + 0];
+    a_hi = A[tid * 2 + 1];
+    b_lo = B[tid * 2 + 0];
+    b_hi = B[tid * 2 + 1];
+
+    typedef __attribute__((__vector_size__(8 * sizeof(int))))    int   intx8_t;
+    typedef __attribute__((__vector_size__(4 * sizeof(float)))) float floatx4_t;
+    intx8_t A_vec = {a_lo.x, a_lo.y, a_lo.z, a_lo.w, a_hi.x, a_hi.y, a_hi.z, a_hi.w};
+    intx8_t B_vec = {b_lo.x, b_lo.y, b_lo.z, b_lo.w, b_hi.x, b_hi.y, b_hi.z, b_hi.w};
+
+    float2 acc[2] = {{0.f, 0.f}, {0.f, 0.f}};
+    asm volatile(
+        "v_mfma_f32_16x16x128_f8f6f4 %0, %1, %2, %0"
+        : "+a"(*(floatx4_t*)acc)
+        : "v"(A_vec), "v"(B_vec));
+
+    C[tid] = *(float4*)acc;
+}
+
+
 extern "C" __global__ __launch_bounds__(_NUM_THREADS, 1)
 void __probe_v2_dce_resistant(
         const int4* __restrict__ a_lds_in,
