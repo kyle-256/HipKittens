@@ -161,6 +161,64 @@ __global__ void __probe_v2_pinned_mma_one_iter(float2* out) {
 // Acc:    32 floats/lane in AGPR, pinned via mma_one_tile's `+a` constraint
 // =============================================================================
 
+// =============================================================================
+// SESSION 4 PROBE — DCE-resistant. Drops int32_t pack (which broke SSA);
+// passes pinned int4 vars directly to a new mma_int4 wrapper that builds
+// the intx8_t operand via vector init inside the wrapper, so register-asm
+// pinning is preserved end-to-end. Adds volatile LDS reads + per-iter
+// global writes so compiler can't prove acc dead.
+// =============================================================================
+namespace v2_pinned {
+__device__ __forceinline__ static void mma_int4(
+        float2 (&D)[2],
+        int4 A_lo, int4 A_hi,
+        int4 B_lo, int4 B_hi) {
+    typedef __attribute__((__vector_size__(8 * sizeof(int)))) int intx8_t;
+    typedef __attribute__((__vector_size__(4 * sizeof(float)))) float floatx4_t;
+    intx8_t A = {A_lo.x, A_lo.y, A_lo.z, A_lo.w, A_hi.x, A_hi.y, A_hi.z, A_hi.w};
+    intx8_t B = {B_lo.x, B_lo.y, B_lo.z, B_lo.w, B_hi.x, B_hi.y, B_hi.z, B_hi.w};
+    // Direct deref into D — mirrors HK's mfma1616128_agpr_inplace pattern;
+    // local-var indirection (the prior version) broke the AGPR `+a` binding.
+    asm volatile(
+        "v_mfma_f32_16x16x128_f8f6f4 %0, %1, %2, %0"
+        : "+a"(*(floatx4_t*)D)
+        : "v"(A), "v"(B));
+}
+}  // namespace v2_pinned
+
+extern "C" __global__ __launch_bounds__(_NUM_THREADS, 1)
+void __probe_v2_dce_resistant(
+        const int4* __restrict__ a_lds_in,
+        const int4* __restrict__ b_lds_in,
+        float* __restrict__ out,
+        int ki) {
+    register int4 a_p0 asm("v0");
+    register int4 a_p1 asm("v4");
+    register int4 b_p0 asm("v32");
+    register int4 b_p1 asm("v36");
+
+    float2 acc[2] = {{0.f, 0.f}, {0.f, 0.f}};
+
+    const int tid = threadIdx.x;
+    for (int k = 0; k < ki; ++k) {
+        // Real loads from kernel-arg pointer.
+        a_p0 = a_lds_in[tid * 2     + k * 1024];
+        a_p1 = a_lds_in[tid * 2 + 1 + k * 1024];
+        b_p0 = b_lds_in[tid * 2     + k * 1024];
+        b_p1 = b_lds_in[tid * 2 + 1 + k * 1024];
+
+        v2_pinned::mma_int4(acc, a_p0, a_p1, b_p0, b_p1);
+
+        // Per-iter visible write keeps acc live across loop, prevents DCE.
+        ((volatile float*)out)[tid] = acc[0].x + acc[1].y;
+    }
+    out[tid     ] = acc[0].x;
+    out[tid + 64] = acc[0].y;
+    out[tid +128] = acc[1].x;
+    out[tid +192] = acc[1].y;
+}
+
+
 extern "C" __global__ __launch_bounds__(_NUM_THREADS, 1)
 void __probe_v2_pinned_full_kloop(
         const fp8e4m3* __restrict__ a_lds_ptr,
