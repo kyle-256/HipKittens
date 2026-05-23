@@ -104,7 +104,47 @@ __device__ __forceinline__ static void mma_one_tile(
 // This wrapper drives the full per-acc mma sweep across A_pin/B_pin
 // fragments, where each fragment holds K=128 of a single 16-row warp tile.
 
+// =============================================================================
+// PROBE — validates HIP clang register-asm honors specific VGPR slot for
+// int4 storage + that mfma1616128_agpr_inplace reads from those slots
+// (i.e., the SSA def-use chain is preserved across the cast).
+//
+// Build this as an instantiated kernel symbol so amdhsa.kernels metadata
+// reveals whether vNN slots are honored. Per-symbol V usage should show
+// the pinned slots; if compiler ignores the binding, V usage will spread.
+// =============================================================================
+__device__ __forceinline__ static void mma_probe_one_iter(
+        float2 (&D)[2]) {
+    // Pinned VGPR slots: A at v32, B at v40 (8 dwords each = 8 VGPRs).
+    // HIP clang `register T asm("vNN")` is supposed to bind to consecutive
+    // VGPRs starting at vNN. We probe int4 (4 dwords) granularity since
+    // int4 is a primitive HIP type with reliable codegen.
+    register int4 a_lo asm("v32");
+    register int4 a_hi asm("v36");
+    register int4 b_lo asm("v40");
+    register int4 b_hi asm("v44");
+    // Synthetic data — keeps SSA edges in place so allocator can't DCE.
+    a_lo = {1, 2, 3, 4};
+    a_hi = {5, 6, 7, 8};
+    b_lo = {9, 10, 11, 12};
+    b_hi = {13, 14, 15, 16};
+    int32_t A_arr[8] = {a_lo.x, a_lo.y, a_lo.z, a_lo.w,
+                        a_hi.x, a_hi.y, a_hi.z, a_hi.w};
+    int32_t B_arr[8] = {b_lo.x, b_lo.y, b_lo.z, b_lo.w,
+                        b_hi.x, b_hi.y, b_hi.z, b_hi.w};
+    mma_one_tile(D, A_arr, B_arr);
+}
+
 }  // namespace v2_pinned
+
+// Instantiate the probe as a global symbol so its register usage shows up
+// in amdhsa.kernels metadata for inspection.
+__global__ void __probe_v2_pinned_mma_one_iter(float2* out) {
+    float2 acc[2] = {{0.f, 0.f}, {0.f, 0.f}};
+    v2_pinned::mma_probe_one_iter(acc);
+    out[threadIdx.x * 2 + 0] = acc[0];
+    out[threadIdx.x * 2 + 1] = acc[1];
+}
 
 
 // =============================================================================
