@@ -822,6 +822,65 @@ void __probe_v2_mma_32_isolated(
     }
 }
 
+// R58: 8-warp + 4-acc + 22 iter + LDS double-buffer prefetch — closest
+// approximation of real production body register pressure.
+extern "C" __global__ __launch_bounds__(512, 1)
+void __probe_v2_mma_32_8w_4acc_lds_k22(
+        const int4* __restrict__ A_gl,  // [22 * 2048] int4
+        const int4* __restrict__ B_gl,  // [22 * 2048] int4
+        float* __restrict__ C) {
+    constexpr int LDS_TILE_INT4 = 1024;  // 16 KB per tile
+    __shared__ int4 As[2][LDS_TILE_INT4];
+    __shared__ int4 Bs[2][LDS_TILE_INT4];
+    const int tid = threadIdx.x;
+    const int wid = tid / 64;
+    const int lid = tid % 64;
+    float2 acc0[8], acc1[8], acc2[8], acc3[8];
+    #pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        acc0[i] = {0.f,0.f}; acc1[i] = {0.f,0.f};
+        acc2[i] = {0.f,0.f}; acc3[i] = {0.f,0.f};
+    }
+    // Initial prefetch tic=0
+    if (tid < LDS_TILE_INT4) {
+        As[0][tid] = A_gl[tid];
+        Bs[0][tid] = B_gl[tid];
+    }
+    __builtin_amdgcn_s_barrier();
+    int tic = 0;
+    #pragma unroll 1
+    for (int k = 0; k < 22; ++k, tic ^= 1) {
+        int toc = tic ^ 1;
+        // Prefetch next iter
+        if (k + 1 < 22 && tid < LDS_TILE_INT4) {
+            As[toc][tid] = A_gl[(k + 1) * LDS_TILE_INT4 * 2 + tid];
+            Bs[toc][tid] = B_gl[(k + 1) * LDS_TILE_INT4 * 2 + tid];
+        }
+        // Read current
+        int4 a0_lo = As[tic][wid * 256 + lid * 2 + 0];
+        int4 a0_hi = As[tic][wid * 256 + lid * 2 + 1];
+        int4 a1_lo = As[tic][wid * 256 + lid * 2 + 128];
+        int4 a1_hi = As[tic][wid * 256 + lid * 2 + 129];
+        int4 b0_lo = Bs[tic][wid * 256 + lid * 2 + 0];
+        int4 b0_hi = Bs[tic][wid * 256 + lid * 2 + 1];
+        int4 b1_lo = Bs[tic][wid * 256 + lid * 2 + 128];
+        int4 b1_hi = Bs[tic][wid * 256 + lid * 2 + 129];
+        __builtin_amdgcn_s_barrier();
+        v2_pinned::mma_32_int4(acc0, a0_lo, a0_hi, b0_lo, b0_hi);
+        v2_pinned::mma_32_int4(acc1, a0_lo, a0_hi, b1_lo, b1_hi);
+        v2_pinned::mma_32_int4(acc2, a1_lo, a1_hi, b0_lo, b0_hi);
+        v2_pinned::mma_32_int4(acc3, a1_lo, a1_hi, b1_lo, b1_hi);
+        __builtin_amdgcn_s_barrier();
+    }
+    #pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        C[tid * 64 + i*2 + 0]  = acc0[i].x; C[tid * 64 + i*2 + 1]  = acc0[i].y;
+        C[tid * 64 + i*2 + 16] = acc1[i].x; C[tid * 64 + i*2 + 17] = acc1[i].y;
+        C[tid * 64 + i*2 + 32] = acc2[i].x; C[tid * 64 + i*2 + 33] = acc2[i].y;
+        C[tid * 64 + i*2 + 48] = acc3[i].x; C[tid * 64 + i*2 + 49] = acc3[i].y;
+    }
+}
+
 // R57: 8-warp WG probe — production thread topology + 4 acc + 22 iter.
 // 8 warps × 64 threads = 512 threads/WG, 1 wave/SIMD per launch_bounds(_,1).
 extern "C" __global__ __launch_bounds__(512, 1)
