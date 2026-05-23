@@ -135,3 +135,17 @@ v1 dispatcher 已 inline 1 个 (`dispatch_grouped_rcr`); P1.0 起步前补 inlin
 | vs Triton geomean | ≥ ? |
 | chi2811 commit (HK + PT) | sha / sha |
 | KPI raw | `/tmp/<milestone>.log` 路径 |
+
+### P1.0 端点 KPI (2026-05-23, PASS)
+
+| 项 | 数值 |
+|---|---|
+| shape × bn | 5 shape × 2 bn = 10 / 10 PASS |
+| correctness | 9 bit-equal + 1 SNR 47.53 dB (gpt_oss bn=128) |
+| perf parity ratio v2/v1 | ∈ [0.996, 1.020], max |Δ|=2% (median-of-7 trials, 50 warmup) |
+| spill (v2 same as v1) | BN=256 RCR/RRR 37 / BN=128 全 0 (P1.2 范围) |
+| smoke script | `Primus-Turbo/scripts/_smoke_p1_0_rcr_v2.py` |
+| 新增文件 | HK `analysis/fp8_gemm/mi350x/kernel_fp8_layouts2.cpp` (1:1 cp v1, 4735 LOC) |
+| 新增 binding | `hk_grouped_rcr_fp8_new` (PT inner adapter + pytorch wrapper + extension decl + m.def/m.impl, hip + non-hip 双写) |
+| 修复 build 阻塞 | rm orphan `Primus-Turbo/csrc/pytorch/grouped_gemm/turbo_grouped_gemm_hip.cpp` (Campaign C revert 残留, gitignored 未自动清) |
+| 下一动作 | task #20 P1.1 起步 (Ref-trick 池 6 item) |
