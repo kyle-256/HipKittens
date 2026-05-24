@@ -2331,6 +2331,12 @@ inline void dispatch_grouped_rrr_v2(grouped_layout_globals_v2_rrr g_in) {
         g_in.m_per_group, g_in.num_slots, g_in.chunk_size, 0,
         0, nullptr, g_in.bn_block,
     };
+    // R486: if caller (autotune) picked bn=128, forward to v1 bn128 body
+    // (v2 only supports BLK_N=256). Otherwise use v2 body for bn=256/0.
+    if (g_in.bn_block == 128) {
+        dispatch_grouped_rrr(g);
+        return;
+    }
     // R474: use v2 RRR body (vacc wrapper for cA-cD, matches RCR R167 pattern).
     g.n       = static_cast<int>(g.c.cols());
     g.M_total = static_cast<int>(g.c.rows());
