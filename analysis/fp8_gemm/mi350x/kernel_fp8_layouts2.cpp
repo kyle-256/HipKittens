@@ -55,6 +55,10 @@
 
 #include "kernel_fp8_layouts.cpp"  // pull v1 helpers + dispatchers into ns
 
+// R155-real
+#undef RCR_EPILOGUE_VMCNT
+#define RCR_EPILOGUE_VMCNT 2
+
 
 
 // =============================================================================
@@ -201,6 +205,54 @@ __device__ __forceinline__ static void mma_int4_vacc(
         "v_mfma_f32_16x16x128_f8f6f4 %0, %1, %2, %0"
         : "+v"(*(floatx4_t*)D)
         : "v"(A), "v"(B));
+}
+
+// =============================================================================
+// P1.2 STEP 1 (R159) — 32x32x64 mfma + native 32x64 frag types
+//
+// ISA root-cause finding: with 16x16x128 + 4-acc layout, compiler emits
+//   ~207 scratch_load + 199 v_accvgpr_write + 103 v_accvgpr_read per
+//   kernel call = ~2450 cycle overhead per call (= 18% of total runtime).
+// Foundation R57 probe confirmed 32x32x64 + 4-acc at 8-warp WG achieves
+//   spill=0 + A=0 (no AGPR shuffle).
+// This step lands the production-grade wrapper that operates on native
+//   32x64 (M-rows × K) fragments. Per acc (64×32 per-warp area) becomes
+//   2 M-tiles × 1 N-tile × 2 K-halves = 4 mma calls (vs 8 with 16x16).
+// =============================================================================
+
+// 32×64 fragment storage (row-major for A, col-major effective for B in RCR).
+// 32 rows × 64 cols of fp8 = 2048 bytes/tile = 32 fp8e4m3_4 per lane
+// distributed across 64-lane warp via mfma_32x32x64 operand convention:
+// 8 fp8e4m3_4 per lane (= 8 int32 dwords).
+using A_row_reg_32 = rt_fp8e4m3<32, 64, row_l, rt_32x64_s>;
+using B_row_reg_32 = rt_fp8e4m3<32, 64, row_l, rt_32x64_s>;
+
+// 32×32 acc tile = 16 floats/lane = float2[8]
+using acc32_t = rt_fl<32, 32, col_l, rt_32x32_s>;
+
+// Native 32x32 wrapper: accepts HK 32x64 frag types, emits 1 mfma_32x32x64.
+// Per-acc 64x32 area requires 2 M-tiles × 2 K-halves = 4 calls.
+__device__ __forceinline__ static void mma_32_frag(
+        float2 (&D)[8],
+        const A_row_reg_32& a, int m_tile, int k_half,
+        const B_row_reg_32& b, int n_tile) {
+    // tiles[m_tile][0] gives the 32x64 sub-tile (HK rt_32x64_s stores K=64
+    // per tile element; for K=128 we have 2 tiles per row → m_tile selects
+    // M-tile, [0] selects K-slot. With BK=128 we have 2 sub-tiles per A_row_reg
+    // — actually A_row_reg_32 is templated with K=64 fixed; we use two
+    // separate fragments to cover K=128.)
+    typedef __attribute__((__vector_size__(8 * sizeof(int)))) int intx8_t;
+    typedef __attribute__((__vector_size__(16 * sizeof(float)))) float floatx16_t;
+    const int4* a_p = reinterpret_cast<const int4*>(&a.tiles[m_tile][0].data[k_half * 4]);
+    const int4* b_p = reinterpret_cast<const int4*>(&b.tiles[n_tile][0].data[k_half * 4]);
+    intx8_t A_vec = {a_p[0].x, a_p[0].y, a_p[0].z, a_p[0].w,
+                     a_p[1].x, a_p[1].y, a_p[1].z, a_p[1].w};
+    intx8_t B_vec = {b_p[0].x, b_p[0].y, b_p[0].z, b_p[0].w,
+                     b_p[1].x, b_p[1].y, b_p[1].z, b_p[1].w};
+    asm volatile(
+        "v_mfma_f32_32x32x64_f8f6f4 %0, %1, %2, %0"
+        : "+a"(*(floatx16_t*)D)
+        : "v"(A_vec), "v"(B_vec));
 }
 
 }  // namespace v2_pinned
@@ -991,6 +1043,44 @@ void __probe_v2_mma_32_2acc_k22(
     }
 }
 
+// R163-real: probe HK load(rt_32x64_s, st_32x64) compile
+extern "C" __global__ __launch_bounds__(64, 1)
+void __probe_v2_st_32x64_load(float* __restrict__ C) {
+    using ST_A = st_fp8e4m3<32, 64, st_32x64_s>;
+    __shared__ ST_A As;
+    using RT_A = rt_fp8e4m3<32, 64, row_l, rt_32x64_s>;
+    RT_A a;
+    const int tid = threadIdx.x;
+    int4* Ap = reinterpret_cast<int4*>(&As);
+    if (tid < 32) {
+        Ap[tid * 4 + 0] = make_int4(tid, tid, tid, tid);
+        Ap[tid * 4 + 1] = make_int4(tid, tid, tid, tid);
+    }
+    __builtin_amdgcn_s_barrier();
+    load(a, As);
+    int v = reinterpret_cast<int*>(&a.tiles[0][0].data[0])[0];
+    C[tid] = (float)v;
+}
+
+// R165-real: production-shape ST composed of st_32x64 subtiles
+extern "C" __global__ __launch_bounds__(64, 1)
+void __probe_v2_st_128x128_32x64subtile(float* __restrict__ C) {
+    using ST_BIG = st_fp8e4m3<128, 128, st_32x64_s>;
+    __shared__ ST_BIG As;
+    using RT_A = rt_fp8e4m3<64, 128, row_l, rt_32x64_s>;  // per-warp 64M × 128K
+    RT_A a;
+    const int tid = threadIdx.x;
+    int4* Ap = reinterpret_cast<int4*>(&As);
+    if (tid < 64) {
+        for (int i = 0; i < 16; ++i) Ap[tid * 16 + i] = make_int4(tid, i, i, tid);
+    }
+    __builtin_amdgcn_s_barrier();
+    auto sub = subtile_inplace<64, 128>(As, {0, 0});
+    load(a, sub);
+    int v = reinterpret_cast<int*>(&a.tiles[0][0].data[0])[0];
+    C[tid] = (float)v;
+}
+
 // R54: K-chain probe — accumulate over 22 K-iter validating spill stays 0
 // as K-loop scale grows (production gpt_oss has ki=22).
 extern "C" __global__ __launch_bounds__(64, 1)
@@ -1126,19 +1216,19 @@ void grouped_rcr_kernel_body_pinned(const grouped_layout_globals g) {
             rcr_8w_load_hoist<_NUM_THREADS>(b_tile(tic, 0), g.b, b_co(bc*2, k+2), soB);
             __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            rcr_mma_v2_wrapper<!FUSED_KTAIL>(cB, a, b1);
+            rcr_mma_v2_vacc_wrapper<!FUSED_KTAIL>(cB, a, b1);
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
             rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0], a_gl_g, a_co(br*2, k+2), soA);
             __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            rcr_mma_v2_wrapper<!FUSED_KTAIL>(cC, a, b0);
+            rcr_mma_v2_vacc_wrapper<!FUSED_KTAIL>(cC, a, b0);
             __builtin_amdgcn_s_barrier();
 
             rcr_8w_load_hoist<_NUM_THREADS>(b_tile(tic, 1), g.b, b_co(bc*2+1, k+2), soB);
             TK_WAIT_VMCNT(RCR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
-            rcr_mma_v2_wrapper<!FUSED_KTAIL>(cD, a, b1);
+            rcr_mma_v2_vacc_wrapper<!FUSED_KTAIL>(cD, a, b1);
             __builtin_amdgcn_s_barrier();
         }
 
@@ -1155,19 +1245,19 @@ void grouped_rcr_kernel_body_pinned(const grouped_layout_globals g) {
             load_b(b1, b_tile(tic, 1), wn);
             __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            rcr_mma_v2_wrapper<!FUSED_KTAIL>(cB, a, b1);
+            rcr_mma_v2_vacc_wrapper<!FUSED_KTAIL>(cB, a, b1);
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
             TK_WAIT_VMCNT(RCR_EPILOGUE_VMCNT); __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            rcr_mma_v2_wrapper<!FUSED_KTAIL>(cC, a, b0);
+            rcr_mma_v2_vacc_wrapper<!FUSED_KTAIL>(cC, a, b0);
             __builtin_amdgcn_s_barrier();
 
             load_b(b0, b_tile(toc, 0), wn);
             __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            rcr_mma_v2_wrapper<!FUSED_KTAIL>(cD, a, b1);
+            rcr_mma_v2_vacc_wrapper<!FUSED_KTAIL>(cD, a, b1);
             __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
             tic ^= 1; toc ^= 1;
         }
@@ -1183,15 +1273,15 @@ void grouped_rcr_kernel_body_pinned(const grouped_layout_globals g) {
             load_b(b1, b_tile(tic, 1), wn);
             __builtin_amdgcn_s_barrier(); RCR_SCHED_BARRIER();
             MAYBE_DRAIN_LGKM();
-            rcr_mma_v2_wrapper<!FUSED_KTAIL>(cB, a, b1);
+            rcr_mma_v2_vacc_wrapper<!FUSED_KTAIL>(cB, a, b1);
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
             __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
             __builtin_amdgcn_s_setprio(1);
-            rcr_mma_v2_wrapper<!FUSED_KTAIL>(cC, a, b0);
-            rcr_mma_v2_wrapper<!FUSED_KTAIL>(cD, a, b1);
+            rcr_mma_v2_vacc_wrapper<!FUSED_KTAIL>(cC, a, b0);
+            rcr_mma_v2_vacc_wrapper<!FUSED_KTAIL>(cD, a, b1);
             __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
         }
@@ -1256,11 +1346,11 @@ void grouped_rcr_kernel_body_pinned(const grouped_layout_globals g) {
                 load_a_kt(a,  0);
                 asm volatile("s_waitcnt vmcnt(0)");
                 rcr_mma_v2_vacc_wrapper<true>(cA, a, b0);
-                rcr_mma_v2_wrapper<true>(cB, a, b1);
+                rcr_mma_v2_vacc_wrapper<true>(cB, a, b1);
                 load_a_kt(a,  1);
                 asm volatile("s_waitcnt vmcnt(0)");
-                rcr_mma_v2_wrapper<true>(cC, a, b0);
-                rcr_mma_v2_wrapper<true>(cD, a, b1);
+                rcr_mma_v2_vacc_wrapper<true>(cC, a, b0);
+                rcr_mma_v2_vacc_wrapper<true>(cD, a, b1);
             }
         }
 
