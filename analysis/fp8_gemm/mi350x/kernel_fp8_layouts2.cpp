@@ -1535,12 +1535,10 @@ void grouped_rcr_kernel_body_pinned_32(const grouped_layout_globals g) {
 
         const float combined_scale = resolve_combined_scale_grp(g);
         if (wm == 0) __builtin_amdgcn_s_barrier();
-        // R383 FIX: 32x32 acc cA has 64 rows = 2 base tiles in M.
-        // r/c are in 32x32 TILE units. wm=0/1 must address NON-OVERLAPPING tile pairs
-        // (wm=0 → tiles 0,1; wm=1 → tiles 2,3) → spacing of 2 between wm.
-        // Old formula `br*WARPS_M*2+wm` collapsed wm=0/1 to adjacent tiles → race.
-        const int r0 = __builtin_amdgcn_readfirstlane(m_subtile_C + br*WARPS_M*4 + wm*2);
-        const int r1 = __builtin_amdgcn_readfirstlane(m_subtile_C + br*WARPS_M*4 + WARPS_M*2 + wm*2);
+        // R389 REVERT: r_tile is in units of RT::rows (= 64 for rt_32x32 cA height=2).
+        // Original formula already gives non-overlapping rows: wm=0 → 0,128; wm=1 → 64,192.
+        const int r0 = __builtin_amdgcn_readfirstlane(m_subtile_C + br*WARPS_M*2+wm);
+        const int r1 = __builtin_amdgcn_readfirstlane(m_subtile_C + br*WARPS_M*2+WARPS_M+wm);
         const int c0 = __builtin_amdgcn_readfirstlane(bc*WARPS_N*2+wn);
         const int c1 = __builtin_amdgcn_readfirstlane(bc*WARPS_N*2+WARPS_N+wn);
         mul(cA, cA, combined_scale);
