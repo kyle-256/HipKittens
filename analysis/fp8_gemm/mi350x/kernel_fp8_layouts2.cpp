@@ -2155,13 +2155,13 @@ void grouped_rrr_kernel_body_pinned(const grouped_layout_globals g) {
                     load_col_from_st(b1_kt, Bs[tic][1], wn * RBN);
                     MAYBE_DRAIN_LGKM();
 
-                    rrr_mma(cA, a, b0_kt);
-                    rrr_mma(cB, a, b1_kt);
+                    rrr_mma_v2_vacc_wrapper<false>(cA, a, b0_kt);
+                    rrr_mma_v2_vacc_wrapper<false>(cB, a, b1_kt);
 
                     load_a_kt_fk(a, 1);
                     asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
-                    rrr_mma(cC, a, b0_kt);
-                    rrr_mma(cD, a, b1_kt);
+                    rrr_mma_v2_vacc_wrapper<false>(cC, a, b0_kt);
+                    rrr_mma_v2_vacc_wrapper<false>(cD, a, b1_kt);
                     __builtin_amdgcn_s_barrier();
                 } else {
                     // Production direct-to-reg byte-load path (slow but quirk-safe).
@@ -2171,12 +2171,12 @@ void grouped_rrr_kernel_body_pinned(const grouped_layout_globals g) {
                     load_b_kt_fk(b1_kt, 1);
                     load_a_kt_fk(a, 0);
                     asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
-                    rrr_mma(cA, a, b0_kt);
-                    rrr_mma(cB, a, b1_kt);
+                    rrr_mma_v2_vacc_wrapper<false>(cA, a, b0_kt);
+                    rrr_mma_v2_vacc_wrapper<false>(cB, a, b1_kt);
                     load_a_kt_fk(a, 1);
                     asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
-                    rrr_mma(cC, a, b0_kt);
-                    rrr_mma(cD, a, b1_kt);
+                    rrr_mma_v2_vacc_wrapper<false>(cC, a, b0_kt);
+                    rrr_mma_v2_vacc_wrapper<false>(cD, a, b1_kt);
                     __builtin_amdgcn_s_barrier();
                 }
             }
@@ -2252,15 +2252,15 @@ void grouped_rrr_kernel_body_pinned(const grouped_layout_globals g) {
             load_b(b0, Bs[tic][0], wn);
             load_a_kt(0);
             asm volatile("s_waitcnt lgkmcnt(0) vmcnt(0)" ::: "memory");
-            rrr_mma(cA, a, b0);
+            rrr_mma_v2_vacc_wrapper<false>(cA, a, b0);
 
             load_b(b1, Bs[tic][1], wn);
-            rrr_mma(cB, a, b1);
+            rrr_mma_v2_vacc_wrapper<false>(cB, a, b1);
 
             load_a_kt(1);
             asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
-            rrr_mma(cC, a, b0);
-            rrr_mma(cD, a, b1);
+            rrr_mma_v2_vacc_wrapper<false>(cC, a, b0);
+            rrr_mma_v2_vacc_wrapper<false>(cD, a, b1);
 #endif
             __builtin_amdgcn_s_barrier();
         }
