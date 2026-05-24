@@ -61,6 +61,34 @@
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 // =============================================================================
 // SESSION 1 — Pinned-storage primitives (compile-only at this commit)
 // =============================================================================
@@ -1062,6 +1090,32 @@ void __probe_v2_st_32x64_load(float* __restrict__ C) {
     C[tid] = (float)v;
 }
 
+// R187-real: probe HK mma_ABt with rt_32x32 acc + rt_32x64 frag
+extern "C" __global__ __launch_bounds__(64, 1)
+void __probe_v2_mma_ABt_32x32(float* __restrict__ C) {
+    using ST_A = st_fp8e4m3<32, 64, st_32x64_s>;
+    using ST_B = st_fp8e4m3<32, 64, st_32x64_s>;
+    __shared__ ST_A As;
+    __shared__ ST_B Bs;
+    rt_fp8e4m3<32, 64, row_l, rt_32x64_s> a;
+    rt_fp8e4m3<32, 64, row_l, rt_32x64_s> b;
+    rt_fl<32, 32, col_l, rt_32x32_s> acc;
+    zero(acc);
+    const int tid = threadIdx.x;
+    int4* Ap = reinterpret_cast<int4*>(&As);
+    int4* Bp = reinterpret_cast<int4*>(&Bs);
+    if (tid < 32) {
+        Ap[tid * 4 + 0] = make_int4(tid, 1, 2, 3);
+        Bp[tid * 4 + 0] = make_int4(tid, 1, 2, 3);
+    }
+    __builtin_amdgcn_s_barrier();
+    load(a, As);
+    load(b, Bs);
+    __builtin_amdgcn_s_barrier();
+    mma_ABt(acc, a, b, acc);
+    C[tid] = acc.tiles[0][0].data[0].x;
+}
+
 // R165-real: production-shape ST composed of st_32x64 subtiles
 extern "C" __global__ __launch_bounds__(64, 1)
 void __probe_v2_st_128x128_32x64subtile(float* __restrict__ C) {
@@ -1386,6 +1440,128 @@ void grouped_gemm_fp8_kernel_v2(const grouped_layout_globals g) {
     grouped_rcr_kernel_body_pinned<N_MASKED_STORE, FUSED_KTAIL>(g);
 }
 
+// R188-step1: P1.2 32x32x64 mfma body skeleton. Uses HK rt_32x64/rt_32x32 frag
+// types + st_32x64 LDS swizzle + mma_ABt high-level API. Per-acc 64×32 area
+// = 2 M-tiles × 1 N-tile × 2 K-halves = 4 mfma (vs 8 with 16x16x128).
+// Half mfma count per acc. Expected lower compiler scheduling pressure +
+// foundation R57 probe validated V=104 A=0 spill=0 at 8-warp scale.
+template<bool N_MASKED_STORE = false, bool FUSED_KTAIL = false>
+__device__ __forceinline__
+void grouped_rcr_kernel_body_pinned_32(const grouped_layout_globals g) {
+    using ST_rcr = st_fp8e4m3<HB, BK, st_32x64_s>;
+    __shared__ ST_rcr As[2][2];
+    __shared__ ST_rcr Bs[2][2];
+    constexpr int MAX_G_PLUS_1 = 65;
+    __shared__ int s_offs[MAX_G_PLUS_1];
+    __shared__ int s_cum_tiles[MAX_G_PLUS_1];
+    __shared__ int s_total_tiles;
+
+    using A_row_reg_32 = rt_fp8e4m3<RBM, BK, row_l, rt_32x64_s>;
+    using B_row_reg_32 = rt_fp8e4m3<RBN, BK, row_l, rt_32x64_s>;
+    using AccTile_32 = rt_fl<RBM, RBN, col_l, rt_32x32_s>;
+    A_row_reg_32 a;
+    B_row_reg_32 b0, b1;
+    AccTile_32 cA, cB, cC, cD;
+
+    const int slots_eff = gridDim.x;
+    const int xcds_eff = g.num_xcds > 0 ? g.num_xcds : BLOCK_SWIZZLE_NUM_XCDS;
+    const int chunk_size_eff = g.chunk_size > 0 ? g.chunk_size : 32;
+    int pid = chiplet_transform_chunked(blockIdx.x, slots_eff, xcds_eff, chunk_size_eff);
+
+    int wm = warpid() / WARPS_N;
+    int wn = warpid() % WARPS_N;
+    const int num_pid_n = g.bpc;
+    const int ki_dyn   = g.ki;
+
+    init_group_cumsum_smem<MAX_G_PLUS_1>(g, s_offs, s_cum_tiles, s_total_tiles,
+                                         num_pid_n, /*M_BLOCK_DIV=*/BLOCK_SIZE);
+    const int total_tiles = s_total_tiles;
+
+    // R188-step1: Simple main loop without prefetch optimization first
+    // (validate correctness + spill metadata before tuning pipeline)
+    constexpr int bpt = ST_rcr::underlying_subtile_bytes_per_thread;
+    constexpr int bpm = bpt * _NUM_THREADS;
+    constexpr int mpt = ST_rcr::rows * ST_rcr::cols * sizeof(fp8e4m3) / bpm;
+    uint32_t soA[mpt], soB[mpt];
+    G::prefill_swizzled_offsets(As[0][0], g.a, soA);
+    G::prefill_swizzled_offsets(Bs[0][0], g.b, soB);
+
+    for (int gt = pid; gt < total_tiles; gt += slots_eff) {
+        int group_idx, m_start_g, M_g, bpr_g, br, bc;
+        if (!dispatch_tile_in_group<MAX_G_PLUS_1>(
+                gt, s_cum_tiles, s_offs, num_pid_n, g.group_m,
+                /*M_BLOCK_DIV=*/BLOCK_SIZE,
+                group_idx, m_start_g, M_g, bpr_g, br, bc)) continue;
+
+        auto a_gl_g = g.a;
+        auto c_gl_g = g.c;
+        patch_per_group_gl_view(a_gl_g, c_gl_g, m_start_g, M_g);
+        constexpr int m_subtile_C = 0;
+        const int m_limit = M_g;
+
+        zero(cA); zero(cB); zero(cC); zero(cD);
+
+        int tic = 0;
+        for (int k = 0; k < ki_dyn; ++k, tic ^= 1) {
+            // Load tiles for current K-iter
+            coord<ST_rcr> a0_co = {0, 0, br*2,   k};
+            coord<ST_rcr> a1_co = {0, 0, br*2+1, k};
+            coord<ST_rcr> b0_co = {0, group_idx, bc*2,   k};
+            coord<ST_rcr> b1_co = {0, group_idx, bc*2+1, k};
+            // R195-real: try G::load instead of rcr_8w_load_hoist
+            G::load(As[tic][0], a_gl_g, a0_co, soA);
+            G::load(As[tic][1], a_gl_g, a1_co, soA);
+            G::load(Bs[tic][0], g.b, b0_co, soB);
+            G::load(Bs[tic][1], g.b, b1_co, soB);
+            __builtin_amdgcn_s_waitcnt(0);
+            __builtin_amdgcn_s_barrier();
+            auto a_sub_m0 = subtile_inplace<RBM, BK>(As[tic][0], {wm, 0});
+            load(a, a_sub_m0);
+            auto b0_sub = subtile_inplace<RBN, BK>(Bs[tic][0], {wn, 0});
+            load(b0, b0_sub);
+            auto b1_sub = subtile_inplace<RBN, BK>(Bs[tic][1], {wn, 0});
+            load(b1, b1_sub);
+            __builtin_amdgcn_s_barrier();
+            mma_ABt(cA, a, b0, cA);
+            mma_ABt(cB, a, b1, cB);
+            __builtin_amdgcn_s_barrier();
+            auto a_sub_m1 = subtile_inplace<RBM, BK>(As[tic][1], {wm, 0});
+            load(a, a_sub_m1);
+            __builtin_amdgcn_s_barrier();
+            mma_ABt(cC, a, b0, cC);
+            mma_ABt(cD, a, b1, cD);
+            __builtin_amdgcn_s_barrier();
+        }
+
+        const float combined_scale = resolve_combined_scale_grp(g);
+        if (wm == 0) __builtin_amdgcn_s_barrier();
+        // R383 FIX: 32x32 acc cA has 64 rows = 2 base tiles in M.
+        // r/c are in 32x32 TILE units. wm=0/1 must address NON-OVERLAPPING tile pairs
+        // (wm=0 → tiles 0,1; wm=1 → tiles 2,3) → spacing of 2 between wm.
+        // Old formula `br*WARPS_M*2+wm` collapsed wm=0/1 to adjacent tiles → race.
+        const int r0 = __builtin_amdgcn_readfirstlane(m_subtile_C + br*WARPS_M*4 + wm*2);
+        const int r1 = __builtin_amdgcn_readfirstlane(m_subtile_C + br*WARPS_M*4 + WARPS_M*2 + wm*2);
+        const int c0 = __builtin_amdgcn_readfirstlane(bc*WARPS_N*2+wn);
+        const int c1 = __builtin_amdgcn_readfirstlane(bc*WARPS_N*2+WARPS_N+wn);
+        mul(cA, cA, combined_scale);
+        store_c_tile_mn_masked_grouped(c_gl_g, cA, /*group_idx=*/0, r0, c0, m_limit, g.n);
+        mul(cB, cB, combined_scale);
+        store_c_tile_mn_masked_grouped(c_gl_g, cB, /*group_idx=*/0, r0, c1, m_limit, g.n);
+        mul(cC, cC, combined_scale);
+        store_c_tile_mn_masked_grouped(c_gl_g, cC, /*group_idx=*/0, r1, c0, m_limit, g.n);
+        mul(cD, cD, combined_scale);
+        store_c_tile_mn_masked_grouped(c_gl_g, cD, /*group_idx=*/0, r1, c1, m_limit, g.n);
+        __builtin_amdgcn_s_barrier();
+    }
+}
+
+template<bool N_MASKED_STORE = false, bool FUSED_KTAIL = false>
+__global__ __launch_bounds__(_NUM_THREADS, 1)
+__attribute__((amdgpu_waves_per_eu(1, 1)))
+void grouped_gemm_fp8_kernel_v2_32(const grouped_layout_globals g) {
+    grouped_rcr_kernel_body_pinned_32<N_MASKED_STORE, FUSED_KTAIL>(g);
+}
+
 
 inline void dispatch_grouped_rcr_v2(grouped_layout_globals_v2 g_in) {
     grouped_layout_globals g{
@@ -1425,7 +1601,25 @@ inline void dispatch_grouped_rcr_v2(grouped_layout_globals_v2 g_in) {
     const int slots = (g.num_slots > 0 && g.num_slots <= NUM_CUS)
         ? g.num_slots : slots_env;
 
-    if (fuse_on) {
+    // R189: env knob to select 32x32 K-loop body
+    static const bool use_32 = []() {
+        if (const char* e = std::getenv("TK_RCR_V2_USE_32")) return std::atoi(e) > 0;
+        return false;
+    }();
+
+    if (use_32) {
+        if (fuse_on) {
+            if (n_aligned)
+                grouped_gemm_fp8_kernel_v2_32<false, true><<<dim3(slots), g.block(), 0, g.stream>>>(g);
+            else
+                grouped_gemm_fp8_kernel_v2_32<true,  true><<<dim3(slots), g.block(), 0, g.stream>>>(g);
+        } else {
+            if (n_aligned)
+                grouped_gemm_fp8_kernel_v2_32<false, false><<<dim3(slots), g.block(), 0, g.stream>>>(g);
+            else
+                grouped_gemm_fp8_kernel_v2_32<true,  false><<<dim3(slots), g.block(), 0, g.stream>>>(g);
+        }
+    } else if (fuse_on) {
         if (n_aligned)
             grouped_gemm_fp8_kernel_v2<false, true><<<dim3(slots), g.block(), 0, g.stream>>>(g);
         else
