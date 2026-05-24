@@ -46,6 +46,48 @@ __device__ inline static void load(RT &dst, const ST &src) {
 
     const uint32_t src_ptr = reinterpret_cast<uintptr_t>(&src.data[0]);
 
+    // R429: custom branch for rt_32x64 row_l fp8 + st_32x64_s.
+    // mfma_f32_32x32x64 expects per-lane K=32 CONTIGUOUS (lane 0 → K=0..31, lane 32 → K=32..63).
+    // Default load layout splits K non-contiguous → output wrong for tiles[1]+.
+    if constexpr (std::is_same_v<U2, fp8e4m3_4> &&
+                  std::is_same_v<typename ST::shape, st_32x64> &&
+                  RT::base_tile_rows == 32 && RT::base_tile_cols == 64 &&
+                  RT::base_tile_stride == 16) {
+        static_assert(ST::underlying_subtile_rows == 32 && ST::underlying_subtile_cols == 64,
+                      "st_32x64 underlying subtile must be 32x64");
+        // Per lane layout matching mfma_323264:
+        //   row = laneid % 32
+        //   col_base = 32 * (laneid / 32)  // lane group 0..31 → col 0; group 32..63 → col 32
+        //   per lane reads 2 ds_read_b128 covering 32 contiguous bytes (K direction)
+        const int r_lane = laneid % 32;
+        const int c_lane_base = 32 * (laneid / 32);
+        constexpr int RT_height = RT::rows / RT::base_tile_rows;  // = view_rows / 32
+        constexpr int RT_width  = RT::cols / RT::base_tile_cols;  // = view_cols / 64
+        #pragma unroll
+        for (int ii = 0; ii < ST::subtiles_per_col; ii++) {
+            #pragma unroll
+            for (int jj = 0; jj < ST::subtiles_per_row; jj++) {
+                const int shared_subtile_id = ii * ST::underlying_subtiles_per_row + jj;
+                const int subtile_offset = shared_subtile_id * ST::underlying_subtile_stride_bytes;
+                const uint32_t intra_off_lo = src.swizzle({r_lane, c_lane_base});
+                const uint32_t intra_off_hi = src.swizzle({r_lane, c_lane_base + 16});
+                const uint32_t addr_lo = src_ptr + subtile_offset + intra_off_lo;
+                const uint32_t addr_hi = src_ptr + subtile_offset + intra_off_hi;
+                // dst.tiles[ii][jj].data[0..3] = lo (K cols 0..15 within lane's K-group)
+                // dst.tiles[ii][jj].data[4..7] = hi (K cols 16..31 within lane's K-group)
+                asm volatile(
+                    "ds_read_b128 %0, %2 offset:0\n"
+                    "ds_read_b128 %1, %3 offset:0\n"
+                    : "=v"(*reinterpret_cast<float4*>(&dst.tiles[ii][jj].data[0])),
+                      "=v"(*reinterpret_cast<float4*>(&dst.tiles[ii][jj].data[4]))
+                    : "v"(addr_lo), "v"(addr_hi)
+                    : "memory"
+                );
+            }
+        }
+        return;
+    }
+
     if constexpr (std::is_same_v<typename ST::shape, st_64x32_padded_b128_s>
     ) {
         static_assert(std::is_same_v<U2, bf16_2>,
