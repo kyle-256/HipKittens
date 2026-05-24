@@ -843,6 +843,29 @@ __device__ __forceinline__ void rcr_mma_v2_vacc_wrapper(
     }
 }
 
+// R473 (P1-RRR): vacc wrapper for RRR — same as RCR vacc wrapper but uses
+// B_col_reg (RRR's col-layout B fragment) with b.tiles[0][n] instead of
+// b.tiles[n][0]. Mirrors R167 RCR breakthrough (all 4 acc as vacc).
+template<bool USE_AGPR>
+__device__ __forceinline__ void rrr_mma_v2_vacc_wrapper(
+        rt_fl<RBM, RBN, col_l, rt_16x16_s>& acc,
+        A_row_reg& a, B_col_reg& b) {
+    constexpr int M_TILES = RBM / 16;
+    constexpr int N_TILES = RBN / 16;
+    #pragma unroll
+    for (int m = 0; m < M_TILES; ++m) {
+        #pragma unroll
+        for (int n = 0; n < N_TILES; ++n) {
+            int4* a_p = reinterpret_cast<int4*>(&a.tiles[m][0].data[0]);
+            // RRR layout: b.tiles[k][n] with K width=1 (BK=128 = 1 base tile in K)
+            int4* b_p = reinterpret_cast<int4*>(&b.tiles[0][n].data[0]);
+            v2_pinned::mma_int4_vacc(
+                *reinterpret_cast<float2(*)[2]>(&acc.tiles[m][n].data[0]),
+                a_p[0], a_p[1], b_p[0], b_p[1]);
+        }
+    }
+}
+
 // R6: mma wrapper using mma_int4 (raw int4 pinned pattern) instead of
 // HK's rcr_mma_agpr_t. Reinterprets HK fragment storage as int4 in-register.
 template<bool USE_AGPR>
@@ -1570,6 +1593,45 @@ void grouped_gemm_fp8_kernel_v2_32(const grouped_layout_globals g) {
     grouped_rcr_kernel_body_pinned_32<N_MASKED_STORE, FUSED_KTAIL>(g);
 }
 
+
+// =============================================================================
+// R473: v2 RRR entry point (forwards to v1 dispatch_grouped_rrr initially).
+// PT-facing struct mirrors RCR's but with bK/bN swapped (RRR B is [G, K, N]).
+// Future rounds: replace v1 forward with v2 RRR body using rrr_mma_v2_vacc_wrapper.
+// =============================================================================
+struct grouped_layout_globals_v2_rrr {
+    const void* a_ptr;
+    const void* b_ptr;
+    void*       c_ptr;
+    int M_total, G_b, bK, bN, cM, cN;
+    const float* sa_ptr;
+    const float* sb_ptr;
+    const int64_t* group_offs_ptr;
+    hipStream_t stream;
+    int G, group_m, m_per_group, num_xcds;
+    int num_slots, chunk_size;
+    int bn_block;
+};
+
+inline void dispatch_grouped_rrr_v2(grouped_layout_globals_v2_rrr g_in) {
+    grouped_layout_globals g{
+        _gl_fp8(reinterpret_cast<fp8e4m3*>(const_cast<void*>(g_in.a_ptr)),
+                1, 1, g_in.M_total, g_in.bK),
+        _gl_fp8(reinterpret_cast<fp8e4m3*>(const_cast<void*>(g_in.b_ptr)),
+                1, g_in.G_b, g_in.bK, g_in.bN),
+        _gl_bf16(reinterpret_cast<bf16*>(g_in.c_ptr), 1, 1, g_in.cM, g_in.cN),
+        0.f, 0.f, g_in.sa_ptr, g_in.sb_ptr,
+        g_in.group_offs_ptr, g_in.stream,
+        g_in.G, 0, 0, 0, 0,
+        g_in.group_m, g_in.num_xcds, 0,
+        0, 0,
+        g_in.m_per_group, g_in.num_slots, g_in.chunk_size, 0,
+        0, nullptr, g_in.bn_block,
+    };
+    // SESSION 1: forward to v1 dispatcher (visible via #include at top).
+    // Future: replace with v2 RRR body using rrr_mma_v2_vacc_wrapper (R167 mirror).
+    dispatch_grouped_rrr(g);
+}
 
 inline void dispatch_grouped_rcr_v2(grouped_layout_globals_v2 g_in) {
     grouped_layout_globals g{
