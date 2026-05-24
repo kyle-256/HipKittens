@@ -385,12 +385,10 @@ struct st_32x64 {
         using T = _T;
         const uint32_t offset = sizeof(T)*(r*cols + c);
         if constexpr (sizeof(T) == 1) {
-            // Step 1 (infra validation): identity swizzle. Step 2+
-            // will XOR in a bank-conflict-avoidance term once the
-            // mfma_323264 input lane map is derived (mirror of the
-            // st_16x128_v2 XOR pattern: ``((offset >> 7) & 7) << 4``
-            // adapted for the 64 B row stride of the 32x64 layout).
-            return offset;
+            // R433: XOR swizzle for bank-conflict avoidance — mirror of
+            // st_16x128_v2 ((offset>>7)&7)<<4 adapted for 64B row stride.
+            const int swizzle = ((offset >> 6) & 7) << 4;
+            return offset ^ swizzle;
         } else {
             static_assert(false, "Unsupported type");
         }
