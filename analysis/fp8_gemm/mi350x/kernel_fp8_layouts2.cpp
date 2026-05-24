@@ -1630,8 +1630,17 @@ void grouped_rrr_kernel_body_pinned(const grouped_layout_globals g) {
     // 2026-05-20: use gridDim.x not NUM_CUS so we can launch with grid =
     // total_tiles (TK_*_GRID_MODE=tile experiment).
     const int slots_eff = gridDim.x;
+    // R475: per-shape chunk_size for RRR v2 (mirror R456 RCR pattern)
+    int chunk_size_eff;
+    if (g.chunk_size > 0) {
+        chunk_size_eff = g.chunk_size;
+    } else {
+        const int n_cols = static_cast<int>(g.c.cols());
+        const int k_cols = static_cast<int>(g.a.cols());
+        chunk_size_eff = (k_cols >= 4096 && n_cols >= 4096) ? 48 : 64;
+    }
     int pid = chiplet_transform_chunked(
-        blockIdx.x, slots_eff, xcds_eff, 64);
+        blockIdx.x, slots_eff, xcds_eff, chunk_size_eff);
 
     int wm = warpid() / WARPS_N;
     int wn = warpid() % WARPS_N;
