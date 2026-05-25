@@ -813,7 +813,7 @@ CSV `lane,byte,k,n` 用 `./rrr_b_lane_layout_probe --table` 重生成。
 
 ---
 
-## Session 11 status: PASSED  HK=<n/a — no kernel change>  PT=<pending>  outer=<pending>
+## Session 11 status: PASSED  HK=84f96617  PT 3rdparty=df7f410e  outer=5c644030
 - 2026-05-25
 - **Scope delivered (final bench + verdict + Session 7.2 incidental upgrade)**
   - **Final 24-shape kernel_only bench** on chi2762 (gfx950, MI355X) — `bench_hk_vs_triton_grouped_fp8_kernel_only.py` (auto_tune=False, override-path = production default)
@@ -852,8 +852,9 @@ CSV `lane,byte,k,n` 用 `./rrr_b_lane_layout_probe --table` 重生成。
   - 全部在 **B=16 grouped** 或 **B=4 + 大 K (≥4096)**
   - 验证 [[fp8-rrr-attempt-h14]] HBM bandwidth ceiling 物理结论: B=16 grouped streams ~544MB B-data vs dense ~364MB = ~50% 数据差 → ~25% TFLOPS gap, source-level kernel tweaking 不可破
   - **真 lever 仍是 (a) B-pretranspose ds_read_b128 主循环 (Session 5/9 系列, subtile load primitive 已 fix in Session 8, body 集成 Session 9.1/9.2/9.3 待做) 或 (b) split-K cross-group B share (~800 LOC, multi-session)**
-- **HK commit**: 不动 (本 session 无 kernel/header 改动)
-- **PT commit**: `<pending>` (override table 4-tuple 刷新 + plan addendum)
+- **HK commit**: `84f96617` (plan addendum only — 本 session 无 kernel/header 改动)
+- **PT outer commit**: `5c644030` (override table 4-tuple 刷新 + 3rdparty bump)
+- **PT 3rdparty commit**: `df7f410e` (plan addendum mirror; HK turbo 84f96617 镜像)
 - **memory**: `feedback_rrr_b_pretrans_session11_final_bench.md`
 - **PT 3rdparty bump**: `<n/a — no HK kernel change>`
 - **Session 11 通过最小可独立的子部分**: 完整 final bench + verdict + 顺手把 Session 7.2 spec 的 override 4-tuple 刷新落地, 让 production 默认路径吃到 Session 10 增益。剩余 Session 9.1/9.2/9.3 (B-pretranspose body integration) 已在 plan 中, 真 1.15× lever 路径明确
