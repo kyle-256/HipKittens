@@ -419,7 +419,7 @@ CSV `lane,byte,k,n` 用 `./rrr_b_lane_layout_probe --table` 重生成。
 - **Risk note for Session 5**: 若 Session 4.1 / 4.2 跳过直接接入 Path L, kernel 主循环 Phase 3 的 16 ds_read_u8/lane (× 2 iter × 8 warps × 64 lanes = 16K byte reads per 128×128 tile) 会触发严重 LDS bank serialization, 预期 fwd geomean 可能回退 -10%~-20%。若必须跳过, 建议在 Session 5 集成时打开 macro `RRR_B_PRETRANS_FALLBACK_TO_GLOAD=1` 在 perf 不达标时回退老路径
 
 
-## Session 5 status: PARTIAL (scaffold only — subtile load bug blocks body integration)  HK=TBD  PT 3rdparty=TBD
+## Session 5 status: PARTIAL (scaffold only — subtile load bug blocks body integration)  HK=43aaeb3d  PT 3rdparty=e294f49e  outer=a0a1d81e
 - 2026-05-25
 - **Scope delivered**:
   - **Probe lands but FAILS** `tests/probes/rrr_b_pretrans_load_subtile_probe.cu` (~250 LOC) + Makefile entry: subtile load variant of Session 3 spec for RT::width=2 (one wi-slice = 32 N cols), parameterized by `col_start` ∈ {0, 32, 64, 96}
