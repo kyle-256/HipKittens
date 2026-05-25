@@ -78,102 +78,143 @@
 
 ---
 
-## Session 3 — B-pretranspose 全集成 + 切换 ds_read_b128  (~500 LOC, 5-8h)
+## Session 3 — ST 类型 + load 特化  (~200 LOC, 3-4h)
 
-**目标**: 把 Session 2 验证过的 b128-from-N-major-LDS primitive **落进 RRR kernel body**, 把所有 B 读路径从 `ds_read_b64_tr_b8` 切到 `ds_read_b128`, 数值 + 性能两方面都过 gate。
+**目标**: 把 Session 2 probe 验证的 b128 地址公式固化成 HK type-system 一等公民: 新 ST 类型 + 新 load() 特化。**不动 kernel body**, 不动 writer, 不破任何现有路径。
 
 **前置**: Session 2 PASSED (probe primitive 已 byte-equivalent verified)
+**(原 Session 3 BLOCKED 后拆出的 3a)**
 
 **已有素材** (Session 1+2 已交付)
 - `tests/probes/rrr_b_pretrans_probe.cu` (HK + PT 3rdparty 双路径) — 闭式 b128 地址公式: `base + (lane&15)*K_DIM + ((lane>>4)&3)*16` + offset:64
 - LDS layout 验证: N-major (`byte_offset(n,k) = n*K_DIM + k`)
 - `(lane, byte) → (k, n)` 映射: `n = lane&15; k_block = (lane>>4)&3; half = byte>>4; k = k_block*16 + (byte&15) + half*64`
-- ISA: probe kernel 2× `ds_read_b128`, 0× `ds_read_b64_tr_b8` (gfx950 chi2811)
+- ISA: probe kernel 2× `ds_read_b128`, 0× `ds_read_b64_tr_b8` (gfx950 chi2762)
 
-**任务清单 (按顺序, 每步必须 SNR ≥ 47 dB 才能往下)**
-
+**任务**
 1. **新 ST 类型** in `include/types/shared/st_shape.cuh`
-   - `st_128x128_pretrans` (或更小如 `st_128x64`, 看 LDS budget): rows=N, cols=K, identity 或简单 XOR swizzle (Session 2 probe 用 identity 已通过, swizzle 留 bank conflict 出现后再加)
-   - 注册到 `st_shape::all` concept, 保证 G::load / ds_read 模板能 dispatch
-
+   - `st_128x128_n_major` (rows=N=128, cols=K=128, 16KB per tile, identity swizzle 起步)
+   - 注册到 `st_shape::all` concept (保证 G::load / ds_read 模板能 dispatch)
 2. **load 特化** in `include/ops/warp/memory/tile/shared_to_register.cuh`
-   - 新 `load(rt_..., st_128x..._pretrans &)` 走 Session 2 probe 验证过的 b128 地址公式
-   - rt 目标类型 = RRR body 现有 B-frag (col_l fp8 rt_base), 不要新加 frag 类型避免 ripple
+   - 新 `load(rt_..., st_128x128_n_major &)` 走 Session 2 probe 闭式地址: `addr = base + (lane&15)*128 + ((lane>>4)&3)*16` + offset:0/64
+   - rt 目标类型 = RRR body 现有 B-frag 类型 (col_l fp8 rt_base), 不新增 frag 避免 ripple
+3. **单元 smoke** in `tests/probes/`
+   - 写一个 minimal test: 填一个已知 pattern 的 LDS N-major buffer + 用新 load 拉到 rt + dump → 对照 Session 2 probe 的 (lane,byte)→(k,n) 映射, mismatch 必须 = 0
 
-3. **B HBM→LDS writer** in `kernel_fp8_layouts2.cpp` (RRR body 4 个 prolog+主循环+FUSED_KTAIL prefetch 站点)
-   - 默认 `G::load(Bs[...])` 是 row-major HBM→row-major LDS, 不能直接用
-   - 选项 A: 8-warp 协作 `buffer_load_b128`(HBM K×N) + per-lane `ds_write_b128` 到 (n*K_DIM+k) LDS offset (类似 PR #330 的 transposed writer)
-   - 选项 B: 在 LDS 里用 staging buffer 先 row-major load, 再 8-warp 协作 transpose ds_read+ds_write 到 N-major 目标 buffer (多一次 LDS round-trip, 慢但简单)
-   - 推荐 A; B 当 fallback
-
-4. **gate macro** `#define RRR_B_PRETRANS 0/1` (kernel_fp8_layouts2.cpp 顶部)
-   - `RRR_B_PRETRANS=0` → 老 ds_read_b64_tr_b8 路径 (回归对照)
-   - `RRR_B_PRETRANS=1` → 新 b128 路径
-   - body 内 8+ `load_b` reads + 4 G::load(Bs[...]) writes 都按 macro 分叉
-   - **暂时**保留, Session 4 才删 gate
-
-5. **Bs slot size 重算** (Session 2 PARTIAL 警告)
-   - 老 ST_v2 64KB double-buf; 新 N-major (128 N × 128 K × 1 fp8) = 16KB per tile × 2 buf = 32KB
-   - LDS budget 不会超 (160KB CU), 但要在 kernel 顶部 `__shared__ uint8_t Bs[...]` size 显式重算并标注
-
-6. **bank conflict 检查** (Session 2 PARTIAL 警告)
-   - 同一 wave 16 lanes/n_val 同时 access 同 N 行 → 8-way 潜在冲突
-   - 写完后跑一次 rocprof `SQ_LDS_BANK_CONFLICT` 计数, 若 >0 加 swizzle (候选 `((offset>>7)&7)<<4` mirror RCR ST_v2)
-
-7. **FUSED_KTAIL 单独 audit**
-   - K_tail 路径有独立的 b_kt prefetch lambdas, 不能漏改
-   - K_rem=0 (full-tile-only) 和 K_rem=64 (有 ktail) 两种都要过
-
-**验证 (硬 gate, 全部满足才 PASSED)**
-- A. `RRR_B_PRETRANS=0` 老路径回归: 24-shape SNR ≥ 47 dB (确认没把老路径改坏)
-- B. `RRR_B_PRETRANS=1` 新路径正确: 24-shape SNR ≥ 47 dB
-- C. ISA disasm (`llvm-objdump` on chi2811): 新路径 main loop `ds_read_b64_tr_b8` 计数 = **0**, `ds_read_b128` 计数 ≈ 48 (per 3000-instr window, 与 RCR 对齐)
-- D. 8-shape bench: TFLOPS geomean **不回退 > 3%** vs baseline (R167 4-acc vacc 1.024×T)。允许小幅 noise. 不要求超 baseline (perf 收益在 Session 4 消除 accvgpr shuffle 后)
+**验证 (硬 gate)**
+- 新 ST 类型编出, 不破现有 ST 实例化 (HK build pass)
+- load 特化编出, 不破现有 load(...) 重载 dispatch
+- 单元 smoke 在 chi2762 跑 pass (mismatch = 0)
 
 **完成动作**
-- HK + PT 3rdparty + PT outer 三 commit 链 parity (同 Session 2 格式)
-- 追加 `## Session 3 status: PASSED  HK=<hash>  PT=<hash>  outer=<hash>` 到本文件末尾
-- memory: `feedback_rrr_b_pretrans_session3_integration.md`
-- 若卡住 ≥3h 或任一 gate 不过, 标 `BLOCKED reason: <>` 并退出
+- HK + PT 3rdparty + PT outer commit 链 parity
+- 追加 `## Session 3 status: PASSED  HK=<hash>  PT=<hash>  outer=<hash>`
+- memory: `feedback_rrr_b_pretrans_session3_st_load.md`
 
-**风险与降级**
-- 若选项 A writer 出现 race/correctness 难调, 立刻切选项 B (LDS staging) 保 correctness
-- 若 ISA 显示 `ds_read_b128` 计数对但 perf 大幅退化 (>5%), 标 PARTIAL/PASSED 看 D gate 是否过; 不过就 BLOCKED 让 user 决策
-- 若 24-shape 有 < 5 个 shape SNR 失败, 列具体 shape + 失败模式到 status 行, 让 Session 4 决定是否回退
-
-**LOC + 时间 honest 估计**
-- LOC: 新 ST 类型 30 + load 特化 60 + B writer 150 + body 接入 (4 G::load + 8 load_b × 双分支) 200 + ktail audit 50 + gate 宏 + smoke harness ≈ **490 LOC**
-- 时间: 5-8h (新 ST + writer 是最大未知, bank conflict 处理可能拖时)
+**LOC + 时间** 约 200 LOC / 3-4h (纯 type system, 不动 kernel body)
 
 ---
 
-## Session 4 — AGPR 数据流优化  (~200 LOC, 3-4h)
+## Session 4 — cross-lane register transpose writer  (~400 LOC, 5-6h) 【难点】
+
+**目标**: 实现 8-warp 协作的 HBM→LDS B 转置 writer, 走 ds_bpermute_b32 路径, perf-acceptable (不超 +10% epilog/prolog 开销 vs 老 G::load). 这是整条 B-pretranspose 链的真难点。
+
+**前置**: Session 3 PASSED (ST 类型 + load 特化 OK, 写入端可独立验证)
+**(原 Session 3 BLOCKED 后拆出的 3b)**
+
+**核心问题**
+- HBM B 是 row-major `B[K][N]` (K stride=N bytes)
+- LDS 目标是 N-major `Bs[N][K]` (N stride=K bytes) — 即 Session 3 新 ST 的 layout
+- 不能直接 G::load 因为 HBM↔LDS 同 layout 假设
+- 不能 naive 每 lane scatter 16 ds_write_b8 (太慢, 见 FUSED_KTAIL load_b_kt_fk perf 数据)
+- **必须** load 到 register (按 HBM row-major 16B = 16 N 元素 of 1 K), 然后 cross-lane shuffle 让每 lane 持有 16K of 1 N, 然后 ds_write_b128
+
+**任务**
+1. **block-transpose 算法设计** (写进 `analysis/fp8_gemm/mi350x/session4_writer_design.md`)
+   - 输入 4×16 lane block (4 K × 16 N 16 个 fp8 byte/lane) → 输出 16×4 (16 K × 1 N 16 byte/lane)
+   - 用 `__builtin_amdgcn_ds_bpermute_b32` × 4 (byte 粒度不支持, 用 b32 + bit-shuffle)
+   - 详细 lane-id → swap-id 表 (mirror Session 1 输出的 lane layout)
+2. **probe kernel** in `tests/probes/rrr_b_writer_probe.cu`
+   - 隔离验证 transpose writer: 喂 HBM `b[k][n]=k*1000+n`, 走新 writer 写 LDS, 用 Session 3 的 load 读出, 对比 host-computed reference
+   - mismatch = 0 才算通过
+3. **bank conflict 探测** in probe
+   - 加 ROCm profiler trace 或手动计数 `SQ_LDS_BANK_CONFLICT` 在 chi2762 rocprof, 必须 0 (或 < 1% of LDS accesses)
+
+**验证 (硬 gate)**
+- writer probe build + run pass on chi2762
+- coverage = 100% (所有 (k,n) 对正确)
+- bank conflict = 0
+- writer 微基准: 单次 transpose 写一个 128×128 tile, 时延 ≤ 4× G::load 同尺寸 row-major (允许些许 overhead, perf 还原在 Session 5 的整 kernel 上测)
+
+**完成动作**
+- HK + PT 3rdparty + PT outer commit
+- 追加 `## Session 4 status: PASSED  HK=<hash>  PT=<hash>  outer=<hash>`
+- memory: `feedback_rrr_b_pretrans_session4_writer.md`
+
+**LOC + 时间** 约 400 LOC / 5-6h (核心 transpose 算法 + probe + bank conflict 验证)
+
+---
+
+## Session 5 — RRR body 集成 + 24-shape verify  (~300 LOC, 4-5h)
+
+**目标**: 把 Session 3 的 ST/load + Session 4 的 writer 接进 RRR body, 全 24-shape 数值正确 + perf 不回退。
+
+**前置**: Session 3 + 4 PASSED
+**(原 Session 3 BLOCKED 后拆出的 3c)**
+
+**任务**
+1. **gate macro** `#define RRR_B_PRETRANS 0/1` 在 `kernel_fp8_layouts2.cpp` 顶部
+2. **6 个 G::load(Bs[...]) sites** (prolog ×2 + 主循环 prefetch ×2 + FUSED_KTAIL ×2): 走新 writer (gated by macro)
+3. **6+ load_b reads**: 走新 ST + 新 load 特化 (gated by macro)
+4. **Bs slot size 重算**: 新 N-major Bs = 16KB per tile × 2 buf = 32KB; LDS budget audit (160KB 内 As 64KB + Bs 32KB + scratch 余下 OK)
+5. **FUSED_KTAIL audit**: K_rem=0 和 K_rem=64 两种都要过; ktail 走老 byte_b8 路径还是新 writer 由 macro 决定 (Session 3 BLOCKED 提示 FUSED_KTAIL 可保留老 path)
+6. **24-shape SNR sweep** with RRR_B_PRETRANS=0 (回归) + =1 (新), 各跑一遍
+7. **ISA 验证**: 新路径 main loop `ds_read_b64_tr_b8` = 0, `ds_read_b128` ≈ 48
+
+**验证 (硬 gate)**
+- A. RRR_B_PRETRANS=0 24-shape SNR ≥ 47 dB (老路径回归)
+- B. RRR_B_PRETRANS=1 24-shape SNR ≥ 47 dB (新路径)
+- C. ISA: 新路径 main loop ds_read_b64_tr_b8 = 0
+- D. 8-shape bench TFLOPS geomean 不回退 > 3% vs R167 baseline (1.024×T)
+
+**完成动作**
+- HK + PT 3rdparty + PT outer commit
+- 追加 `## Session 5 status: PASSED HK=<hash> PT=<hash> outer=<hash>`
+- memory: `feedback_rrr_b_pretrans_session5_integration.md`
+
+**LOC + 时间** 约 300 LOC / 4-5h (~12 site 替换 + 双路径 verify)
+
+---
+
+## Session 6 — AGPR 数据流优化  (~200 LOC, 3-4h)
 
 **目标**: 消除 RRR 比 RCR 多的 416 条 accvgpr shuffle。
 
-**前置**: Session 3 PASSED
+**前置**: Session 5 PASSED
+**(原 Session 4 — 顺移)**
 
 **任务**
-1. ISA disasm RRR body，定位 accvgpr_read/write 来源 (是 acc init? acc spill? mma chaining?)
-2. 视情况：
+1. ISA disasm RRR body, 定位 accvgpr_read/write 来源 (acc init? spill? mma chaining?)
+2. 视情况:
    - 让 acc 全程 resident in AGPR (D-aliases-C inplace + acc-init avoid v_mov)
-   - 或者改 acc storage class (rt_fl<...> 的 storage hint)
-3. 与 Session 3 一样保留 numeric 验证
+   - 或改 acc storage class (rt_fl<...> 的 storage hint)
+3. 与 Session 5 一样保留 numeric 验证
 
 **验证**
 - ISA: accvgpr_read + accvgpr_write 总数 ≤ 50 (vs 当前 416)
 - 24/24 shape SNR ≥ 47 dB
-- 8-shape bench: geomean ≥ 1.05× Triton (不是终点，仍要 Session 5)
+- 8-shape bench: geomean ≥ 1.05× Triton (不是终点, 仍要 Session 7)
 
 **完成动作**: 同上
 
 ---
 
-## Session 5 — Per-shape autotune + 最终验证  (~100 LOC, 2-3h)
+## Session 7 — Per-shape autotune + 最终验证  (~100 LOC, 2-3h)
 
 **目标**: 锁定 8/8 ≥ 1.15× Triton。
 
-**前置**: Session 4 PASSED
+**前置**: Session 6 PASSED
+**(原 Session 5 — 顺移)**
 
 **任务**
 1. 扩展 `grouped_gemm_fp8_impl.py` 的 `_HK_FP8_RRR_CANDIDATES` 覆盖 8 shape 关键 (group_m, chunk_size, bn_block) 组合
@@ -188,15 +229,15 @@
 
 **完成动作**
 - HK + PT 最终 commit
-- 追加 `## Session 5 status: PASSED  HK=<hash>  PT=<hash>  geomean=<x>  min=<y>`
-- 更新 MEMORY.md：`feedback_rrr_v2_b_pretrans_win.md`
+- 追加 `## Session 7 status: PASSED HK=<hash> PT=<hash> geomean=<x> min=<y>`
+- 更新 MEMORY.md: `feedback_rrr_v2_b_pretrans_win.md`
 
 ---
 
 ## Session 1 result — B mma_AB lane layout 映射表
 
 **Probe**: `tests/probes/rrr_b_lane_layout_probe.cu` + Makefile (HK + PT 3rdparty 双路径)
-**Run host**: chi2811 (gfx950, MI355X), `/opt/rocm/bin/hipcc --offload-arch=gfx950`
+**Run host**: chi2762 (gfx950, MI355X), `/opt/rocm/bin/hipcc --offload-arch=gfx950`
 **Validation**: `OK: 2048 (k,n) coordinates, each appears exactly once.` (coverage 完整无重叠)
 
 ### 闭式映射 (lane, byte) → (k, n)
@@ -242,13 +283,24 @@ CSV `lane,byte,k,n` 用 `./rrr_b_lane_layout_probe --table` 重生成。
 
 ## Session 1 status: PASSED  HK=bac982bd  PT=7736b348  (3rdparty=a5849bc7)
 - 2026-05-25
-- probe build + run pass on chi2811 (gfx950); coverage 2048/2048 unique
+- probe build + run pass on chi2762 (gfx950); coverage 2048/2048 unique
 - 闭式映射 `(lane, byte) → (k, n)` 见 Session 1 result 段
 - memory: `feedback_rrr_b_lane_layout.md`
 
 ## Session 2 status: PASSED  HK=090166ba  PT=e1ab0597  (outer=eae76e40)
 
-## Session 3 status: BLOCKED  reason: 自定义 HBM→LDS B-pretranspose writer 单 session 装不下 — LDS budget (160KB) 排除 Option B fallback (要 196KB); Option A.1 naive scatter writer (16 ds_write_b8/lane) 正确但破 D gate (>10% 回退, 见 FUSED_KTAIL load_b_kt_fk 印证); Option A.2 cross-lane register transpose 需 ds_bpermute b32 × 4 + bank-conflict 校准, 多 session 工作 (~700-900 LOC)
+## Session 3 status: PASSED  HK=75335d85  PT=9761d96e  (outer=3c52e440)
+- 2026-05-25
+- 新 ST `kittens::ducks::st_shape::st_128x128_n_major` (rows=N=128 cols=K=128, identity swizzle, fp8) + alias `st_128x128_n_major_s`
+- `shared_to_register.cuh::load(RT col_layout, ST)` 新 `if constexpr` 分支: 当 ST 是 `st_128x128_n_major` + RT=`rt_128x16_s` col_l fp8 时, 走 per-lane 2× `ds_read_b128` 公式 (`addr = base + (lane&15)*128 + ((lane>>4)&3)*16`, offset:0 + offset:64)
+- 单元 smoke `tests/probes/rrr_b_pretrans_st_load_probe.cu`: chi2811 (gfx950) **mismatch=0 missing=0 duplicate=0** 覆盖 64 lane × 32 byte × 8 N-tile = 16384 元组; OK 输出 "new st_128x128_n_major + load() == Session 1 mma_AB mapping"
+- ISA (probe binary `--save-temps` 出的 amdgcn .s): **8 ds_read_b128 / 0 ds_read_b64_tr_b8** (新路径独立, 老 col_l fp8 路径未触发)
+- Bug-fix bonus: 同时把 line 53 的 `st_32x64` 也补全为 `ducks::st_shape::st_32x64` (原裸名在某些 include 顺序下解析不到 — probe build 触发后才暴露; PT 实际 build 此前能过是因为 include 顺序碰巧 OK)
+- HK build: PT full re-link clean on chi2811 (`libprimus_turbo_kernels.so` 51086336 bytes, 04:05 timestamp), 0 errors, 现有 `ducks::st_shape::all` dispatch 未破
+- memory: `feedback_rrr_b_pretrans_session3_st_load.md`
+- Session 4 entry: 大头剩下 **cross-lane register transpose writer** (HBM row-major B → N-major LDS), 见原 BLOCKED 文档拆出的 Session 4 §; Session 3 已交付的 ST + load primitive 是 Session 4 / 5 写入端 / kernel 集成的 type-system 基座 — 单独可 verify, 不依赖 writer 即可证
+
+## Session 3 (superseded, original 500 LOC scope) status: BLOCKED  reason: 自定义 HBM→LDS B-pretranspose writer 单 session 装不下 — LDS budget (160KB) 排除 Option B fallback (要 196KB); Option A.1 naive scatter writer (16 ds_write_b8/lane) 正确但破 D gate (>10% 回退, 见 FUSED_KTAIL load_b_kt_fk 印证); Option A.2 cross-lane register transpose 需 ds_bpermute b32 × 4 + bank-conflict 校准, 多 session 工作 (~700-900 LOC) — **已拆 Session 3a/3b/3c (new Session 3/4/5), 老 Session 4/5 顺移 6/7**
 - 2026-05-25
 - 无 kernel/header 改动 commit (避免半成品污染); 完整诊断 + Session 4 handoff steps 见 memory `feedback_rrr_b_pretrans_session3_blocked.md`
 - 关键证据:
@@ -267,7 +319,7 @@ CSV `lane,byte,k,n` 用 `./rrr_b_lane_layout_probe --table` 重生成。
 
 ### (历史 PARTIAL 标注, 保留)
 - 2026-05-25
-- **Scope delivered**: 隔离 probe `tests/probes/rrr_b_pretrans_probe.cu` 验证 b128-from-pretranspose-LDS 路径 (LDS 按 N-major 摆: `byte_offset(n,k) = n*K_DIM + k`; 每 lane 2× `ds_read_b128` at `base + (lane&15)*K_DIM + ((lane>>4)&3)*16` + offset:64) 产出的 (lane, byte) → (k, n) 映射与 Session 1 mma_AB B 操作数映射 **byte-equivalent** (mismatch=0, coverage 2048/2048 unique on chi2811 gfx950)
+- **Scope delivered**: 隔离 probe `tests/probes/rrr_b_pretrans_probe.cu` 验证 b128-from-pretranspose-LDS 路径 (LDS 按 N-major 摆: `byte_offset(n,k) = n*K_DIM + k`; 每 lane 2× `ds_read_b128` at `base + (lane&15)*K_DIM + ((lane>>4)&3)*16` + offset:64) 产出的 (lane, byte) → (k, n) 映射与 Session 1 mma_AB B 操作数映射 **byte-equivalent** (mismatch=0, coverage 2048/2048 unique on chi2762 gfx950)
 - **ISA**: probe device asm `grep ds_*` → `2 ds_read_b128 / 0 ds_read_b64_tr_b8`。证明硬件层面 b128 路径 deliver 等价 mma 操作数
 - **Scope NOT delivered (vs plan §Session 2 验证)**:
   - ❌ 新 `st_128x64_b_pretrans` ST 类型 + `st_shape.cuh::all` 注册
