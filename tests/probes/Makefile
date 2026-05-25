@@ -15,7 +15,8 @@ HIPFLAGS = -std=c++20 \
            -I$(HIP_INCLUDE_DIR)
 
 PROBES := rrr_b_lane_layout_probe rrr_b_pretrans_probe rrr_b_pretrans_st_load_probe \
-          rrr_b_writer_probe rrr_b_pretrans_load_subtile_probe
+          rrr_b_writer_probe rrr_b_pretrans_load_subtile_probe \
+          rrr_prolog_b_pretrans_probe
 
 all: $(PROBES)
 

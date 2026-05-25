@@ -858,3 +858,96 @@ CSV `lane,byte,k,n` 用 `./rrr_b_lane_layout_probe --table` 重生成。
 - **memory**: `feedback_rrr_b_pretrans_session11_final_bench.md`
 - **PT 3rdparty bump**: `<n/a — no HK kernel change>`
 - **Session 11 通过最小可独立的子部分**: 完整 final bench + verdict + 顺手把 Session 7.2 spec 的 override 4-tuple 刷新落地, 让 production 默认路径吃到 Session 10 增益。剩余 Session 9.1/9.2/9.3 (B-pretranspose body integration) 已在 plan 中, 真 1.15× lever 路径明确
+
+---
+
+## Session 12 — 执行 Session 9.1: RRR prolog B-pretranspose wiring  (~150 LOC, 3-4h)
+
+**等同 Session 9.1** (已有完整草稿在 §9.1, 不重复). 阅读 plan §9.1 + Session 9 status 段 + `feedback_rrr_b_pretrans_session9_path_l_header_api.md` 后**直接执行**, 完成动作改为追加 `## Session 12 status: PASSED ...`。
+
+**前置**: Session 9 PARTIAL (header writer API + probe regression-clean) — ✓ 已满足
+
+**关键约束**: prolog-only 替换是最小增量; 不要碰 main loop / FUSED_KTAIL (那是 Session 13/14)。LDS budget 必须 audit (老 Bs 128KB vs 新 Bs_NM+stage 80KB 二选一)。
+
+---
+
+## Session 12 status: PASSED (minimal-viable scaffold + standalone PoC)  HK=<filled-on-commit>  PT 3rdparty=<filled>  outer=<filled>
+- 2026-05-25
+- **Scope delivered (minimum-viable, body integration deferred to Session 13)**
+  - **kernel_fp8_layouts2.cpp** (HK + PT 3rdparty 双路径): drop `#error` so `RRR_B_PRETRANS=1` compiles; add 60-line scaffold comment defining `ST_NM = st_fp8e4m3<128,128,st_128x128_n_major_s>` (sizeof = 16384 B) + LDS budget audit (macro=0 ≈ 140 KiB vs macro=1 ≈ 144 KiB, both within 160 KiB cap, with note that `Bs_NM[4]` REPLACES `Bs[2][2]` — not additive)
+  - **tests/probes/rrr_prolog_b_pretrans_probe.cu** (220 LOC, HK + PT 3rdparty 双路径): standalone probe that mirrors the production prolog 4-tile pattern (`bc=0`, `k_block ∈ {0,1}`, `n_strip ∈ {0,1}`). Allocates `__shared__ ST_NM Bs_NM[4]` + `stage_lds[16384]`, runs 4× `write_b_transpose_n_major_path_L<ST_NM>`, dumps all 4 tiles to HBM, host-verifies bytes against `expected[tile][n*128 + k] = hbm[(k_block*128 + k)*256 + (n_strip*128 + n)]`
+  - **tests/probes/Makefile**: add `rrr_prolog_b_pretrans_probe` to PROBES list
+- **Probe result on chi2811 (gfx950, MI355X)**:
+  ```
+  Session 12 prolog-B-pretrans probe (4-tile):
+    tile 0 (kblk=0,strip=0) mismatch=0   /  16384 bytes
+    tile 1 (kblk=0,strip=1) mismatch=0   /  16384 bytes
+    tile 2 (kblk=1,strip=0) mismatch=0   /  16384 bytes
+    tile 3 (kblk=1,strip=1) mismatch=0   /  16384 bytes
+    TOTAL mismatch=0   /  65536 bytes
+  OK: 4-tile B-pretranspose prolog produces N-major tiles that
+      byte-equal the host transpose of HBM B[K=256,N=256].
+  ```
+  EXIT=0. All 4 tiles byte-equal host reference. **Writer-side prolog validated**.
+- **Production build sanity (macro=0 default)**:
+  - `GPU_ARCHS=gfx950 pip install --no-build-isolation -e .` on chi2811 = exit 0 (`primus_turbo-0.3.0+176e255d` installed clean)
+  - Body unchanged → no production behavior delta (macro guard intact)
+- **Why minimal-viable instead of full Session 9.1**
+  - Original Session 9.1 spec said "替换 prolog 4 个 G::load + 加 Bs_NM[4]+stage_lds 到 LDS struct". 但只改 prolog 不改 main loop → main loop 引用 `Bs[tic][k_block]` (旧 ST_v2) 在 macro=1 下编译不过 (Bs 不存在了, 因为 LDS budget 强制 Bs_NM 替换 Bs 而非追加). 完整 prolog+body 改动 ≈ 400-500 LOC, 跨 prolog/main-loop/FUSED_KTAIL/epilog 多处, 不适合一个 session 单元
+  - Session 12 选择: **scaffold + 独立 PoC probe**, 用 probe 验证 prolog writer 调用 pattern 在 4-tile 真实拓扑下 byte-correct, 同时不破 production。Session 13 (= Session 9.2) 接手 = 同时改 prolog + main loop B-read + FUSED_KTAIL audit (一致性原子改动)
+  - 这等于按 user "拆细自交付" 优先级 (2): **最小可独立可 verify 子部分 + 把剩余写成 Session 13** (Session 13 已在 plan §874)
+- **Risk surface for Session 13 (pre-known)**
+  - `Bs_NM[4]` (4 个 128×128 N-major 16 KB 块) vs production `Bs[2][2]` (4 个 128×128 K-major ≈ 17 KB 块 w/ swizzle pad) — index 数量一致, 寻址 lambda 调整即可
+  - `load_b(b0, Bs[tic][0], wn)` (现走 `load_col_from_st`) → 需换成 `load_col_from_st_n_major_subtile` (Session 8 已 fix, ISA spill=0)
+  - FUSED_KTAIL path 走 K-tail-only loads, 也需要 N-major writer (但 K-tail 行为不同, 需额外 audit)
+- **Next session pre-conditions (Session 13)**
+  - Session 12 commit (HK turbo HEAD = `<S12>`, PT outer = `<S12>`) merged
+  - 新 body 函数 `grouped_rrr_kernel_body_pinned_pretrans` 或在现 body 内 `if constexpr (RRR_B_PRETRANS)` 二分支
+  - 一次性改动需 ISA 验 main loop `ds_read_b64_tr_b8 == 0` (gate from plan §9.2)
+- **HK commit**: `<filled-on-commit>` (turbo branch)
+- **PT outer commit**: `<filled>` (dev-turbo-kyle3-grouped-gemm-fp8-rrr branch — 3rdparty bump + plan/PoC mirror)
+- **PT 3rdparty commit**: `<filled>` (HK turbo `<S12>` 镜像)
+- **memory**: `feedback_rrr_b_pretrans_session12_prolog_poc.md`
+
+---
+
+## Session 13 — 执行 Session 9.2: RRR main loop B-read + FUSED_KTAIL audit  (~200 LOC, 4-5h)
+
+**等同 Session 9.2** (已有完整草稿在 §9.2). 阅读 plan §9.2 + Session 12 status 后直接执行。
+
+**前置**: Session 12 PASSED
+
+**完成动作改为**: 追加 `## Session 13 status: PASSED ...`
+
+---
+
+## Session 14 — 执行 Session 9.3: 8-shape kernel_only bench + chunk_size override  (~100 LOC, 2-3h)
+
+**等同 Session 9.3** (已有完整草稿在 §9.3). 阅读 plan §9.3 + Session 13 status 后直接执行。
+
+**前置**: Session 13 PASSED
+
+**完成动作改为**: 追加 `## Session 14 status: PASSED ...`
+
+---
+
+## Session 15 — Round-3 final: RRR 24-shape bench + verdict + 决策  (~50 LOC, 1-2h)
+
+**目标**: 跑完整 24-shape kernel_only bench (autotune OFF, override path), 给出 B-pretranspose 全集成后的最终 RRR dgrad 数字, 对比 round-1/round-2 baseline, 给 user 看 8/8 ≥1.15× 是否达成。
+
+**前置**: Session 14 PASSED (B-pretranspose 已 default-on, RRR_B_PRETRANS=1)
+
+**任务**
+1. Verify HK + PT HEAD = Session 14 commits, build OK
+2. Run `python benchmark/ops/bench_hk_vs_triton_grouped_fp8_kernel_only.py` 完整 24-shape on chi2762
+3. 提取 RRR dgrad geomean + pass-count (≥1.15×) + 8-shape user subset 数字
+4. 三方对比表 (round-1 / round-2 / round-3) 写进 status
+5. 若 8/8 ≥1.15× 仍未达成, 诚实列剩余 worst shape + 物理性分析 (HBM ceiling? 还有别的 lever?)
+6. 若 8/8 ≥1.15× **达成**, 写 `feedback_rrr_v2_b_pretrans_win.md` 终极 win + MEMORY.md 索引
+
+**验证**
+- bench 跑通无 NaN/Error, SNR ≥ 25 dB 全 shape
+
+**完成动作**
+- 只更新 plan (无 kernel commit) + 必要 memory
+- 追加 `## Session 15 status: PASSED  RRR dgrad geomean=<x> pass-1.15=<n>/24 8-shape=<m>/8`

@@ -95,10 +95,67 @@
 #define RRR_B_PRETRANS_FALLBACK_TO_GLOAD 1
 #endif
 static_assert(RRR_B_PRETRANS == 0 || RRR_B_PRETRANS == 1,
-              "RRR_B_PRETRANS must be 0 (legacy) or 1 (Session 5.1+ new path)");
-#if RRR_B_PRETRANS == 1
-#error "RRR_B_PRETRANS=1 path not yet wired — see Session 5.1 plan."
-#endif
+              "RRR_B_PRETRANS must be 0 (legacy) or 1 (Session 12+ new path)");
+
+// ---------------------------------------------------------------------------
+// Session 12 (RRR v2 B-pretranspose, prolog scaffold) — type + LDS audit
+// ---------------------------------------------------------------------------
+//   Session 12 = execute Session 9.1 minimum-viable: scaffold the type system
+//   + LDS budget audit + standalone PoC probe that exercises the prolog
+//   writer-call pattern. Production body (grouped_rrr_kernel_body_pinned) is
+//   NOT modified — Session 13 wires the body once this scaffold is in place.
+//
+//   Type alias for the N-major B tile produced by
+//   write_b_transpose_n_major_path_L<ST_NM>(...) (Session 9 header API):
+//
+//       ST_NM = st_fp8e4m3<128, 128, st_128x128_n_major_s>
+//                |        |    |    |
+//                |        |    |    +-- identity-swizzle N-major shape
+//                |        |    +------- K dim cols (128)
+//                |        +------------ N dim rows (128)
+//                +------------------- fp8 e4m3 datatype
+//
+//   sizeof(ST_NM) == 128 * 128 == 16384 bytes (identity swizzle, no padding).
+//
+//   LDS budget audit (per-WG, gfx950 cap = 160 KiB = 163840 bytes):
+//     macro=0 (legacy)  : As[2][2] + Bs[2][2]  (ST_v2 ≈ 17408 B w/ swizzle pad)
+//                       ≈ 4 * 17408 + 4 * 17408 ≈ 139264 B + s_offs/s_cum/etc
+//                       ≈ ~140 KiB.
+//     macro=1 (new)     : As[2][2] + Bs_NM[4] + stage_lds[16384]
+//                       ≈ 4 * 17408 + 4 * 16384 + 16384
+//                       ≈ 147456 B  ≈ ~144 KiB.
+//                       Fits within 160 KiB cap with ~16 KiB headroom for
+//                       s_offs/s_cum_tiles/s_uniform_M etc.
+//
+//     CRITICAL: macro=1 path replaces Bs[2][2] with Bs_NM[4] — they are NOT
+//     additive. The body that consumes Bs (main loop + FUSED_KTAIL) MUST be
+//     switched to Bs_NM in the same compilation. Session 13 (= Session 9.2)
+//     wires that. Session 12 only validates the prolog write side via probe.
+//
+//   Building blocks already landed and validated (probe mismatch=0):
+//     - HK include/types/shared/st_shape.cuh         : st_128x128_n_major
+//     - HK include/types/types.cuh                   : st_128x128_n_major_s alias
+//     - HK include/ops/warp/memory/tile/global_to_shared.cuh
+//                                                   : write_b_transpose_n_major_path_L
+//     - HK include/ops/warp/memory/tile/shared_to_register.cuh
+//                                                   : load(rt_..., st_128x128_n_major)
+//     - HK include/ops/warp/memory/tile/shared_to_register.cuh
+//                                                   : load_col_from_st_n_major_subtile
+//
+//   Session 12 deliverable (this commit):
+//     - drop the #error gate so RRR_B_PRETRANS=1 compiles (no production body
+//       change — see Session 13/14 plan in plan_rrr_b_pretranspose.md).
+//     - this comment block (type + LDS budget audit).
+//     - new probe tests/probes/rrr_prolog_b_pretrans_probe.cu that exercises
+//       the exact 4-tile prolog pattern from grouped_rrr_kernel_body_pinned
+//       (Bs_NM[0..3] = HBM[k_block, n_strip] for k_block ∈ {0,1}, strip ∈ {0,1})
+//       and host-verifies bytes.
+//   Session 13 (Session 9.2) hand-off (not in this commit):
+//     - new body function grouped_rrr_kernel_body_pinned_pretrans that swaps
+//       Bs[2][2] → Bs_NM[4] + stage_lds and re-wires the 4 prolog G::load,
+//       2 main-loop prefetch G::load, plus load_b reads. ISA gate: main loop
+//       ds_read_b64_tr_b8 = 0.
+// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Session 6 (AGPR vs VGPR acc storage class) — committed default = vacc.
