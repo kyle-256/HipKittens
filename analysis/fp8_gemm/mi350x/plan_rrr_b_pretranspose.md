@@ -418,3 +418,32 @@ CSV `lane,byte,k,n` 用 `./rrr_b_lane_layout_probe --table` 重生成。
 - **Why split**: 单 session 装下 design + Path L 正确性 + 完整 verify harness 已是上限; Path P + bank conflict + microbench 是 perf 优化, 必须先有 Path L 正确基线再 swap-and-compare。承认 "拆细自交付" 原则, Session 4 = "writer 正确", Session 4.1 = "writer 快", Session 4.2 = "writer 最优"
 - **Risk note for Session 5**: 若 Session 4.1 / 4.2 跳过直接接入 Path L, kernel 主循环 Phase 3 的 16 ds_read_u8/lane (× 2 iter × 8 warps × 64 lanes = 16K byte reads per 128×128 tile) 会触发严重 LDS bank serialization, 预期 fwd geomean 可能回退 -10%~-20%。若必须跳过, 建议在 Session 5 集成时打开 macro `RRR_B_PRETRANS_FALLBACK_TO_GLOAD=1` 在 perf 不达标时回退老路径
 
+
+## Session 5 status: PARTIAL (scaffold only — subtile load bug blocks body integration)  HK=TBD  PT 3rdparty=TBD
+- 2026-05-25
+- **Scope delivered**:
+  - **Probe lands but FAILS** `tests/probes/rrr_b_pretrans_load_subtile_probe.cu` (~250 LOC) + Makefile entry: subtile load variant of Session 3 spec for RT::width=2 (one wi-slice = 32 N cols), parameterized by `col_start` ∈ {0, 32, 64, 96}
+  - **Macro scaffold** `kernel_fp8_layouts2.cpp` lines 62-103: `RRR_B_PRETRANS` (default 0, `=1` is `#error` until 5.1 wires body) + `RRR_B_PRETRANS_FALLBACK_TO_GLOAD` (default 1) + documented Session 5 / 5.1 plan inline
+  - **Build verify**: PT incremental build 16/16 clean on chi2811 (`libprimus_turbo_kernels.so` re-linked, 0 errors); RRR_B_PRETRANS=0 is no-op (`static_assert` only), v1/v2 dispatcher paths unaffected
+  - **Session 3 spec re-verified**: width=8 probe `rrr_b_pretrans_st_load_probe` still PASSES (mismatch=0) — building blocks still valid
+- **Scope NOT delivered (subtile load bug)**:
+  - ❌ Working `load_col_from_st_n_major_subtile<RT,ST>(dst, tile, col_start)` overload for RT::width=2
+  - ❌ New `grouped_rrr_kernel_body_pinned_pretrans` body function
+  - ❌ Dispatcher hook on `RRR_B_PRETRANS=1`
+  - ❌ Gates A/B/C/D (no kernel changes to test)
+- **Why blocked — Session 5.1 spec entry point**:
+  - 5 variants tried on subtile probe, all FAIL with consistent corruption pattern:
+    1. Original (function-wrapped, dual-output asm with `=&v(float4)`) — 46% mismatch
+    2. Split into 2× single-output asm — 14% mismatch (improved)
+    3. float4 lo/hi locals + struct copy — 14% mismatch (same pattern)
+    4. `int4` locals (no RT struct access) — 44% mismatch
+    5. Hand-unrolled per-j with separate scopes + `asm volatile("" ::: "memory")` fence + 4× `ds_read_b64` (2-VGPR aligned) — 61% mismatch but j=1 PERFECT and j=0 ALL ZEROS/GARBAGE
+  - **Variant 5 diagnostic**: when separate-scope-per-j fence inserted, the SECOND scope is fully correct and FIRST scope's byte-write loop reads garbage. Pattern points to compiler reordering j=0's byte-load-from-int2-locals BELOW j=1's `ds_read_b64` (which reuses the same VGPRs as j=0's locals), so j=0's byte writes see post-j=1 values.
+  - Width=8 (Session 3 spec) does NOT exhibit this — likely because compiler can't fold 8-iteration unroll into VGPR-reuse pattern and spills to LDS or distributes across enough register pressure that reordering is impossible.
+  - **Session 5.1 attempts** (suggested, in priority order):
+    1. **Force VGPR liveness via `__shared__` workspace**: ds_read_b64 → write to `__shared__` per-warp scratch → ds_read at end. Pays 1 LDS round-trip but guarantees compiler can't reorder asm output reads
+    2. **Use `register T x asm("vNN")` syntax** per HK `[[pinned-vgpr-asm-constraint-design-flaw]]` follow-up (note: that memory says this approach was abandoned — but for SOURCE-LEVEL probe-only, it may be acceptable). Bind each int2 to fixed VGPRs so reuse is impossible
+    3. **Wider RT (use Session 3 spec width=8 unconditionally)**: load full 128 N cols into RT, take subtile slice in register space. Wastes 6 base tiles (4× more VGPR pressure) but works today. Acceptable if RT::width=8 fits in V+A ≤ 256 dwords/lane 8-wave cap (8 base × 8 dword = 64 dword VGPR per RT, A frags ~32 dword, total ~96 dword + uniforms ~120-150 — should fit)
+    4. **Force compiler not to reorder**: declare int2 locals as `volatile`, or wrap each scope's byte-loads in `__threadfence_block()`, or store ds_read results IMMEDIATELY to `out[]` (no intermediate locals)
+  - Until 5.1 lands a working subtile load, Session 5 kernel body integration cannot proceed
+- **Session 5 deliverable surface**: probe file + macro scaffold + plan addendum + memory. v1/v2 production paths unchanged

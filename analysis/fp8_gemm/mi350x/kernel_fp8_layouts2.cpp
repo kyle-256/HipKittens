@@ -59,6 +59,47 @@
 #undef RCR_EPILOGUE_VMCNT
 #define RCR_EPILOGUE_VMCNT 2
 
+// ---------------------------------------------------------------------------
+// Session 5 (RRR B-pretranspose campaign) — macro scaffold (PARTIAL).
+// ---------------------------------------------------------------------------
+//   RRR_B_PRETRANS = 0 (default): no behavior change; v1/v2 RRR body uses
+//     existing ds_read_b64_tr_b8 + accvgpr shuffle path.
+//   RRR_B_PRETRANS = 1 (Session 5.1+ once subtile load bug resolved):
+//     RRR dgrad body uses the new st_128x128_n_major ST + Path L
+//     HBM→LDS transpose writer (Session 4) + b128-from-N-major
+//     load specialization (Session 3). Eliminates ds_read_b64_tr_b8
+//     + 416 accvgpr shuffles per K-iter.
+//
+//   Building blocks already landed:
+//     - HK include/types/shared/st_shape.cuh : st_128x128_n_major
+//     - HK include/ops/warp/memory/tile/shared_to_register.cuh :
+//         load() specialization for st_128x128_n_major + col_l fp8 RT
+//         (Session 3 PASSED, probe mismatch=0)
+//     - HK include/ops/warp/memory/tile/global_to_shared.cuh :
+//         Path L 8-warp HBM→staging→Bs transpose writer
+//         (Session 4 PASSED, probe mismatch=0 + roundtrip mismatch=0)
+//
+//   Outstanding (Session 5.1):
+//     - subtile load overload `load_col_from_st_n_major_subtile<RT_,ST_>(
+//         dst, tile, col_start)` for RT::width=2 (4 wi-slices per K-iter).
+//       Probe `rrr_b_pretrans_load_subtile_probe` FAILS for width=2 due
+//       to compiler VGPR reuse / instruction reorder bug (5 variants
+//       tried — see Session 5 status in plan_rrr_b_pretranspose.md).
+//     - new RRR body function `grouped_rrr_kernel_body_pinned_pretrans`
+//       gated by `RRR_B_PRETRANS=1` and dispatcher hook.
+// ---------------------------------------------------------------------------
+#ifndef RRR_B_PRETRANS
+#define RRR_B_PRETRANS 0
+#endif
+#ifndef RRR_B_PRETRANS_FALLBACK_TO_GLOAD
+#define RRR_B_PRETRANS_FALLBACK_TO_GLOAD 1
+#endif
+static_assert(RRR_B_PRETRANS == 0 || RRR_B_PRETRANS == 1,
+              "RRR_B_PRETRANS must be 0 (legacy) or 1 (Session 5.1+ new path)");
+#if RRR_B_PRETRANS == 1
+#error "RRR_B_PRETRANS=1 path not yet wired — see Session 5.1 plan."
+#endif
+
 
 
 
