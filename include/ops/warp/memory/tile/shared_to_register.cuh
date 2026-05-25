@@ -50,7 +50,7 @@ __device__ inline static void load(RT &dst, const ST &src) {
     // mfma_f32_32x32x64 expects per-lane K=32 CONTIGUOUS (lane 0 → K=0..31, lane 32 → K=32..63).
     // Default load layout splits K non-contiguous → output wrong for tiles[1]+.
     if constexpr (std::is_same_v<U2, fp8e4m3_4> &&
-                  std::is_same_v<typename ST::shape, st_32x64> &&
+                  std::is_same_v<typename ST::shape, ducks::st_shape::st_32x64> &&
                   RT::base_tile_rows == 32 && RT::base_tile_cols == 64 &&
                   RT::base_tile_stride == 16) {
         static_assert(ST::underlying_subtile_rows == 32 && ST::underlying_subtile_cols == 64,
@@ -307,6 +307,46 @@ __device__ inline static void load(RT &dst, const ST &src) {
     constexpr int packing = base_types::packing<typename RT::dtype>::num();
 
     const int laneid = kittens::laneid();
+
+    // Session 3 (RRR B-pretranspose). For st_128x128_n_major: LDS holds
+    // B as N-rows × K-cols (K contiguous within each N row), identity
+    // layout. Per Session 2 probe (rrr_b_pretrans_probe.cu) verified:
+    //   per-lane base = lds_base + (lane & 15) * 128 + ((lane >> 4) & 3) * 16
+    //   2× ds_read_b128 (offset:0 + offset:64) → 32 byte/lane covering
+    //     bytes 0..15 = K_low (K = k_block*16 + 0..15) at N = lane&15
+    //     bytes 16..31 = K_high (K = k_block*16+64 + 0..15) at N = lane&15
+    //   matches Session 1 mma_AB B-operand mapping byte-equivalent.
+    // Replaces 4× ds_read_b64_tr_b8 + 416 accvgpr shuffles in current
+    // load_col_from_st path. RT must be fp8e4m3 col_layout with base
+    // tile 128×16 (rt_128x16_s family).
+    if constexpr (std::is_same_v<typename ST::shape, ducks::st_shape::st_128x128_n_major> &&
+                  std::is_same_v<U2, fp8e4m3_4> &&
+                  RT::base_tile_rows == 128 && RT::base_tile_cols == 16 &&
+                  RT::base_tile_stride == 16) {
+        static_assert(RT::rows == 128, "st_128x128_n_major load expects RT::rows=128 (K)");
+        static_assert(ST::rows == 128 && ST::cols == 128,
+                      "st_128x128_n_major load expects ST 128x128 tile");
+        static_assert(RT::height == 1,
+                      "st_128x128_n_major load: RT height (K/128) must be 1");
+        const int n_val_base   = laneid & 15;         // 0..15  N within 16-N strip
+        const int k_block      = (laneid >> 4) & 3;   // 0..3   K-block selector
+        const uint32_t src_ptr = reinterpret_cast<uintptr_t>(&src.data[0]);
+        constexpr int K_DIM    = ST::cols;            // 128
+        #pragma unroll
+        for (int j = 0; j < RT::width; ++j) {
+            const int n_val = j * 16 + n_val_base;
+            const uint32_t addr = src_ptr + n_val * K_DIM + k_block * 16;
+            asm volatile(
+                "ds_read_b128 %0, %2 offset:0\n"
+                "ds_read_b128 %1, %2 offset:64\n"
+                : "=&v"(*reinterpret_cast<float4*>(&dst.tiles[0][j].data[0])),
+                  "=&v"(*reinterpret_cast<float4*>(&dst.tiles[0][j].data[4]))
+                : "v"(addr)
+                : "memory"
+            );
+        }
+        return;
+    }
 
     // FP8 col_l: ds_read_b64_tr_b8 operates on 16-lane groups.
     // Need 2 lanes/row × 8 rows = 16 lanes spanning 128 bytes (8 rows × 16 cols).

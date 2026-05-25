@@ -421,12 +421,41 @@ struct st_128x16 {
     }
 };
 
+// Session 3 (RRR B-pretranspose): N×K layout where N is row, K is col.
+// Identity swizzle — Session 2 probe verified bank pattern works for
+// 2× ds_read_b128 per lane at addr = base + n_val*128 + k_block*16.
+struct st_128x128_n_major {
+    static constexpr int rows = 128;  // N dim
+    static constexpr int cols = 128;  // K dim
+    static constexpr int subtile_padding = 0;
+
+    template<typename _T>
+    static constexpr int bytes_per_thread() {
+        if constexpr (sizeof(_T) == 1) {
+            return 16;
+        } else {
+            static_assert(false, "Unsupported type");
+        }
+    }
+
+    template<typename _T>
+    __device__ __forceinline__ static const uint32_t swizzle (int2 coord) {
+        using T = _T;
+        const uint32_t offset = sizeof(T)*(coord.x*cols + coord.y);
+        if constexpr (sizeof(T) == 1) {
+            return offset;
+        } else {
+            static_assert(false, "Unsupported type");
+        }
+    }
+};
+
 template<typename T>
-concept all = std::is_same_v<T, st_16x16> || 
-              std::is_same_v<T, st_16x16_swizzled> || 
-              std::is_same_v<T, st_32x32> || 
-              std::is_same_v<T, st_16x32> || 
-              std::is_same_v<T, st_32x16> || 
+concept all = std::is_same_v<T, st_16x16> ||
+              std::is_same_v<T, st_16x16_swizzled> ||
+              std::is_same_v<T, st_32x32> ||
+              std::is_same_v<T, st_16x32> ||
+              std::is_same_v<T, st_32x16> ||
               std::is_same_v<T, st_8x32>  ||
               std::is_same_v<T, st_16x128> ||
               std::is_same_v<T, st_16x128_v2> ||
@@ -434,7 +463,8 @@ concept all = std::is_same_v<T, st_16x16> ||
               std::is_same_v<T, st_16x128_v3> ||
               std::is_same_v<T, st_64x32_padded_b128> ||
               std::is_same_v<T, st_32x64> ||
-              std::is_same_v<T, st_128x16>;
+              std::is_same_v<T, st_128x16> ||
+              std::is_same_v<T, st_128x128_n_major>;
 
 
 } // namespace st_shape
