@@ -55,31 +55,8 @@ constexpr int BYTES_LANE   = 32;   // per base tile (8 quad-bytes)
 constexpr int N_TILES_PER  = RT2::width;  // 2
 constexpr int OUT_BYTES_PER = LANES * BYTES_LANE * N_TILES_PER;  // 4096 per wi
 
-// Session 5 subtile load. Templated mirror of Session 3 spec (in
-// shared_to_register.cuh) with a runtime `col_start` N-offset.
-template<typename RT_, typename ST_>
-__device__ __forceinline__ void load_col_from_st_n_major_subtile(
-    RT_& dst, const ST_& tile, int col_start)
-{
-    const int laneid       = kittens::laneid();
-    const int n_val_base   = laneid & 15;
-    const int k_block      = (laneid >> 4) & 3;
-    const uint32_t src_ptr = reinterpret_cast<uintptr_t>(&tile.data[0]);
-    constexpr int K_DIM    = ST_::cols;
-    #pragma unroll
-    for (int j = 0; j < RT_::width; ++j) {
-        const int n_val = j * 16 + n_val_base + col_start;
-        const uint32_t addr = src_ptr + n_val * K_DIM + k_block * 16;
-        asm volatile(
-            "ds_read_b128 %0, %2 offset:0\n"
-            "ds_read_b128 %1, %2 offset:64\n"
-            : "=&v"(*reinterpret_cast<float4*>(&dst.tiles[0][j].data[0])),
-              "=&v"(*reinterpret_cast<float4*>(&dst.tiles[0][j].data[4]))
-            : "v"(addr)
-            : "memory"
-        );
-    }
-}
+// Session 8 fix is now landed in shared_to_register.cuh as
+// `kittens::load_col_from_st_n_major_subtile`. Probe uses the header version.
 
 // mode 0: byte holds K index, mode 1: byte holds N index.
 __global__ void __launch_bounds__(64, 1)
@@ -100,62 +77,19 @@ probe_subtile_load(uint8_t* __restrict__ out, int mode, int col_start)
     }
     __syncthreads();
 
-    // Hand-unrolled per-j with FULL SCOPE PER J. Each scope has its own
-    // addr SGPR and own int2 locals → compiler cannot alias VGPRs across j.
-    // Uses 4× ds_read_b64 (each needs only 2-VGPR alignment).
-    {
-        const int laneid       = kittens::laneid();
-        const int n_val_base   = laneid & 15;
-        const int k_block      = (laneid >> 4) & 3;
-        const uint32_t src_ptr = reinterpret_cast<uintptr_t>(&Bs.data[0]);
-        constexpr int K_DIM    = 128;
+    // Session 8 fix path: width-8 internal tmp + register-space slice.
+    RT2 dst;
+    load_col_from_st_n_major_subtile(dst, Bs, col_start);
 
-        // j=0
-        {
-            const int n_val = 0 + n_val_base + col_start;
-            const uint32_t addr = src_ptr + n_val * K_DIM + k_block * 16;
-            int2 q0, q1, q2, q3;
-            asm volatile("ds_read_b64 %0, %1 offset:0"  : "=&v"(q0) : "v"(addr) : "memory");
-            asm volatile("ds_read_b64 %0, %1 offset:8"  : "=&v"(q1) : "v"(addr) : "memory");
-            asm volatile("ds_read_b64 %0, %1 offset:64" : "=&v"(q2) : "v"(addr) : "memory");
-            asm volatile("ds_read_b64 %0, %1 offset:72" : "=&v"(q3) : "v"(addr) : "memory");
-            int dst_base = (0 * LANES + tid) * BYTES_LANE;
-            const uint8_t* p0 = reinterpret_cast<const uint8_t*>(&q0);
-            const uint8_t* p1 = reinterpret_cast<const uint8_t*>(&q1);
-            const uint8_t* p2 = reinterpret_cast<const uint8_t*>(&q2);
-            const uint8_t* p3 = reinterpret_cast<const uint8_t*>(&q3);
-            #pragma unroll
-            for (int i = 0; i < 8; ++i) {
-                out[dst_base + i]      = p0[i];
-                out[dst_base + 8 + i]  = p1[i];
-                out[dst_base + 16 + i] = p2[i];
-                out[dst_base + 24 + i] = p3[i];
-            }
-            // Prevent compiler from reordering j=0 byte loads BELOW j=1's ds_read
-            // (which would re-use the same VGPRs and clobber q0..q3).
-            asm volatile("" ::: "memory");
-        }
-        // j=1
-        {
-            const int n_val = 16 + n_val_base + col_start;
-            const uint32_t addr = src_ptr + n_val * K_DIM + k_block * 16;
-            int2 q0, q1, q2, q3;
-            asm volatile("ds_read_b64 %0, %1 offset:0"  : "=&v"(q0) : "v"(addr) : "memory");
-            asm volatile("ds_read_b64 %0, %1 offset:8"  : "=&v"(q1) : "v"(addr) : "memory");
-            asm volatile("ds_read_b64 %0, %1 offset:64" : "=&v"(q2) : "v"(addr) : "memory");
-            asm volatile("ds_read_b64 %0, %1 offset:72" : "=&v"(q3) : "v"(addr) : "memory");
-            int dst_base = (1 * LANES + tid) * BYTES_LANE;
-            const uint8_t* p0 = reinterpret_cast<const uint8_t*>(&q0);
-            const uint8_t* p1 = reinterpret_cast<const uint8_t*>(&q1);
-            const uint8_t* p2 = reinterpret_cast<const uint8_t*>(&q2);
-            const uint8_t* p3 = reinterpret_cast<const uint8_t*>(&q3);
-            #pragma unroll
-            for (int i = 0; i < 8; ++i) {
-                out[dst_base + i]      = p0[i];
-                out[dst_base + 8 + i]  = p1[i];
-                out[dst_base + 16 + i] = p2[i];
-                out[dst_base + 24 + i] = p3[i];
-            }
+    // Dump per-(j, byte) bytes into out[].
+    #pragma unroll
+    for (int j = 0; j < N_TILES_PER; ++j) {
+        const uint8_t* lane_bytes = reinterpret_cast<const uint8_t*>(
+            &dst.tiles[0][j].data[0]);
+        int dst_base = (j * LANES + tid) * BYTES_LANE;
+        #pragma unroll
+        for (int i = 0; i < BYTES_LANE; ++i) {
+            out[dst_base + i] = lane_bytes[i];
         }
     }
 }

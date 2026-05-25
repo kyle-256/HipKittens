@@ -484,6 +484,25 @@ CSV `lane,byte,k,n` 用 `./rrr_b_lane_layout_probe --table` 重生成。
   - Until 5.1 lands a working subtile load, Session 5 kernel body integration cannot proceed
 - **Session 5 deliverable surface**: probe file + macro scaffold + plan addendum + memory. v1/v2 production paths unchanged
 
+## Session 8 status: PASSED  HK=<pending>  PT 3rdparty=<pending>  outer=<pending>
+- 2026-05-25
+- **Scope delivered (subtile-load primitive fixed; ready for Session 9 body integration)**
+  - **Header API** `include/ops/warp/memory/tile/shared_to_register.cuh`: 新 free function `kittens::load_col_from_st_n_major_subtile<RT,ST>(dst, tile, col_start)`, RT::width=2 + ST=`st_128x128_n_major` + fp8 col_l + rt_128x16_s base tile。 内部 alloc 一个 RT::width=8 tmp + `kittens::load(tmp, tile)` (Session 3 verified primitive) + switch-case slice 2 个 base tile 到 dst (`std::integral_constant` lambda 锁定 BASE_IDX compile-time, 避免 runtime indexing 走 scratch)
+  - **Probe rewrite** `tests/probes/rrr_b_pretrans_load_subtile_probe.cu` 走新 header API, 删掉 Session 5 5 个 variant 全部失败的 hand-rolled per-j ds_read_b64 实现
+  - **Probe result (chi2762 gfx950, 5-run determinism)**: 4/4 col_start ∈ {0, 32, 64, 96} **mismatch=0 bad_range=0 missing=0 dup=0**, 5/5 reruns identical; 覆盖 64 lane × 32 byte × 2 j × 4 cs = 16384 元组
+  - **ISA 验证 (probe binary `--save-temps` 出的 amdgcn .s)**: `amdhsa_next_free_vgpr=129` actual `vgpr_count=74` `agpr_count=0` `private_segment_fixed_size=0` (**spill=0 scratch=0**); 静态指令计数 `ds_read_b128=16 ds_read_b64_tr_b8=0 ds_read_b64=0 scratch_load=0 scratch_store=0` — Session 5 plan 的 "新路径 ds_read_b64_tr_b8 = 0" gate 在 primitive 层面已满足
+  - **Session 3 width=8 regression**: `rrr_b_pretrans_st_load_probe` 仍然 mismatch=0 missing=0 duplicate=0, 16384/16384 unique (header 新增 free function 不破老 `load(RT, ST)` 模板 dispatch)
+- **Why width-8-internal works where 5 hand-rolled variants failed**:
+  - Hand-rolled per-j ds_read_b64 (Session 5 variants 1-5) 失败的本质 = 编译器把 j=0 的 byte-load reorder 到 j=1 的 ds_read_b64 之后, j=0/j=1 共用同一组 VGPR slot, j=0 读到的是 post-j=1 clobber 的值
+  - Session 3 width-8 `kittens::load(tmp, tile)` 不触发是因为 RT::width=8 = 8 base tile × 8 dword = 64 dword VGPR 全程 statically distinct, 编译器没机会 alias inter-j
+  - 把 width-2 dst 内部走 width-8 tmp + register-space slice = 在 primitive 内"绕过" 编译器 reorder bug, 不需要 inline asm hack 或 `register T x asm("vNN")` 风险路径
+- **Session 9 hand-off notes (cost analysis + amortization recommendation)**
+  - Per-call cost: tmp 用 64 dword/lane VGPR (vs subtile dst 16 dword/lane). 单次调用 V cap 撞 256 边缘的风险来自这 64 dword
+  - **Amortization 路径**: kernel body 的 4 个 `load_b(wi=0..3)` call site 可改为 issue ONE width-8 load 拉 tmp, 然后 4× register-space slice → 64 dword tmp 只付一次。Session 9 集成时建议这条路径, 而不是直接 4 次 subtile call
+  - 如果 Session 9 走 amortize 路径, 还需要新增一个 `slice_from_full<BASE_IDX>(dst2, tmp8)` 模板 helper (~30 LOC); 否则直接 4× call subtile 是可行的但要 disasm 验 V+A budget
+- HK commit: `<pending>`; PT 3rdparty commit: `<pending>`; PT outer commit: `<pending>`
+- memory: `feedback_rrr_b_pretrans_session8_subtile_fix.md`
+
 ## Session 7 status: PARTIAL (per-shape override table + probe infra landed; 8/8 ≥1.15× target structurally unmet, follow-ups 7.1/7.2/7.3 added)  HK=bb35e595  PT=a76c3dee  (3rdparty bump in PT outer commit)
 - 2026-05-25
 - **Scope delivered (probe infrastructure + per-shape autotune override)**
@@ -581,3 +600,107 @@ CSV `lane,byte,k,n` 用 `./rrr_b_lane_layout_probe --table` 重生成。
 - PT only commit
 - 追加 `## Session 7.3 status: PASSED PT=<hash> noise_floor=<x>% methodology_gap=<y>pp`
 
+
+---
+
+## Session 8 — 修 subtile-load width=2 编译器 reorder bug  (~250 LOC, 3-4h) 【RRR 解锁关键】
+
+**目标**: 让 `load_col_from_st_n_major_subtile<RT::width=2>(dst, tile, col_start)` 在 chi2762 (gfx950) 上 mismatch=0, 解锁 Session 9 RRR body 集成。
+
+**前置**: Session 3 + 4 PASSED, Session 5 PARTIAL (probe + scaffold 已落地)
+
+**背景** (Session 5 status §"Why blocked" 已诊断)
+5 个 variant 全 FAIL, 决定性证据 (variant 5 split-scope): 第二 j-scope 完美, 第一 j-scope 全垃圾 → 编译器把 j=0 byte-load 重排到 j=1 ds_read_b64 之后, j=0 VGPR 被 j=1 复用。Session 3 spec (width=8) 不触发是因为 8-iter unroll 寄存器压力大无法复用。
+
+**任务 (按优先级试, 任一过 mismatch=0 就停)**
+1. **width=8 unconditional** (Session 5 候选 #3, **最快可行**): subtile load 内部直接用 Session 3 spec 加载 full 128 N, 然后 register-space 取 32-col slice (浪费 6 个 base tile 寄存器但今天就 work). V+A budget: RT::width=8 ≈ 64 dword VGPR + A frags 32 dword + uniforms ~120-150 ≈ 250 dword, 撞 8-wave 256 cap 边缘 → 必须 disasm 验证 next_free_vgpr
+2. 若 #1 撞 V cap, 切 **`__shared__` workspace 中转** (Session 5 候选 #1): ds_read_b64 → 写到 `__shared__` per-warp scratch → ds_read at end。多 1 LDS round-trip 但保证编译器不能 reorder
+3. 若 #1+#2 都不行, **`register T x asm("vNN")` 钉死 VGPR** (Session 5 候选 #2). 高风险 (memory `pinned-vgpr-asm-constraint-design-flaw`), 留作 last resort
+
+**验证 (硬 gate)**
+- subtile probe `rrr_b_pretrans_load_subtile_probe` 在 chi2762 跑 pass (mismatch=0, missing=0, duplicate=0) 全部 4 个 col_start ∈ {0,32,64,96}
+- ISA disasm: 不能引入新 spill (`scratch_load/store` 不增加) 或 spill ≤ Session 4 baseline + 16 dword
+- 不破 Session 3 width=8 probe (回归测试)
+
+**完成动作**
+- HK + PT 3rdparty + PT outer 三 commit
+- 追加 `## Session 8 status: PASSED HK=<hash> PT=<hash> outer=<hash>`
+- memory: `feedback_rrr_b_pretrans_session8_subtile_fix.md`
+
+---
+
+## Session 9 — RRR body 集成 + 24-shape SNR verify  (~300 LOC, 4-5h)
+
+**目标**: 把 Session 8 修好的 subtile load 接入 RRR kernel body, 6 个 G::load + 6+ load_b site 改造, 走 `RRR_B_PRETRANS=1` 路径, ISA verify ds_read_b64_tr_b8 = 0, 24-shape SNR ≥ 47 dB。
+
+**前置**: Session 8 PASSED (subtile load mismatch=0)
+
+**任务**
+1. 删 `kernel_fp8_layouts2.cpp:65` 的 `#error` 让 `RRR_B_PRETRANS=1` 可编
+2. 用 Session 4 的 writer + Session 8 的 subtile load 写 `grouped_rrr_kernel_body_pinned_pretrans`
+3. dispatcher hook: `RRR_B_PRETRANS=1` 时路由到新 body
+4. 6 个 G::load(Bs[...]) sites (prolog ×2 + main loop prefetch ×2 + FUSED_KTAIL ×2) 走新 writer
+5. 6+ load_b reads 走新 ST + subtile load 特化
+6. Bs slot size 重算 (新 N-major 32KB total vs 老 ST_v2 68KB)
+7. FUSED_KTAIL audit: K_rem=0 和 K_rem=64 两种 case
+8. ISA disasm: chi2762 上 `llvm-objdump` 数主循环 `ds_read_b64_tr_b8` (必须 0) + `ds_read_b128` (≈48)
+
+**验证 (硬 gate)**
+- `RRR_B_PRETRANS=0` 老路径 24-shape SNR ≥ 47 dB (回归)
+- `RRR_B_PRETRANS=1` 新路径 24-shape SNR ≥ 47 dB
+- ISA: main loop `ds_read_b64_tr_b8` = 0
+- 8-shape kernel_only bench geomean **不回退** > 3% vs current R167 baseline (1.024×T)
+- spill ≤ Session 6 baseline (vacc opt 后) + 16 dword
+
+**完成动作**
+- HK + PT 3rdparty + PT outer commit
+- 追加 `## Session 9 status: PASSED HK=<hash> PT=<hash> outer=<hash>`
+- memory: `feedback_rrr_b_pretrans_session9_body_integration.md`
+
+---
+
+## Session 10 — chunk_size 第 4 autotune 维度  (~250 LOC, 3-4h)
+
+**目标**: 让 per-shape autotune 覆盖 chunk_size ∈ {16, 32, 48, 64, 96}, 给 Session 11 final bench 更宽 search space。
+
+**前置**: Session 9 PASSED (新 B-pretranspose body 是 default), 或 Session 9 SKIPPED/PARTIAL 也可以 (chunk_size 维度对老 body 也 work)
+
+**任务**
+1. ABI 扩展 `dispatch_grouped_rrr_v2` 加 `int chunk_size_override = -1` 参数 (sentinel = 走原 heuristic)
+2. PT binding `hk_grouped_gemm_gfx950.cu` + `bindings_pytorch.cpp` + `_hip.cpp` 各加 11th arg
+3. Python `_HK_FP8_RRR_CANDIDATES` 升 4-tuple `(gm, xcds, bn, chunk)`, override table 同步
+4. `probe_rrr_per_shape.py` 加 chunk_size 维度 (16×2×5 = 160 cfg/shape)
+5. 重跑 probe 24 shape, 提 winners
+
+**验证**
+- 24-shape SNR ≥ 25 dB (correctness floor, autotune 候选必须不破)
+- 24-shape kernel_only geomean ≥ Session 7 baseline 1.065× (不能回退)
+- 至少 3 shape ratio 提升 ≥ 3pp 证明新维度有效
+
+**完成动作**
+- HK + PT commit
+- 追加 `## Session 10 status: PASSED HK=<hash> PT=<hash> outer=<hash>`
+
+---
+
+## Session 11 — Final RRR 24-shape bench + verdict  (~50 LOC, 1-2h)
+
+**目标**: 集合 Session 8+9+10 所有改进, 跑完整 24-shape kernel_only bench, 给出 RRR dgrad ≥ 1.15× 的最终结果。
+
+**前置**: Session 10 PASSED (或 8/9/10 任一 PARTIAL/BLOCKED 都跑, 报告当前实际数字)
+
+**任务**
+1. 拉最新 HK + PT (`git -C ... pull` 或 verify HEAD = Session 10 outer commit), rebuild Primus-Turbo (`GPU_ARCHS=gfx950 pip install --no-build-isolation -e .`)
+2. 跑 `python benchmark/ops/bench_hk_vs_triton_grouped_fp8_kernel_only.py` 完整 24-shape on chi2762
+3. 提取 RRR dgrad 各 shape ratio + geomean + pass-count
+4. 比较 vs baseline (今天 1.065× / 2/24)
+5. 若 ≥ 1.15× pass-count 仍不到 8/8, 列出最差 7-shape 共性 + 物理原因 (HBM bandwidth or 其他)
+
+**验证**
+- 完整 bench 跑通无 NaN/Error
+- 报告写进 plan 末尾的 Session 11 status 段
+
+**完成动作**
+- 只更新 plan (无 kernel commit)
+- 追加 `## Session 11 status: PASSED/PARTIAL  RRR dgrad geomean=<x>  pass-1.15=<n>/24  worst=<shape>=<ratio>`
+- 若 8/8 ≥ 1.15× 终于达成, 写 `feedback_rrr_v2_b_pretrans_win.md` (终极 win) 标 MEMORY.md

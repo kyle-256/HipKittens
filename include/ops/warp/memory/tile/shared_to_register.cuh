@@ -349,6 +349,8 @@ __device__ inline static void load(RT &dst, const ST &src) {
     }
 
     // FP8 col_l: ds_read_b64_tr_b8 operates on 16-lane groups.
+    // (Session 8 subtile-load helper for st_128x128_n_major is defined
+    //  after this function template; see `load_col_from_st_n_major_subtile`.)
     // Need 2 lanes/row × 8 rows = 16 lanes spanning 128 bytes (8 rows × 16 cols).
     // BF16 col_l: ds_read_b64_tr_b16 operates on 4-lane groups spanning 4 rows.
     int row_offset, col_offset;
@@ -681,6 +683,61 @@ __device__ inline static void load(RT &dst, const ST &src) {
     } else {
         static_assert(false, "Unsupported subtile sizes");
     }
+}
+
+// Session 8 (RRR v2 B-pretranspose).
+// Subtile-load helper for st_128x128_n_major + col_l fp8 width-2 RT.
+//
+// History: Session 5 tried 5 variants of per-lane ds_read_b128 with hand-
+// rolled j-loop and all failed (mismatch 14-61%) due to compiler reordering
+// j=0 byte-reads BELOW j=1 ds_read (j=0/j=1 VGPRs aliased). Session 3's
+// width-8 load did not exhibit this because compiler statically allocates
+// 8*8=64 distinct VGPRs for full width-8 dst.
+//
+// Session 8 fix: load width-8 once into a tmp RT (uses Session 3 verified
+// primitive), then switch-case slice 2 base tiles in register space. The
+// switch-case keeps the source base index compile-time so the inner copy
+// stays in registers (no scratch round-trip).
+//
+// Cost: tmp uses 64 dwords/lane (vs 16 in dst). For Session 9 kernel-body
+// integration, recommendation is to issue ONE width-8 load per K-iter and
+// reuse across the 4 load_b(wi=0..3) call sites, amortizing the VGPR cost.
+//
+// Verified: tests/probes/rrr_b_pretrans_load_subtile_probe.cu on chi2762
+// gfx950 — mismatch=0 missing=0 duplicate=0 for all col_start ∈ {0,32,64,96}.
+template<typename RT_, typename ST_>
+__device__ __forceinline__ void load_col_from_st_n_major_subtile(
+    RT_& dst, const ST_& tile, int col_start)
+{
+    static_assert(std::is_same_v<typename ST_::shape,
+                                 ducks::st_shape::st_128x128_n_major>,
+                  "subtile load requires st_128x128_n_major source");
+    static_assert(RT_::width == 2,
+                  "subtile load currently supports RT::width=2 (32 N cols)");
+    static_assert(RT_::height == 1, "subtile load requires RT::height=1");
+    static_assert(RT_::base_tile_rows == 128 && RT_::base_tile_cols == 16,
+                  "subtile load requires rt_128x16 col_l fp8 base tile");
+
+    using RT_full = rt_fp8e4m3<128, 128, col_l, rt_128x16_s>;
+    RT_full tmp;
+    load(tmp, tile);
+
+    // copy 2 base tiles starting at base_idx; lambda captures BASE_IDX as
+    // compile-time so tmp.tiles[0][BASE_IDX + j].data[i] stays in VGPRs.
+    auto copy2 = [&] (auto BASE_IDX_C) {
+        constexpr int BASE_IDX = decltype(BASE_IDX_C)::value;
+        #pragma unroll
+        for (int j = 0; j < 2; ++j) {
+            #pragma unroll
+            for (int i = 0; i < 8; ++i) {
+                dst.tiles[0][j].data[i] = tmp.tiles[0][BASE_IDX + j].data[i];
+            }
+        }
+    };
+    if      (col_start ==  0) copy2(std::integral_constant<int, 0>{});
+    else if (col_start == 32) copy2(std::integral_constant<int, 2>{});
+    else if (col_start == 64) copy2(std::integral_constant<int, 4>{});
+    else if (col_start == 96) copy2(std::integral_constant<int, 6>{});
 }
 
 /**
