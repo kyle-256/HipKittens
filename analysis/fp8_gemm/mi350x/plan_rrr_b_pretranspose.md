@@ -155,11 +155,75 @@
 
 ---
 
+## Session 4.1 — writer 升级到 Path P (cross-lane bpermute, perf)  (~250 LOC, 4-5h)
+
+**目标**: 把 Session 4 的 Path L 写法 (Phase 3 用 16 ds_read_u8/lane gather) 替换成 Path P (cross-lane ds_bpermute_b32 + v_perm_b32 byte-shuffle in register)。LDS ops 减半, 进一步 narrowed bank conflict。
+
+**前置**: Session 4 PASSED (Path L 正确性 + Session 3 round-trip)
+
+**已有素材**
+- `session4_writer_design.md` §3 给出完整算法 (16-lane subgroup: 16 ds_bpermute + 12 v_perm per 16x16 byte block)
+- `tests/probes/rrr_b_writer_probe.cu` 的 `b_writer_roundtrip` 验证 harness 直接复用 (mode K + mode N 双 dump)
+
+**任务**
+1. 在 `rrr_b_writer_probe.cu` 加 `__device__ void transpose16x16_bpermute(...)` 函数: 输入 16 lanes × 16 byte (K-major), 输出 16 lanes × 16 byte (N-major), 通过 4 phase ds_bpermute + 3 v_perm/output dword (per design §3.2)
+2. 加新 kernel `b_writer_path_P`: 取消 staging LDS, 直接 load HBM → in-register transpose → ds_write_b128 final
+3. probe `main` 加 verify-C/D: Path P 重跑 verify-A + verify-B
+4. ISA 抓取: Path P main loop ds_read_u8 = 0, ds_bpermute_b32 ≈ 16 × 4 sub-groups × 2 iter = 128/warp
+5. 微基准 (probe 内置): 10K-loop time both kernels, Path P ≤ 0.5× Path L (Phase 3 改进)
+
+**验证 (硬 gate)**
+- Path P probe verify-A + verify-B 全 0 mismatch
+- Path L 和 Path P 输出 Bs_final byte-for-byte 完全一致 (probe 内 cross-compare)
+- ISA: Path P main path ds_read_u8 = 0; 16-lane subgroup 内 ds_bpermute_b32 计数 = 16
+- 微基准: Path P 单 tile transpose time ≤ 0.5× Path L (因为消除 16 ds_read_u8/lane)
+
+**完成动作**
+- HK + PT 3rdparty + PT outer commit
+- 追加 `## Session 4.1 status: PASSED  HK=<hash>  PT=<hash>  outer=<hash>`
+- memory: `feedback_rrr_b_pretrans_session4_1_path_p.md`
+
+**LOC + 时间** 约 250 LOC / 4-5h (Path P 函数 + 新 kernel + verify)
+
+---
+
+## Session 4.2 — bank conflict 消除 + writer 微基准  (~200 LOC, 3-4h)
+
+**目标**: 量化并消除 Path P 写入 / 读取 LDS 的 bank conflict, 给 Session 5 kernel 集成提供性能预算。
+
+**前置**: Session 4.1 PASSED
+
+**已有素材**
+- `session4_writer_design.md` §3.4 + §3.5 分析两路 bank conflict 类型 (Path P 2-way write conflict, Path L 4-way read conflict)
+- 候选 mitigation: `st_128x128_n_major_v2` (XOR swizzle `((offset>>7) & 7) << 4` mirror st_16x128_v2)
+
+**任务**
+1. 新 ST `st_128x128_n_major_v2` (XOR swizzle) + 注册 `all` concept
+2. Session 3 `load(rt_128x16_s, st_128x128_n_major_v2)` 特化: 复用 base addr 公式, 在 swizzle 层 XOR (基址处 XOR 后 b128 仍连续 16 bytes within bank-group of 4)
+3. writer probe 加 `b_writer_path_P_v2` (写入 v2 ST), 重跑 verify-A + verify-B
+4. rocprof on chi2811: `SQ_LDS_BANK_CONFLICT` counter 抓 path_P_v1 vs path_P_v2 vs G::load row-major
+5. 输出表格: instructions/byte, bank_conflict_per_warp, 推断 kernel 集成后预期 % 跌
+6. 决定: 用 v1 (identity) or v2 (swizzled) 进 Session 5
+
+**验证 (硬 gate)**
+- v2 path probe verify-A + verify-B 全 0 mismatch
+- rocprof: v2 写入 bank conflict 比 v1 减少 ≥ 50% (或确认 v1 实测 < 5% 就停留 v1)
+- 微基准: v2 vs v1 path P 时延差 < 5% (mitigation 不能 perf 倒退)
+
+**完成动作**
+- HK + PT 3rdparty + PT outer commit
+- 追加 `## Session 4.2 status: PASSED  HK=<hash>  PT=<hash>  outer=<hash>  chosen=<v1|v2>`
+- memory: `feedback_rrr_b_pretrans_session4_2_bank_conflict.md`
+
+**LOC + 时间** 约 200 LOC / 3-4h (新 ST + load 特化 + rocprof scripting)
+
+---
+
 ## Session 5 — RRR body 集成 + 24-shape verify  (~300 LOC, 4-5h)
 
 **目标**: 把 Session 3 的 ST/load + Session 4 的 writer 接进 RRR body, 全 24-shape 数值正确 + perf 不回退。
 
-**前置**: Session 3 + 4 PASSED
+**前置**: Session 3 + 4 PASSED (Session 4.1 / 4.2 强烈推荐, 否则 perf 见 8 章 Session 5 risk note)
 **(原 Session 3 BLOCKED 后拆出的 3c)**
 
 **任务**
@@ -333,4 +397,24 @@ CSV `lane,byte,k,n` 用 `./rrr_b_lane_layout_probe --table` 重生成。
 - **Pre-condition risk for Session 3**: 当前 LDS layout (ST_v2 64KB double-buf) 与 N-major layout (16KB per tile × 2 buf) 容量不同, Bs slot size 需要 audit; bank conflict 未在 probe 验证 (单 wave, 顺序读, 16 lanes/n_val 同时 access 同 N 行 → 8-way 潜在冲突, Session 3 必须加 swizzle 或测 perf)
 - HK commit: `d9ebba7c`; PT 3rdparty commit: `5ff508d5`; PT outer bump: `d1b42b55`
 - memory: `feedback_rrr_b_pretrans_session2_probe.md`
+
+## Session 4 status: PASSED  HK=<filled-at-commit>  PT=<filled-at-commit>  (3rdparty=<filled>)
+- 2026-05-25
+- **Scope delivered (Path L 正确性 + Session 4.1/4.2 设计 + plan additions)**
+  - **设计文档** `analysis/fp8_gemm/mi350x/session4_writer_design.md` (~330 行): 8-warp 协作 HBM→LDS B-transpose writer 的两条路径完整算法 + LDS budget audit + bank conflict 分析 + scope split into Session 4 / 4.1 / 4.2
+  - **Probe 实现** `tests/probes/rrr_b_writer_probe.cu` (~250 LOC) + Makefile entry
+    - kernel `b_writer_path_L`: 512-thread WG, 16KB staging LDS + 16KB final Bs (st_128x128_n_major), Phase 1+2 (HBM→staging) 2 b128 load + 2 b128 write per lane, Phase 3+4 (staging→final transpose) 16 ds_read_u8 gather + 1 b128 write per lane × 2 iter
+    - kernel `b_writer_roundtrip`: 同 writer + Session 3 `load(rt_128x16_s, st_128x128_n_major)` 拉出 RT 内容并 dump
+    - VERIFY-A (host byte-compare ref[n*128+k]=hbm[k*128+n] vs Bs_final dump): **mismatch=0** over 16384 bytes
+    - VERIFY-B (round-trip mode-K + mode-N via Session 3 load, compare against Session 1 closed-form (lane,byte)→(k,n)): **mismatch=0 bad_range=0 missing=0 duplicate=0** over 16384 元组
+  - **ISA 抓取** (chi2811 gfx950, hipcc --save-temps):
+    - `b_writer_path_L` static: 16 ds_read_b128 + 8 ds_write_b128 + 73 ds_read_u8 + 48 v_perm_b32 + 28 s_waitcnt (Phase 3 用 16 byte-read/lane = 主性能瓶颈, Session 4.1 lever)
+    - `b_writer_roundtrip` static: 16 ds_read_b128 (Session 3 load 工作) + 4 ds_write_b128 + 32 ds_read_u8 + 48 v_perm_b32 + 10 s_waitcnt + **0 ds_read_b64_tr_b8** (新 path 不触发 transpose-load, 与 Session 3 验证一致)
+- **Scope deferred (Session 4.1 / 4.2 plan additions written)**
+  - ❌ Path P (cross-lane ds_bpermute_b32 + v_perm_b32 byte-shuffle in register) — 算法已在 design doc §3 落档, Session 4.1 task
+  - ❌ Bank-conflict-free LDS layout (`st_128x128_n_major_v2` XOR swizzle 候选) — design doc §3.4/3.5 分析, Session 4.2 task
+  - ❌ rocprof `SQ_LDS_BANK_CONFLICT` 实测 — Session 4.2 task
+  - ❌ Writer microbenchmark (vs G::load row-major baseline) — Session 4.2 task
+- **Why split**: 单 session 装下 design + Path L 正确性 + 完整 verify harness 已是上限; Path P + bank conflict + microbench 是 perf 优化, 必须先有 Path L 正确基线再 swap-and-compare。承认 "拆细自交付" 原则, Session 4 = "writer 正确", Session 4.1 = "writer 快", Session 4.2 = "writer 最优"
+- **Risk note for Session 5**: 若 Session 4.1 / 4.2 跳过直接接入 Path L, kernel 主循环 Phase 3 的 16 ds_read_u8/lane (× 2 iter × 8 warps × 64 lanes = 16K byte reads per 128×128 tile) 会触发严重 LDS bank serialization, 预期 fwd geomean 可能回退 -10%~-20%。若必须跳过, 建议在 Session 5 集成时打开 macro `RRR_B_PRETRANS_FALLBACK_TO_GLOAD=1` 在 perf 不达标时回退老路径
 

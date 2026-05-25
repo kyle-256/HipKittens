@@ -14,7 +14,8 @@ HIPFLAGS = -std=c++20 \
            -I$(THUNDERKITTENS_ROOT)/include \
            -I$(HIP_INCLUDE_DIR)
 
-PROBES := rrr_b_lane_layout_probe rrr_b_pretrans_probe rrr_b_pretrans_st_load_probe
+PROBES := rrr_b_lane_layout_probe rrr_b_pretrans_probe rrr_b_pretrans_st_load_probe \
+          rrr_b_writer_probe
 
 all: $(PROBES)
 
