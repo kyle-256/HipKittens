@@ -67,7 +67,7 @@ v_mfma_f32_*_f8f6f4 (gfx950 cbsz/blgp/abid 0,0,0) is e4m3 native path. Other cbs
 30 dB gate, observed: 47-55 dB (gpt_oss bit-eq, dsv3 47-51, qwen 53-54). Lots of margin to gate.
 
 ## R170 — _bench_p1_rcr_v2 reproducibility
-chi2811 cold, single workload: v2/v1 1.10-1.12 reproducible ±0.02. Suitable for session-level lever decisions.
+chi2762 cold, single workload: v2/v1 1.10-1.12 reproducible ±0.02. Suitable for session-level lever decisions.
 
 ## R171 — _bench_24_v2 unique benefit
 24-shape coverage catches per-shape outliers (qwen_up_M2048 noise). Single-trial 24-shape too noisy; need 3-trial median for production use.

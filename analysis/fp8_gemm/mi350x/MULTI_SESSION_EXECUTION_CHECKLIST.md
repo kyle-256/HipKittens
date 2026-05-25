@@ -5,7 +5,7 @@
 Before any session:
 - [ ] `git log -1` HK turbo + PT outer + PT 3rdparty commit hashes recorded
 - [ ] sync.sh push parity verified for both repos
-- [ ] chi2811 docker exec `import primus_turbo; print(primus_turbo.__file__)` OK
+- [ ] chi2762 docker exec `import primus_turbo; print(primus_turbo.__file__)` OK
 - [ ] `_smoke_p1_0_rcr_v2.py` runs without GPU error
 - [ ] Current bench v2/Triton geomean recorded (baseline)
 

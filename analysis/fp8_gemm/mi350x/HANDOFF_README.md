@@ -56,7 +56,7 @@ These are FOUNDATION probes, not production paths. Production still uses 16Ã—16Ã
 
 ```
 ssh login_node2
-ssh chi2811
+ssh chi2762
 docker exec mlperf_gptoss bash
 cd /workspace/code/Primus-Turbo
 /opt/venv/bin/python scripts/_bench_24_v2.py

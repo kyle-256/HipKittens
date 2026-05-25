@@ -89,7 +89,7 @@
 //       gated by `RRR_B_PRETRANS=1` and dispatcher hook.
 // ---------------------------------------------------------------------------
 #ifndef RRR_B_PRETRANS
-#define RRR_B_PRETRANS 0
+#define RRR_B_PRETRANS 1   // Session 13 PoC verify (revert to 0 after smoke)
 #endif
 #ifndef RRR_B_PRETRANS_FALLBACK_TO_GLOAD
 #define RRR_B_PRETRANS_FALLBACK_TO_GLOAD 1
@@ -1743,8 +1743,20 @@ void grouped_gemm_fp8_kernel_v2_32(const grouped_layout_globals g) {
 template<bool N_MASKED_STORE = false, bool FUSED_KTAIL = false>
 __device__ __forceinline__
 void grouped_rrr_kernel_body_pinned(const grouped_layout_globals g) {
+    // Session 13 (RRR v2 B-pretranspose, body wiring).
+    // RRR_B_PRETRANS=1: switch B-tile LDS layout from ST_v2 (K-major,
+    //   tr_b8 reads in mma) to st_128x128_n_major (N-major, plain b128
+    //   reads). FUSED_KTAIL forced OFF by dispatcher.
+    // RRR_B_PRETRANS=0 (default): legacy ST_v2 path, behaviour unchanged.
     __shared__ ST_row As[2][2];
-    __shared__ ST_v2  Bs[2][2];
+#if RRR_B_PRETRANS
+    using ST_B_TILE = st_fp8e4m3<128, 128, st_128x128_n_major_s>;
+    __shared__ ST_B_TILE Bs[2][2];
+    __shared__ __align__(16) uint8_t stage_lds[16384];
+#else
+    using ST_B_TILE = ST_v2;
+    __shared__ ST_B_TILE Bs[2][2];
+#endif
     constexpr int MAX_G_PLUS_1 = 65;
     __shared__ int s_offs[MAX_G_PLUS_1];
     __shared__ int s_cum_tiles[MAX_G_PLUS_1];
@@ -1834,11 +1846,13 @@ void grouped_rrr_kernel_body_pinned(const grouped_layout_globals g) {
     uint32_t soA[mptA];
     G::prefill_swizzled_offsets(As[0][0], g.a, soA);
 
+#if !RRR_B_PRETRANS
     constexpr int bptB = ST_v2::underlying_subtile_bytes_per_thread;
     constexpr int bpmB = bptB * _NUM_THREADS;
     constexpr int mptB = ST_v2::rows * ST_v2::cols * sizeof(fp8e4m3) / bpmB;
     uint32_t soB[mptB];
     G::prefill_swizzled_offsets(Bs[0][0], g.b, soB);
+#endif
 
     for (int gt = pid; gt < total_tiles; gt += slots_eff) {
         int group_idx, local_tile;
@@ -1941,32 +1955,66 @@ void grouped_rrr_kernel_body_pinned(const grouped_layout_globals g) {
         auto b_co = [&](int s, int k) -> coord<ST_v2> {
             return {0, 0, k, s};
         };
+#if RRR_B_PRETRANS
+        // RRR_B_PRETRANS path: compute HBM byte pointer for the 128 K × 128 N
+        // tile at (k_idx, n_strip_idx) in the per-group shifted B view.
+        // b_gl_g.raw_ptr already shifted by group_idx*K*N (see H3 hoist above);
+        // K-dim stride = stride<2>() bytes per K row, N strip stride = 128 B.
+        const uint32_t b_k_stride_bytes_pre =
+            static_cast<uint32_t>(g.b.template stride<2>());
+        auto b_tile_hbm_ptr_pre = [&](int n_strip_idx, int k_idx)
+                __attribute__((always_inline)) -> const fp8e4m3* {
+            return reinterpret_cast<const fp8e4m3*>(
+                reinterpret_cast<const uint8_t*>(b_gl_g.raw_ptr) +
+                static_cast<size_t>(k_idx) * 128u *
+                    static_cast<size_t>(b_k_stride_bytes_pre) +
+                static_cast<size_t>(n_strip_idx) * 128u);
+        };
+#endif
 
         auto load_a = [&](A_row_reg& dst, ST_row& tile, int wi) {
             auto sub = subtile_inplace<RBM, BK>(tile, {wi, 0});
             load(dst, sub);
         };
-        auto load_b = [&](B_col_reg& dst, ST_v2& tile, int wi) {
+        auto load_b = [&](B_col_reg& dst, ST_B_TILE& tile, int wi) {
+#if RRR_B_PRETRANS
+            load_col_from_st_n_major_subtile(dst, tile, wi * RBN);
+#else
             load_col_from_st(dst, tile, wi * RBN);
+#endif
         };
+
+// Compile-time helper macro: prolog + main-loop B-tile load site.
+//   args: (dst_ref, n_strip_idx, k_idx)
+//   macro=0 → G::load via b_co + soB.
+//   macro=1 → write_b_transpose_n_major_path_L (HBM → staging → N-major LDS).
+#if RRR_B_PRETRANS
+#define BS_LOAD(dst, n_strip, k_idx) \
+    kittens::write_b_transpose_n_major_path_L<ST_B_TILE>( \
+        (dst), b_tile_hbm_ptr_pre((n_strip), (k_idx)), \
+        b_k_stride_bytes_pre, stage_lds)
+#else
+#define BS_LOAD(dst, n_strip, k_idx) \
+    G::load((dst), b_gl_g, b_co((n_strip), (k_idx)), soB)
+#endif
 
         zero(cA); zero(cB); zero(cC); zero(cD);
 
         int tic = 0, toc = 1;
         // Prologue: tile-0 + tile-1 (mirrors dense gemm_kernel<RRR>
         // lines 1421-1435). a-load uses g.a (unpatched) per fix above.
-        G::load(Bs[tic][0], b_gl_g, b_co(bc*2,   0), soB);
+        BS_LOAD(Bs[tic][0], bc*2,   0);
         rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0], a_gl_g, a_co(br*2,   0), soA);
-        G::load(Bs[tic][1], b_gl_g, b_co(bc*2+1, 0), soB);
+        BS_LOAD(Bs[tic][1], bc*2+1, 0);
         rcr_8w_load_hoist<_NUM_THREADS>(As[tic][1], a_gl_g, a_co(br*2+1, 0), soA);
 
         if (wm == 1) __builtin_amdgcn_s_barrier();
         TK_WAIT_VMCNT(RRR_INIT0_VMCNT);
         __builtin_amdgcn_s_barrier();
 
-        G::load(Bs[toc][0], b_gl_g, b_co(bc*2,   1), soB);
+        BS_LOAD(Bs[toc][0], bc*2,   1);
         rcr_8w_load_hoist<_NUM_THREADS>(As[toc][0], a_gl_g, a_co(br*2,   1), soA);
-        G::load(Bs[toc][1], b_gl_g, b_co(bc*2+1, 1), soB);
+        BS_LOAD(Bs[toc][1], bc*2+1, 1);
 
         TK_WAIT_VMCNT(RRR_INIT1_VMCNT);
         __builtin_amdgcn_s_barrier();
@@ -1994,7 +2042,7 @@ void grouped_rrr_kernel_body_pinned(const grouped_layout_globals g) {
 
             // Phase 2: cB = mma(slab0, strip1).
             load_b(b1, Bs[tic][1], wn);
-            G::load(Bs[tic][0], b_gl_g, b_co(bc*2, k+2), soB);
+            BS_LOAD(Bs[tic][0], bc*2, k+2);
             __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
             RRR_MMA_WRAPPER<false>(cB, a, b1);
@@ -2002,7 +2050,7 @@ void grouped_rrr_kernel_body_pinned(const grouped_layout_globals g) {
 
             // Phase 3: cC = mma(slab1, strip0).
             load_a(a, As[tic][1], wm);
-            G::load(Bs[tic][1], b_gl_g, b_co(bc*2+1, k+2), soB);
+            BS_LOAD(Bs[tic][1], bc*2+1, k+2);
             __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
             RRR_MMA_WRAPPER<false>(cC, a, b0);
@@ -2072,6 +2120,16 @@ void grouped_rrr_kernel_body_pinned(const grouped_layout_globals g) {
             __builtin_amdgcn_s_barrier();
         }
 
+#if RRR_B_PRETRANS
+        // RRR_B_PRETRANS=1: dispatcher forces FUSED_KTAIL=false so
+        // the FUSED_KTAIL block below is never instantiated. Preprocess
+        // it out entirely to avoid lexical references to ST_v2-only
+        // helpers (load_col_from_st) inside if-constexpr bodies that
+        // would otherwise type-check against the new ST_NM Bs layout.
+        static_assert(!FUSED_KTAIL,
+            "RRR_B_PRETRANS=1 requires FUSED_KTAIL=false; "
+            "dispatcher must force false template.");
+#else
         // ===== FUSED_KTAIL (RRR FP8) =====
         // K-tail K_REM=64 reduction fused into main kernel epilog. Both A
         // AND B loaded direct-to-register via raw_buffer_load_b8 to avoid
@@ -2327,8 +2385,9 @@ void grouped_rrr_kernel_body_pinned(const grouped_layout_globals g) {
                 }
             }
         }
+#endif  // !RRR_B_PRETRANS  (FUSED_KTAIL block)
 
-#if FP8_RRR_FUSE_PROBE
+#if FP8_RRR_FUSE_PROBE && !RRR_B_PRETRANS
         if (g.fast_k < g.k) {
             // ---- Cooperative pre-zero of Bs[tic][0/1] ----
             // ST_v2 has swizzle padding (= 17408 bytes); strip to 16-byte
@@ -2434,6 +2493,7 @@ void grouped_rrr_kernel_body_pinned(const grouped_layout_globals g) {
         __builtin_amdgcn_s_barrier();
     }
 }
+#undef BS_LOAD
 // R474: kernel symbol + dispatch update — replace v1 forward with v2 body
 
 template<bool N_MASKED_STORE = false, bool FUSED_KTAIL = false>
@@ -2493,7 +2553,16 @@ inline void dispatch_grouped_rrr_v2(grouped_layout_globals_v2_rrr g_in) {
     g.ki      = g.fast_k / K_BLOCK;
     if (g.bpc == 0 || g.ki == 0) return;
     const int K_rem = g.k - g.fast_k;
+#if RRR_B_PRETRANS
+    // Session 13: B-pretranspose body never instantiates FUSED_KTAIL=true
+    // (LDS budget + ST_v2-only K-tail helpers). Caller falls through to
+    // the FUSED=false template even when K_rem==64; the K-tail K_REM=64
+    // contribution is dropped (acceptable for the per-shape PoC subset
+    // where K is divisible by 128). FUSED_KTAIL fix path is Session 13.1.
+    const bool fuse_on = false;
+#else
     const bool fuse_on = (K_rem == 64);
+#endif
     const bool n_aligned = (g.bpc * BLOCK_SIZE == g.n);
 
     static const int slots_env = []() {
@@ -2506,6 +2575,15 @@ inline void dispatch_grouped_rrr_v2(grouped_layout_globals_v2_rrr g_in) {
     const int slots = (g.num_slots > 0 && g.num_slots <= NUM_CUS)
         ? g.num_slots : slots_env;
 
+#if RRR_B_PRETRANS
+    // FUSED_KTAIL=true template is statically refused (see body static_assert);
+    // preprocess fused-true launches out so they are not instantiated.
+    (void)fuse_on;
+    if (n_aligned)
+        grouped_rrr_kernel_v2<false, false><<<dim3(slots), g.block(), 0, g.stream>>>(g);
+    else
+        grouped_rrr_kernel_v2<true,  false><<<dim3(slots), g.block(), 0, g.stream>>>(g);
+#else
     if (fuse_on) {
         if (n_aligned)
             grouped_rrr_kernel_v2<false, true><<<dim3(slots), g.block(), 0, g.stream>>>(g);
@@ -2517,6 +2595,7 @@ inline void dispatch_grouped_rrr_v2(grouped_layout_globals_v2_rrr g_in) {
         else
             grouped_rrr_kernel_v2<true,  false><<<dim3(slots), g.block(), 0, g.stream>>>(g);
     }
+#endif
 }
 
 inline void dispatch_grouped_rcr_v2(grouped_layout_globals_v2 g_in) {

@@ -13,7 +13,7 @@
 - **fwd / dgrad 目标**: vs Triton ≥ **1.15× geomean** (当前 RCR 0.943×, RRR 0.955×)。
 - **持 8-warp MMA** (mandate, 不退 4-warp); persistent + CPU sync free (现 v1 已具备 architecture parity, P0 已确认)。
 - **dual-run**: v1 / v2 并存, 直到 P4 删旧。
-- **做一点 benchmark 一点**: 每 milestone 端点必须出 chi2811 KPI 表 + spill 元数据, 不达标不进下一 milestone。
+- **做一点 benchmark 一点**: 每 milestone 端点必须出 chi2762 KPI 表 + spill 元数据, 不达标不进下一 milestone。
 
 ## §1 Raw delta vs 目标 (来自 Bench agent 2026-05-23)
 
@@ -26,7 +26,7 @@
 | RRR dgrad vs hk_dense | ~0.74× | ≥0.97× | +23pp |
 | spill (BN=256 主路径) | 37/67 VGPR | 0 | 结构性 |
 
-完整 24-shape × 3-op KPI: 远程 chi2811 `/tmp/bench_hk_vs_triton.log`。
+完整 24-shape × 3-op KPI: 远程 chi2762 `/tmp/bench_hk_vs_triton.log`。
 
 ## §2 路线图
 
@@ -133,7 +133,7 @@ v1 dispatcher 已 inline 1 个 (`dispatch_grouped_rcr`); P1.0 起步前补 inlin
 | spill (V/A scratch) | 0 / 0 / 0 |
 | vs hk_dense geomean | ≥ ? |
 | vs Triton geomean | ≥ ? |
-| chi2811 commit (HK + PT) | sha / sha |
+| chi2762 commit (HK + PT) | sha / sha |
 | KPI raw | `/tmp/<milestone>.log` 路径 |
 
 ### P5 Final Bench (2026-05-23) — Campaign D wrap-up

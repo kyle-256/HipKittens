@@ -40,10 +40,10 @@ hipBLASLt fp8 grouped: tested separately. HK beats hipBLASLt ~24% fwd / ~47% bwd
 CK_tile fp8 grouped exists but PT integration through composable_kernel grouped_gemm_quant path. User `[[no-ck-fallback]]` forbids routing to CK for worst shapes.
 
 ## R189 — Final bench command
-chi2811: `cd /workspace/code/Primus-Turbo && /opt/venv/bin/python scripts/_bench_24_v2.py` — get 24-shape v2/v1 + per-shape comparison.
+chi2762: `cd /workspace/code/Primus-Turbo && /opt/venv/bin/python scripts/_bench_24_v2.py` — get 24-shape v2/v1 + per-shape comparison.
 
 ## R190 — Final spill check command
-chi2811: `cd /workspace/code/Primus-Turbo && /opt/venv/bin/python scripts/_check_spill.py` — get v2 4-variant spill metadata.
+chi2762: `cd /workspace/code/Primus-Turbo && /opt/venv/bin/python scripts/_check_spill.py` — get v2 4-variant spill metadata.
 
 ## R191 — Memory file aggregation
 ~30 memory files in `/root/.claude/projects/-wekafs-kyle-code2/memory/`. MEMORY.md index has ~30 entries.
@@ -61,7 +61,7 @@ Per `[[fp8-rrr-32x32-flawed-premise]]`: wrapper swap alone won't reduce spill. M
 HK turbo: 75+ session-specific commits. PT outer dev: 75+ commits. PT 3rdparty submodule bumps every commit.
 
 ## R196 — Push state
-Never pushed to remote git (per user constraint). All sync.sh push deposits to chi2811 remote via rsync only.
+Never pushed to remote git (per user constraint). All sync.sh push deposits to chi2762 remote via rsync only.
 
 ## R197 — Session-end commit anchor
 HK turbo: latest will be `2abfedb1 + this batch`. PT outer: latest mirror chain.

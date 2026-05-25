@@ -50,7 +50,7 @@ print(f"L2 hit rate: {hits/(hits+miss):.3f}")
 
 ## ssh Escape Issue (R80 blocker)
 
-Multi-level `ssh login_node → ssh chi2811 → docker exec` chain corrupts shell escapes for `<<EOF` heredocs and complex `$var` expansion. Workarounds:
+Multi-level `ssh login_node → ssh chi2762 → docker exec` chain corrupts shell escapes for `<<EOF` heredocs and complex `$var` expansion. Workarounds:
 
 1. Pre-write PMC config file locally + scp via login_node (sandbox blocked SCP in current session, may need user help)
 2. Run PMC config write inside docker exec via simple `printf` to single file

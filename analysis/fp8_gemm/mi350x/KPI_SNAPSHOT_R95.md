@@ -2,7 +2,7 @@
 
 ## Full 24-shape RCR fwd bench
 
-Run: 2026-05-23, chi2811, HK turbo `8ec865a4` + PT outer `6647ff15` (post-R91)
+Run: 2026-05-23, chi2762, HK turbo `8ec865a4` + PT outer `6647ff15` (post-R91)
 Script: `Primus-Turbo/scripts/_bench_24_v2.py`
 Method: 10 warmup + 50 timed iters, single trial
 
