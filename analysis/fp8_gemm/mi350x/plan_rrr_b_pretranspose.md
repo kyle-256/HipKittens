@@ -483,3 +483,101 @@ CSV `lane,byte,k,n` 用 `./rrr_b_lane_layout_probe --table` 重生成。
     4. **Force compiler not to reorder**: declare int2 locals as `volatile`, or wrap each scope's byte-loads in `__threadfence_block()`, or store ds_read results IMMEDIATELY to `out[]` (no intermediate locals)
   - Until 5.1 lands a working subtile load, Session 5 kernel body integration cannot proceed
 - **Session 5 deliverable surface**: probe file + macro scaffold + plan addendum + memory. v1/v2 production paths unchanged
+
+## Session 7 status: PARTIAL (per-shape override table + probe infra landed; 8/8 ≥1.15× target structurally unmet, follow-ups 7.1/7.2/7.3 added)  HK=<plan-bump>  PT=<probe+override>  outer=<bump>
+- 2026-05-25
+- **Scope delivered (probe infrastructure + per-shape autotune override)**
+  - **Probe script** `Primus-Turbo/benchmark/ops/probe_rrr_per_shape.py` (~150 LOC): 全 24-shape brute-force sweep (16 cfg × bn∈{0,128} = up to 32 candidates/shape) × median-of-3 trials × 30 iters; reports best HK ms + Triton ratio + writes raw matrix `/tmp/probe_rrr_per_shape.json`。直接调底层 op (bypass autotune), 给 reproducible per-shape ground truth
+  - **Override table** `grouped_gemm_fp8_impl.py:_HK_FP8_RRR_OVERRIDES` (24 entry dict, `(m_total, n, k) → (gm, xcds, bn)`) from probe winners; dispatch hooks BEFORE sweep, bypasses autotune cost when shape matches MoE matrix
+  - **New candidate** `(4, 32)` added to `_HK_FP8_RRR_CANDIDATES` (probe found it Top-1 for gpt_oss-down-B4-M2048 at 1.261×, currently autotune can't reach)
+- **Scope NOT delivered (plan gate 8/8 ≥1.15× UNMET, structural ceiling)**
+  - ❌ 8/8 user shape RRR dgrad ≥ 1.15× Triton — **per-shape probe best-of-32 geomean = 1.100× (min 1.033 / max 1.309), 4/24 PASS** (gpt_oss-up B4 M2048 1.309 / gpt_oss-down B4 M2048 1.261 / qwen-down B4 M2048 1.284 / qwen-down B4 M4096 1.301)
+  - ❌ 8-shape user subset ≥ 1.15× : 1/8 pass (qwen_up_B4_M4096 1.17 per kernel_only bench); 5/8 in [1.02, 1.15] gap range, 2/8 below 1.05
+  - ❌ chunk_size autotune dimension — current binding ABI (10 args, no chunk_size slot) blocks; deferred to Session 7.1
+- **Why structural ceiling hit**: 
+  - Per-shape brute-force = exhaustively measured 24 × 32 = 768 (gm,xcds,bn) timings on chi2762 (gfx950, MI355X); **no (gm,xcds,bn) cfg exists** in this product space that hits 1.15× for 8/8 shapes
+  - 7/24 worst shapes (ratio 1.03-1.06) 全 B=16 grouped + dsv3-up/qwen-up on large K (4096-7168) — 命中 [[fp8-rrr-attempt-h14]] HBM bandwidth ceiling 物理结论 (B=16 grouped streams 544MB B data vs dense 364MB = ~25% gap), 单凭 (gm,xcds,bn) tuning 不可破
+  - 真 lever 是 B-pretranspose (Session 4 PASSED, Session 5 PARTIAL — subtile load 阻塞) 或 split-K cross-group B share (Task #30, ~800 LOC, multi-session)
+- **Methodology note (kernel_only vs autograd bench divergence)**:
+  - Autograd bench `bench_hk_vs_triton_grouped_fp8_dgrad.py` 用 `t_dgrad = t_fb - t_fwd`, 早期单次 run 显示 1.30× geomean — 但 per-shape 单次 ratio swing 0.41-1.92× across runs, methodology high-noise
+  - Kernel-only bench `bench_hk_vs_triton_grouped_fp8_kernel_only.py` 直接 dispatch dgrad op, geomean 1.073-1.095× (5/24 pass), per-shape stable
+  - 真值 = kernel-only。autograd 高 ratio 是 fwd 减去引入的噪声不是 kernel gain
+- **HK commit**: `<plan-bump-hash>` (plan addendum only, no kernel touch this session)
+- **PT 3rdparty commit**: `<bump>`
+- **PT outer commit**: `<probe+override+bump>`
+- **memory**: `feedback_rrr_b_pretrans_session7_per_shape_override.md`
+- **Why marked PARTIAL not BLOCKED**: 交付了 reproducible per-shape probe infra + override table 让后续 session 拿到 24-shape ground truth 而不必重跑全 768 cfg sweep; 7.1/7.2/7.3 follow-ups 提供继续推进路径
+
+---
+
+## Session 7.1 — chunk_size 第 4 autotune 维度 (~250 LOC, 3-4h)
+
+**目标**: 把 chunk_size 从 dispatcher 内部 heuristic (`k>=4096 && n>=4096 ? 48 : 64`) 提升到 autotune 候选维度, 让 per-shape probe 可以搜更宽 grid。
+
+**前置**: Session 7 PASSED (override table 已有 baseline)
+
+**任务**
+1. **ABI 扩展** `kernel_fp8_layouts2.cpp::dispatch_grouped_rrr_v2` 加 `int chunk_size_override = -1` 参数 (sentinel -1 = 走原 heuristic)
+2. **PT binding** `csrc/kernels/grouped_gemm/HipKittens/hk_grouped_gemm_gfx950.cu` 加 chunk_size 参数 + 在 `torch::library::Library` def_schema 加新 arg
+3. **op schema bump** `bindings_pytorch.cpp / bindings_pytorch_hip.cpp` 加 11 个 arg (向后兼容: 旧调用 sentinel)
+4. **Python wrapper** `grouped_gemm_fp8_impl.py` 把 `_HK_FP8_RRR_CANDIDATES` 升为 4-tuple `(gm, xcds, bn, chunk)`, 候选 chunk ∈ {16, 32, 48, 64, 96}; override table 也升 4-tuple
+5. **重跑 probe** `probe_rrr_per_shape.py` 加 chunk_size 维度 (cfg 数 16×2×5 = 160/shape, total 3840), re-extract winners
+
+**验证**
+- 24-shape SNR ≥ 25 dB (correctness floor)
+- 24-shape geomean **≥** Session 7 baseline 1.073× (kernel_only) — chunk_size 是放宽 search space 不会变差除非 race fix gate
+- 至少 3 shape ratio 增加 ≥ 3pp (证明新维度有效)
+
+**完成动作**
+- HK + PT commit (kernel ABI bump + binding + Python override re-fill)
+- 追加 `## Session 7.1 status: PASSED HK=<hash> PT=<hash>`
+
+**Risk**
+- ABI bump 需要 `pip install --no-build-isolation -e .` 重 build (5-10 min on chi2811)
+- chunk_size=16 短 K 可能撞 race-fix gate (bn=128 路径 vmcnt drain 假设 chunk_size ≥ 32); 必须 audit dispatcher line 1722-1729
+
+---
+
+## Session 7.2 — Session 5/5.1 B-pretranspose 解锁后重做 override table (~50 LOC, 1-2h)
+
+**目标**: 当 Session 5.1 落地 subtile load 修复 + Session 5 body integration 完成后, 重跑 probe + 刷新 override table (B-pretranspose 路径会改变 per-shape 最优 cfg)。
+
+**前置**: Session 5 PASSED (RRR_B_PRETRANS=1 在 RRR body 6 个 G::load site 全部接入, ISA disasm 0 × `ds_read_b64_tr_b8`)
+
+**任务**
+1. **重跑 probe** `probe_rrr_per_shape.py` with `RRR_B_PRETRANS=1` macro forced (env knob 或 dispatcher 强制选 pretrans path)
+2. **diff override table**: 哪些 shape 切到不同 (gm, xcds, bn)? 哪些原 bn=128 winner 现在改 bn=0?
+3. **update `_HK_FP8_RRR_OVERRIDES`** 用新 winners
+4. **8-shape gate re-verify**: 拿 user subset 跑 bench, 期望 4-6/8 ≥ 1.15× (B-pretranspose 预期 close 8-12pp on B=16 large-K 失败 shape)
+
+**验证**
+- 24-shape geomean ratio **≥** Session 7 baseline 1.100× (probe geomean)
+- 期望 8-shape ≥ 1.15× count: ≥ 4/8 (Session 5 plan 估算)
+
+**完成动作**
+- PT only commit (no kernel change, just override table refresh)
+- 追加 `## Session 7.2 status: PASSED PT=<hash> 8shape=<x>/8`
+
+---
+
+## Session 7.3 — dgrad bench methodology stabilize (~100 LOC, 2h)
+
+**目标**: 把 `bench_hk_vs_triton_grouped_fp8_dgrad.py` 从单 run noisy 改为 multi-trial median, 让 autograd 路径也能给出可信 geomean (今天 single-run swing 0.41-1.92× 不可用)。
+
+**前置**: 无依赖 (与 7.1/7.2 并行)
+
+**任务**
+1. 改 bench script 加 `--n-trials` 参数 (默认 5), 每 trial 独立 `torch.cuda.synchronize` → median report
+2. 加 per-shape stderr 报告 (median ± stderr%)
+3. 加 `--methodology` flag: `subtract` (默认, 现有 t_fb - t_fwd) vs `kernel_only` (新, 直接 dispatch hk_grouped_rrr_fp8)
+4. 跑两种 methodology 5-trial × 24 shape, 报告 geomean / min / max diff
+5. 落档预期 noise floor (autograd 路径 stderr 多大 → 多少 trial 才稳)
+
+**验证**
+- 单 shape stderr ≤ 5% (5-trial median)
+- 两 methodology geomean ratio diff ≤ 8pp (差距是真 (autograd overhead), 不是 noise)
+
+**完成动作**
+- PT only commit
+- 追加 `## Session 7.3 status: PASSED PT=<hash> noise_floor=<x>% methodology_gap=<y>pp`
+
