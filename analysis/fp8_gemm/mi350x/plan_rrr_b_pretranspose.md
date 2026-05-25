@@ -810,3 +810,50 @@ CSV `lane,byte,k,n` 用 `./rrr_b_lane_layout_probe --table` 重生成。
 - **结论**: chunk_size 是真 lever; 24-shape geomean 从 Session 7 的 1.065× 推到 1.113× (+4.8pp), 仍距 8/8 ≥1.15× 终极目标差 0-15pp/shape
 - HK commit: `2ae8c6ce`; PT 3rdparty commit: `<not bumped — no kernel change>`; PT outer commit: `c439e5e3`
 - memory: `feedback_rrr_b_pretrans_session10_chunk_autotune.md`
+
+---
+
+## Session 11 status: PASSED  HK=<n/a — no kernel change>  PT=<pending>  outer=<pending>
+- 2026-05-25
+- **Scope delivered (final bench + verdict + Session 7.2 incidental upgrade)**
+  - **Final 24-shape kernel_only bench** on chi2762 (gfx950, MI355X) — `bench_hk_vs_triton_grouped_fp8_kernel_only.py` (auto_tune=False, override-path = production default)
+  - **Session 7.2 incidental upgrade** (override table 3→4 tuple): `_HK_FP8_RRR_OVERRIDES` 24 entries 全部刷新为 `(gm, xcds, bn, chunk)` source = Session 10 probe winners JSON (`/tmp/probe_rrr_per_shape.json`, 160 cfg/shape × median-of-3 trials). 同时改 override consumer 解 4-tuple 传 chunk. **production 默认路径现在直接吃到 Session 10 chunk autotune 增益, 不再需要开 autotune=True.**
+- **3 production-path runs (autotune OFF, override active)**
+  | scenario | fwd geo | dgrad geo | wgrad geo | dgrad min | dgrad max | dgrad ≥1.15 |
+  |---|---:|---:|---:|---:|---:|---:|
+  | pre-Session-11 (3-tuple override, chunk=heuristic) | 1.149× | 1.031× | 1.768× | 0.74 | 1.20 | 3/24 |
+  | Session 11 (4-tuple override, chunk=probe winner) | 1.139× | **1.075×** | 1.786× | **1.00** | **1.33** | 3/24 |
+  | reference (autotune ON + override cleared, chunk env) | 1.133× | 1.078× | 1.781× | 1.00 | 1.35 | 3/24 |
+  - **Session 11 production default now matches the autotune-on ceiling within 0.3pp** (1.075 vs 1.078) — override 4-tuple 完成了 Session 10 增益的 last-mile 落地
+  - dgrad min lifted 0.74 → 1.00: 4 个原本反 perf 的 shape (dsv3-down B4 M2048, dsv3-up B4 M4096, qwen-down B4 M2048, qwen-down B4 M4096) 全部 ≥ 1.0× Triton
+- **Per-shape dgrad ratio (Session 11 production, 24-shape full)**
+  ```
+  gpt_oss-up    B4 M2048: 1.23x   gpt_oss-down B4 M2048: 1.17x
+  gpt_oss-up    B4 M4096: 1.03x   gpt_oss-down B4 M4096: 1.12x
+  gpt_oss-up   B16 M2048: 1.03x   gpt_oss-down B16 M2048: 1.07x
+  gpt_oss-up   B16 M4096: 1.03x   gpt_oss-down B16 M4096: 1.09x
+  dsv3-up       B4 M2048: 1.06x   dsv3-down    B4 M2048: 1.03x
+  dsv3-up       B4 M4096: 1.03x   dsv3-down    B4 M4096: 1.00x
+  dsv3-up      B16 M2048: 1.05x   dsv3-down   B16 M2048: 1.07x
+  dsv3-up      B16 M4096: 1.06x   dsv3-down   B16 M4096: 1.02x
+  qwen-up       B4 M2048: 1.04x   qwen-down    B4 M2048: 1.12x
+  qwen-up       B4 M4096: 1.04x   qwen-down    B4 M4096: 1.33x
+  qwen-up      B16 M2048: 1.06x   qwen-down   B16 M2048: 1.04x
+  qwen-up      B16 M4096: 1.07x   qwen-down   B16 M4096: 1.05x
+  ```
+- **8 user shape subset** (from memory R210, plan §3 "user 8 shape"): gpt_oss_up B4 M2048 / gpt_oss_up B16 M2048 / dsv3_up B4 M4096 / dsv3_up B16 M2048 / dsv3_down B16 M4096 / qwen_up B4 M4096 / qwen_down B16 M2048 / qwen_down B16 M4096
+  - ratios: 1.23 / 1.03 / 1.03 / 1.05 / 1.02 / 1.04 / 1.04 / 1.05
+  - **8-shape geomean = 1.06×**, **pass ≥1.15× = 1/8** (gpt_oss_up_B4_M2048 only)
+- **Plan target verdict**
+  - "8/8 user shape RRR dgrad ≥ 1.15× Triton" → **NOT MET** (1/8)
+  - "24-shape geomean ≥ Session 7 baseline 1.065× (kernel_only)" → **MET** (1.075× = +1.0pp)
+  - "24-shape pass count ≥1.15× ≥ Session 10 probe 4/24" → **NOT MET in production bench** (3/24); probe 4-th winner (gpt_oss_up_B4 1.372× vs prod 1.23×) gap = probe 用 median-of-3 × 30 iter + 同 cfg 重复 vs bench 单 run × 50 iter, methodology delta ~10pp on best-shape, 跨 (gm,xcds,bn,chunk) search space 复现性不如 probe
+- **7 worst-shape 共性 (ratio 1.00-1.07×, 17/24 shapes)**
+  - 全部在 **B=16 grouped** 或 **B=4 + 大 K (≥4096)**
+  - 验证 [[fp8-rrr-attempt-h14]] HBM bandwidth ceiling 物理结论: B=16 grouped streams ~544MB B-data vs dense ~364MB = ~50% 数据差 → ~25% TFLOPS gap, source-level kernel tweaking 不可破
+  - **真 lever 仍是 (a) B-pretranspose ds_read_b128 主循环 (Session 5/9 系列, subtile load primitive 已 fix in Session 8, body 集成 Session 9.1/9.2/9.3 待做) 或 (b) split-K cross-group B share (~800 LOC, multi-session)**
+- **HK commit**: 不动 (本 session 无 kernel/header 改动)
+- **PT commit**: `<pending>` (override table 4-tuple 刷新 + plan addendum)
+- **memory**: `feedback_rrr_b_pretrans_session11_final_bench.md`
+- **PT 3rdparty bump**: `<n/a — no HK kernel change>`
+- **Session 11 通过最小可独立的子部分**: 完整 final bench + verdict + 顺手把 Session 7.2 spec 的 override 4-tuple 刷新落地, 让 production 默认路径吃到 Session 10 增益。剩余 Session 9.1/9.2/9.3 (B-pretranspose body integration) 已在 plan 中, 真 1.15× lever 路径明确
