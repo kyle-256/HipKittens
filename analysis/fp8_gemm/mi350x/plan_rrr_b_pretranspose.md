@@ -484,7 +484,7 @@ CSV `lane,byte,k,n` 用 `./rrr_b_lane_layout_probe --table` 重生成。
   - Until 5.1 lands a working subtile load, Session 5 kernel body integration cannot proceed
 - **Session 5 deliverable surface**: probe file + macro scaffold + plan addendum + memory. v1/v2 production paths unchanged
 
-## Session 7 status: PARTIAL (per-shape override table + probe infra landed; 8/8 ≥1.15× target structurally unmet, follow-ups 7.1/7.2/7.3 added)  HK=<plan-bump>  PT=<probe+override>  outer=<bump>
+## Session 7 status: PARTIAL (per-shape override table + probe infra landed; 8/8 ≥1.15× target structurally unmet, follow-ups 7.1/7.2/7.3 added)  HK=bb35e595  PT=a76c3dee  (3rdparty bump in PT outer commit)
 - 2026-05-25
 - **Scope delivered (probe infrastructure + per-shape autotune override)**
   - **Probe script** `Primus-Turbo/benchmark/ops/probe_rrr_per_shape.py` (~150 LOC): 全 24-shape brute-force sweep (16 cfg × bn∈{0,128} = up to 32 candidates/shape) × median-of-3 trials × 30 iters; reports best HK ms + Triton ratio + writes raw matrix `/tmp/probe_rrr_per_shape.json`。直接调底层 op (bypass autotune), 给 reproducible per-shape ground truth
@@ -502,9 +502,9 @@ CSV `lane,byte,k,n` 用 `./rrr_b_lane_layout_probe --table` 重生成。
   - Autograd bench `bench_hk_vs_triton_grouped_fp8_dgrad.py` 用 `t_dgrad = t_fb - t_fwd`, 早期单次 run 显示 1.30× geomean — 但 per-shape 单次 ratio swing 0.41-1.92× across runs, methodology high-noise
   - Kernel-only bench `bench_hk_vs_triton_grouped_fp8_kernel_only.py` 直接 dispatch dgrad op, geomean 1.073-1.095× (5/24 pass), per-shape stable
   - 真值 = kernel-only。autograd 高 ratio 是 fwd 减去引入的噪声不是 kernel gain
-- **HK commit**: `<plan-bump-hash>` (plan addendum only, no kernel touch this session)
-- **PT 3rdparty commit**: `<bump>`
-- **PT outer commit**: `<probe+override+bump>`
+- **HK commit**: `bb35e595` (plan addendum only, no kernel touch this session)
+- **PT 3rdparty bump**: `bb35e595` (mirrored in PT outer commit)
+- **PT outer commit**: `a76c3dee` (probe + override table + 3rdparty bump)
 - **memory**: `feedback_rrr_b_pretrans_session7_per_shape_override.md`
 - **Why marked PARTIAL not BLOCKED**: 交付了 reproducible per-shape probe infra + override table 让后续 session 拿到 24-shape ground truth 而不必重跑全 768 cfg sweep; 7.1/7.2/7.3 follow-ups 提供继续推进路径
 
