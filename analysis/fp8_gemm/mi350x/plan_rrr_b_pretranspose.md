@@ -191,3 +191,9 @@ CSV `lane,byte,k,n` 用 `./rrr_b_lane_layout_probe --table` 重生成。
 ## Session log (按完成顺序追加)
 <!-- 每个 session 完成或被卡，在下方追加一行 -->
 
+## Session 1 status: PASSED  HK=bac982bd  PT=7736b348  (3rdparty=a5849bc7)
+- 2026-05-25
+- probe build + run pass on chi2811 (gfx950); coverage 2048/2048 unique
+- 闭式映射 `(lane, byte) → (k, n)` 见 Session 1 result 段
+- memory: `feedback_rrr_b_lane_layout.md`
+
