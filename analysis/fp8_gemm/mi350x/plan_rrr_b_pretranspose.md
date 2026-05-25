@@ -790,7 +790,7 @@ CSV `lane,byte,k,n` 用 `./rrr_b_lane_layout_probe --table` 重生成。
 
 ---
 
-## Session 10 status: PASSED  HK=<this commit>  PT 3rdparty=<this commit>  outer=<this commit>
+## Session 10 status: PASSED  HK=2ae8c6ce  PT 3rdparty=<not bumped, no kernel change>  outer=c439e5e3
 - 2026-05-25
 - **Scope delivered**
   - ABI extend: `dispatch_grouped_rrr_v2` 已有 `chunk_size` 字段 (struct), wrapper `hk_grouped_rrr_fp8` + `hk_grouped_rrr_fp8_new` 加 `int chunk_size` 参数 (sentinel 0 = dispatcher heuristic)
@@ -808,5 +808,5 @@ CSV `lane,byte,k,n` 用 `./rrr_b_lane_layout_probe --table` 重生成。
     - qwen_down_B4_M4096: 1.349× (best (16,0,128,0))
   - chunk dim 分布: chunk=64 赢 11 shape, chunk=32 赢 8, chunk=96 赢 3, chunk=0 (heuristic) 赢 2, chunk=48 赢 0 → 之前 dispatcher 默认 48 实际 actively suboptimal
 - **结论**: chunk_size 是真 lever; 24-shape geomean 从 Session 7 的 1.065× 推到 1.113× (+4.8pp), 仍距 8/8 ≥1.15× 终极目标差 0-15pp/shape
-- HK commit: `<pending>`; PT 3rdparty commit: `<pending>`; PT outer commit: `<pending>`
+- HK commit: `2ae8c6ce`; PT 3rdparty commit: `<not bumped — no kernel change>`; PT outer commit: `c439e5e3`
 - memory: `feedback_rrr_b_pretrans_session10_chunk_autotune.md`
