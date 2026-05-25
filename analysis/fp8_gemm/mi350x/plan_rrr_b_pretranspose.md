@@ -273,7 +273,7 @@
 
 ---
 
-## Session 6 status: PASSED  (commits 待填: HK=<hash> PT 3rdparty=<hash> outer=<hash>)
+## Session 6 status: PASSED  (HK=82a67c83 PT 3rdparty=6835203f outer=f9d720aa)
 
 **实施**: 不动 wrapper 实现, 仅在文件顶加 `RRR_S6_USE_VACC` macro + `RRR_MMA_WRAPPER` typedef-style 重定向, `replace_all` 把 RRR body 24 个 `rrr_mma_v2_agpr_inplace_wrapper<false>` 调用点替换为 `RRR_MMA_WRAPPER<false>`。Default = 1 (vacc), set =0 可一键 A/B 比对回 R662 AGPR baseline。约 30 LOC (远小于 plan 估计的 200 LOC) — 因为发现『delta 不需要 AGPR 数据流重写, 直接换 storage class 即一刀切'.
 
