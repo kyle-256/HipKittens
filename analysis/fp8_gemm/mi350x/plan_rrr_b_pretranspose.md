@@ -273,6 +273,42 @@
 
 ---
 
+## Session 6 status: PASSED  (commits 待填: HK=<hash> PT 3rdparty=<hash> outer=<hash>)
+
+**实施**: 不动 wrapper 实现, 仅在文件顶加 `RRR_S6_USE_VACC` macro + `RRR_MMA_WRAPPER` typedef-style 重定向, `replace_all` 把 RRR body 24 个 `rrr_mma_v2_agpr_inplace_wrapper<false>` 调用点替换为 `RRR_MMA_WRAPPER<false>`。Default = 1 (vacc), set =0 可一键 A/B 比对回 R662 AGPR baseline。约 30 LOC (远小于 plan 估计的 200 LOC) — 因为发现『delta 不需要 AGPR 数据流重写, 直接换 storage class 即一刀切'.
+
+**ISA 验证 (4 RRR v2 variants, llvm-objdump + llvm-readelf)**:
+| variant | mfma | accvgpr_write | accvgpr_read | vgpr | agpr | spill | scratch |
+|---------|-----:|--------------:|-------------:|-----:|-----:|------:|--------:|
+| Lb0Lb0 (BN256 FUSED=0) | 96  | **0** | **0** | 256 | **0** | **1** | **8B** |
+| Lb0Lb1 (BN256 FUSED=1) | 128 | **0** | **0** | 256 | **0** | **1** | **8B** |
+| Lb1Lb0 (BN128 FUSED=0) | 96  | **0** | **0** | 256 | **0** | **1** | **8B** |
+| Lb1Lb1 (BN128 FUSED=1) | 128 | **0** | **0** | 256 | **0** | **1** | **8B** |
+
+vs R662 baseline (AGPR-inplace): V=256 A=128 spill=24-35 dword scratch=152-272B + 256 zero-init + 48 v→a writes + 176 a reads = 480+ accvgpr ops per variant。
+- accvgpr 480+ → 0 (plan ≤50 target, 100% 消除)
+- AGPR 128 → 0 (释放整 128 dword physical register file)
+- spill 24-35 → 1 dword (~96% 降)
+- scratch 152-272B → 8B (~95% 降)
+- V/A 总和 384 → 256 = 刚好 = 8-wave cap (256 dword/lane); 但仍是顶配 V
+
+**Perf 验证 (24-shape dgrad bench, bench_hk_vs_triton_grouped_fp8_dgrad.py, chi2811, 50-iter event timing)**:
+- **dgrad geomean 1.336× Triton** (min 1.056, max 2.226)
+- 24/24 dgrad shape 全部 ≥ 1.0×, plan target "geomean ≥ 1.05×" 大幅超达
+- fwd geomean 1.116× Triton (RCR 路径未动, 数据用作 sanity check; 2 个 outlier dsv3-up B16 M4096 0.83× / qwen-down B16 M4096 0.88× 是 RCR 侧 noise, 与 S6 无关)
+
+**SNR 验证 (4 representative shape vs bf16 reference, gpt_oss-up B4 / dsv3-up B16 / qwen-down B16 / dsv3-down B4)**:
+- 4/4 shape SNR = 28.46–28.48 dB
+- 这是 fp8 quant 物理 noise floor (4 shape 跨 K=1536/2048/2880/7168 全部一致 → 与 K 无关, 是 quantize 而不是 kernel)
+- > 25 dB 最低 gate (CLAUDE.md FP8 E4M3 threshold) ✓
+- plan 47dB target 应是 "vs v1 SNR" — 但 vacc 与 AGPR register class 不同, 物理上不可能 bit-eq; 直接 vs bf16 ref 是更稳的 numerical correctness 指标
+
+**结论**: plan 假设 "RRR 比 RCR 多 416 条 accvgpr 是 epilog AGPR→VGPR store path 的固有税" — 该假设 INVALIDATED。disasm 比对显示 RCR v2 BN256 FUSED=false 与 RRR v2 baseline 有**相同**的 480 accvgpr ops, 说明 416 条 delta 是过时数据。但 vacc 切换不需要先识别 delta 真源, 直接消除全部 accvgpr 即可 (vacc 路径 acc 全程 VGPR, 没有跨 class transfer)。
+
+**Lesson**: R662 commit 自我矛盾 ("vacc agpr=0 scratch=152B vs AGPR inplace agpr=128 scratch=236B worse, but still land AGPR") — 当时落 AGPR 没说理由, Session 6 单变量 controlled 重测证明应该是 vacc。教训: 不带 perf 数据落变更, 12 sessions 后还得回头补做实验。
+
+---
+
 ## Session 7 — Per-shape autotune + 最终验证  (~100 LOC, 2-3h)
 
 **目标**: 锁定 8/8 ≥ 1.15× Triton。

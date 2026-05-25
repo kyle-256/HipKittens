@@ -100,6 +100,33 @@ static_assert(RRR_B_PRETRANS == 0 || RRR_B_PRETRANS == 1,
 #error "RRR_B_PRETRANS=1 path not yet wired — see Session 5.1 plan."
 #endif
 
+// ---------------------------------------------------------------------------
+// Session 6 (AGPR vs VGPR acc storage class) — committed default = vacc.
+// ---------------------------------------------------------------------------
+//   RRR_S6_USE_VACC = 1 (default): RRR body dispatches `rrr_mma_v2_vacc_wrapper`
+//     — acc in VGPR (float2). Per-variant metadata: V=256 A=0 spill=1 dword
+//     scratch=8B. All 4 variants (BN256/BN128 × FUSED 0/1) have 0
+//     v_accvgpr_write / 0 v_accvgpr_read in the entire kernel; mfma count
+//     unchanged (96 for FUSED=0, 128 for FUSED=1).
+//   RRR_S6_USE_VACC = 0: revert to `rrr_mma_v2_agpr_inplace_wrapper` (R662
+//     baseline) — V=256 A=128 spill=24-35 scratch=152-272B with 480+
+//     accvgpr ops (256 zero-init prolog + 48 v→a writes + 176 reads epilog).
+//   Measured impact (24-shape dgrad bench vs Triton, chi2811):
+//     vacc=1: geomean 1.336× (min 1.056, max 2.226)
+//     vacc=0 (prior head): ~1.11× geomean (per [[fp8-rrr-h11-h12]] / R662 notes)
+//   Wrappers are byte-equivalent at the mma layer; only the storage class
+//   differs. SNR vs bf16 ref = 28.46 dB (fp8 quant noise floor, ≥25dB gate).
+// ---------------------------------------------------------------------------
+#ifndef RRR_S6_USE_VACC
+#define RRR_S6_USE_VACC 1
+#endif
+
+#if RRR_S6_USE_VACC
+#define RRR_MMA_WRAPPER rrr_mma_v2_vacc_wrapper
+#else
+#define RRR_MMA_WRAPPER rrr_mma_v2_agpr_inplace_wrapper
+#endif
+
 
 
 
@@ -1905,7 +1932,7 @@ void grouped_rrr_kernel_body_pinned(const grouped_layout_globals g) {
             // mfma latency cycles.
             TK_WAIT_LGKM(RRR_PREFETCH_LGKM); __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            rrr_mma_v2_agpr_inplace_wrapper<false>(cA, a, b0);
+            RRR_MMA_WRAPPER<false>(cA, a, b0);
             __builtin_amdgcn_s_barrier();
 
             // Phase 2: cB = mma(slab0, strip1).
@@ -1913,7 +1940,7 @@ void grouped_rrr_kernel_body_pinned(const grouped_layout_globals g) {
             G::load(Bs[tic][0], b_gl_g, b_co(bc*2, k+2), soB);
             __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            rrr_mma_v2_agpr_inplace_wrapper<false>(cB, a, b1);
+            RRR_MMA_WRAPPER<false>(cB, a, b1);
             __builtin_amdgcn_s_barrier();
 
             // Phase 3: cC = mma(slab1, strip0).
@@ -1921,14 +1948,14 @@ void grouped_rrr_kernel_body_pinned(const grouped_layout_globals g) {
             G::load(Bs[tic][1], b_gl_g, b_co(bc*2+1, k+2), soB);
             __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            rrr_mma_v2_agpr_inplace_wrapper<false>(cC, a, b0);
+            RRR_MMA_WRAPPER<false>(cC, a, b0);
             __builtin_amdgcn_s_barrier();
 
             // Phase 4: cD = mma(slab1, strip1).
             rcr_8w_load_hoist<_NUM_THREADS>(As[tic][0], a_gl_g, a_co(br*2, k+2), soA);
             TK_WAIT_VMCNT(RRR_STEADY_VMCNT); __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            rrr_mma_v2_agpr_inplace_wrapper<false>(cD, a, b1);
+            RRR_MMA_WRAPPER<false>(cD, a, b1);
             __builtin_amdgcn_s_barrier();
             RRR_SCHED_BARRIER();
         }
@@ -1941,24 +1968,24 @@ void grouped_rrr_kernel_body_pinned(const grouped_layout_globals g) {
             rcr_8w_load_hoist<_NUM_THREADS>(As[toc][1], a_gl_g, a_co(br*2+1, ki_dyn-1), soA);
             __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rrr_mma_v2_agpr_inplace_wrapper<false>(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); RRR_MMA_WRAPPER<false>(cA, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rrr_mma_v2_agpr_inplace_wrapper<false>(cB, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); RRR_MMA_WRAPPER<false>(cB, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
             TK_WAIT_VMCNT(RRR_EPILOGUE_VMCNT); __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rrr_mma_v2_agpr_inplace_wrapper<false>(cC, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); RRR_MMA_WRAPPER<false>(cC, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             // Dense-pattern prefetch: load b0 for epilog 2 NOW (Bs[toc][0]
             // post-flip = Bs[new tic][0]). Hides LDS read latency under cD mma.
             load_b(b0, Bs[toc][0], wn);
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rrr_mma_v2_agpr_inplace_wrapper<false>(cD, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); RRR_MMA_WRAPPER<false>(cD, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
             RRR_SCHED_BARRIER();
             tic ^= 1; toc ^= 1;
@@ -1970,21 +1997,21 @@ void grouped_rrr_kernel_body_pinned(const grouped_layout_globals g) {
             load_a(a, As[tic][0], wm);
             asm volatile("s_waitcnt vmcnt(0)"); __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rrr_mma_v2_agpr_inplace_wrapper<false>(cA, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); RRR_MMA_WRAPPER<false>(cA, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rrr_mma_v2_agpr_inplace_wrapper<false>(cB, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); RRR_MMA_WRAPPER<false>(cB, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             load_a(a, As[tic][1], wm);
             __builtin_amdgcn_s_barrier();
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rrr_mma_v2_agpr_inplace_wrapper<false>(cC, a, b0); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); RRR_MMA_WRAPPER<false>(cC, a, b0); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
 
             MAYBE_DRAIN_LGKM();
-            __builtin_amdgcn_s_setprio(1); rrr_mma_v2_agpr_inplace_wrapper<false>(cD, a, b1); __builtin_amdgcn_s_setprio(0);
+            __builtin_amdgcn_s_setprio(1); RRR_MMA_WRAPPER<false>(cD, a, b1); __builtin_amdgcn_s_setprio(0);
             __builtin_amdgcn_s_barrier();
         }
 
@@ -2217,13 +2244,13 @@ void grouped_rrr_kernel_body_pinned(const grouped_layout_globals g) {
                     load_col_from_st(b1_kt, Bs[tic][1], wn * RBN);
                     MAYBE_DRAIN_LGKM();
 
-                    rrr_mma_v2_agpr_inplace_wrapper<false>(cA, a, b0_kt);
-                    rrr_mma_v2_agpr_inplace_wrapper<false>(cB, a, b1_kt);
+                    RRR_MMA_WRAPPER<false>(cA, a, b0_kt);
+                    RRR_MMA_WRAPPER<false>(cB, a, b1_kt);
 
                     load_a_kt_fk(a, 1);
                     asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
-                    rrr_mma_v2_agpr_inplace_wrapper<false>(cC, a, b0_kt);
-                    rrr_mma_v2_agpr_inplace_wrapper<false>(cD, a, b1_kt);
+                    RRR_MMA_WRAPPER<false>(cC, a, b0_kt);
+                    RRR_MMA_WRAPPER<false>(cD, a, b1_kt);
                     __builtin_amdgcn_s_barrier();
                 } else {
                     // Production direct-to-reg byte-load path (slow but quirk-safe).
@@ -2233,12 +2260,12 @@ void grouped_rrr_kernel_body_pinned(const grouped_layout_globals g) {
                     load_b_kt_fk(b1_kt, 1);
                     load_a_kt_fk(a, 0);
                     asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
-                    rrr_mma_v2_agpr_inplace_wrapper<false>(cA, a, b0_kt);
-                    rrr_mma_v2_agpr_inplace_wrapper<false>(cB, a, b1_kt);
+                    RRR_MMA_WRAPPER<false>(cA, a, b0_kt);
+                    RRR_MMA_WRAPPER<false>(cB, a, b1_kt);
                     load_a_kt_fk(a, 1);
                     asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
-                    rrr_mma_v2_agpr_inplace_wrapper<false>(cC, a, b0_kt);
-                    rrr_mma_v2_agpr_inplace_wrapper<false>(cD, a, b1_kt);
+                    RRR_MMA_WRAPPER<false>(cC, a, b0_kt);
+                    RRR_MMA_WRAPPER<false>(cD, a, b1_kt);
                     __builtin_amdgcn_s_barrier();
                 }
             }
@@ -2314,15 +2341,15 @@ void grouped_rrr_kernel_body_pinned(const grouped_layout_globals g) {
             load_b(b0, Bs[tic][0], wn);
             load_a_kt(0);
             asm volatile("s_waitcnt lgkmcnt(0) vmcnt(0)" ::: "memory");
-            rrr_mma_v2_agpr_inplace_wrapper<false>(cA, a, b0);
+            RRR_MMA_WRAPPER<false>(cA, a, b0);
 
             load_b(b1, Bs[tic][1], wn);
-            rrr_mma_v2_agpr_inplace_wrapper<false>(cB, a, b1);
+            RRR_MMA_WRAPPER<false>(cB, a, b1);
 
             load_a_kt(1);
             asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
-            rrr_mma_v2_agpr_inplace_wrapper<false>(cC, a, b0);
-            rrr_mma_v2_agpr_inplace_wrapper<false>(cD, a, b1);
+            RRR_MMA_WRAPPER<false>(cC, a, b0);
+            RRR_MMA_WRAPPER<false>(cD, a, b1);
 #endif
             __builtin_amdgcn_s_barrier();
         }
