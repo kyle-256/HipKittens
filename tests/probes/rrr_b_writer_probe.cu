@@ -45,6 +45,11 @@ static_assert(sizeof(ST) == TILE_BYTES, "ST size mismatch");
 
 // =====================================================================
 // Phase A: writer probe — verify writer produces correct Bs bytes.
+//
+// Session 9 update: now exercises the header API
+// `kittens::write_b_transpose_n_major_path_L` from
+// include/ops/warp/memory/tile/global_to_shared.cuh. The inline body kept
+// in revision history for traceability (see git log pre-Session 9).
 // =====================================================================
 __global__ void __launch_bounds__(512, 1)
 b_writer_path_L(const uint8_t* __restrict__ hbm_b,
@@ -53,57 +58,16 @@ b_writer_path_L(const uint8_t* __restrict__ hbm_b,
     __shared__ __align__(16) uint8_t Bs_stage[TILE_BYTES];
     __shared__ ST                    Bs_final;
 
-    const int tid     = threadIdx.x;
-    const int warp_id = tid >> 6;     // 0..7
-    const int lane_id = tid & 63;     // 0..63
-
-    // -------- Phase 1+2: HBM → staging LDS (K-major) --------
-    //   warp w handles K rows [w*16, w*16+16).
-    //   Per iter: each lane does 1 b128 load (16 contiguous N bytes for 1 K row).
-    //   2 iter × 64 lanes/warp × 16 bytes/lane = 16K × 128N = 2048 bytes/warp covered.
-    #pragma unroll
-    for (int iter = 0; iter < 2; ++iter) {
-        const int n_block_base = iter * 64;
-        const int k_local      = lane_id & 15;
-        const int n_chunk      = (lane_id >> 4) & 3;
-        const int K_row        = warp_id * 16 + k_local;
-        const int N_col_start  = n_block_base + n_chunk * 16;
-        const size_t hbm_off   = (size_t)K_row * N_DIM + N_col_start;
-        const size_t lds_off   = (size_t)K_row * N_DIM + N_col_start;
-        __uint128_t v = *reinterpret_cast<const __uint128_t*>(&hbm_b[hbm_off]);
-        *reinterpret_cast<__uint128_t*>(&Bs_stage[lds_off]) = v;
-    }
-    __syncthreads();
-
-    // -------- Phase 3+4: staging → final Bs (N-major) --------
-    //   warp w handles K-strip [w*16, w*16+16) of FINAL.
-    //   Per iter: each lane handles 1 N-row in final. lane_id ∈ [0,64),
-    //   n_block_base = iter*64 → N_row = n_block_base + lane_id ∈ [0,128).
-    //   For (K=w*16+0..15, N=N_row): 16 strided bytes in staging at
-    //     staging[(w*16 + k_in_strip)*128 + N_row] for k_in_strip=0..15.
-    //   Gather via 16 ds_read_b8 → 1 ds_write_b128 to Bs_final.
-    //   (Sub-optimal LDS pattern — Session 4.1 will replace with cross-lane.)
-    uint8_t* Bs_final_raw = reinterpret_cast<uint8_t*>(&Bs_final.data[0]);
-    #pragma unroll
-    for (int iter = 0; iter < 2; ++iter) {
-        const int n_block_base = iter * 64;
-        const int N_row        = n_block_base + lane_id;
-        const int K_strip      = warp_id * 16;
-
-        uint8_t out16[16];
-        #pragma unroll
-        for (int k_in_strip = 0; k_in_strip < 16; ++k_in_strip) {
-            const int K_global = K_strip + k_in_strip;
-            out16[k_in_strip] = Bs_stage[(size_t)K_global * N_DIM + N_row];
-        }
-        const size_t final_off = (size_t)N_row * K_DIM + K_strip;
-        *reinterpret_cast<__uint128_t*>(&Bs_final_raw[final_off]) =
-            *reinterpret_cast<const __uint128_t*>(&out16[0]);
-    }
-    __syncthreads();
+    // Identity stride for the probe (HBM tile is exactly 128 N wide).
+    kittens::write_b_transpose_n_major_path_L<ST>(
+        Bs_final,
+        reinterpret_cast<const fp8e4m3*>(hbm_b),
+        /*hbm_k_stride_bytes=*/(uint32_t)N_DIM,
+        Bs_stage);
 
     // Dump Bs_final to HBM (byte-by-byte) for host verification.
-    for (int i = tid; i < TILE_BYTES; i += 512) {
+    uint8_t* Bs_final_raw = reinterpret_cast<uint8_t*>(&Bs_final.data[0]);
+    for (int i = threadIdx.x; i < TILE_BYTES; i += 512) {
         dst_dump[i] = Bs_final_raw[i];
     }
 }
@@ -122,38 +86,12 @@ b_writer_roundtrip(const uint8_t* __restrict__ hbm_b,
     const int warp_id = tid >> 6;
     const int lane_id = tid & 63;
 
-    // ---- Same writer phases as b_writer_path_L ----
-    #pragma unroll
-    for (int iter = 0; iter < 2; ++iter) {
-        const int n_block_base = iter * 64;
-        const int k_local      = lane_id & 15;
-        const int n_chunk      = (lane_id >> 4) & 3;
-        const int K_row        = warp_id * 16 + k_local;
-        const int N_col_start  = n_block_base + n_chunk * 16;
-        const size_t hbm_off   = (size_t)K_row * N_DIM + N_col_start;
-        const size_t lds_off   = (size_t)K_row * N_DIM + N_col_start;
-        __uint128_t v = *reinterpret_cast<const __uint128_t*>(&hbm_b[hbm_off]);
-        *reinterpret_cast<__uint128_t*>(&Bs_stage[lds_off]) = v;
-    }
-    __syncthreads();
-
-    uint8_t* Bs_final_raw = reinterpret_cast<uint8_t*>(&Bs_final.data[0]);
-    #pragma unroll
-    for (int iter = 0; iter < 2; ++iter) {
-        const int n_block_base = iter * 64;
-        const int N_row        = n_block_base + lane_id;
-        const int K_strip      = warp_id * 16;
-        uint8_t out16[16];
-        #pragma unroll
-        for (int k_in_strip = 0; k_in_strip < 16; ++k_in_strip) {
-            const int K_global = K_strip + k_in_strip;
-            out16[k_in_strip] = Bs_stage[(size_t)K_global * N_DIM + N_row];
-        }
-        const size_t final_off = (size_t)N_row * K_DIM + K_strip;
-        *reinterpret_cast<__uint128_t*>(&Bs_final_raw[final_off]) =
-            *reinterpret_cast<const __uint128_t*>(&out16[0]);
-    }
-    __syncthreads();
+    // ---- Session 9 header API writer ----
+    kittens::write_b_transpose_n_major_path_L<ST>(
+        Bs_final,
+        reinterpret_cast<const fp8e4m3*>(hbm_b),
+        /*hbm_k_stride_bytes=*/(uint32_t)N_DIM,
+        Bs_stage);
 
     // ---- Session 3 load: Bs_final → RT b ----
     // Only 1 warp dumps RT (single warp == 64 lanes is sufficient since

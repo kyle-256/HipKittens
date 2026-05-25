@@ -423,4 +423,109 @@ template<ducks::st::all ST, ducks::gl::all GL, ducks::coord::tile COORD=coord<ST
 __device__ static inline void store(const GL &dst, const ST &src, const COORD &idx) {
     store<2, false, ST, GL, COORD, WARP_THREADS>(dst, src, idx);
 }
+
+// =============================================================================
+// Session 9 (RRR v2 B-pretranspose): Path L HBM→LDS B-transpose writer.
+// =============================================================================
+//
+// Promotes the Session 4 probe writer (tests/probes/rrr_b_writer_probe.cu)
+// into a header API so kernel-body code can call it without re-implementing
+// the transpose. Hard-wired for a 128 K × 128 N tile (one st_128x128_n_major
+// instance), 512-thread WG (8 warps), fp8e4m3 data.
+//
+// Caller responsibilities:
+//   - `dst_n_major`  : an LDS tile of type ST = st_fp8e4m3<128,128,
+//                      st_128x128_n_major_s> (16 KB, identity swizzle).
+//   - `hbm_b_tile_ptr` : first byte of the desired 128 K × 128 N tile in
+//                       HBM. Caller computes (k_start*hbm_k_stride + n_start).
+//                       Tile must lie wholly within the K×N HBM buffer
+//                       (OOB safety not provided; for K-tail use the legacy
+//                        path).
+//   - `hbm_k_stride_bytes` : bytes per K-row in HBM (= N_full * sizeof(fp8)).
+//   - `stage_lds`    : caller-supplied 16384-byte aligned LDS scratch.
+//                     Caller controls aliasing / lifetime across phases.
+//   - WG = 512 threads (8 warps × 64 lanes); function uses `threadIdx.x`.
+//   - Caller is responsible for any pre-call __syncthreads (if stage_lds is
+//     aliased with another consumer). The function itself issues 2 internal
+//     barriers (after Phase 1+2, after Phase 3+4) so that on return the
+//     LDS tile is consistent across all warps.
+//
+// Algorithm (Path L = LDS staging — Session 4 design doc §2):
+//   Phase 1+2: HBM[K_row][N_col] → stage_lds[K_row*128 + N_col] (K-major)
+//              8 warps × 16 K-rows/warp = 128 K covered; 2 iters × 16 N/iter
+//              = 128 N covered. 2 b128 loads + 2 b128 writes per lane.
+//   Phase 3+4: stage_lds[K_row*128 + N_row] (gather 16 K) → dst_n_major
+//              at offset N_row*128 + K_strip. 16 ds_read_b8 + 1 ds_write_b128
+//              per lane × 2 iters.
+//   (Session 4.1 deferred Path P optimisation — cross-lane bpermute — has
+//    NOT landed; this function ships the Path L baseline.)
+//
+// Performance note (from Session 4 probe ISA):
+//   - 16 ds_read_b128 (HBM via b128 reinterpret_cast)
+//   - 16 ds_write_b128 (staging + final)
+//   - 64 ds_read_u8  per 16x16 byte block × 2 = 128 byte gathers
+//   Single-tile transpose roughly 4× cost of a plain G::load row-major; for
+//   the RRR body the amortised cost is acceptable so long as it is hidden
+//   under mfma issue. Real perf budget is decided in Session 9.3.
+template<ducks::st::all ST>
+__device__ __forceinline__ void write_b_transpose_n_major_path_L(
+    ST&             dst_n_major,
+    const fp8e4m3*  hbm_b_tile_ptr,
+    uint32_t        hbm_k_stride_bytes,
+    uint8_t*        stage_lds)
+{
+    static_assert(std::is_same_v<typename ST::shape,
+                                 ducks::st_shape::st_128x128_n_major>,
+                  "write_b_transpose_n_major_path_L requires "
+                  "st_128x128_n_major destination");
+    static_assert(ST::rows == 128 && ST::cols == 128,
+                  "write_b_transpose_n_major_path_L hard-wired for 128x128 tile");
+
+    constexpr int K_DIM = 128;
+    constexpr int N_DIM = 128;
+
+    const int tid     = threadIdx.x;
+    const int warp_id = tid >> 6;     // 0..7
+    const int lane_id = tid & 63;     // 0..63
+
+    // -------- Phase 1+2: HBM → staging LDS (K-major) --------
+    #pragma unroll
+    for (int iter = 0; iter < 2; ++iter) {
+        const int n_block_base = iter * 64;
+        const int k_local      = lane_id & 15;
+        const int n_chunk      = (lane_id >> 4) & 3;
+        const int K_row        = warp_id * 16 + k_local;
+        const int N_col_start  = n_block_base + n_chunk * 16;
+
+        const fp8e4m3* hbm_addr = reinterpret_cast<const fp8e4m3*>(
+            reinterpret_cast<const uint8_t*>(hbm_b_tile_ptr) +
+            static_cast<size_t>(K_row) * hbm_k_stride_bytes + N_col_start);
+        const size_t lds_off = static_cast<size_t>(K_row) * N_DIM + N_col_start;
+
+        __uint128_t v =
+            *reinterpret_cast<const __uint128_t*>(hbm_addr);
+        *reinterpret_cast<__uint128_t*>(&stage_lds[lds_off]) = v;
+    }
+    __syncthreads();
+
+    // -------- Phase 3+4: staging → final Bs (N-major) --------
+    uint8_t* dst_raw = reinterpret_cast<uint8_t*>(&dst_n_major.data[0]);
+    #pragma unroll
+    for (int iter = 0; iter < 2; ++iter) {
+        const int n_block_base = iter * 64;
+        const int N_row        = n_block_base + lane_id;
+        const int K_strip      = warp_id * 16;
+
+        uint8_t out16[16];
+        #pragma unroll
+        for (int k_in_strip = 0; k_in_strip < 16; ++k_in_strip) {
+            const int K_global = K_strip + k_in_strip;
+            out16[k_in_strip] = stage_lds[static_cast<size_t>(K_global) * N_DIM + N_row];
+        }
+        const size_t final_off = static_cast<size_t>(N_row) * K_DIM + K_strip;
+        *reinterpret_cast<__uint128_t*>(&dst_raw[final_off]) =
+            *reinterpret_cast<const __uint128_t*>(&out16[0]);
+    }
+    __syncthreads();
+}
 }

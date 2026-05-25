@@ -503,6 +503,89 @@ CSV `lane,byte,k,n` 用 `./rrr_b_lane_layout_probe --table` 重生成。
 - HK commit: `<pending>`; PT 3rdparty commit: `<pending>`; PT outer commit: `<pending>`
 - memory: `feedback_rrr_b_pretrans_session8_subtile_fix.md`
 
+## Session 9 status: PARTIAL (Path L writer extracted as header API; kernel body integration deferred to 9.1/9.2/9.3)  HK=<pending>  PT 3rdparty=<pending>  outer=<pending>
+- 2026-05-25
+- **Scope delivered (smallest verifiable sub-deliverable of original Session 9)**
+  - **Header API** `include/ops/warp/memory/tile/global_to_shared.cuh` 末新增 free function `kittens::write_b_transpose_n_major_path_L<ST>(ST& dst_n_major, const fp8e4m3* hbm_b_tile_ptr, uint32_t hbm_k_stride_bytes, uint8_t* stage_lds)` (~60 LOC)
+  - 函数体 = Session 4 probe 内联实现 lift 出来, 但把硬编码 `N_DIM=128` 的 HBM stride 改成 caller-supplied `hbm_k_stride_bytes` 参数, 使 kernel body 在 N=4096/7168/2048 等 production shape 下也能复用
+  - `static_assert` 锁定 ST shape = `st_128x128_n_major` + rows=cols=128, 避免误用
+  - **Probe refactor** `tests/probes/rrr_b_writer_probe.cu` 两个 kernel (`b_writer_path_L` + `b_writer_roundtrip`) 删 inline Phase 1+2+3+4, 改单 call 新 header API; caller 保留 `__shared__ uint8_t Bs_stage[16384]` + `__shared__ ST Bs_final` (caller-supplied buffer 设计, 让 kernel body 集成时控制 LDS 总预算)
+  - **Verification (chi2762 gfx950, MI355X)**:
+    - `rrr_b_writer_probe`: VERIFY-A mismatch=0 (direct byte-compare 16384 bytes), VERIFY-B mismatch=0 bad_range=0 missing=0 duplicate=0 (round-trip via Session 3 load)
+    - 回归: `rrr_b_pretrans_st_load_probe` mismatch=0; `rrr_b_pretrans_load_subtile_probe` 4/4 col_start mismatch=0
+    - ISA (extracted via `roc-obj-extract` .s text): `b_writer_path_L` = 2 × global_load_dwordx4 + 4 × ds_write_b128 + 41 × ds_read_u8 + **0 ds_read_b64_tr_b8** + 0 ds_read_b128, 与 Session 4 inline 实现完全 equivalent
+- **Why PARTIAL not PASSED**: 原 Session 9 spec 要求改 `grouped_rrr_kernel_body_pinned` 6 个 G::load(Bs) site + 12+ load_b read + FUSED_KTAIL audit + 24-shape SNR bench (~500-800 LOC, 单 session 装不下)。今天交付的是 lift writer 到 header API 这个**前置依赖** — kernel body 拿到一个 callable + parameterized + ISA-verified-equivalent 的 writer, Session 9.1 起步立即可用
+- **Comment correctness fix**: `kernel_fp8_layouts2.cpp:78-80` 注释原本声称 writer 已在 `global_to_shared.cuh` (Session 4 时 placeholder), 今天交付后命题**首次成立**
+- HK commit: `<pending>`; PT 3rdparty commit: `<pending>`; PT outer commit: `<pending>`
+- memory: `feedback_rrr_b_pretrans_session9_path_l_header_api.md`
+
+---
+
+## Session 9.1 — RRR kernel body prolog wiring (~150 LOC, 3-4h)
+
+**目标**: 在 `grouped_rrr_kernel_body_pinned` 的 prolog 段 (4 个 `G::load(Bs[0..3], ...)` site) 在 `RRR_B_PRETRANS=1` macro guard 下替换为 `kittens::write_b_transpose_n_major_path_L<ST_NM>(Bs_NM[i], hbm_B_ptr_for_tile, k_stride_bytes, stage_lds_shared)`。其余路径 (main loop + FUSED_KTAIL) 保持 `=0` 老路径, 让 9.1 是**编译可过 + prolog-only 替换**的最小增量。
+
+**前置**: Session 9 PARTIAL (writer header API + probe regression-clean)
+
+**任务**
+1. 删 `kernel_fp8_layouts2.cpp:91-101` 的 `#error` (允许 `RRR_B_PRETRANS=1` 编)
+2. 新增 ST_NM typedef = `st_fp8e4m3<128,128, st_128x128_n_major_s>`
+3. LDS struct 新增 `uint8_t stage_lds[16384]` + `ST_NM Bs_NM[4]` (在 `RRR_B_PRETRANS=1` 下替换 Bs[4][2])
+4. prolog 4 个 G::load 改 macro-guarded branch
+5. 单 shape PoC (dsv3_dgrad B4 M4096 K=2048) `_grouped_rrr_v2_new` + `RRR_B_PRETRANS=1`, printf 1 个 (n,k) byte 对比 reference
+
+**验证**
+- `RRR_B_PRETRANS=0` 8-shape kernel_only bench geomean **无 regress > 0.5pp**
+- `RRR_B_PRETRANS=1` PoC 1-shape prolog Bs_NM 内容正确
+- LDS budget audit: 老 Bs[4][2]=128KB 与 新 Bs_NM[4]+stage_lds=80KB 必须二选一, 不并存
+
+**完成动作**
+- HK + PT commit, 追加 `## Session 9.1 status: ...`
+
+---
+
+## Session 9.2 — RRR main loop B-read + FUSED_KTAIL audit (~200 LOC, 4-5h)
+
+**目标**: `load_b(wi)` lambda + main loop 12+ B-read site 全部切到 Bs_NM + Session 8 `load_col_from_st_n_major_subtile`。FUSED_KTAIL K_rem ∈ {0, 64} 两 case 独立验证。
+
+**前置**: Session 9.1 PASSED
+
+**任务**
+1. `load_b(wi)` lambda 改 `RRR_B_PRETRANS=1` branch 走 `load_col_from_st_n_major_subtile<rt_128x16_s, ST_NM>(b_frag, Bs_NM[buf_idx], wi*16)` (4× direct call 起步, amortize 留 9.2.1)
+2. main loop prefetch 2 个 G::load 改写
+3. FUSED_KTAIL block (kernel_fp8_layouts2.cpp:2026-2356) 镜像改写
+4. ISA disasm: chi2762 数 main loop `ds_read_b64_tr_b8` count → **必须 0**; `ds_read_b128` count ≈ 48
+
+**验证 (硬 gate)**
+- `RRR_B_PRETRANS=1` 24-shape SNR ≥ 47 dB
+- `RRR_B_PRETRANS=0` 老路径不回退
+- ISA `ds_read_b64_tr_b8` = 0
+- LDS ≤ 160KB cap
+- V+A 8-wave WG ≤ 256 dwords/lane
+
+**完成动作**
+- HK + PT commit, 追加 `## Session 9.2 status: ...`
+
+---
+
+## Session 9.3 — 8-shape kernel_only bench + chunk_size override (~100 LOC, 2-3h)
+
+**目标**: Session 9.1+9.2 完成后跑 8 user-target shape RRR dgrad kernel_only bench, 对比 Session 7 partial baseline (geomean 1.065× Triton, 2/24 ≥ 1.15×)。
+
+**前置**: Session 9.2 PASSED
+
+**任务**
+1. `python benchmark/ops/bench_hk_vs_triton_grouped_fp8_kernel_only.py --op rrr --filter user_8_shape` on chi2762 (`HK_FP8_RRR_BACKEND=NEW`)
+2. per-shape ratio + geomean + pass@1.15 count
+3. 5-trial median 噪声校准
+4. 若 worst-shape gap 仍在 long-K, 启 Session 10 chunk_size autotune
+5. 若全 ≥ 1.15×, 写 `feedback_rrr_v2_b_pretrans_win.md` 加 MEMORY.md
+
+**完成动作**
+- HK + PT outer commit, 追加 `## Session 9.3 status: ...  RRR dgrad geomean=<x>  pass-1.15=<n>/8  worst=<shape>=<ratio>`
+
+---
+
 ## Session 7 status: PARTIAL (per-shape override table + probe infra landed; 8/8 ≥1.15× target structurally unmet, follow-ups 7.1/7.2/7.3 added)  HK=bb35e595  PT=a76c3dee  (3rdparty bump in PT outer commit)
 - 2026-05-25
 - **Scope delivered (probe infrastructure + per-shape autotune override)**
