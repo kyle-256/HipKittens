@@ -1,0 +1,6 @@
+OK: b128-from-pretranspose-LDS produces Session-1-equivalent
+    (lane, byte) → (k, n) mapping. Coverage 2048/2048 unique.
+---ISA---
+      2 ds_read_b128
+      8 ds_write_b16
+     16 ds_write_b8

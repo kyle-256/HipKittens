@@ -197,3 +197,20 @@ CSV `lane,byte,k,n` 用 `./rrr_b_lane_layout_probe --table` 重生成。
 - 闭式映射 `(lane, byte) → (k, n)` 见 Session 1 result 段
 - memory: `feedback_rrr_b_lane_layout.md`
 
+## Session 2 status: PARTIAL (design verified via probe; kernel integration deferred to Session 3)
+- 2026-05-25
+- **Scope delivered**: 隔离 probe `tests/probes/rrr_b_pretrans_probe.cu` 验证 b128-from-pretranspose-LDS 路径 (LDS 按 N-major 摆: `byte_offset(n,k) = n*K_DIM + k`; 每 lane 2× `ds_read_b128` at `base + (lane&15)*K_DIM + ((lane>>4)&3)*16` + offset:64) 产出的 (lane, byte) → (k, n) 映射与 Session 1 mma_AB B 操作数映射 **byte-equivalent** (mismatch=0, coverage 2048/2048 unique on chi2811 gfx950)
+- **ISA**: probe device asm `grep ds_*` → `2 ds_read_b128 / 0 ds_read_b64_tr_b8`。证明硬件层面 b128 路径 deliver 等价 mma 操作数
+- **Scope NOT delivered (vs plan §Session 2 验证)**:
+  - ❌ 新 `st_128x64_b_pretrans` ST 类型 + `st_shape.cuh::all` 注册
+  - ❌ `shared_to_register.cuh` load 特化 (for new ST type)
+  - ❌ `kernel_fp8_layouts2.cpp` RRR body 接入 (新 `#define RRR_B_PRETRANS 0/1` gate 未引入)
+  - ❌ 老路径 24-shape SNR ≥ 47 dB 验证 (kernel 未改动)
+  - ❌ 新路径 4-shape SNR ≥ 47 dB 验证 (kernel 未改动)
+  - ❌ 整 kernel ISA disasm 0× `ds_read_b64_tr_b8` 验证 (kernel 未改动)
+- **Why partial**: 完整集成 6 个 `G::load(Bs[...])` writes (prolog ×2 + 主循环 prefetch ×2 + FUSED_KTAIL ×2) + 8+ `load_b` reads + custom HBM→LDS transposed writer 单 session 容量超载。先 isolate 验证 b128 primitive 是 Session 1 mapping 充要条件, 避免直接改 kernel 后 race-fix/spill 退化
+- **Session 3 retry 应做**: (1) 新 `st_128x128_pretrans` ST (rows=N=128, cols=K=128, identity 或简单 XOR swizzle) + 注册 `all` concept; (2) `shared_to_register.cuh` 新 load 特化用 probe 验证过的 b128 地址公式; (3) custom B HBM→LDS writer (G::load 走默认 row-major 不能直接用) — 候选: 8-warp 协作 `buffer_load_b128` (HBM K×N) + `ds_write_b128` 到 (n*K_DIM+k) LDS offset; (4) RRR body 4 个 `G::load(Bs)` + 1 `load_b` lambda gated by `RRR_B_PRETRANS` macro
+- **Pre-condition risk for Session 3**: 当前 LDS layout (ST_v2 64KB double-buf) 与 N-major layout (16KB per tile × 2 buf) 容量不同, Bs slot size 需要 audit; bank conflict 未在 probe 验证 (单 wave, 顺序读, 16 lanes/n_val 同时 access 同 N 行 → 8-way 潜在冲突, Session 3 必须加 swizzle 或测 perf)
+- HK commit: `<pending>`; PT 3rdparty commit: `<pending>`; PT outer bump: `<pending>`
+- memory: `feedback_rrr_b_pretrans_session2_probe.md`
+
