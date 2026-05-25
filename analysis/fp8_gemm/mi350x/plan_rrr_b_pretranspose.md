@@ -484,7 +484,7 @@ CSV `lane,byte,k,n` 用 `./rrr_b_lane_layout_probe --table` 重生成。
   - Until 5.1 lands a working subtile load, Session 5 kernel body integration cannot proceed
 - **Session 5 deliverable surface**: probe file + macro scaffold + plan addendum + memory. v1/v2 production paths unchanged
 
-## Session 8 status: PASSED  HK=<pending>  PT 3rdparty=<pending>  outer=<pending>
+## Session 8 status: PASSED  HK=44a2b54f  PT 3rdparty=e915d4b4  outer=44db4859
 - 2026-05-25
 - **Scope delivered (subtile-load primitive fixed; ready for Session 9 body integration)**
   - **Header API** `include/ops/warp/memory/tile/shared_to_register.cuh`: 新 free function `kittens::load_col_from_st_n_major_subtile<RT,ST>(dst, tile, col_start)`, RT::width=2 + ST=`st_128x128_n_major` + fp8 col_l + rt_128x16_s base tile。 内部 alloc 一个 RT::width=8 tmp + `kittens::load(tmp, tile)` (Session 3 verified primitive) + switch-case slice 2 个 base tile 到 dst (`std::integral_constant` lambda 锁定 BASE_IDX compile-time, 避免 runtime indexing 走 scratch)
