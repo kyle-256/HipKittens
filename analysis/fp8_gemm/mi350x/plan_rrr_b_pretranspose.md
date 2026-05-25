@@ -871,7 +871,7 @@ CSV `lane,byte,k,n` 用 `./rrr_b_lane_layout_probe --table` 重生成。
 
 ---
 
-## Session 12 status: PASSED (minimal-viable scaffold + standalone PoC)  HK=<filled-on-commit>  PT 3rdparty=<filled>  outer=<filled>
+## Session 12 status: PASSED (minimal-viable scaffold + standalone PoC)  HK=73dfcd5a  PT 3rdparty=7f2c47af  outer=c08fef67
 - 2026-05-25
 - **Scope delivered (minimum-viable, body integration deferred to Session 13)**
   - **kernel_fp8_layouts2.cpp** (HK + PT 3rdparty 双路径): drop `#error` so `RRR_B_PRETRANS=1` compiles; add 60-line scaffold comment defining `ST_NM = st_fp8e4m3<128,128,st_128x128_n_major_s>` (sizeof = 16384 B) + LDS budget audit (macro=0 ≈ 140 KiB vs macro=1 ≈ 144 KiB, both within 160 KiB cap, with note that `Bs_NM[4]` REPLACES `Bs[2][2]` — not additive)
@@ -904,9 +904,9 @@ CSV `lane,byte,k,n` 用 `./rrr_b_lane_layout_probe --table` 重生成。
   - Session 12 commit (HK turbo HEAD = `<S12>`, PT outer = `<S12>`) merged
   - 新 body 函数 `grouped_rrr_kernel_body_pinned_pretrans` 或在现 body 内 `if constexpr (RRR_B_PRETRANS)` 二分支
   - 一次性改动需 ISA 验 main loop `ds_read_b64_tr_b8 == 0` (gate from plan §9.2)
-- **HK commit**: `<filled-on-commit>` (turbo branch)
-- **PT outer commit**: `<filled>` (dev-turbo-kyle3-grouped-gemm-fp8-rrr branch — 3rdparty bump + plan/PoC mirror)
-- **PT 3rdparty commit**: `<filled>` (HK turbo `<S12>` 镜像)
+- **HK commit**: `73dfcd5a` (turbo branch)
+- **PT outer commit**: `c08fef67` (dev/kyle_hipkitten_gemm_groupedgemm — 3rdparty bump only; 4 files staged in 3rdparty/HipKittens)
+- **PT 3rdparty commit**: `7f2c47af` (HK turbo `73dfcd5a` 镜像; detached HEAD, gitlink updated in outer)
 - **memory**: `feedback_rrr_b_pretrans_session12_prolog_poc.md`
 
 ---
