@@ -787,3 +787,26 @@ CSV `lane,byte,k,n` 用 `./rrr_b_lane_layout_probe --table` 重生成。
 - 只更新 plan (无 kernel commit)
 - 追加 `## Session 11 status: PASSED/PARTIAL  RRR dgrad geomean=<x>  pass-1.15=<n>/24  worst=<shape>=<ratio>`
 - 若 8/8 ≥ 1.15× 终于达成, 写 `feedback_rrr_v2_b_pretrans_win.md` (终极 win) 标 MEMORY.md
+
+---
+
+## Session 10 status: PASSED  HK=<this commit>  PT 3rdparty=<this commit>  outer=<this commit>
+- 2026-05-25
+- **Scope delivered**
+  - ABI extend: `dispatch_grouped_rrr_v2` 已有 `chunk_size` 字段 (struct), wrapper `hk_grouped_rrr_fp8` + `hk_grouped_rrr_fp8_new` 加 `int chunk_size` 参数 (sentinel 0 = dispatcher heuristic)
+  - PyTorch schema 加 `int chunk_size=0` (bindings_pytorch.cpp:86,89)
+  - PT inner CUDA adapter `hk_grouped_gemm_gfx950.cu`: chunk_size 传入 `dispatch_grouped_rrr_v2`
+  - Python autotune (`grouped_gemm_fp8_impl.py`): `_HK_FP8_RRR_CHUNK_CHOICES` env (default "0", 可设 "0,32,48,64,96"); 4-way cfg sweep (`gm × xcds × bn × chunk`); 4-tuple unpack 给 cache; override path 传 sentinel 0
+  - Probe extend (`benchmark/ops/probe_rrr_per_shape.py`): `CHUNK_CHOICES = [0,32,48,64,96]`; per-shape best (gm, xcds, bn, ck) 报告
+- **验证**
+  - SNR: chunk=0/32/64 bit-identical 输出 (dsv3-up B4 M4096 验证)
+  - 24-shape probe geomean **1.113×** vs Session 7 baseline 1.065× → **+4.8pp** (大幅超过 ≥ baseline 要求)
+  - Pass ≥1.15×: **4/24** (Session 7 = 2/24) → +2 shape
+    - gpt_oss_up_B4_M2048: 1.372× (best (1,4,128,32))
+    - gpt_oss_down_B4_M2048: 1.266× (best (1,4,0,32))
+    - qwen_down_B4_M2048: 1.304× (best (4,32,0,96))
+    - qwen_down_B4_M4096: 1.349× (best (16,0,128,0))
+  - chunk dim 分布: chunk=64 赢 11 shape, chunk=32 赢 8, chunk=96 赢 3, chunk=0 (heuristic) 赢 2, chunk=48 赢 0 → 之前 dispatcher 默认 48 实际 actively suboptimal
+- **结论**: chunk_size 是真 lever; 24-shape geomean 从 Session 7 的 1.065× 推到 1.113× (+4.8pp), 仍距 8/8 ≥1.15× 终极目标差 0-15pp/shape
+- HK commit: `<pending>`; PT 3rdparty commit: `<pending>`; PT outer commit: `<pending>`
+- memory: `feedback_rrr_b_pretrans_session10_chunk_autotune.md`
