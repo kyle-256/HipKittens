@@ -78,23 +78,72 @@
 
 ---
 
-## Session 3 — load_b 切换到 ds_read_b128  (~150 LOC, 2-3h)
+## Session 3 — B-pretranspose 全集成 + 切换 ds_read_b128  (~500 LOC, 5-8h)
 
-**目标**: 替换 RRR body 里所有 B LDS→reg 调用，固化新路径，删 `RRR_B_PRETRANS` 宏。
+**目标**: 把 Session 2 验证过的 b128-from-N-major-LDS primitive **落进 RRR kernel body**, 把所有 B 读路径从 `ds_read_b64_tr_b8` 切到 `ds_read_b128`, 数值 + 性能两方面都过 gate。
 
-**前置**: Session 2 PASSED + 新路径 numeric 正确
+**前置**: Session 2 PASSED (probe primitive 已 byte-equivalent verified)
 
-**任务**
-1. 删 `RRR_B_PRETRANS` gating，新路径成为唯一路径
-2. 删旧的 `ds_read_b64_tr_b8` 包装函数 (若不再被引用)
-3. 24-shape full numerical sweep
-4. ISA 计数：B 操作数应 0× `ds_read_b64_tr_b8` + ≈48× `ds_read_b128`
+**已有素材** (Session 1+2 已交付)
+- `tests/probes/rrr_b_pretrans_probe.cu` (HK + PT 3rdparty 双路径) — 闭式 b128 地址公式: `base + (lane&15)*K_DIM + ((lane>>4)&3)*16` + offset:64
+- LDS layout 验证: N-major (`byte_offset(n,k) = n*K_DIM + k`)
+- `(lane, byte) → (k, n)` 映射: `n = lane&15; k_block = (lane>>4)&3; half = byte>>4; k = k_block*16 + (byte&15) + half*64`
+- ISA: probe kernel 2× `ds_read_b128`, 0× `ds_read_b64_tr_b8` (gfx950 chi2811)
 
-**验证**
-- 24/24 shape SNR ≥ 47 dB
-- 8-shape bench: TFLOPS 不应回退 vs Session 0 baseline (允许 ±3% 噪声)
+**任务清单 (按顺序, 每步必须 SNR ≥ 47 dB 才能往下)**
 
-**完成动作**: 同上
+1. **新 ST 类型** in `include/types/shared/st_shape.cuh`
+   - `st_128x128_pretrans` (或更小如 `st_128x64`, 看 LDS budget): rows=N, cols=K, identity 或简单 XOR swizzle (Session 2 probe 用 identity 已通过, swizzle 留 bank conflict 出现后再加)
+   - 注册到 `st_shape::all` concept, 保证 G::load / ds_read 模板能 dispatch
+
+2. **load 特化** in `include/ops/warp/memory/tile/shared_to_register.cuh`
+   - 新 `load(rt_..., st_128x..._pretrans &)` 走 Session 2 probe 验证过的 b128 地址公式
+   - rt 目标类型 = RRR body 现有 B-frag (col_l fp8 rt_base), 不要新加 frag 类型避免 ripple
+
+3. **B HBM→LDS writer** in `kernel_fp8_layouts2.cpp` (RRR body 4 个 prolog+主循环+FUSED_KTAIL prefetch 站点)
+   - 默认 `G::load(Bs[...])` 是 row-major HBM→row-major LDS, 不能直接用
+   - 选项 A: 8-warp 协作 `buffer_load_b128`(HBM K×N) + per-lane `ds_write_b128` 到 (n*K_DIM+k) LDS offset (类似 PR #330 的 transposed writer)
+   - 选项 B: 在 LDS 里用 staging buffer 先 row-major load, 再 8-warp 协作 transpose ds_read+ds_write 到 N-major 目标 buffer (多一次 LDS round-trip, 慢但简单)
+   - 推荐 A; B 当 fallback
+
+4. **gate macro** `#define RRR_B_PRETRANS 0/1` (kernel_fp8_layouts2.cpp 顶部)
+   - `RRR_B_PRETRANS=0` → 老 ds_read_b64_tr_b8 路径 (回归对照)
+   - `RRR_B_PRETRANS=1` → 新 b128 路径
+   - body 内 8+ `load_b` reads + 4 G::load(Bs[...]) writes 都按 macro 分叉
+   - **暂时**保留, Session 4 才删 gate
+
+5. **Bs slot size 重算** (Session 2 PARTIAL 警告)
+   - 老 ST_v2 64KB double-buf; 新 N-major (128 N × 128 K × 1 fp8) = 16KB per tile × 2 buf = 32KB
+   - LDS budget 不会超 (160KB CU), 但要在 kernel 顶部 `__shared__ uint8_t Bs[...]` size 显式重算并标注
+
+6. **bank conflict 检查** (Session 2 PARTIAL 警告)
+   - 同一 wave 16 lanes/n_val 同时 access 同 N 行 → 8-way 潜在冲突
+   - 写完后跑一次 rocprof `SQ_LDS_BANK_CONFLICT` 计数, 若 >0 加 swizzle (候选 `((offset>>7)&7)<<4` mirror RCR ST_v2)
+
+7. **FUSED_KTAIL 单独 audit**
+   - K_tail 路径有独立的 b_kt prefetch lambdas, 不能漏改
+   - K_rem=0 (full-tile-only) 和 K_rem=64 (有 ktail) 两种都要过
+
+**验证 (硬 gate, 全部满足才 PASSED)**
+- A. `RRR_B_PRETRANS=0` 老路径回归: 24-shape SNR ≥ 47 dB (确认没把老路径改坏)
+- B. `RRR_B_PRETRANS=1` 新路径正确: 24-shape SNR ≥ 47 dB
+- C. ISA disasm (`llvm-objdump` on chi2811): 新路径 main loop `ds_read_b64_tr_b8` 计数 = **0**, `ds_read_b128` 计数 ≈ 48 (per 3000-instr window, 与 RCR 对齐)
+- D. 8-shape bench: TFLOPS geomean **不回退 > 3%** vs baseline (R167 4-acc vacc 1.024×T)。允许小幅 noise. 不要求超 baseline (perf 收益在 Session 4 消除 accvgpr shuffle 后)
+
+**完成动作**
+- HK + PT 3rdparty + PT outer 三 commit 链 parity (同 Session 2 格式)
+- 追加 `## Session 3 status: PASSED  HK=<hash>  PT=<hash>  outer=<hash>` 到本文件末尾
+- memory: `feedback_rrr_b_pretrans_session3_integration.md`
+- 若卡住 ≥3h 或任一 gate 不过, 标 `BLOCKED reason: <>` 并退出
+
+**风险与降级**
+- 若选项 A writer 出现 race/correctness 难调, 立刻切选项 B (LDS staging) 保 correctness
+- 若 ISA 显示 `ds_read_b128` 计数对但 perf 大幅退化 (>5%), 标 PARTIAL/PASSED 看 D gate 是否过; 不过就 BLOCKED 让 user 决策
+- 若 24-shape 有 < 5 个 shape SNR 失败, 列具体 shape + 失败模式到 status 行, 让 Session 4 决定是否回退
+
+**LOC + 时间 honest 估计**
+- LOC: 新 ST 类型 30 + load 特化 60 + B writer 150 + body 接入 (4 G::load + 8 load_b × 双分支) 200 + ktail audit 50 + gate 宏 + smoke harness ≈ **490 LOC**
+- 时间: 5-8h (新 ST + writer 是最大未知, bank conflict 处理可能拖时)
 
 ---
 
@@ -197,7 +246,26 @@ CSV `lane,byte,k,n` 用 `./rrr_b_lane_layout_probe --table` 重生成。
 - 闭式映射 `(lane, byte) → (k, n)` 见 Session 1 result 段
 - memory: `feedback_rrr_b_lane_layout.md`
 
-## Session 2 status: PARTIAL (design verified via probe; kernel integration deferred to Session 3)
+## Session 2 status: PASSED  HK=090166ba  PT=e1ab0597  (outer=eae76e40)
+
+## Session 3 status: BLOCKED  reason: 自定义 HBM→LDS B-pretranspose writer 单 session 装不下 — LDS budget (160KB) 排除 Option B fallback (要 196KB); Option A.1 naive scatter writer (16 ds_write_b8/lane) 正确但破 D gate (>10% 回退, 见 FUSED_KTAIL load_b_kt_fk 印证); Option A.2 cross-lane register transpose 需 ds_bpermute b32 × 4 + bank-conflict 校准, 多 session 工作 (~700-900 LOC)
+- 2026-05-25
+- 无 kernel/header 改动 commit (避免半成品污染); 完整诊断 + Session 4 handoff steps 见 memory `feedback_rrr_b_pretrans_session3_blocked.md`
+- 关键证据:
+  - LDS budget: 当前 Bs(ST_v2)=68KB + As=64KB + 余 28KB; 替代 N-major Bs=64KB OK, 但 Option B 同时持 staging+target = 132KB B alone, 加 As 总 196KB > 160KB
+  - G::load `prefill_swizzled_offsets` (global_to_shared.cuh:121-181) 假设 HBM↔LDS 同方向 row-major, 无法表达转置写入
+  - FUSED_KTAIL `load_b_kt_fk` (kernel_fp8_layouts2.cpp:2030-2082) 是 16 ds_write_b8/lane 的 working reference, 但**正是 prod fallback 因为它慢于 byte_b8 direct-to-reg**, 证明 naive scatter 路径 perf 不 acceptable
+  - Cross-lane register transpose 路径需 gfx950 ds_bpermute_b32 × 4 (byte 粒度不支持) + 复杂 lane-byte 映射; 单 session 不现实
+- Session 4 entry point (handoff in memory):
+  1. 新 ST 类型 `st_128x128_n_major` (identity swizzle, 16384B per tile) → `st_shape.cuh` + `all` concept
+  2. 新 load 特化 mirror Session 2 probe `addr = base + (n_base+lane&15)*128 + ((lane>>4)&3)*16` + offset:0/64 → `shared_to_register.cuh`
+  3. 自定义 8-warp writer with cross-lane register transpose (4× ds_bpermute_b32) — 最大难点
+  4. RRR body 6 G::load + 6 load_b sites gated by `RRR_B_PRETRANS` macro
+  5. FUSED_KTAIL 路径**不需要改动** (已 bypass LDS)
+- 风险点: bank conflict (16 lanes/n_val 同行) + 8-wave V+A ≤256 dword cap + bn128 race-fix dependency
+**Note**: user 接受 PARTIAL 视为 PASSED；未交付的 ST 类型 + load 特化 + kernel body 集成 + 24-shape SNR 全部合并到 Session 3。原说明保留在下方供 Session 3 引用。
+
+### (历史 PARTIAL 标注, 保留)
 - 2026-05-25
 - **Scope delivered**: 隔离 probe `tests/probes/rrr_b_pretrans_probe.cu` 验证 b128-from-pretranspose-LDS 路径 (LDS 按 N-major 摆: `byte_offset(n,k) = n*K_DIM + k`; 每 lane 2× `ds_read_b128` at `base + (lane&15)*K_DIM + ((lane>>4)&3)*16` + offset:64) 产出的 (lane, byte) → (k, n) 映射与 Session 1 mma_AB B 操作数映射 **byte-equivalent** (mismatch=0, coverage 2048/2048 unique on chi2811 gfx950)
 - **ISA**: probe device asm `grep ds_*` → `2 ds_read_b128 / 0 ds_read_b64_tr_b8`。证明硬件层面 b128 路径 deliver 等价 mma 操作数
