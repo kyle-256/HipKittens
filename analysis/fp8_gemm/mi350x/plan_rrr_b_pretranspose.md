@@ -398,7 +398,7 @@ CSV `lane,byte,k,n` 用 `./rrr_b_lane_layout_probe --table` 重生成。
 - HK commit: `d9ebba7c`; PT 3rdparty commit: `5ff508d5`; PT outer bump: `d1b42b55`
 - memory: `feedback_rrr_b_pretrans_session2_probe.md`
 
-## Session 4 status: PASSED  HK=<filled-at-commit>  PT=<filled-at-commit>  (3rdparty=<filled>)
+## Session 4 status: PASSED  HK=d5523163  PT 3rdparty=8cff83b9  (outer bump TBD)
 - 2026-05-25
 - **Scope delivered (Path L 正确性 + Session 4.1/4.2 设计 + plan additions)**
   - **设计文档** `analysis/fp8_gemm/mi350x/session4_writer_design.md` (~330 行): 8-warp 协作 HBM→LDS B-transpose writer 的两条路径完整算法 + LDS budget audit + bank conflict 分析 + scope split into Session 4 / 4.1 / 4.2
