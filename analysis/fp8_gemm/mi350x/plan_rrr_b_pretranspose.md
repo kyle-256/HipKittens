@@ -503,7 +503,7 @@ CSV `lane,byte,k,n` 用 `./rrr_b_lane_layout_probe --table` 重生成。
 - HK commit: `<pending>`; PT 3rdparty commit: `<pending>`; PT outer commit: `<pending>`
 - memory: `feedback_rrr_b_pretrans_session8_subtile_fix.md`
 
-## Session 9 status: PARTIAL (Path L writer extracted as header API; kernel body integration deferred to 9.1/9.2/9.3)  HK=<pending>  PT 3rdparty=<pending>  outer=<pending>
+## Session 9 status: PARTIAL (Path L writer extracted as header API; kernel body integration deferred to 9.1/9.2/9.3)  HK=4b9ed70d  PT 3rdparty=1f1ae01a  outer=31f74406
 - 2026-05-25
 - **Scope delivered (smallest verifiable sub-deliverable of original Session 9)**
   - **Header API** `include/ops/warp/memory/tile/global_to_shared.cuh` 末新增 free function `kittens::write_b_transpose_n_major_path_L<ST>(ST& dst_n_major, const fp8e4m3* hbm_b_tile_ptr, uint32_t hbm_k_stride_bytes, uint8_t* stage_lds)` (~60 LOC)
@@ -516,7 +516,7 @@ CSV `lane,byte,k,n` 用 `./rrr_b_lane_layout_probe --table` 重生成。
     - ISA (extracted via `roc-obj-extract` .s text): `b_writer_path_L` = 2 × global_load_dwordx4 + 4 × ds_write_b128 + 41 × ds_read_u8 + **0 ds_read_b64_tr_b8** + 0 ds_read_b128, 与 Session 4 inline 实现完全 equivalent
 - **Why PARTIAL not PASSED**: 原 Session 9 spec 要求改 `grouped_rrr_kernel_body_pinned` 6 个 G::load(Bs) site + 12+ load_b read + FUSED_KTAIL audit + 24-shape SNR bench (~500-800 LOC, 单 session 装不下)。今天交付的是 lift writer 到 header API 这个**前置依赖** — kernel body 拿到一个 callable + parameterized + ISA-verified-equivalent 的 writer, Session 9.1 起步立即可用
 - **Comment correctness fix**: `kernel_fp8_layouts2.cpp:78-80` 注释原本声称 writer 已在 `global_to_shared.cuh` (Session 4 时 placeholder), 今天交付后命题**首次成立**
-- HK commit: `<pending>`; PT 3rdparty commit: `<pending>`; PT outer commit: `<pending>`
+- HK commit: `4b9ed70d`; PT 3rdparty commit: `1f1ae01a`; PT outer commit: `31f74406`
 - memory: `feedback_rrr_b_pretrans_session9_path_l_header_api.md`
 
 ---
